@@ -44,6 +44,14 @@ start_link() ->
 
 %% Child :: {Id,StartFunc,Restart,Shutdown,Type,Modules}
 init([]) ->
+  Rpc =
+    #{id => barrel_rpc_sup,
+      start => {barrel_rpc_sup, start_link, [] },
+      restart => permanent,
+      shutdown => infinity,
+      type => supervisor,
+      modules => [barrel_rpc_sup]
+    },
 
   StoreSup =
     #{id => barrel_store_sup,
@@ -69,6 +77,7 @@ init([]) ->
       modules => [barrel_replicate_sup]},
   
   Specs = [
+    Rpc,
     StoreSup,
     Event,
     ReplicateSup

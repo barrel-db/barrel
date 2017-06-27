@@ -58,7 +58,7 @@ create_db(DbId, Config) ->
   _ = lager:warning("barrel_db:create/2 is deprecated", []),
   create_db(Config#{ <<"database_id">> => DbId }).
 
-create_db(#{ << "database_id">> := _DbId } = Config) ->
+create_db(#{ << "database_id">> := _DbId } = Config) ->
   gen_server:call(?MODULE, {create_db, Config});
 create_db(Config) when is_map(Config) ->
   DbId = barrel_lib:uniqid(),
@@ -258,7 +258,6 @@ do_delete_db(DbId, State = #{ conf := Conf, db_pids := DbPids }) ->
       _ = lager:info("removed database ~p from config~n", [DbId]),
       {ok, State#{ conf => Conf2, db_pids => DbPids2}}
   end.
-
 
 db_is_down(Pid, State = #{ db_pids := DbPids }) ->
   case maps:take(Pid, DbPids) of
