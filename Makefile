@@ -33,7 +33,7 @@ dialyzer:
 
 test: cleantest dialyzer
 	@$(REBAR) eunit
-	@$(REBAR) ct
+	@$(REBAR) ct --sname=barrel_test
 
 cover:
 	@$(REBAR) cover

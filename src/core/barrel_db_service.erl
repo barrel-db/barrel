@@ -55,8 +55,7 @@ execute(Context, Writer, Method, Args) ->
 %% TODO: use maps has option so we don't have to transform them
 'GetDoc'( _Context, _Writer, [DbId, DocId, Options] ) ->
   barrel_db:get(DbId, DocId, Options).
-  
-  
+
 'PutDoc'( _Context, _Writer, [DbId, Doc, Options] ) ->
   Rev = maps:get(rev, Options, <<>>),
   Async = maps:get(async, Options, false),
