@@ -162,11 +162,11 @@ persistent_replication(_Config) ->
   ok = barrel_replicate:stop_replication(RepId),
   [{RepId, {true, nil, nil}}] = ets:lookup(replication_ids, RepId),
   [] = ets:lookup(replication_ids, Pid),
-  {ok, [AllConfig2]} = file:consult("data/replication.config"),
+  {ok, [AllConfig2]} = file:consult(config_file()),
   RepConfig2 = maps:get(<<"a">>, AllConfig2),
   #{ <<"source">> := <<"source">>, <<"target">> := <<"testdb">>, options := Options} = RepConfig2,
   ok = barrel_replicate:delete_replication(RepId),
-  {ok, [AllConfig3]} = file:consult("data/replication.config"),
+  {ok, [AllConfig3]} = file:consult(config_file()),
   undefined = maps:get(RepId, AllConfig3, undefined),
   [] = ets:lookup(replication_ids, RepId),
   ok.
@@ -195,7 +195,7 @@ restart_persistent_replication(_Config) ->
   {'EXIT', {badarg, _}} = (catch ets:lookup(replication_ids, RepId)),
   timer:sleep(200),
   ok = barrel_replicate:delete_replication(RepId),
-  {ok, [AllConfig3]} = file:consult("data/replication.config"),
+  {ok, [AllConfig3]} = file:consult(config_file()),
   undefined = maps:get(RepId, AllConfig3, undefined),
   [] = ets:lookup(replication_ids, RepId),
   ok.
@@ -390,3 +390,7 @@ read_checkpoint_doc(Db, RepId) ->
 
 checkpoint_docid(RepId) ->
   <<"replication-checkpoint-", RepId/binary>>.
+
+
+config_file() ->
+  filename:join([barrel_store:data_dir(), "replication.config"]).

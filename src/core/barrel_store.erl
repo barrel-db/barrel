@@ -132,10 +132,13 @@ db_properties(DbId) ->
 
 get_conf() -> gen_server:call(?MODULE, get_conf).
 
+default_dir() ->
+  filename:join([?DATA_DIR, node()]).
+
 -spec data_dir() -> string().
 data_dir() ->
-  Dir = application:get_env(barrel, data_dir, ?DATA_DIR),
-  _ = filelib:ensure_dir(filename:join([".",Dir, "dummy"])),
+  Dir = application:get_env(barrel, data_dir, default_dir()),
+  _ = filelib:ensure_dir(filename:join([".", Dir, "dummy"])),
   Dir.
 
 
