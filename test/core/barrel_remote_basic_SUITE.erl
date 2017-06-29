@@ -6,7 +6,7 @@
 %%% @end
 %%% Created : 29. Jun 2017 15:46
 %%%-------------------------------------------------------------------
--module(barrel_remote_SUITE).
+-module(barrel_remote_basic_SUITE).
 -author("benoitc").
 
 %% API
@@ -29,7 +29,6 @@ all() ->
   ].
 
 
-
 init_per_suite(Config) ->
   {ok, _} = application:ensure_all_started(barrel),
   {ok, RemoteNode} = start_slave(barrel_test1),
@@ -37,12 +36,12 @@ init_per_suite(Config) ->
 
 end_per_suite(Config) ->
   ok = stop_slave(barrel_test1),
+  _ = application:stop(barrel),
   Config.
 
 init_per_testcase(_, Config) -> Config.
 
 end_per_testcase(_, _Config) -> ok.
-
 
 basic(Config) ->
   RemoteNode = proplists:get_value(remote, Config),
@@ -57,10 +56,8 @@ basic(Config) ->
   false = maps:is_key(<<"deleted">>, Meta),
   {ok, <<"a">>, _RevId2} = barrel_remote:delete(ChPid, <<"testdb">>, <<"a">>, #{rev =>RevId}),
   {error, not_found} = barrel_remote:get(ChPid, <<"testdb">>, <<"a">>, []),
-  ok = barrel_remote:delete_database(ChPid, <<"testdb">>).
-  
-  
-  
+  ok = barrel_remote:delete_database(ChPid, <<"testdb">>),
+  [] = barrel_remote:database_names(ChPid).
 
 
 %% ==============================

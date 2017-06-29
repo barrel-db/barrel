@@ -92,6 +92,18 @@ connected(info, {request, StreamRef, Pid, Req}, Data = #{ last_id := Id } ) ->
   Writer = get_writer(Data),
   _ = Writer ! {rpc, StreamId, Req},
   {keep_state, Data#{ last_id => StreamId }};
+connected(info, {stream, StreamRef, ReqData}, Data) ->
+  case stream_for_client(StreamRef, Data) of
+    {ok, StreamId} ->
+      Writer = get_writer(Data),
+      _ = Writer ! {stream, StreamId, ReqData},
+      {keep_state, Data};
+    not_found ->
+      {keep_state, Data}
+  end;
+connected(info, {rpc_stream, StreamId, Resp}, Data) ->
+  ok = handle_response_stream(StreamId, Resp, Data),
+  {keep_state, Data};
 connected(info, {rpc_response, StreamId, Resp}, Data) ->
   ok = handle_response(StreamId, Resp, Data),
   {keep_state, Data};
@@ -150,10 +162,22 @@ client_for_stream(StreamId, #{ tab := Tab }) ->
     [{StreamId, {StreamRef, ClientPid}}] -> {ok, StreamRef, ClientPid}
   end.
 
+stream_for_client(StreamRef, #{ tab := Tab }) ->
+  case ets:lookup(Tab, StreamRef) of
+    [] -> not_found;
+    [{StreamRef, StreamId}] -> {ok, StreamId}
+  end.
+
 get_writer(#{ mod := Mod, mod_state := ModState}) ->
   Mod:get_writer(ModState).
 
-client_is_down(Pid, #{ tab := Tab }) ->
+delete_stream(StreamId, StreamRef, Pid, #{ tab := Tab }) ->
+  _ = ets:delete(Tab, StreamId),
+  _ = ets:delete(Tab, StreamRef),
+  _ = ets:delete(Tab, {Pid, StreamId}),
+  ok.
+
+client_is_down(Pid, Data = #{ tab := Tab }) ->
   case ets:take(Tab, Pid) of
     [] -> false;
     _ ->
@@ -161,9 +185,7 @@ client_is_down(Pid, #{ tab := Tab }) ->
       AllStreams = ets:select(Tab, MatchSpec),
       lists:foreach(
         fun({Pid1, StreamId, StreamRef}) ->
-          _ = ets:delete(Tab, StreamId),
-          _ = ets:delete(Tab, StreamRef),
-          _ = ets:delete(Tab, {Pid1, StreamId})
+          delete_stream(StreamId, StreamRef, Pid1, Data)
         end,
         AllStreams),
       true
@@ -173,8 +195,18 @@ handle_response(StreamId, Resp, Data) ->
   case client_for_stream(StreamId, Data) of
     {ok, StreamRef, ClientPid} ->
       ClientPid ! {barrel_rpc_response, StreamRef, Resp},
+      delete_stream(StreamId, StreamRef, ClientPid, Data);
+    not_found ->
+      ok
+  end.
+
+handle_response_stream(StreamId, Resp, Data) ->
+  case client_for_stream(StreamId, Data) of
+    {ok, StreamRef, ClientPid} ->
+      ClientPid ! {barrel_rpc_stream, StreamRef, Resp},
       ok;
     not_found ->
       ok
   end.
+
 

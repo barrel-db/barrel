@@ -23,9 +23,17 @@
   get/4,
   put/4,
   delete/4,
-  insert/4
+  insert/4,
+  multi_get/6,
+  put_rev/6,
+  write_batch/4
 ]).
 
+-export([
+  put_system_doc/4,
+  get_system_doc/3,
+  delete_system_doc/3
+]).
 
 start_channel(Params) ->
   barrel_rpc:start_channel(Params).
@@ -68,3 +76,58 @@ delete(ChPid, DbId, DocId, Options) ->
 insert(ChPid, DbId, Doc, Options) ->
   Ref = barrel_rpc:request(ChPid, {'barrel.v1.Database', 'InsertDoc', [DbId, Doc, Options]}),
   barrel_rpc:await(ChPid, Ref).
+
+multi_get(ChPid, DbId, Fun, Acc, DocIds, Options) ->
+  Ref = barrel_rpc:request(ChPid, {'barrel.v1.Database', 'MultiGetDoc', [DbId, DocIds, Options]}),
+  do_fold(ChPid, Ref, Fun, Acc).
+
+put_rev(ChPid, DbId, Doc, History, Deleted, Options) ->
+  Ref = barrel_rpc:request(ChPid, {'barrel.v1.Database', 'PutRev', [DbId, Doc, History, Deleted, Options]}),
+  barrel_rpc:await(ChPid, Ref).
+
+write_batch(ChPid, DbId, Updates, Options) ->
+  Ref = barrel_rpc:request(ChPid, {'barrel.v1.Database', 'WriteBatch', [DbId, Options]}),
+  ok = stream_batch_updates(Updates, ChPid, Ref),
+  wait_batch_results(ChPid, Ref, []).
+
+stream_batch_updates([Update | Rest], ChPid, Ref) ->
+  _ = barrel_rpc:stream(ChPid, Ref, Update),
+  stream_batch_updates(Rest,  ChPid, Ref);
+stream_batch_updates([], ChPid, Ref) ->
+  barrel_rpc:stream(ChPid, Ref, end_batch).
+
+wait_batch_results(ChPid, Ref, Acc) ->
+  case barrel_rpc:await(ChPid, Ref) of
+    {data, Result} -> wait_batch_results(ChPid, Ref, [ Result | Acc ]);
+    end_stream -> lists:reverse(Acc)
+  end.
+
+
+%% ==============================
+%% system docs operations
+
+
+put_system_doc(ChPid, DbId, DocId, Doc) ->
+  Ref = barrel_rpc:request(ChPid, {'barrel.v1.Database', 'PutSystemDoc', [DbId, DocId, Doc]}),
+  barrel_rpc:await(ChPid, Ref).
+
+get_system_doc(ChPid, DbId, DocId) ->
+  Ref = barrel_rpc:request(ChPid, {'barrel.v1.Database', 'GetSystemDoc', [DbId, DocId]}),
+  barrel_rpc:await(ChPid, Ref).
+
+delete_system_doc(ChPid, DbId, DocId) ->
+  Ref = barrel_rpc:request(ChPid, {'barrel.v1.Database', 'DeleteSystemDoc', [DbId, DocId]}),
+  barrel_rpc:await(ChPid, Ref).
+
+
+%% ==============================
+%% internal helpers
+
+do_fold(ChPid, Ref, Fun, Acc) ->
+  case barrel_rpc:await(ChPid, Ref) of
+    {data, {Doc, Meta}} ->
+      Acc2 = Fun(Doc, Meta, Acc),
+      do_fold(ChPid, Ref, Fun, Acc2);
+    end_stream ->
+      Acc
+  end.

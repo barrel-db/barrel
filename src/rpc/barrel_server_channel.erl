@@ -39,7 +39,12 @@ start_link(ReaderPid, WriterPid) ->
 
 %% keep stream information in a record so we can easily find
 %% it in a list
--record(stream, { id, worker }).
+-record(stream, {
+  id,
+  worker,
+  service,
+  method
+}).
 
 init([ReaderPid, WriterPid]) ->
   Data = #{
@@ -71,32 +76,37 @@ wait_request(EventType, Event, Data) ->
 handle_request(StreamId, {Service, Method, Args}, Data) ->
   case barrel_rpc:find_service(Service) of
     not_found ->
-      _ = send_error(StreamId, #{ <<"error">> => <<"service_not_found">>}, Data),
+      _ = send_response(StreamId, {error, {service_not_found, Service}}, Data),
       {keep_state, Data};
     Mod ->
       %% TODO: maybe we should just link instead of monitoring the workers?
       WorkerPid = spawn_worker(StreamId, Mod, Method, Args, Data),
-      Data1 = add_stream(StreamId, WorkerPid, Data),
+      Data1 = add_stream(StreamId, WorkerPid, Service, Method, Data),
       {keep_state, Data1}
   end.
 
 handle_message(StreamId, Msg, Data) ->
   case get_worker(StreamId, Data) of
     {ok, WorkerPid} ->
-      WorkerPid ! {rpc_msg, Msg},
+      WorkerPid ! {rpc_stream, StreamId, Msg},
       ok;
     false ->
       ok
   end.
 
 handle_event(info, _State, {'DOWN', _Ref, process, Pid, normal}, Data) ->
-  {_StreamId, Data1} = remove_worker(Pid, Data),
+  {_Stream, Data1} = remove_worker(Pid, Data),
   {keep_state, Data1};
 handle_event(info, State, {'DOWN', _Ref, process, Pid, Reason}, Data) ->
-  {StreamId, Data1} = remove_worker(Pid, Data),
-  error_logger:error_msg(
-    "~s: ~p, stream ~p is down: ~p~n",
-    [?MODULE_STRING, State, StreamId, Reason]
+  {Stream, Data1} = remove_worker(Pid, Data),
+  #stream{id = StreamId,
+          service = Service,
+          method = Method} = Stream,
+  %% tell the client about the error so it can close the stream
+  _ = send_response(StreamId, {error, {service_error, Reason}}, Data),
+  _ = lager:error(
+    "~s: ~p, stream ~p (~p:~p) error: ~p~n",
+    [?MODULE_STRING, State, StreamId, Service, Method, Reason]
   ),
   {keep_state, Data1};
 handle_event(_EventType, State, Event, Data) ->
@@ -113,25 +123,17 @@ spawn_worker(StreamId, Mod, Method, Args, Data) ->
   spawn(?MODULE, worker, [StreamId, Mod, Method, Args, Data]).
 
 worker(StreamId, Mod, Method, Args, Data = #{ writer := Writer }) ->
-  case catch Mod:execute(new_context(StreamId), Writer, Method, Args) of
-    {'EXIT', _} = Error->
-      _ = lager:info("worker error: ~p~n", [Error]),
-      send_response(StreamId, {error, server_error}, Data);
-    Result ->
-      send_response(StreamId, Result, Data)
+  case Mod:execute(new_context(StreamId), Writer, Method, Args) of
+    ignore -> ok;
+    Result -> send_response(StreamId, Result, Data)
   end.
 
 send_response(StreamId, Msg, #{ writer := Writer}) ->
   Msg1 = {rpc_response, StreamId, Msg},
   Writer ! Msg1.
 
-send_error(StreamId, Error, #{ writer := Writer} ) ->
-  Msg = {stream_error, StreamId, Error},
-  Writer ! Msg.
-
-
-add_stream(StreamId, WorkerPid, Data = #{ streams := Streams }) ->
-  Stream = #stream{id = StreamId, worker = WorkerPid },
+add_stream(StreamId, WorkerPid, Service, Method, Data = #{ streams := Streams }) ->
+  Stream = #stream{id = StreamId, worker = WorkerPid, service = Service, method =  Method },
   Data1 = Data#{ streams => [Stream | Streams ]},
   _ = erlang:monitor(process, WorkerPid),
   Data1.
@@ -145,8 +147,8 @@ get_worker(StreamId, #{ streams := Streams }) ->
 remove_worker(WorkerPid, Data = #{ streams := Streams }) ->
   case lists:keytake(WorkerPid, #stream.worker, Streams) of
     false -> {undefined, Data};
-    {value, #stream{ id = StreamId }, NStreams} ->
-      {StreamId, Data#{ streams => NStreams }}
+    {value, Stream, NStreams} ->
+      {Stream, Data#{ streams => NStreams }}
   end.
 
 new_context(StreamId) ->

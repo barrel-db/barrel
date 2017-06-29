@@ -13,7 +13,11 @@
   start_channel/1,
   close_channel/1, close_channel/2,
   request/2, request/3,
-  await/2, await/3
+  await/2, await/3,
+  stream/3,
+  end_stream/2,
+  response_stream/3,
+  response_end_stream/2
 ]).
 
 
@@ -61,18 +65,28 @@ await(ChPid, StreamRef, Timeout) ->
 await1(MRef, ChPid, StreamRef, Timeout) ->
   receive
     {barrel_rpc_response, StreamRef, Resp} -> Resp;
-    {rpc_end_stream, StreamRef} -> done;
-    {'DOWN', MRef, process, ChPid, Reason} ->
-      {error, Reason};
-    Other ->
-      lager:error(
-        "~s: unknown stream message, ~p~n",
-        [?MODULE_STRING, Other]
-      )
+    {barrel_rpc_stream, StreamRef, Resp} -> Resp;
+    {'DOWN', MRef, process, ChPid, Reason} -> {error, Reason}
   after Timeout ->
     {error, rpc_timeout}
   end.
 
+stream(ChPid, StreamRef, Data) ->
+  _ = ChPid ! {stream, StreamRef, {data, Data}},
+  ok.
+
+end_stream(ChPid, StreamRef) ->
+  _ = ChPid ! {stream, StreamRef, end_stream},
+  ok.
+
+response_stream(Writer, StreamId, Data) ->
+  _ = Writer ! {rpc_stream, StreamId, {data, Data}},
+  ok.
+
+response_end_stream(Writer, StreamId) ->
+  _ = Writer ! {rpc_stream, StreamId, end_stream},
+  ignore.
+  
 
 find_service(Service) ->
   barrel_rpc_service:find_service(barrel_lib:to_atom(Service)).
