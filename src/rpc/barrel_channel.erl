@@ -174,7 +174,7 @@ handle_response(StreamId, Resp, Data) ->
     {ok, StreamRef, ClientPid} ->
       ClientPid ! {barrel_rpc_response, StreamRef, Resp},
       ok;
-    notfound ->
+    not_found ->
       ok
   end.
 

@@ -115,7 +115,7 @@ spawn_worker(StreamId, Mod, Method, Args, Data) ->
 worker(StreamId, Mod, Method, Args, Data = #{ writer := Writer }) ->
   case catch Mod:execute(new_context(StreamId), Writer, Method, Args) of
     {'EXIT', _} = Error->
-      lager:info("worker error: ~p~n", [Error]),
+      _ = lager:info("worker error: ~p~n", [Error]),
       send_response(StreamId, {error, server_error}, Data);
     Result ->
       send_response(StreamId, Result, Data)

@@ -43,7 +43,7 @@ connect(Params, _TypeSup, _State) ->
     {error, _} = E ->
       E;
     {badrpc, nodedown} ->
-      lager:error("~s: badrpc: node ~p down", [?MODULE_STRING, Node]),
+      _ = lager:error("~s: badrpc: node ~p down", [?MODULE_STRING, Node]),
       {error, {nodedown, Node}}
   end.
 
@@ -52,7 +52,7 @@ terminate(_Reason, #{ node := Node, channel_pid := ChannelPid }) ->
   ok.
 
 handle_message({'DOWN', _MRef, process, ChPid, Reason}, #{ node := Node, channel_pid := ChPid } = State) ->
-  lager:info("~s: remote channel on ~p down: ~p", [?MODULE_STRING, Node, Reason]),
+  _ = lager:info("~s: remote channel on ~p down: ~p", [?MODULE_STRING, Node, Reason]),
   {stop, {server_down, Reason}, State};
 
 handle_message(Msg, State) ->

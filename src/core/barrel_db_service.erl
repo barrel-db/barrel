@@ -29,7 +29,7 @@
 ]).
 
 execute(Context, Writer, Method, Args) ->
-  lager:info("~s: handle ~p with ~p", [?MODULE_STRING, Method, Args]),
+  _ = lager:info("~s: handle ~p with ~p", [?MODULE_STRING, Method, Args]),
   erlang:apply(
     ?MODULE,
     barrel_lib:to_atom(Method),
