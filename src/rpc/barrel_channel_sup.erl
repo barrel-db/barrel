@@ -8,7 +8,7 @@
 %%%-------------------------------------------------------------------
 -module(barrel_channel_sup).
 -author("benoitc").
--behaviour(supervisor).
+-behaviour(barrel_supervisor3).
 
 %% API
 -export([start_link/1]).
@@ -17,15 +17,15 @@
 -export([init/1, post_init/1]).
 
 start_link(Params) ->
-  {ok, Sup} = supervisor3:start_link(?MODULE, []),
-  {ok, TypeSup} = supervisor3:start_child(
+  {ok, Sup} = barrel_supervisor3:start_link(?MODULE, []),
+  {ok, TypeSup} = barrel_supervisor3:start_child(
     Sup,
     {channel_transport_sup,
       {barrel_channel_transport_sup, start_link, []},
       transient, infinity, supervisor,
       [barrel_channel_transport_sup]}
   ),
-  {ok, Connection} = supervisor3:start_child(
+  {ok, Connection} = barrel_supervisor3:start_child(
     Sup,
     {channel,
       {barrel_channel, start_link, [TypeSup, Params]},

@@ -9,7 +9,7 @@
 %% TODO: do we really need supervisor3
 -module(barrel_channel_transport_sup).
 -author("benoitc").
--behaviour(supervisor3).
+-behaviour(barrel_supervisor3).
 
 %% API
 -export([
@@ -23,7 +23,7 @@
 type_mod(#{ type := direct }) -> {direct, barrel_direct_transport};
 type_mod(_) -> erlang:error(bad_connection_type).
 
-start_link() -> supervisor3:start_link(?MODULE, []).
+start_link() -> barrel_supervisor3:start_link(?MODULE, []).
 
 init([]) ->
   {ok, {{one_for_all, 0, 1}, []}}.

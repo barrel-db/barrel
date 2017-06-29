@@ -14,8 +14,7 @@
      jsone,
      uuid,
      gproc,
-     hooks,
-     supervisor3
+     hooks
     ]},
    {env, []},
    {modules, []},
