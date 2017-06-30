@@ -10,7 +10,10 @@
 -author("benoitc").
 
 %% API
--export([start_channel/1]).
+-export([
+  start_channel/1,
+  close_channel/1, close_channel/2
+]).
 
 -export([
   database_names/1,
@@ -37,6 +40,12 @@
 
 start_channel(Params) ->
   barrel_rpc:start_channel(Params).
+
+close_channel(ChPid) ->
+  barrel_rpc:close_channel(ChPid).
+
+close_channel(ChPid, Timeout) ->
+  barrel_rpc:close_channel(ChPid, Timeout).
 
 %% ==============================
 %% database operations

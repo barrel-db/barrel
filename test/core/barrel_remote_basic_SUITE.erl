@@ -36,7 +36,6 @@ init_per_suite(Config) ->
 
 end_per_suite(Config) ->
   ok = stop_slave(barrel_test1),
-  _ = application:stop(barrel),
   Config.
 
 init_per_testcase(_, Config) -> Config.
@@ -57,7 +56,8 @@ basic(Config) ->
   {ok, <<"a">>, _RevId2} = barrel_remote:delete(ChPid, <<"testdb">>, <<"a">>, #{rev =>RevId}),
   {error, not_found} = barrel_remote:get(ChPid, <<"testdb">>, <<"a">>, []),
   ok = barrel_remote:delete_database(ChPid, <<"testdb">>),
-  [] = barrel_remote:database_names(ChPid).
+  [] = barrel_remote:database_names(ChPid),
+  ok = barrel_remote:close_channel(ChPid).
 
 
 %% ==============================

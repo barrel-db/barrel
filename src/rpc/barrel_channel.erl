@@ -107,8 +107,8 @@ connected(info, {rpc_stream, StreamId, Resp}, Data) ->
 connected(info, {rpc_response, StreamId, Resp}, Data) ->
   ok = handle_response(StreamId, Resp, Data),
   {keep_state, Data};
-connected(info, {'DOWN', _MRef, process, Pid, _Reason}=Info, Data) ->
-  case client_is_down(Pid, Data) of
+connected(info, {'DOWN', _MRef, process, Pid, Reason}=Info, Data) ->
+  case client_is_down(Pid, Reason, Data) of
     true ->
       {keep_state, Data};
     false ->
@@ -177,7 +177,7 @@ delete_stream(StreamId, StreamRef, Pid, #{ tab := Tab }) ->
   _ = ets:delete(Tab, {Pid, StreamId}),
   ok.
 
-client_is_down(Pid, Data = #{ tab := Tab }) ->
+client_is_down(Pid, Reason, Data = #{ tab := Tab }) ->
   case ets:take(Tab, Pid) of
     [] -> false;
     _ ->
@@ -185,6 +185,8 @@ client_is_down(Pid, Data = #{ tab := Tab }) ->
       AllStreams = ets:select(Tab, MatchSpec),
       lists:foreach(
         fun({Pid1, StreamId, StreamRef}) ->
+          Writer = get_writer(Data),
+          _ = Writer ! {rst_stream, StreamId, Reason},
           delete_stream(StreamId, StreamRef, Pid1, Data)
         end,
         AllStreams),
@@ -203,10 +205,16 @@ handle_response(StreamId, Resp, Data) ->
 handle_response_stream(StreamId, Resp, Data) ->
   case client_for_stream(StreamId, Data) of
     {ok, StreamRef, ClientPid} ->
+      _ = maybe_delete_stream(Resp, StreamId, StreamRef, ClientPid, Data) ,
       ClientPid ! {barrel_rpc_stream, StreamRef, Resp},
       ok;
     not_found ->
       ok
   end.
+
+maybe_delete_stream(end_stream, StreamId, StreamRef, ClientPid, Data) ->
+  delete_stream(StreamId, StreamRef, ClientPid, Data);
+maybe_delete_stream(_, _, _, _, _) ->
+  ok.
 
 

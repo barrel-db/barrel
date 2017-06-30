@@ -42,6 +42,7 @@ start_link(ReaderPid, WriterPid) ->
 -record(stream, {
   id,
   worker,
+  monitor,
   service,
   method
 }).
@@ -94,6 +95,13 @@ handle_message(StreamId, Msg, Data) ->
       ok
   end.
 
+handle_event(info, State, {rst_stream, StreamId, Reason}, Data) ->
+  {_Stream, Data1} = kill_stream(StreamId, Data),
+  _ = lager:info(
+    "~s: ~p, stream ~p exited remotely with error: ~p~n",
+    [?MODULE_STRING, State, StreamId, Reason]
+  ),
+  {keep_state, Data1};
 handle_event(info, _State, {'DOWN', _Ref, process, Pid, normal}, Data) ->
   {_Stream, Data1} = remove_worker(Pid, Data),
   {keep_state, Data1};
@@ -133,9 +141,13 @@ send_response(StreamId, Msg, #{ writer := Writer}) ->
   Writer ! Msg1.
 
 add_stream(StreamId, WorkerPid, Service, Method, Data = #{ streams := Streams }) ->
-  Stream = #stream{id = StreamId, worker = WorkerPid, service = Service, method =  Method },
+  MRef = erlang:monitor(process, WorkerPid),
+  Stream = #stream{id = StreamId,
+                   worker = WorkerPid,
+                   monitor = MRef,
+                   service = Service,
+                   method =  Method},
   Data1 = Data#{ streams => [Stream | Streams ]},
-  _ = erlang:monitor(process, WorkerPid),
   Data1.
 
 get_worker(StreamId, #{ streams := Streams }) ->
@@ -153,3 +165,21 @@ remove_worker(WorkerPid, Data = #{ streams := Streams }) ->
 
 new_context(StreamId) ->
   #{ stream_id => StreamId, server => self() }.
+
+kill_stream(StreamId, Data = #{ streams := Streams }) ->
+  case lists:keytake(StreamId, #stream.id, Streams) of
+    false -> {undefined, Data};
+    {value, Stream, NStreams} ->
+      Data2 = Data#{ streams => NStreams},
+      #stream{ worker = Pid, monitor = MRef} = Stream,
+      %% kill stream worker
+      try
+          catch exit(Pid, kill),
+          receive
+            {'DOWN', MRef, _, _, _} -> ok
+          end
+      after
+        erlang:demonitor(MRef, [flush])
+      end,
+      {Stream, Data2}
+  end.

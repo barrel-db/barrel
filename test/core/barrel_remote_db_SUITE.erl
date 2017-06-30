@@ -48,8 +48,8 @@ init_per_suite(Config) ->
   [{remote, RemoteNode}, {channel, ChPid} | Config].
 
 end_per_suite(Config) ->
+  _ = barrel_remote:close_channel(channel(Config)),
   ok = stop_slave(barrel_test1),
-  application:stop(barrel),
   Config.
 
 init_per_testcase(_, Config) ->
