@@ -36,6 +36,7 @@ stop(_State) ->
 
 services() ->
   #{ 'barrel.v1.Database' => barrel_db_service,
+     'barrel.v1.DatabaseChanges' => barrel_changes_services,
      'barrel.v1.Replicate' => barrel_replicate }.
 
 load_services() ->

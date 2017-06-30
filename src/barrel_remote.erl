@@ -39,6 +39,10 @@
   delete_system_doc/3
 ]).
 
+-export([
+  changes_since/6
+]).
+
 start_channel(Params) ->
   barrel_rpc:start_channel(Params).
 
@@ -120,6 +124,13 @@ delete_system_doc(ChPid, DbId, DocId) ->
   Ref = barrel_rpc:request(ChPid, {'barrel.v1.Database', 'DeleteSystemDoc', [DbId, DocId]}),
   barrel_rpc:await(ChPid, Ref).
 
+%% ==============================
+%% changes operations
+
+changes_since(ChPid, DbId, Since, Fun, Acc, Options) ->
+  Ref = barrel_rpc:request(ChPid, {'barrel.v1.DatabaseChanges', 'ChangesSince', [DbId, Since, Options]}),
+  do_fold_changes(ChPid, Ref, Fun, Acc).
+
 
 %% ==============================
 %% internal helpers
@@ -129,6 +140,15 @@ do_fold(ChPid, Ref, Fun, Acc) ->
     {data, {Doc, Meta}} ->
       Acc2 = Fun(Doc, Meta, Acc),
       do_fold(ChPid, Ref, Fun, Acc2);
+    end_stream ->
+      Acc
+  end.
+
+do_fold_changes(ChPid, Ref, Fun, Acc) ->
+  case barrel_rpc:await(ChPid, Ref) of
+    {data, Change} ->
+      Acc2 = Fun(Change, Acc),
+      do_fold_changes(ChPid, Ref, Fun, Acc2);
     end_stream ->
       Acc
   end.

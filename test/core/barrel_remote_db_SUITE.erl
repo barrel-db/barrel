@@ -27,7 +27,8 @@
   put_rev/1,
   revision_conflict/1,
   write_batch/1,
-  fold_by_id/1
+  fold_by_id/1,
+  change_since/1
 ]).
 
 all() ->
@@ -39,7 +40,8 @@ all() ->
     put_rev,
     revision_conflict,
     write_batch,
-    fold_by_id
+    fold_by_id,
+    change_since
   ].
 
 
@@ -214,6 +216,29 @@ fold_by_id(Config) ->
   Acc5 = barrel_remote:fold_by_id(Ch, <<"testdb">>, Fun, [],
     [{include_doc, true}, {gt, <<"b">>}]),
   [<<"c">>] = Acc5,
+  ok.
+
+
+change_since(Config) ->
+  Ch = channel(Config),
+  Fun = fun
+          (Change, Acc) ->
+            Id = maps:get(<<"id">>, Change),
+            [Id|Acc]
+        end,
+  [] = barrel_remote:changes_since(Ch, <<"testdb">>, 0, Fun, [], []),
+  Doc = #{ <<"id">> => <<"aa">>, <<"v">> => 1},
+  {ok, <<"aa">>, _RevId} = barrel_remote:insert(Ch, <<"testdb">>, Doc, #{}),
+  [<<"aa">>] = barrel_remote:changes_since(Ch, <<"testdb">>, 0, Fun, [], []),
+  Doc2 = #{ <<"id">> => <<"bb">>, <<"v">> => 1},
+  {ok, <<"bb">>, _RevId2} = barrel_remote:insert(Ch, <<"testdb">>, Doc2, #{}),
+  {ok, _, _} = barrel_remote:get(Ch, <<"testdb">>, <<"bb">>, []),
+  [<<"bb">>, <<"aa">>] = barrel_remote:changes_since(Ch, <<"testdb">>, 0, Fun, [], []),
+  [<<"bb">>] = barrel_remote:changes_since(Ch, <<"testdb">>, 1, Fun, [], []),
+  [] = barrel_remote:changes_since(Ch, <<"testdb">>, 2, Fun, [], []),
+  Doc3 = #{ <<"id">> => <<"cc">>, <<"v">> => 1},
+  {ok, <<"cc">>, _RevId3} = barrel_remote:insert(Ch, <<"testdb">>, Doc3, #{}),
+  [<<"cc">>] = barrel_remote:changes_since(Ch, <<"testdb">>, 2, Fun, [], []),
   ok.
 
 %% ==============================
