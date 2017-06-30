@@ -28,7 +28,8 @@
   revision_conflict/1,
   write_batch/1,
   fold_by_id/1,
-  change_since/1
+  change_since/1,
+  await_change/1
 ]).
 
 all() ->
@@ -41,7 +42,8 @@ all() ->
     revision_conflict,
     write_batch,
     fold_by_id,
-    change_since
+    change_since,
+    await_change
   ].
 
 
@@ -240,6 +242,29 @@ change_since(Config) ->
   {ok, <<"cc">>, _RevId3} = barrel_remote:insert(Ch, <<"testdb">>, Doc3, #{}),
   [<<"cc">>] = barrel_remote:changes_since(Ch, <<"testdb">>, 2, Fun, [], []),
   ok.
+
+await_change(Config) ->
+  Ch = channel(Config),
+  Parent = self(),
+  Pid = spawn(
+    fun() ->
+      Stream = barrel_remote:subscribe_changes(Ch, <<"testdb">>, 0, []),
+      ct:print("la"),
+      Change =barrel_remote:await_change(Ch, Stream),
+      ct:print("ici"),
+      {ok, LastSeq} = barrel_remote:unsubscribe_changes(Ch, Stream),
+      Parent ! {change, self(), LastSeq, Change}
+    end
+  ),
+  Doc = #{ <<"id">> => <<"aa">>, <<"v">> => 1},
+  {ok, <<"aa">>, _RevId} = barrel_remote:insert(Ch, <<"testdb">>, Doc, #{}),
+  receive
+    {change, Pid, 1, #{ <<"id">> := <<"aa">>, <<"seq">> := 1 }} -> ok;
+    Else ->
+      erlang:error({bad_result, Else})
+    after 5000 ->
+        erlang:error(timeout)
+  end.
 
 %% ==============================
 %% internal helpers

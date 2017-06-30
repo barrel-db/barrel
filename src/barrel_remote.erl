@@ -40,7 +40,10 @@
 ]).
 
 -export([
-  changes_since/6
+  changes_since/6,
+  subscribe_changes/4,
+  await_change/2,
+  unsubscribe_changes/2
 ]).
 
 start_channel(Params) ->
@@ -130,6 +133,27 @@ delete_system_doc(ChPid, DbId, DocId) ->
 changes_since(ChPid, DbId, Since, Fun, Acc, Options) ->
   Ref = barrel_rpc:request(ChPid, {'barrel.v1.DatabaseChanges', 'ChangesSince', [DbId, Since, Options]}),
   do_fold_changes(ChPid, Ref, Fun, Acc).
+
+
+subscribe_changes(ChPid, DbId, Since, Options) ->
+  StreamRef = barrel_rpc:request(ChPid, {'barrel.v1.DatabaseChanges', 'ChangesStream', [DbId, Since, Options]}),
+  _ = erlang:put({StreamRef, last_seq},  Since),
+  StreamRef.
+
+await_change(ChPid, StreamRef) ->
+  case barrel_rpc:await(ChPid, StreamRef) of
+    {data, Change} ->
+      Seq = maps:get(<<"seq">>, Change),
+      OldSeq = erlang:get({StreamRef, last_seq}),
+      _ = erlang:put({StreamRef, last_seq}, erlang:max(OldSeq, Seq)),
+      Change;
+    end_stream ->
+      {end_stream, erlang:erase({StreamRef, last_seq})}
+  end.
+
+unsubscribe_changes(ChPid, StreamRef) ->
+  ok = barrel_rpc:end_stream(ChPid, StreamRef),
+  {ok, erlang:erase({StreamRef, last_seq})}.
 
 
 %% ==============================

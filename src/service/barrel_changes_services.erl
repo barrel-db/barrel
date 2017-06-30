@@ -15,7 +15,8 @@
 ]).
 
 -export([
-  'ChangesSince'/3
+  'ChangesSince'/3,
+  'ChangesStream'/3
 ]).
 
 execute(Context, Writer, Method, Args) ->
@@ -26,6 +27,7 @@ execute(Context, Writer, Method, Args) ->
     [Context, Writer, Args]
   ).
 
+%% TODO: maybe deprecate ChangesSince ?
 'ChangesSince'( #{ stream_id := StreamId}, Writer, [DbId, Since, Options] ) ->
   barrel_db:changes_since(
     DbId,
@@ -39,3 +41,34 @@ execute(Context, Writer, Method, Args) ->
   ),
   barrel_rpc:response_end_stream(Writer, StreamId);
 'ChangesSince'( _, _, _ ) -> erlang:error(badarg).
+
+'ChangesStream'( #{ stream_id := StreamId}, Writer, [DbId, Since0, Options] ) ->
+  %% register to the changes
+  _ = barrel_event:reg(DbId),
+  Since1 = stream_changes(StreamId, Writer, DbId, Since0, Options),
+  enter_changes_loop(StreamId, Writer, DbId, Since1, Options).
+
+%% ==============================
+%% internal helpers
+
+stream_changes(StreamId, Writer, DbId, Since, Options) ->
+  barrel_db:changes_since(
+    DbId,
+    Since,
+    fun(Change, OldSeq) ->
+      Seq = maps:get(<<"seq">>, Change),
+      _ = barrel_rpc:response_stream(Writer, StreamId, Change),
+      {ok, erlang:max(OldSeq, Seq)}
+    end,
+    Since,
+    Options
+  ).
+
+enter_changes_loop(StreamId, Writer, DbId, Since0, Options) ->
+  receive
+    {rpc_data, StreamId, end_stream} ->
+      barrel_rpc:response_end_stream(Writer, StreamId);
+    {'$barrel_event', _, db_updated} ->
+      Since1 = stream_changes(StreamId, Writer, DbId, Since0, Options),
+      enter_changes_loop(StreamId, Writer, DbId, Since1, Options)
+  end.
