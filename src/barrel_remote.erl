@@ -99,18 +99,6 @@ write_batch(ChPid, DbId, Updates, Options) ->
   ok = stream_batch_updates(Updates, ChPid, Ref),
   wait_batch_results(ChPid, Ref, []).
 
-stream_batch_updates([Update | Rest], ChPid, Ref) ->
-  _ = barrel_rpc:stream(ChPid, Ref, Update),
-  stream_batch_updates(Rest,  ChPid, Ref);
-stream_batch_updates([], ChPid, Ref) ->
-  barrel_rpc:stream(ChPid, Ref, end_batch).
-
-wait_batch_results(ChPid, Ref, Acc) ->
-  case barrel_rpc:await(ChPid, Ref) of
-    {data, Result} -> wait_batch_results(ChPid, Ref, [ Result | Acc ]);
-    end_stream -> lists:reverse(Acc)
-  end.
-
 
 %% ==============================
 %% system docs operations
@@ -139,4 +127,16 @@ do_fold(ChPid, Ref, Fun, Acc) ->
       do_fold(ChPid, Ref, Fun, Acc2);
     end_stream ->
       Acc
+  end.
+
+stream_batch_updates([Update | Rest], ChPid, Ref) ->
+  _ = barrel_rpc:stream(ChPid, Ref, Update),
+  stream_batch_updates(Rest,  ChPid, Ref);
+stream_batch_updates([], ChPid, Ref) ->
+  barrel_rpc:stream(ChPid, Ref, end_batch).
+
+wait_batch_results(ChPid, Ref, Acc) ->
+  case barrel_rpc:await(ChPid, Ref) of
+    {data, Result} -> wait_batch_results(ChPid, Ref, [ Result | Acc ]);
+    end_stream -> lists:reverse(Acc)
   end.
