@@ -28,7 +28,8 @@
   'InsertDoc'/3,
   'PutRev'/3,
   'MultiGetDoc'/3,
-  'WriteBatch'/3
+  'WriteBatch'/3,
+  'FoldById'/3
 ]).
 
 -export([
@@ -111,7 +112,6 @@ execute(Context, Writer, Method, Args) ->
   barrel_rpc:response_end_stream(Writer, StreamId);
 'MultiGetDoc'( _, _, _ ) -> erlang:error(badarg).
 
-
 'WriteBatch'( #{ stream_id := StreamId}, Writer, [DbId, Options] ) ->
   Async = maps:get(async, Options, false),
   Batch = wait_batch_stream(StreamId, barrel_write_batch:new(Async)),
@@ -121,22 +121,19 @@ execute(Context, Writer, Method, Args) ->
       send_batch_stream(Results, StreamId, Writer)
   end.
 
-%% TODO: add deadline
-wait_batch_stream(StreamId, Batch0) ->
-  receive
-    {rpc_stream, StreamId, {data, end_batch}} ->
-      Batch0;
-    {rpc_stream, StreamId, {data, Op}} ->
-      Batch1 = barrel_write_batch:add_op(Op, Batch0),
-      wait_batch_stream(StreamId, Batch1)
-    
-  end.
+'FoldById'( #{ stream_id := StreamId}, Writer, [DbId, Options] ) ->
+  barrel_db:fold_by_id(
+    DbId,
+    fun(Doc, Meta, _Acc) ->
+      _ = barrel_rpc:response_stream(Writer, StreamId, {Doc, Meta}),
+      {ok, nil}
+    end,
+    nil,
+    Options
+  ),
+  barrel_rpc:response_end_stream(Writer, StreamId);
+'FoldById'( _, _, _ ) -> erlang:error(badarg).
 
-send_batch_stream([Result | Rest], StreamId, Writer) ->
-  barrel_rpc:response_stream(Writer, StreamId,Result),
-  send_batch_stream(Rest, StreamId, Writer);
-send_batch_stream([], StreamId, Writer) ->
-  barrel_rpc:response_end_stream(Writer, StreamId).
 
 %% ==============================
 %% SYSTEM DOCS
@@ -163,3 +160,19 @@ update_doc(Db, Batch) ->
     ok -> ok;
     [Res] -> Res
   end.
+
+%% TODO: add deadline
+wait_batch_stream(StreamId, Batch0) ->
+  receive
+    {rpc_stream, StreamId, {data, end_batch}} ->
+      Batch0;
+    {rpc_stream, StreamId, {data, Op}} ->
+      Batch1 = barrel_write_batch:add_op(Op, Batch0),
+      wait_batch_stream(StreamId, Batch1)
+  end.
+
+send_batch_stream([Result | Rest], StreamId, Writer) ->
+  barrel_rpc:response_stream(Writer, StreamId,Result),
+  send_batch_stream(Rest, StreamId, Writer);
+send_batch_stream([], StreamId, Writer) ->
+  barrel_rpc:response_end_stream(Writer, StreamId).

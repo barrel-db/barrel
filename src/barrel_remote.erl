@@ -29,7 +29,8 @@
   insert/4,
   multi_get/6,
   put_rev/6,
-  write_batch/4
+  write_batch/4,
+  fold_by_id/5
 ]).
 
 -export([
@@ -99,6 +100,9 @@ write_batch(ChPid, DbId, Updates, Options) ->
   ok = stream_batch_updates(Updates, ChPid, Ref),
   wait_batch_results(ChPid, Ref, []).
 
+fold_by_id(ChPid, DbId, Fun, Acc, Options) ->
+  Ref = barrel_rpc:request(ChPid, {'barrel.v1.Database', 'FoldById', [DbId, Options]}),
+  do_fold(ChPid, Ref, Fun, Acc).
 
 %% ==============================
 %% system docs operations

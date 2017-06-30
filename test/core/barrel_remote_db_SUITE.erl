@@ -26,7 +26,8 @@
   multi_get/1,
   put_rev/1,
   revision_conflict/1,
-  write_batch/1
+  write_batch/1,
+  fold_by_id/1
 ]).
 
 all() ->
@@ -37,7 +38,8 @@ all() ->
     multi_get,
     put_rev,
     revision_conflict,
-    write_batch
+    write_batch,
+    fold_by_id
   ].
 
 
@@ -184,6 +186,35 @@ write_batch(Config) ->
   {ok, #{ <<"v">> := 2}, _} = barrel_remote:get(Ch, <<"testdb">>, <<"a">>, []),
   {ok, #{ <<"v">> := 1}, _} = barrel_remote:get(Ch, <<"testdb">>, <<"b">>, []),
   {error, not_found} = barrel_remote:get(Ch, <<"testdb">>, <<"c">>, []).
+
+
+fold_by_id(Config) ->
+  Ch = channel(Config),
+  Doc = #{ <<"id">> => <<"a">>, <<"v">> => 1},
+  {ok, <<"a">>, _RevId} = barrel_remote:insert(Ch, <<"testdb">>, Doc, #{}),
+  Doc2 = #{ <<"id">> => <<"b">>, <<"v">> => 1},
+  {ok, <<"b">>, _RevId2} = barrel_remote:insert(Ch, <<"testdb">>, Doc2, #{}),
+  Doc3 = #{ <<"id">> => <<"c">>, <<"v">> => 1},
+  {ok, <<"c">>, _RevId3} = barrel_remote:insert(Ch, <<"testdb">>, Doc3, #{}),
+  Fun = fun
+          (#{ <<"id">> := DocId }, _Meta, Acc1) ->
+            [DocId | Acc1]
+        end,
+  Acc = barrel_remote:fold_by_id(Ch, <<"testdb">>, Fun, [], []),
+  [<<"c">>, <<"b">>, <<"a">>] = Acc,
+  Acc2 = barrel_remote:fold_by_id(Ch, <<"testdb">>, Fun, [],
+    [{include_doc, true}, {lt, <<"b">>}]),
+  [<<"a">>] = Acc2,
+  Acc3 = barrel_remote:fold_by_id(Ch, <<"testdb">>, Fun, [],
+    [{include_doc, true}, {lte, <<"b">>}]),
+  [<<"b">>, <<"a">>] = Acc3,
+  Acc4 = barrel_remote:fold_by_id(Ch, <<"testdb">>, Fun, [],
+    [{include_doc, true}, {gte, <<"b">>}]),
+  [<<"c">>, <<"b">>] = Acc4,
+  Acc5 = barrel_remote:fold_by_id(Ch, <<"testdb">>, Fun, [],
+    [{include_doc, true}, {gt, <<"b">>}]),
+  [<<"c">>] = Acc5,
+  ok.
 
 %% ==============================
 %% internal helpers
