@@ -64,8 +64,8 @@ await(ChPid, StreamRef, Timeout) ->
 
 await1(MRef, ChPid, StreamRef, Timeout) ->
   receive
-    {barrel_rpc_response, StreamRef, Resp} -> Resp;
-    {barrel_rpc_stream, StreamRef, Resp} -> Resp;
+    {rpc_response, StreamRef, Resp} -> Resp;
+    {rpc_stream, StreamRef, Resp} -> Resp;
     {'DOWN', MRef, process, ChPid, Reason} -> {error, Reason}
   after Timeout ->
     {error, rpc_timeout}

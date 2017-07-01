@@ -196,7 +196,7 @@ client_is_down(Pid, Reason, Data = #{ tab := Tab }) ->
 handle_response(StreamId, Resp, Data) ->
   case client_for_stream(StreamId, Data) of
     {ok, StreamRef, ClientPid} ->
-      ClientPid ! {barrel_rpc_response, StreamRef, Resp},
+      ClientPid ! {rpc_response, StreamRef, Resp},
       delete_stream(StreamId, StreamRef, ClientPid, Data);
     not_found ->
       ok
@@ -206,7 +206,7 @@ handle_response_stream(StreamId, Resp, Data) ->
   case client_for_stream(StreamId, Data) of
     {ok, StreamRef, ClientPid} ->
       _ = maybe_delete_stream(Resp, StreamId, StreamRef, ClientPid, Data) ,
-      ClientPid ! {barrel_rpc_stream, StreamRef, Resp},
+      ClientPid ! {rpc_stream, StreamRef, Resp},
       ok;
     not_found ->
       ok

@@ -1,6 +1,7 @@
 BASEDIR = $(shell pwd)
 SUPPORTDIR = $(BASEDIR)/support
 REBAR ?= $(SUPPORTDIR)/rebar3
+EPMD ?= $(which epmd)
 
 .PHONY: help all rel tar store apply
 
@@ -33,6 +34,7 @@ dialyzer:
 
 test: cleantest dialyzer
 	@$(REBAR) eunit
+	@$(EPMD) -daemon
 	@$(REBAR) ct --sname=barrel_test
 
 cover:
