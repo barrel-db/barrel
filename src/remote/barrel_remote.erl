@@ -7,6 +7,7 @@
 %%% Created : 29. Jun 2017 15:31
 %%%-------------------------------------------------------------------
 -module(barrel_remote).
+  database_infos/2
 -author("benoitc").
 
 %% API
