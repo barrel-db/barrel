@@ -1,4 +1,5 @@
 %% Copyright 2017, Bernard Notarianni
+%% Copyright 2017, Benoit Chesneau
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License"); you may not
 %% use this file except in compliance with the License. You may obtain a copy of
@@ -61,8 +62,9 @@ get_start_seq(State) ->
   State#st.start_seq.
 
 %% @doc Decide it we should write checkpoints, and do it.
-maybe_write_checkpoint(#st{last_seq=LastSeq, target_seq=TargetSeq}=State)
-  when LastSeq >= TargetSeq ->
+maybe_write_checkpoint(
+    #st{last_seq=LastSeq, target_seq=TargetSeq}=State
+) when LastSeq >= TargetSeq ->
   ok = write_checkpoint(State),
   set_next_target_seq(State);
 maybe_write_checkpoint(State) ->
@@ -140,16 +142,10 @@ read_last_seq(Db, RepId) ->
   end.
 
 write_checkpoint_doc(Db, RepId, Checkpoint) ->
-  put_system_doc(Db, checkpoint_docid(RepId), Checkpoint).
-
-put_system_doc({Mod, ModState}, Id, Doc) ->
-  Mod:put_system_doc(ModState, Id, Doc).
+  barrel_replicate_api_wrapper:put_system_doc(Db, checkpoint_docid(RepId), Checkpoint).
 
 read_checkpoint_doc(Db, RepId) ->
-  get_system_doc(Db, checkpoint_docid(RepId)).
-
-get_system_doc({Mod, ModState}, Id) ->
-  Mod:get_system_doc(ModState, Id).
+  barrel_replicate_api_wrapper:get_system_doc(Db, checkpoint_docid(RepId)).
 
 
 delete(Checkpoint) ->
@@ -161,10 +157,7 @@ delete(Checkpoint) ->
   ok.
 
 delete_checkpoint_doc(Db, RepId) ->
-  delete_system_doc(Db, checkpoint_docid(RepId)).
-
-delete_system_doc({Mod, ModState}, Id) ->
-  Mod:delete_system_doc(ModState, Id).
+  barrel_replicate_api_wrapper:delete_system_doc(Db, checkpoint_docid(RepId)).
 
 checkpoint_docid(RepId) ->
   <<"replication-checkpoint-", RepId/binary>>.

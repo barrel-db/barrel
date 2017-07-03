@@ -187,8 +187,6 @@ connect(DbId) -> {ok, DbId}.
 database_infos(Db) -> barrel_db:infos(Db).
 
 
-
-
 %% Database API.
 
 %% @doc retrieve a document by its key

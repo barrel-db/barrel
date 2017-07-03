@@ -445,20 +445,32 @@ await_change(_Config) ->
   Pid = spawn(
     fun() ->
       Stream = barrel_local:subscribe_changes(<<"testdb">>, 0, []),
-      ct:print("la"),
-      Change = barrel_local:await_change(Stream),
-      ct:print("ici"),
-      {ok, LastSeq} = barrel_local:unsubscribe_changes(Stream),
-      Parent ! {change, self(), LastSeq, Change}
+      change_loop(Parent, Stream)
     end
   ),
   Doc = #{ <<"id">> => <<"aa">>, <<"v">> => 1},
   {ok, <<"aa">>, _RevId} = barrel_local:post(<<"testdb">>, Doc, #{}),
-  receive
-    {change, Pid, 1, #{ <<"id">> := <<"aa">>, <<"seq">> := 1 }} -> ok;
-    Else ->
-      erlang:error({bad_result, Else})
-  after 5000 ->
-    erlang:error(timeout)
-  end.
+  Doc1 = #{ <<"id">> => <<"bb">>, <<"v">> => 1},
+  {ok, <<"bb">>, _RevId1} = barrel_local:post(<<"testdb">>, Doc1, #{}),
+  {ok, <<"aa">>, _RevId2} = barrel_local:delete(<<"testdb">>, <<"aa">>, #{}),
+  Changes = collect_changes(Pid, [], 3),
+  [{add, <<"aa">>}, {add, <<"bb">>}, {del, <<"aa">>}] = Changes.
 
+
+change_loop(Parent, Stream) ->
+  Change = barrel_local:await_change(Stream),
+  Parent ! {change, self(), Change},
+  change_loop(Parent, Stream).
+
+collect_changes(_Pid, Acc, 0) -> lists:reverse(Acc);
+collect_changes(Pid, Acc, N) ->
+  receive
+    {change, Pid, #{ <<"id">> := Id, <<"deleted">> := true }} ->
+      collect_changes(Pid, [{del, Id} | Acc], N - 1);
+    {change, Pid, #{ <<"id">> := Id }}->
+      collect_changes(Pid, [{add, Id} | Acc], N - 1);
+    Else ->
+      exit(Else)
+  after 5000 ->
+    exit(changes_timeout)
+  end.

@@ -13,7 +13,6 @@
 %% the License.
 
 -module(barrel_replicate_SUITE).
--author("Bernard Notarianni").
 
 %% API
 -export(
@@ -36,6 +35,8 @@
    , checkpoints/1
    , list_replication_tasks/1
    ]).
+
+-define(CH(DbId), barrel_replicate_api_wrapper:setup_channel(DbId)).
 
 
  all() ->
@@ -271,6 +272,7 @@ checkpoints(_Config) ->
   SourceDbId = <<"source">>,
   RepId = <<"checkpoints">>,
   {ok, SourceCheckpoints} = read_checkpoint_doc(SourceDbId, RepId),
+  lager:info("source checkpoint is ~p~n", [SourceCheckpoints]),
   History = maps:get(<<"history">>, SourceCheckpoints),
   4 = length(History),
   LastSession = hd(History),

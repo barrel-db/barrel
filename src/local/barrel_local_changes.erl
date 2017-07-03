@@ -68,15 +68,15 @@ wait_changes(State) ->
       exit({shutdown, db_down});
     {'DOWN', _, process, Owner, _Reason} ->
       exit(normal);
-    {'EXIT', Parent, _} ->
-      exit(normal);
+    {'EXIT', Parent, _Reason} ->
+      terminate(normal, State);
     {system, From, Request} ->
       sys:handle_system_msg(
         Request, From, Parent, ?MODULE, [],
         {wait_changes, State});
     Other ->
       _ = lager:error("~s: got unexpected message: ~p~n", [?MODULE_STRING, Other]),
-      exit(unexpected_message)
+      exit({unexpected_message, Other})
   end.
 
 stream_changes(State) ->
@@ -101,18 +101,17 @@ system_continue(_, _, {wait_changes, State}) ->
   wait_changes(State).
 
 -spec system_terminate(any(), _, _, _) -> no_return().
-system_terminate(Reason, _, _, _State) ->
+system_terminate(Reason, _, _, State) ->
+  terminate(Reason, State).
+
+system_code_change(Misc, _, _, _) ->
+  {ok, Misc}.
+
+-spec terminate(_, _) -> no_return().
+terminate(Reason, _State) ->
   _ = lager:debug(
     "~s terminate: ~p",
     [?MODULE_STRING,Reason]
   ),
-  
   catch barrel_event:unreg(),
-  exit(Reason).
-
-system_code_change(Misc, _, _, _) ->
-  {ok, Misc}.
-  
-  
-  
-  
+  erlang:exit(Reason).

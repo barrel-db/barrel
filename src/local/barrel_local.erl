@@ -21,7 +21,8 @@
   database_names/0,
   create_database/1,
   delete_database/1,
-  database_infos/1
+  database_infos/1,
+  has_database/1
 ]).
 
 %% DOC API
@@ -70,7 +71,8 @@ delete_database(DbId) ->
 
 database_infos(Db) -> barrel_db:infos(Db).
 
-
+has_database(DbId) ->
+  (barrel_store:whereis_db(DbId) /= undefined).
 
 
 %% ==============================
@@ -172,7 +174,7 @@ await_change(Pid, Timeout) ->
       LastSeq = erlang:erase({Pid, last_seq}),
       {end_stream, {error, Reason}, LastSeq}
     after Timeout ->
-      erlang:error(timeout)
+    {end_stream, timeout}
   end.
 
 unsubscribe_changes(Pid) ->

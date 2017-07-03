@@ -13,7 +13,7 @@
 %% the License.
 
 -module(barrel_replicate_alg_SUITE).
--author("Bernard Notarianni").
+
 
 %% API
 -export(
@@ -37,6 +37,9 @@ all() ->
   , deleted_doc
   , random_activity
   ].
+
+-define(CH(DbId), barrel_replicate_api_wrapper:setup_channel(DbId)).
+
 
 init_per_suite(Config) ->
   {ok, _} = application:ensure_all_started(barrel),
@@ -81,8 +84,8 @@ one_doc(_Config) ->
   Metrics = barrel_replicate_metrics:new(),
   Changes = changes(),
   {ok, _} = barrel_replicate_alg:replicate(
-    {barrel, <<"source">>},
-    {barrel, <<"testdb">>},
+    ?CH(<<"source">>),
+    ?CH(<<"testdb">>),
     Changes,
     Metrics
   ),
@@ -100,8 +103,8 @@ source_not_empty(_Config) ->
   Metrics = barrel_replicate_metrics:new(),
   Changes = changes(),
   {ok, _} = barrel_replicate_alg:replicate(
-    {barrel, <<"source">>},
-    {barrel, <<"testdb">>},
+    ?CH(<<"source">>),
+    ?CH(<<"testdb">>),
     Changes,
     Metrics
   ),
@@ -116,8 +119,8 @@ deleted_doc(_Config) ->
   Metrics = barrel_replicate_metrics:new(),
   Changes = changes(),
   {ok, _} = barrel_replicate_alg:replicate(
-    {barrel, <<"source">>},
-    {barrel, <<"testdb">>},
+    ?CH(<<"source">>),
+    ?CH(<<"testdb">>),
     Changes,
     Metrics
   ),
@@ -134,8 +137,8 @@ random_activity(_Config) ->
   Metrics = barrel_replicate_metrics:new(),
   Changes = changes(),
   {ok, _} = barrel_replicate_alg:replicate(
-    {barrel, <<"source">>},
-    {barrel, <<"testdb">>},
+    ?CH(<<"source">>),
+    ?CH(<<"testdb">>),
     Changes,
     Metrics
   ),

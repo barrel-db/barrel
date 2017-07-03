@@ -13,7 +13,8 @@
 %% the License.
 
 -module(barrel_replicate_checkpoint_SUITE).
--author("Bernard Notarianni").
+
+-define(CH(DbId), barrel_replicate_api_wrapper:setup_channel(DbId)).
 
 %% API
 -export(
@@ -58,9 +59,9 @@ end_per_suite(Config) ->
 
 checkpoints(_Config) ->
   RepId = <<"repdid">>,
-  Source = {barrel, <<"source">>},
-  Target = {barrel, <<"testdb">>},
   Options = [{checkpoint_size, 5}],
+  Source = ?CH(<<"source">>),
+  Target = ?CH(<<"testdb">>),
   C0 = barrel_replicate_checkpoint:new(RepId, Source, Target, Options),
   C1 = barrel_replicate_checkpoint:set_last_seq(4, C0),
   C2 = barrel_replicate_checkpoint:maybe_write_checkpoint(C1),
@@ -89,8 +90,8 @@ checkpoints(_Config) ->
 
 history_size(_Config) ->
   RepId = <<"repdid">>,
-  Source = {barrel, <<"source">>},
-  Target = {barrel, <<"testdb">>},
+  Source = barrel_replicate_api_wrapper:setup_channel(<<"source">>),
+  Target = barrel_replicate_api_wrapper:setup_channel(<<"testdb">>),
   Options = [{checkpoint_size, 5}, {checkpoint_max_history, 3}],
 
   replication_session([5,10,12], Source, Target, Options, RepId),
