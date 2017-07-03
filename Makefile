@@ -1,7 +1,7 @@
 BASEDIR = $(shell pwd)
 SUPPORTDIR = $(BASEDIR)/support
 REBAR ?= $(SUPPORTDIR)/rebar3
-EPMD ?= $(which epmd)
+EPMD ?= $(shell which epmd)
 
 .PHONY: help all rel tar store apply
 

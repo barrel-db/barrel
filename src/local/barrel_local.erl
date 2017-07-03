@@ -46,7 +46,10 @@
 
 
 -export([
-  changes_since/5
+  changes_since/5,
+  subscribe_changes/3,
+  unsubscribe_changes/1,
+  await_change/1, await_change/2
 ]).
 
 
@@ -82,8 +85,8 @@ multi_get(Db, Fun, AccIn, DocIds, Options) ->
   barrel_db:multi_get(Db, Fun, AccIn, DocIds, Options).
 
 put(Db, Doc, Options) when is_map(Doc) ->
-  Rev = proplists:get_value(rev, Options, <<>>),
-  Async = proplists:get_value(async, Options, false),
+  Rev = maps:get(rev, Options, <<>>),
+  Async = maps:get(async, Options, false),
   Batch = barrel_write_batch:put(Doc, Rev, barrel_write_batch:new(Async)),
   update_doc(Db, Batch);
 put(_,  _, _) ->
@@ -91,21 +94,21 @@ put(_,  _, _) ->
 
 
 put_rev(Db, Doc, History, Deleted, Options) when is_map(Doc) ->
-  Async = proplists:get_value(async, Options, false),
+  Async = maps:get(async, Options, false),
   Batch = barrel_write_batch:put_rev(Doc, History, Deleted, barrel_write_batch:new(Async)),
   update_doc(Db, Batch);
 put_rev(_, _, _, _, _) ->
   erlang:error(badarg).
 
 delete(Db, DocId, Options) ->
-  Async = proplists:get_value(async, Options, false),
-  Rev = proplists:get_value(rev, Options, <<>>),
+  Async = maps:get(async, Options, false),
+  Rev = maps:get(rev, Options, <<>>),
   Batch = barrel_write_batch:delete(DocId, Rev, barrel_write_batch:new(Async)),
   update_doc(Db, Batch).
 
 post(Db, Doc, Options) ->
-  Async = proplists:get_value(async, Options, false),
-  IsUpsert = proplists:get_value(is_upsert, Options, false),
+  Async = maps:get(async, Options, false),
+  IsUpsert = maps:get(is_upsert, Options, false),
   Batch = barrel_write_batch:post(Doc, IsUpsert, barrel_write_batch:new(Async)),
   update_doc(Db, Batch).
 
@@ -147,8 +150,32 @@ changes_since(Db, Since, Fun, Acc, Opts) ->
   barrel_db:changes_since(Db, Since, Fun, Acc, Opts).
 
 
+subscribe_changes(DbId, Since, Options) ->
+  {ok, Pid} = barrel_local_changes_sup:start_consumer(self(), DbId, Since, Options),
+  _ = erlang:put({Pid, last_seq},  Since),
+  Pid.
 
+await_change(Pid) -> await_change(Pid, infinity).
 
+await_change(Pid, Timeout) ->
+  MRef = erlang:monitor(process, Pid),
+  receive
+    {change, Pid, Change} ->
+      Seq = maps:get(<<"seq">>, Change),
+      OldSeq = erlang:get({Pid, last_seq}),
+      _ = erlang:put({Pid, last_seq}, erlang:max(OldSeq, Seq)),
+      Change;
+    {'DOWN', MRef, process, _, normal} ->
+      LastSeq = erlang:erase({Pid, last_seq}),
+      {end_stream, normal, LastSeq};
+    {'DOWN', MRef, process, _, Reason} ->
+      LastSeq = erlang:erase({Pid, last_seq}),
+      {end_stream, {error, Reason}, LastSeq}
+    after Timeout ->
+      erlang:error(timeout)
+  end.
 
-
-
+unsubscribe_changes(Pid) ->
+  _ = barrel_local_changes_sup:stop_consumer(Pid),
+  LastSeq = erlang:erase({Pid, last_seq}),
+  {ok, LastSeq}.

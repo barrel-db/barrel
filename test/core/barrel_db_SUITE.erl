@@ -49,7 +49,8 @@
   write_batch/1,
   write_json_batch/1,
   change_deleted/1,
-  resource_id/1
+  resource_id/1,
+  await_change/1
 ]).
 
 all() ->
@@ -76,7 +77,8 @@ all() ->
     write_batch,
     write_json_batch,
     change_deleted,
-    resource_id
+    resource_id,
+    await_change
   ].
 
 init_per_suite(Config) ->
@@ -437,3 +439,26 @@ revsdiff(_Config) ->
   {ok, <<"revsdiff">>, _RevId3} = barrel:put(<<"testdb">>, Doc2, [{rev, RevId}]),
   {ok, [<<"1-missing">>], []} = barrel:revsdiff(<<"testdb">>, <<"revsdiff">>, [<<"1-missing">>]),
   ok.
+
+await_change(_Config) ->
+  Parent = self(),
+  Pid = spawn(
+    fun() ->
+      Stream = barrel_local:subscribe_changes(<<"testdb">>, 0, []),
+      ct:print("la"),
+      Change = barrel_local:await_change(Stream),
+      ct:print("ici"),
+      {ok, LastSeq} = barrel_local:unsubscribe_changes(Stream),
+      Parent ! {change, self(), LastSeq, Change}
+    end
+  ),
+  Doc = #{ <<"id">> => <<"aa">>, <<"v">> => 1},
+  {ok, <<"aa">>, _RevId} = barrel_local:post(<<"testdb">>, Doc, #{}),
+  receive
+    {change, Pid, 1, #{ <<"id">> := <<"aa">>, <<"seq">> := 1 }} -> ok;
+    Else ->
+      erlang:error({bad_result, Else})
+  after 5000 ->
+    erlang:error(timeout)
+  end.
+

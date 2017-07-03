@@ -7,7 +7,6 @@
 %%% Created : 29. Jun 2017 15:31
 %%%-------------------------------------------------------------------
 -module(barrel_remote).
-  database_infos/2
 -author("benoitc").
 
 %% API
@@ -43,7 +42,7 @@
 -export([
   changes_since/6,
   subscribe_changes/4,
-  await_change/2,
+  await_change/2, await_change/3,
   unsubscribe_changes/2
 ]).
 
@@ -141,8 +140,10 @@ subscribe_changes(ChPid, DbId, Since, Options) ->
   _ = erlang:put({StreamRef, last_seq},  Since),
   StreamRef.
 
-await_change(ChPid, StreamRef) ->
-  case barrel_rpc:await(ChPid, StreamRef) of
+await_change(ChPid, StreamRef) -> await_change(ChPid, StreamRef, infinity).
+
+await_change(ChPid, StreamRef, Timeout) ->
+  case barrel_rpc:await(ChPid, StreamRef, Timeout) of
     {data, Change} ->
       Seq = maps:get(<<"seq">>, Change),
       OldSeq = erlang:get({StreamRef, last_seq}),

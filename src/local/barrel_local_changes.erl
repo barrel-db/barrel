@@ -15,11 +15,11 @@
 
 %% API
 -export([
-  start_link/5
+  start_link/4
 ]).
 
 -export([
-  init/6,
+  init/5,
   wait_changes/1
 ]).
 
@@ -30,10 +30,10 @@
 ]).
 
 
-start_link(StreamId, Owner, DbId, Since, Options) ->
-  proc_lib:start_link(?MODULE, init, [StreamId, Owner, self(), DbId, Since, Options]).
+start_link(Owner, DbId, Since, Options) ->
+  proc_lib:start_link(?MODULE, init, [Owner, self(), DbId, Since, Options]).
 
-init(StreamId, Owner, Parent, DbId, Since0, Options) ->
+init(Owner, Parent, DbId, Since0, Options) ->
   process_flag(trap_exit, true),
   proc_lib:init_ack(Parent, {ok, self()}),
   
@@ -51,7 +51,6 @@ init(StreamId, Owner, Parent, DbId, Since0, Options) ->
     parent => Parent,
     owner => Owner,
     db_ref => MRef,
-    stream_id => StreamId,
     last_seq => Since0,
     options => Options
   },
@@ -60,13 +59,13 @@ init(StreamId, Owner, Parent, DbId, Since0, Options) ->
   wait_changes(State#{ last_seq => Since1 }).
 
 wait_changes(State) ->
-  #{ parent := Parent, owner := Owner, db_ref := Ref, stream_id := StreamId } = State,
+  #{ parent := Parent, owner := Owner, db_ref := Ref } = State,
   receive
     {'$barrel_event', _, db_updated} ->
       LastSeq = stream_changes(State),
       wait_changes(State#{ last_seq => LastSeq });
     {'DOWN', Ref, process, _DbPid, _Reason} ->
-      Owner ! {change, StreamId, db_down};
+      exit({shutdown, db_down});
     {'DOWN', _, process, Owner, _Reason} ->
       exit(normal);
     {'EXIT', Parent, _} ->
@@ -76,14 +75,14 @@ wait_changes(State) ->
         Request, From, Parent, ?MODULE, [],
         {wait_changes, State});
     Other ->
-      lager:error("~s: got unexpected message: ~p~n", [?MODULE_STRING, Other]),
+      _ = lager:error("~s: got unexpected message: ~p~n", [?MODULE_STRING, Other]),
       exit(unexpected_message)
   end.
 
 stream_changes(State) ->
   #{
-    db := DbId, owner := Owner, stream_id := StreamId,
-    last_seq => LastSeq, options => Options
+    db := DbId, owner := Owner,
+    last_seq := LastSeq, options := Options
   } = State,
   
   barrel_db:changes_since(
@@ -91,7 +90,7 @@ stream_changes(State) ->
     LastSeq,
     fun(Change, OldSeq) ->
       Seq = maps:get(<<"seq">>, Change),
-      _ = Owner ! {change, StreamId, Change},
+      _ = Owner ! {change, self(), Change},
       {ok, erlang:max(OldSeq, Seq)}
     end,
     LastSeq,

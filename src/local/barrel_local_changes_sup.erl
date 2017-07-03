@@ -12,19 +12,23 @@
 %% API
 -export([
   start_link/0,
-  start_consumer/5
+  start_consumer/4,
+  stop_consumer/1
 ]).
 
 -export([init/1]).
 
 start_link() ->
-  supervisor:start_link({local, ?MODULE}, []).
+  supervisor:start_link({local, ?MODULE}, ?MODULE, []).
 
-start_consumer(StreamId, Owner, DbId, Since, Options) ->
+start_consumer(Owner, DbId, Since, Options) ->
   supervisor:start_child(
     ?MODULE,
-    [StreamId, Owner, DbId, Since, Options]
+    [Owner, DbId, Since, Options]
   ).
+
+stop_consumer(Pid) ->
+  supervisor:terminate_child(?MODULE, Pid).
 
 init(_) ->
   Child = #{
