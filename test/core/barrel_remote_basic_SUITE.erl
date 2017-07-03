@@ -50,7 +50,7 @@ basic(Config) ->
   [<<"testdb">>] = barrel_remote:database_names(ChPid),
   {error, not_found} = barrel_remote:get(ChPid, <<"testdb">>, <<"a">>, []),
   Doc = #{ <<"id">> => <<"a">>, <<"v">> => 1},
-  {ok, <<"a">>, RevId} = barrel_remote:insert(ChPid, <<"testdb">>, Doc, #{}),
+  {ok, <<"a">>, RevId} = barrel_remote:post(ChPid, <<"testdb">>, Doc, #{}),
   {ok, Doc, #{<<"rev">> := RevId}=Meta} = barrel_remote:get(ChPid, <<"testdb">>, <<"a">>, []),
   false = maps:is_key(<<"deleted">>, Meta),
   {ok, <<"a">>, _RevId2} = barrel_remote:delete(ChPid, <<"testdb">>, <<"a">>, #{rev =>RevId}),

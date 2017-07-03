@@ -26,7 +26,7 @@
   get/4,
   put/4,
   delete/4,
-  insert/4,
+  post/4,
   multi_get/6,
   put_rev/6,
   write_batch/4,
@@ -90,7 +90,7 @@ delete(ChPid, DbId, DocId, Options) ->
   Ref = barrel_rpc:request(ChPid, {'barrel.v1.Database', 'DeleteDoc', [DbId, DocId, Options]}),
   barrel_rpc:await(ChPid, Ref).
 
-insert(ChPid, DbId, Doc, Options) ->
+post(ChPid, DbId, Doc, Options) ->
   Ref = barrel_rpc:request(ChPid, {'barrel.v1.Database', 'InsertDoc', [DbId, Doc, Options]}),
   barrel_rpc:await(ChPid, Ref).
 
