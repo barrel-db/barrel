@@ -69,7 +69,7 @@ order_by_key(_Config) ->
     <<"creationDate">> => 1431620472,
     <<"isRegistered">> => true
   },
-  {ok, <<"AndersenFamily">>, _Rev} = barrel:post(<<"testdb">>, Doc, []),
+  {ok, <<"AndersenFamily">>, _Rev} = barrel:post(<<"testdb">>, Doc, #{}),
   timer:sleep(400),
   {ok, _Doc1, _Meta1} = barrel:get(<<"testdb">>, <<"AndersenFamily">>, []),
 
@@ -106,7 +106,9 @@ multiple_docs(_Config) ->
 
   All40 = barrel:fold_by_id(
     <<"testdb">>,
-    fun(#{ <<"id">> := Id },_ , Acc) -> {ok, [Id | Acc]} end,
+    fun(#{<<"id">> := Id }, _ , Acc) ->
+      {ok, [Id | Acc]}
+    end,
     [],
     [{max, 40}]
   ),

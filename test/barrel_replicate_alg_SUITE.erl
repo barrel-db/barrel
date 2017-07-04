@@ -80,7 +80,7 @@ changes() ->
 
 one_doc(_Config) ->
   Doc = #{ <<"id">> => <<"a">>, <<"v">> => 1},
-  {ok, <<"a">>, _RevId} = barrel:post(<<"source">>, Doc, []),
+  {ok, <<"a">>, _RevId} = barrel:post(<<"source">>, Doc, #{}),
   Metrics = barrel_replicate_metrics:new(),
   Changes = changes(),
   {ok, _} = barrel_replicate_alg:replicate(
@@ -98,7 +98,7 @@ one_doc(_Config) ->
 
 source_not_empty(_Config) ->
   Doc = #{ <<"id">> => <<"a">>, <<"v">> => 1},
-  {ok, <<"a">>, _RevId} = barrel:post(<<"source">>, Doc, []),
+  {ok, <<"a">>, _RevId} = barrel:post(<<"source">>, Doc, #{}),
   {ok, Doc2, _} = barrel:get(<<"source">>, <<"a">>, []),
   Metrics = barrel_replicate_metrics:new(),
   Changes = changes(),
@@ -113,9 +113,9 @@ source_not_empty(_Config) ->
 
 deleted_doc(_Config) ->
   Doc = #{ <<"id">> => <<"a">>, <<"v">> => 1},
-  {ok, <<"a">>, RevId} = barrel:post(<<"source">>, Doc, []),
+  {ok, <<"a">>, RevId} = barrel:post(<<"source">>, Doc, #{}),
   {ok, #{ <<"id">> := <<"a">>}, #{<<"rev">> := RevId }} = barrel:get(<<"source">>, <<"a">>, []),
-  {ok, _, _} = barrel:delete(<<"source">>, <<"a">>, [{rev, RevId}]),
+  {ok, _, _} = barrel:delete(<<"source">>, <<"a">>, #{rev => RevId}),
   Metrics = barrel_replicate_metrics:new(),
   Changes = changes(),
   {ok, _} = barrel_replicate_alg:replicate(
@@ -196,10 +196,10 @@ put_doc(DocName, Value, Db) ->
     {ok, Doc, Meta} ->
       Doc2 = Doc#{<<"v">> => Value},
       RevId = maps:get(<<"rev">>, Meta),
-      {ok,_,_} = barrel:put(Db, Doc2, [{rev, RevId}]);
+      {ok,_,_} = barrel:put(Db, Doc2, #{rev => RevId});
     {error, not_found} ->
       Doc = #{<<"id">> => Id, <<"v">> => Value},
-      {ok,_,_} = barrel:post(Db, Doc, [])
+      {ok,_,_} = barrel:post(Db, Doc, #{})
   end.
 
 delete_doc(DocName, Db) ->
@@ -208,7 +208,7 @@ delete_doc(DocName, Db) ->
     {error, not_found} -> ok;
     {ok, _Doc, Meta} ->
       RevId = maps:get(<<"rev">>, Meta),
-      {ok, _, _} = barrel:delete(Db, Id, [{rev, RevId}]),
+      {ok, _, _} = barrel:delete(Db, Id, #{rev => RevId}),
       ok
   end.
 

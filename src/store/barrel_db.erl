@@ -499,7 +499,6 @@ decode_rid(Bin) ->
   << Rid:64 >> = base64:decode(Bin),
   Rid.
 
-
 %% TODO: put dbinfo in a template
 init([Cache, MemEnv, DbId, Config]) ->
   process_flag(trap_exit, true),
