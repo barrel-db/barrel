@@ -33,12 +33,22 @@
 
 setup_channel(DbId) when is_binary(DbId) ->
   #{ mod => barrel_local, init_args => [], db => DbId };
-setup_channel({Mod, Channel, DbId}) ->
+setup_channel(#{ mod := Mod, db := DbId } = Config) ->
+  Channel = Mod:start_channel(Config),
   #{ mod => Mod, init_args => [Channel], db => DbId };
-setup_channel({Channel, DbId}) when is_pid(Channel), is_binary(DbId) ->
-  #{ mod => barrel_remote, init_args => [Channel], db => DbId };
-setup_channel(_) ->
-  erlang:error(badarg).
+setup_channel(#{ proto := Proto , db := DbId} = Config) ->
+  Mod = proto_mod(Proto),
+  {ok, Channel} = Mod:start_channel(Config),
+  #{ mod => Mod, init_args => [Channel], db => DbId }.
+
+proto_mod(rpc) -> barrel_remote;
+proto_mod(http) -> barrel_httpc;
+proto_mod(Proto) ->
+  Supported = application:get_env(barrel, proto_replication, #{}),
+  case maps:find(Proto, Supported) of
+    {ok, Mod} -> Mod;
+    error -> erlang:error(badarg)
+  end.
 
 %% ==============================‡
 %% barrel_replicate_alg

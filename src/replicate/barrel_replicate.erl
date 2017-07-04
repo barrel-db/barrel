@@ -85,10 +85,8 @@ find_repid(RepId) ->
     [{RepId, RepInfo}] -> {ok, RepInfo}
   end.
 
-
 init([]) ->
   _ = ets:new(replication_ids, [ordered_set, named_table, public, {read_concurrency, true}]),
-
   self() ! init_config,
   {ok, #{ config => maps:new() }}.
 
