@@ -21,7 +21,14 @@
 -export([init/1, post_init/1]).
 
 type_mod(#{ type := direct }) -> {direct, barrel_direct_transport};
-type_mod(_) -> erlang:error(bad_connection_type).
+type_mod(#{ type := Type }) ->
+  Transports = application:get_env(barrel, transports, #{}),
+  case maps:find(Type, Transports) of
+    {ok, Mod} ->
+      {Type, Mod};
+    error ->
+      erlang:error(bad_connection_type)
+  end.
 
 start_link() -> barrel_supervisor3:start_link(?MODULE, []).
 
