@@ -20,12 +20,14 @@
 ]).
 
 -export([
-  basic/1
+  basic/1,
+  named_channel/1
 ]).
 
 all() ->
   [
-    basic
+    basic,
+    named_channel
   ].
 
 
@@ -59,6 +61,25 @@ basic(Config) ->
   [] = barrel_remote:database_names(ChPid),
   ok = barrel_remote:close_channel(ChPid).
 
+named_channel(Config) ->
+  RemoteNode = proplists:get_value(remote, Config),
+  {ok, ChPid} = barrel_remote:start_channel(#{ type => direct, node => RemoteNode, channel_name => mychannel }),
+  true = (ChPid =:= barrel_channel:channel_pid(mychannel)),
+  [] = barrel_remote:database_names(mychannel),
+  {ok, _} = barrel_remote:create_database(mychannel, #{ <<"database_id">> => <<"testdb">> }),
+  [<<"testdb">>] = barrel_remote:database_names(mychannel),
+  {error, not_found} = barrel_remote:get(mychannel, <<"testdb">>, <<"a">>, []),
+  Doc = #{ <<"id">> => <<"a">>, <<"v">> => 1},
+  {ok, <<"a">>, RevId} = barrel_remote:post(mychannel, <<"testdb">>, Doc, #{}),
+  {ok, Doc, #{<<"rev">> := RevId}=Meta} = barrel_remote:get(mychannel, <<"testdb">>, <<"a">>, []),
+  false = maps:is_key(<<"deleted">>, Meta),
+  {ok, <<"a">>, _RevId2} = barrel_remote:delete(mychannel, <<"testdb">>, <<"a">>, #{rev =>RevId}),
+  {error, not_found} = barrel_remote:get(mychannel, <<"testdb">>, <<"a">>, []),
+  ok = barrel_remote:delete_database(mychannel, <<"testdb">>),
+  [] = barrel_remote:database_names(mychannel),
+  ok = barrel_remote:close_channel(mychannel),
+  false = erlang:is_process_alive(ChPid),
+  undefined = barrel_channel:channel_pid(mychannel).
 
 %% ==============================
 %% internal helpers

@@ -21,7 +21,6 @@
 ]).
 
 
-
 %% API
 -export([
   find_service/1,
@@ -32,6 +31,10 @@
 
 -define(TIMEOUT, 5000).
 
+-type channel() :: pid() | term().
+
+-export_types([channel/0]).
+
 
 -spec start_channel(map()) -> {ok, pid()}.
 start_channel(Params) ->
@@ -39,28 +42,38 @@ start_channel(Params) ->
   barrel_channel:connect(Connection).
 
 
--spec close_channel(pid()) -> ok.
-close_channel(ChPid) -> close_channel(ChPid, ?CLOSE_TIMEOUT).
+-spec close_channel(channel()) -> ok.
+close_channel(Ch) -> close_channel(Ch, ?CLOSE_TIMEOUT).
 
--spec close_channel(pid(), non_neg_integer()) -> ok.
-close_channel(ChPid, Timeout) ->
-  barrel_channel:close(ChPid, Timeout).
+-spec close_channel(channel(), non_neg_integer()) -> ok.
+close_channel(Ch, Timeout) ->
+  barrel_channel:close(barrel_channel:channel_pid(Ch), Timeout).
 
-request(ChPid, Req) -> request(ChPid, Req, []).
+request(Ch, Req) -> request(Ch, Req, []).
 
-request(ChPid, {_Service, _Method, _Args}=Req, Options) ->
-  StreamRef = make_ref(),
-  ReplyTo = proplists:get_value(reply_to, Options, self()),
-  ChPid ! {request, StreamRef, ReplyTo, Req},
-  StreamRef.
+request(Ch, {_Service, _Method, _Args}=Req, Options) ->
+  with_channel(
+    Ch,
+    fun(ChPid) ->
+      StreamRef = make_ref(),
+      ReplyTo = proplists:get_value(reply_to, Options, self()),
+      ChPid ! {request, StreamRef, ReplyTo, Req},
+      StreamRef
+    end
+  ).
 
-await(ChPid, StreamRef) -> await(ChPid, StreamRef, ?TIMEOUT).
+await(Ch, StreamRef) -> await(Ch, StreamRef, ?TIMEOUT).
 
-await(ChPid, StreamRef, Timeout) ->
-  MRef = erlang:monitor(process, ChPid),
-  Res = await1(MRef, ChPid, StreamRef, Timeout),
-  erlang:demonitor(MRef, [flush]),
-  Res.
+await(Ch, StreamRef, Timeout) ->
+  with_channel(
+    Ch,
+    fun(ChPid) ->
+      MRef = erlang:monitor(process, ChPid),
+      Res = await1(MRef, ChPid, StreamRef, Timeout),
+      erlang:demonitor(MRef, [flush]),
+      Res
+    end
+  ).
 
 await1(MRef, ChPid, StreamRef, Timeout) ->
   receive
@@ -71,12 +84,12 @@ await1(MRef, ChPid, StreamRef, Timeout) ->
     {error, rpc_timeout}
   end.
 
-stream(ChPid, StreamRef, Data) ->
-  _ = ChPid ! {stream, StreamRef, {data, Data}},
+stream(Ch, StreamRef, Data) ->
+  _ = send_channel(Ch, {stream, StreamRef, {data, Data}}),
   ok.
 
-end_stream(ChPid, StreamRef) ->
-  _ = ChPid ! {stream, StreamRef, end_stream},
+end_stream(Ch, StreamRef) ->
+  _ = send_channel(Ch, {stream, StreamRef, end_stream}),
   ok.
 
 response_stream(Writer, StreamId, Data) ->
@@ -95,3 +108,17 @@ find_service(Service) ->
 load_services(Mapping) ->
   barrel_rpc_service:load_services(Mapping).
 
+
+with_channel(Channel, Fun) ->
+  case barrel_channel:channel_pid(Channel) of
+    undefined -> erlang:error(badarg);
+    ChPid -> Fun(ChPid)
+  end.
+
+send_channel(Ch, Msg) ->
+  with_channel(
+    Ch,
+    fun(ChPid) ->
+      ChPid ! Msg
+    end
+  ).

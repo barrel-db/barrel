@@ -19,9 +19,12 @@
   connect/3,
   terminate/2,
   handle_message/2,
-  get_writer/1
+  get_writer/1,
+  channel_id/1
 ]).
 
+
+channel_id(Params) -> maps:get(node, Params).
 
 init() -> {ok, #{}}.
 

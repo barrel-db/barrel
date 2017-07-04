@@ -6,7 +6,10 @@
 -export([
   start_link/2,
   connect/1,
-  close/2
+  close/2,
+  set_channel_name/2,
+  unset_channel_name/1,
+  channel_pid/1
 ]).
 
 %% Gen server API
@@ -34,6 +37,19 @@ connect(ConnPid) -> gen_statem:call(ConnPid, connect).
 
 close(ConnPid, Timeout) -> gen_statem:stop(ConnPid, normal, Timeout).
 
+set_channel_name(ChPid, Name) ->
+  gen_statem:call(ChPid, {set_name, Name}).
+
+unset_channel_name(ChPid) ->
+  gen_statem:call(ChPid, unset_name).
+
+channel_pid(Pid) when is_pid(Pid) -> Pid;
+channel_pid(Name) ->
+  case catch gproc:lookup_pid({n, l, {channel_by_name, Name}}) of
+    {'EXIT', _} -> undefined;
+    Pid -> Pid
+  end.
+
 %% ==============================
 %% internal API
 
@@ -58,12 +74,15 @@ code_change(_OldVsn, State, Data, _Extra) -> {ok, State, Data}.
 
 idle({call, From}, connect, {TypeSup, Params}) ->
   {Type, Mod} = barrel_channel_transport_sup:type_mod(Params),
+  Name = maps:get(channel_name, Params, undefined),
   {ok, ModState} = Mod:init(),
   %% initialize the data
   Data = #{
     mod => Mod,
     mod_state => ModState,
     type => Type,
+    params => Params,
+    name => Name,
     streams => [],
     last_id => 0
   },
@@ -71,6 +90,7 @@ idle({call, From}, connect, {TypeSup, Params}) ->
   %% TODO: handle retry logic
   case Mod:connect(Params, TypeSup, ModState) of
     {ok, NewModState} ->
+      ok = register_channel(Data),
       %% TODO: revisit the way we handle streams ?
       Tid = ets:new(?MODULE, [set]),
       Data1 = Data#{ mod_state => NewModState, tab => Tid},
@@ -83,6 +103,13 @@ idle(EventType, Event, Data) ->
   handle_event(EventType, idle, Event, Data).
 
 
+connected({call, From}, {set_name, Name}, Data) ->
+  ok = unregister_channel_name(Data),
+  ok = register_channel_name(Name),
+  {keep_state, Data#{ name => Name}, [{reply, From, ok}]};
+connected({call, From}, unset_name, Data) ->
+  ok = unregister_channel_name(Data),
+  {keep_state, Data#{ name => undefined}, [{reply, From, ok}]};
 connected(info, {request, StreamRef, Pid, Req}, Data = #{ last_id := Id } ) ->
   %% maybe monitor this stream
   ok = maybe_monitor(Pid, Data),
@@ -217,4 +244,16 @@ maybe_delete_stream(end_stream, StreamId, StreamRef, ClientPid, Data) ->
 maybe_delete_stream(_, _, _, _, _) ->
   ok.
 
+register_channel(Data = #{ type := Type, params := Params }) ->
+  _ = gproc:reg({p, l, {channel, Type}}, Params),
+  register_channel_name(Data).
 
+register_channel_name(#{ name := undedfined }) -> ok;
+register_channel_name(#{ name := Name }) -> 
+  _ = gproc:reg({n, l, {channel_by_name, Name}}),
+  ok.
+
+unregister_channel_name(#{ name := undefined }) -> ok;
+unregister_channel_name(#{ name := Name }) ->
+  _ = gproc:unreg({n, l, {channel_by_name, Name}}),
+  ok.

@@ -30,7 +30,8 @@
   fold_by_id/1,
   change_since/1,
   await_change/1,
-  revsdiff/1
+  revsdiff/1,
+  named_await_change/1
 ]).
 
 all() ->
@@ -45,13 +46,14 @@ all() ->
     fold_by_id,
     change_since,
     await_change,
-    revsdiff
+    revsdiff,
+    named_await_change
   ].
 
 init_per_suite(Config) ->
   {ok, _} = application:ensure_all_started(barrel),
   {ok, RemoteNode} = start_slave(barrel_test1),
-  {ok, ChPid} = barrel_remote:start_channel(#{ type => direct, node => RemoteNode }),
+  {ok, ChPid} = barrel_remote:start_channel(#{ type => direct, node => RemoteNode, channel_name => test_channel }),
   [{remote, RemoteNode}, {channel, ChPid} | Config].
 
 end_per_suite(Config) ->
@@ -265,6 +267,28 @@ await_change(Config) ->
       erlang:error({bad_result, Else})
     after 5000 ->
         erlang:error(timeout)
+  end.
+
+named_await_change(_Config) ->
+  Parent = self(),
+  Pid = spawn(
+    fun() ->
+      Stream = barrel_remote:subscribe_changes(test_channel, <<"testdb">>, 0, []),
+      ct:print("la"),
+      Change =barrel_remote:await_change(test_channel, Stream),
+      ct:print("ici"),
+      {ok, LastSeq} = barrel_remote:unsubscribe_changes(test_channel, Stream),
+      Parent ! {change, self(), LastSeq, Change}
+    end
+  ),
+  Doc = #{ <<"id">> => <<"aa">>, <<"v">> => 1},
+  {ok, <<"aa">>, _RevId} = barrel_remote:post(test_channel, <<"testdb">>, Doc, #{}),
+  receive
+    {change, Pid, 1, #{ <<"id">> := <<"aa">>, <<"seq">> := 1 }} -> ok;
+    Else ->
+      erlang:error({bad_result, Else})
+  after 5000 ->
+    erlang:error(timeout)
   end.
 
 revsdiff(Config) ->
