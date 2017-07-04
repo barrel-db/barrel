@@ -68,7 +68,7 @@ one_doc(Config) ->
   },
   {ok, #{<<"replication_id">> := RepId}} = barrel_replicate:start_replication(RepConfig, Options),
   Doc = #{ <<"id">> => <<"a">>, <<"v">> => 1},
-  {ok, <<"a">>, _RevId} = barrel:post(<<"source">>, Doc, []),
+  {ok, <<"a">>, _RevId} = barrel:post(<<"source">>, Doc, #{}),
   timer:sleep(200),
   {ok, Doc2, _} = barrel:get(<<"source">>, <<"a">>, []),
   {ok, Doc2, _} = barrel_remote:get(Ch, <<"testdb">>, <<"a">>, []),
@@ -78,7 +78,7 @@ one_doc(Config) ->
   ok.
 
 delete_doc(Db, DocId) ->
-  _ = barrel:delete(Db, DocId, []),
+  _ = barrel:delete(Db, DocId, #{}),
   ok.
 
 delete_doc( Ch, Db, DocId) ->
