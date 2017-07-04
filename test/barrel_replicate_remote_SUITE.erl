@@ -48,7 +48,7 @@ init_per_testcase(_, Config) ->
 
 end_per_testcase(_, _Config) ->
   ok = barrel_remote:delete_database(rep_test_channel, <<"testdb">>),
-  ok = barrel_store:delete_db(<<"source">>),
+  ok = barrel:delete_database(<<"source">>),
   ok.
 
 target(Config) ->

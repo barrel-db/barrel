@@ -86,11 +86,11 @@ init_per_suite(Config) ->
   Config.
 
 init_per_testcase(_, Config) ->
-  {ok, _} = barrel_store:create_db(<<"testdb">>, #{}),
+  {ok, _} = barrel:create_database(#{ <<"database_id">> => <<"testdb">> }),
   [{db, <<"testdb">>} | Config].
 
 end_per_testcase(_, _Config) ->
-  ok = barrel_store:delete_db(<<"testdb">>),
+  ok = barrel:delete_database(<<"testdb">>),
   ok.
 
 end_per_suite(Config) ->
@@ -209,12 +209,12 @@ create_doc(_Config) ->
   {ok, <<"b">>, _RevId2} = barrel:post(<<"testdb">>, Doc2, []).
 
 docs_count(_Config) ->
-  {ok, #{ docs_count := 0 }} = barrel:db_infos(<<"testdb">>),
+  {ok, #{ docs_count := 0 }} = barrel:database_infos(<<"testdb">>),
   Doc = #{<<"v">> => 1},
   {ok, DocId, RevId} = barrel:post(<<"testdb">>, Doc, []),
-  {ok, #{ docs_count := 1 }} = barrel:db_infos(<<"testdb">>),
+  {ok, #{ docs_count := 1 }} = barrel:database_infos(<<"testdb">>),
   {ok, _, _} = barrel:delete(<<"testdb">>, DocId, [{rev, RevId}]),
-  {ok, #{ docs_count := 0 }} = barrel:db_infos(<<"testdb">>).
+  {ok, #{ docs_count := 0 }} = barrel:database_infos(<<"testdb">>).
 
 get_revisions(_Config) ->
   Doc = #{<<"v">> => 1},

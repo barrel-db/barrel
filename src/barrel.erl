@@ -15,6 +15,16 @@
 -module(barrel).
 -author("benoitc").
 
+
+%% Database API
+
+-export([
+  database_names/0,
+  create_database/1,
+  delete_database/1,
+  database_infos/1
+]).
+
 %% DOC API
 
 -export([
@@ -45,19 +55,6 @@
   find_by_key/5
 ]).
 
-%% Database API
-
--export([
-  create_db/1,
-  create_db/2,
-  delete_db/1,
-  db_infos/1,
-  connect/1
-]).
-
--export([
-  database_infos/1
-]).
 
 -export([
   start_replication/3,
@@ -165,27 +162,20 @@
   docinfo/0
 ]).
 
--deprecated([create_db/2]).
-
 -include("barrel.hrl").
 
-create_db(DbId, Config) ->
-  _ = lager:warning("barrel_db:create/2 is deprecated", []),
-  create_db(Config#{ <<"database_id">> => DbId }).
+database_names() ->
+  barrel_local:database_names().
 
-create_db(Config) -> barrel_store:create_db(Config).
+create_database(Config) ->
+  barrel_local:create_database(Config).
 
+delete_database(DbId) ->
+  barrel_local:delete_database(DbId).
 
-delete_db(DbId) -> barrel_store:delete_db(DbId).
-
--spec db_infos(Db::db()) ->  {ok, DbInfos::db_infos()} | {error, term()}.
-db_infos(Db) ->  barrel_db:infos(Db).
-
-%% new db handling api
-connect(DbId) -> {ok, DbId}.
-
-database_infos(Db) -> barrel_db:infos(Db).
-
+-spec database_infos(Db::db()) ->  {ok, DbInfos::db_infos()} | {error, term()}.
+database_infos(Db) ->
+  barrel_local:database_infos(Db).
 
 %% Database API.
 

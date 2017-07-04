@@ -54,13 +54,13 @@ init_per_suite(Config) ->
   Config.
 
 init_per_testcase(_, Config) ->
-  {ok, _} = barrel_store:create_db(<<"testdb">>, #{}),
-  {ok, _} = barrel_store:create_db(<<"source">>, #{}),
+  {ok, _} = barrel:create_database(#{ <<"database_id">> => <<"testdb">> }),
+  {ok, _} = barrel:create_database(#{ <<"database_id">> => <<"source">> }),
   [{db, <<"testdb">>} | Config].
 
 end_per_testcase(_, _Config) ->
-  ok = barrel_store:delete_db(<<"testdb">>),
-  ok = barrel_store:delete_db(<<"source">>),
+  ok = barrel:delete_database(<<"testdb">>),
+  ok = barrel:delete_database(<<"source">>),
   ok.
 
 end_per_suite(Config) ->
@@ -214,7 +214,7 @@ start_duplicate_replication(_Config) ->
 
 
 delete_database_being_replicated(_Config) ->
-  {ok, _} = barrel_store:create_db(<<"tobedeleted">>, #{}),
+  {ok, _} = barrel:create_database(#{ <<"database_id">> => <<"tobedeleted">> }),
   RepId = <<"sourcedatabasedeleted">>,
   Options = [],
   RepConfig = #{<<"replication_id">> => RepId,
@@ -224,7 +224,7 @@ delete_database_being_replicated(_Config) ->
     barrel_replicate:start_replication(RepConfig, Options),
   Manager = whereis(barrel_replicate),
   [{<<"sourcedatabasedeleted">>, {false, _Pid, _}}] = ets:lookup(replication_ids, RepId),
-  ok = barrel_store:delete_db(<<"tobedeleted">>),
+  ok = barrel:delete_database(<<"tobedeleted">>),
   timer:sleep(200),
   Manager = whereis(barrel_replicate),
   [] = ets:lookup(replication_ids, RepId),

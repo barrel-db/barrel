@@ -53,11 +53,11 @@ end_per_testcase(_Config) ->
   ok.
 
 create_db(_Config) ->
-  {ok, #{ <<"database_id">> := <<"testdb">>}} = barrel_store:create_db(<<"testdb">>, #{}),
+  {ok, #{ <<"database_id">> := <<"testdb">>}} = barrel_store:create_db(#{ <<"database_id">> => <<"testdb">> }),
   [<<"testdb">>] = barrel_store:databases(),
   true = barrel_db:exists(<<"testdb">>),
-  {error, db_exists} = barrel_store:create_db(<<"testdb">>, #{}),
-  {ok, #{ <<"database_id">> := <<"testdb1">>}} = barrel_store:create_db(<<"testdb1">>, #{}),
+  {error, db_exists} = barrel:create_database(#{ <<"database_id">> => <<"testdb">> }),
+  {ok, #{ <<"database_id">> := <<"testdb1">>}} = barrel_store:create_db(#{ <<"database_id">> => <<"testdb1">> }),
   [<<"testdb">>, <<"testdb1">>] = barrel_store:databases(),
   ok = barrel_store:delete_db(<<"testdb">>),
   [] = ets:lookup(barrel_dbs, <<"testdb">>),
@@ -67,7 +67,7 @@ create_db(_Config) ->
 
 
 persist_db(_Config) ->
-  {ok, #{ <<"database_id">> := <<"testdb">>}} = barrel_store:create_db(<<"testdb">>, #{}),
+  {ok, #{ <<"database_id">> := <<"testdb">>}} = barrel_store:create_db(#{ <<"database_id">> => <<"testdb">> }),
   [<<"testdb">>] = barrel_store:databases(),
   ok = application:stop(barrel),
   io:format("stopped the database", []),
