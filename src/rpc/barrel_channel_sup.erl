@@ -8,28 +8,38 @@
 %%%-------------------------------------------------------------------
 -module(barrel_channel_sup).
 -author("benoitc").
--behaviour(barrel_supervisor3).
+-behaviour(supervisor).
 
 %% API
 -export([start_link/1]).
 
-%% supervisor 3 callbacks
--export([init/1, post_init/1]).
+%% supervisor callbacks
+-export([init/1]).
+
+start_link(#{ channel_name := Name } = Params) ->
+  SupName = {via, gproc, {n, l, {?MODULE, Name}}},
+  case supervisor:start_link(SupName, ?MODULE, []) of
+    {ok, Sup} -> start_children(Sup, Params);
+    {error, Error} -> Error
+  end;
 
 start_link(Params) ->
-  {ok, Sup} = barrel_supervisor3:start_link(?MODULE, []),
-  {ok, TypeSup} = barrel_supervisor3:start_child(
+  {ok, Sup} = supervisor:start_link(?MODULE, []),
+  start_children(Sup, Params).
+
+start_children(Sup, Params) ->
+  {ok, TypeSup} = supervisor:start_child(
     Sup,
     {channel_transport_sup,
       {barrel_channel_transport_sup, start_link, []},
       transient, infinity, supervisor,
       [barrel_channel_transport_sup]}
   ),
-  {ok, Connection} = barrel_supervisor3:start_child(
+  {ok, Connection} = supervisor:start_child(
     Sup,
     {channel,
       {barrel_channel, start_link, [TypeSup, Params]},
-      intrinsic, brutal_kill, worker,
+      transient, brutal_kill, worker,
       [barrel_channel]}
   ),
   {ok, Sup, Connection}.
@@ -37,5 +47,3 @@ start_link(Params) ->
 %% supervisor3 callback
 init([]) ->
   {ok, {{one_for_all, 0, 1}, []}}.
-
-post_init(_) -> ignore.

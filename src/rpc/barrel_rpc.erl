@@ -38,8 +38,14 @@
 
 -spec start_channel(map()) -> {ok, pid()}.
 start_channel(Params) ->
-  {ok, _Sup, Connection} = barrel_channel_sup_sup:start_connection_sup(Params),
-  barrel_channel:connect(Connection).
+  case barrel_channel_sup_sup:start_connection_sup(Params) of
+    {ok, _Sup, Connection} ->
+      barrel_channel:connect(Connection);
+    {error, {already_started, _}} ->
+      ChannelName = maps:get(channel_name, Params),
+      Channel = gproc:where({n, l, {channel_by_name, ChannelName}}),
+      {ok, Channel}
+  end.
 
 
 -spec close_channel(channel()) -> ok.

@@ -7,8 +7,6 @@
   start_link/2,
   connect/1,
   close/2,
-  set_channel_name/2,
-  unset_channel_name/1,
   channel_pid/1
 ]).
 
@@ -37,12 +35,6 @@ connect(ConnPid) -> gen_statem:call(ConnPid, connect).
 
 close(ConnPid, Timeout) -> gen_statem:stop(ConnPid, normal, Timeout).
 
-set_channel_name(ChPid, Name) ->
-  gen_statem:call(ChPid, {set_name, Name}).
-
-unset_channel_name(ChPid) ->
-  gen_statem:call(ChPid, unset_name).
-
 channel_pid(Pid) when is_pid(Pid) -> Pid;
 channel_pid(Name) ->
   case catch gproc:lookup_pid({n, l, {channel_by_name, Name}}) of
@@ -54,7 +46,13 @@ channel_pid(Name) ->
 %% internal API
 
 start_link(TypeSup, Params) ->
-  gen_statem:start_link(?MODULE, {TypeSup, Params}, []).
+  case maps:get(channel_name, Params, undefined) of
+    undefined ->
+      gen_statem:start_link(?MODULE, {TypeSup, Params}, []);
+    Name ->
+      ChannelKey = {n, l, {channel_by_name, Name}},
+      gen_statem:start_link({via, gproc, ChannelKey},?MODULE, {TypeSup, Params}, [])
+  end.
 
 %% ==============================
 %% gen server API
@@ -102,14 +100,6 @@ idle({call, From}, connect, {TypeSup, Params}) ->
 idle(EventType, Event, Data) ->
   handle_event(EventType, idle, Event, Data).
 
-
-connected({call, From}, {set_name, Name}, Data) ->
-  ok = unregister_channel_name(Data),
-  ok = register_channel_name(Name),
-  {keep_state, Data#{ name => Name}, [{reply, From, ok}]};
-connected({call, From}, unset_name, Data) ->
-  ok = unregister_channel_name(Data),
-  {keep_state, Data#{ name => undefined}, [{reply, From, ok}]};
 connected(info, {request, StreamRef, Pid, Req}, Data = #{ last_id := Id } ) ->
   %% maybe monitor this stream
   ok = maybe_monitor(Pid, Data),
@@ -244,16 +234,6 @@ maybe_delete_stream(end_stream, StreamId, StreamRef, ClientPid, Data) ->
 maybe_delete_stream(_, _, _, _, _) ->
   ok.
 
-register_channel(Data = #{ type := Type, params := Params }) ->
+register_channel(#{ type := Type, params := Params }) ->
   _ = gproc:reg({p, l, {channel, Type}}, Params),
-  register_channel_name(Data).
-
-register_channel_name(#{ name := undedfined }) -> ok;
-register_channel_name(#{ name := Name }) -> 
-  _ = gproc:reg({n, l, {channel_by_name, Name}}),
-  ok.
-
-unregister_channel_name(#{ name := undefined }) -> ok;
-unregister_channel_name(#{ name := Name }) ->
-  _ = gproc:unreg({n, l, {channel_by_name, Name}}),
   ok.

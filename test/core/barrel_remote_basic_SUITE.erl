@@ -64,6 +64,8 @@ basic(Config) ->
 named_channel(Config) ->
   RemoteNode = proplists:get_value(remote, Config),
   {ok, ChPid} = barrel_remote:start_channel(#{ type => direct, node => RemoteNode, channel_name => mychannel }),
+  %% connection should be reused
+  {ok, ChPid} = barrel_remote:start_channel(#{ type => direct, node => RemoteNode, channel_name => mychannel }),
   true = (ChPid =:= barrel_channel:channel_pid(mychannel)),
   [] = barrel_remote:database_names(mychannel),
   {ok, _} = barrel_remote:create_database(mychannel, #{ <<"database_id">> => <<"testdb">> }),
