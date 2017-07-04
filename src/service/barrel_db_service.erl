@@ -29,7 +29,8 @@
   'PutRev'/3,
   'MultiGetDoc'/3,
   'WriteBatch'/3,
-  'FoldById'/3
+  'FoldById'/3,
+  'RevsDiff'/3
 ]).
 
 -export([
@@ -74,7 +75,7 @@ execute(Context, Writer, Method, Args) ->
 'PutDoc'( _Context, _Writer, [DbId, Doc, Options] ) ->
   Rev = maps:get(rev, Options, <<>>),
   Async = maps:get(async, Options, false),
-  
+
   Batch = barrel_write_batch:put(Doc, Rev, barrel_write_batch:new(Async)),
   update_doc(DbId, Batch);
 'PutDoc'( _, _, _ ) -> erlang:error(badarg).
@@ -133,6 +134,10 @@ execute(Context, Writer, Method, Args) ->
   ),
   barrel_rpc:response_end_stream(Writer, StreamId);
 'FoldById'( _, _, _ ) -> erlang:error(badarg).
+
+'RevsDiff'( _Context, _Writer, [DbId, DocId, RevIds] ) ->
+  barrel_db:revsdiff(DbId, DocId, RevIds);
+'RevsDiff'( _, _, _ ) -> erlang:error(badarg).
 
 
 %% ==============================

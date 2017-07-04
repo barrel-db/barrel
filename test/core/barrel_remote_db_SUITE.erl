@@ -29,7 +29,8 @@
   write_batch/1,
   fold_by_id/1,
   change_since/1,
-  await_change/1
+  await_change/1,
+  revsdiff/1
 ]).
 
 all() ->
@@ -43,9 +44,9 @@ all() ->
     write_batch,
     fold_by_id,
     change_since,
-    await_change
+    await_change,
+    revsdiff
   ].
-
 
 init_per_suite(Config) ->
   {ok, _} = application:ensure_all_started(barrel),
@@ -108,10 +109,10 @@ multi_get(Config) ->
     {<<"c">>, 3}],
   Docs = [#{ <<"id">> => K, <<"v">> => V} || {K,V} <- Kvs],
   [ {ok,_,_} = barrel_remote:post(Ch, <<"testdb">>, D, #{}) || D <- Docs ],
-  
+
   %% the "query" to get the id/rev
   Mget = [ Id || {Id, _} <- Kvs],
-  
+
   %% a fun to parse the results
   %% the parameter is the same format as the regular get function output
   Fun=
@@ -120,10 +121,10 @@ multi_get(Config) ->
       #{<<"rev">> := RevId} = Meta,
       [#{<<"id">> => DocId, <<"rev">> => RevId, <<"doc">>  => Doc }|Acc]
     end,
-  
+
   %% let's process it
   Results = barrel_remote:multi_get(Ch, <<"testdb">>, Fun, [], Mget, []),
-  
+
   %% check results
   [#{<<"doc">> := #{<<"id">> := <<"a">>, <<"v">> := 1},
     <<"id">> := <<"a">>,
@@ -174,19 +175,19 @@ write_batch(Config) ->
     { delete, <<"c">>, Rev3_1},
     { put, D4, <<>>}
   ],
-  
+
   {ok, #{ <<"v">> := 1}, _} = barrel_remote:get(Ch, <<"testdb">>, <<"a">>, []),
   {error, not_found} = barrel_remote:get(Ch, <<"testdb">>, <<"b">>, []),
   {ok, #{ <<"v">> := 1}, _} = barrel_remote:get(Ch, <<"testdb">>, <<"c">>, []),
-  
+
   Results = barrel_remote:write_batch(Ch, <<"testdb">>, OPs, #{}),
   true = is_list(Results),
-  
+
   [ {ok, <<"a">>, _},
     {ok, <<"b">>, _},
     {ok, <<"c">>, _},
     {error, not_found} ] = Results,
-  
+
   {ok, #{ <<"v">> := 2}, _} = barrel_remote:get(Ch, <<"testdb">>, <<"a">>, []),
   {ok, #{ <<"v">> := 1}, _} = barrel_remote:get(Ch, <<"testdb">>, <<"b">>, []),
   {error, not_found} = barrel_remote:get(Ch, <<"testdb">>, <<"c">>, []).
@@ -265,6 +266,15 @@ await_change(Config) ->
     after 5000 ->
         erlang:error(timeout)
   end.
+
+revsdiff(Config) ->
+  Ch = channel(Config),
+  Doc = #{ <<"id">> => <<"revsdiff">>, <<"v">> => 1},
+  {ok, <<"revsdiff">>, RevId} = barrel_remote:post(Ch, <<"testdb">>, Doc, #{}),
+  Doc2 = Doc#{<<"v">> => 2},
+  {ok, <<"revsdiff">>, _RevId3} = barrel_remote:put(Ch, <<"testdb">>, Doc2, #{rev => RevId}),
+  {ok, [<<"1-missing">>], []} = barrel_remote:revsdiff(Ch, <<"testdb">>, <<"revsdiff">>, [<<"1-missing">>]),
+  ok.
 
 %% ==============================
 %% internal helpers

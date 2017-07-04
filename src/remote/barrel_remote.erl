@@ -30,7 +30,8 @@
   multi_get/6,
   put_rev/6,
   write_batch/4,
-  fold_by_id/5
+  fold_by_id/5,
+  revsdiff/4
 ]).
 
 -export([
@@ -110,6 +111,10 @@ write_batch(ChPid, DbId, Updates, Options) ->
 fold_by_id(ChPid, DbId, Fun, Acc, Options) ->
   Ref = barrel_rpc:request(ChPid, {'barrel.v1.Database', 'FoldById', [DbId, Options]}),
   do_fold(ChPid, Ref, Fun, Acc).
+
+revsdiff(ChPid, DbId, DocId, RevIds) ->
+  Ref = barrel_rpc:request(ChPid, {'barrel.v1.Database', 'RevsDiff', [DbId, DocId, RevIds]}),
+  barrel_rpc:await(ChPid, Ref).
 
 %% ==============================
 %% system docs operations
