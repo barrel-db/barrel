@@ -36,9 +36,6 @@
    , list_replication_tasks/1
    ]).
 
--define(CH(DbId), barrel_replicate_api_wrapper:setup_channel(DbId)).
-
-
  all() ->
    [ one_doc
    , source_not_empty
