@@ -95,23 +95,24 @@ multi_get(DbName, Fun, AccIn, DocIds, Options) ->
     DbName,
     fun(Db) ->
       %% parse options
-      WithHistory = proplists:get_value(history, Options, false),
-      MaxHistory = proplists:get_value(max_history, Options, ?IMAX1),
-      Ancestors = proplists:get_value(ancestors, Options, []),
+      WithHistory = maps:get(history, Options, false),
+      MaxHistory = maps:get(max_history, Options, ?IMAX1),
+      Ancestors = maps:get(ancestors, Options, []),
       %% initialize a snapshot for reads
       {ok, Snapshot} = rocksdb:snapshot(Db#db.store),
       ReadOptions = [{snapshot, Snapshot}],
       Rev = <<"">>,
-      GetRevs = fun(DocId, Acc) ->
-        Res = get_doc1(Db, DocId, Rev,
-          WithHistory, MaxHistory,
-          Ancestors, ReadOptions),
-        case Res of
-          {ok, Doc, Meta} ->
-            Fun(Doc, Meta, Acc);
-          _ -> Acc
-        end
-                end,
+      GetRevs =
+        fun(DocId, Acc) ->
+          Res = get_doc1(
+            Db, DocId, Rev, WithHistory, MaxHistory, Ancestors,
+            ReadOptions),
+          case Res of
+            {ok, Doc, Meta} ->
+              Fun(Doc, Meta, Acc);
+            _ -> Acc
+          end
+        end,
       %% finally retrieve the docs
       try
         lists:foldl(GetRevs, AccIn, DocIds)
@@ -127,10 +128,10 @@ get(DbName, DocId, Options) ->
     DbName,
     fun(Db) ->
       %% parse options
-      Rev = proplists:get_value(rev, Options, <<"">>),
-      WithHistory = proplists:get_value(history, Options, false),
-      MaxHistory = proplists:get_value(max_history, Options, ?IMAX1),
-      Ancestors = proplists:get_value(ancestors, Options, []),
+      Rev = maps:get(rev, Options, <<"">>),
+      WithHistory = maps:get(history, Options, false),
+      MaxHistory = maps:get(max_history, Options, ?IMAX1),
+      Ancestors = maps:get(ancestors, Options, []),
       get_doc1(Db, DocId, Rev, WithHistory, MaxHistory, Ancestors, [])
     end
   ).

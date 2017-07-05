@@ -46,7 +46,7 @@ sync_revision(Source, Target, DocId, Revision, Metrics) ->
 read_doc_with_history(Source, Id, Rev, Metrics) ->
   Get =
     fun() ->
-      barrel_replicate_api_wrapper:get(Source, Id, [{rev, Rev}, {history, true}])
+      barrel_replicate_api_wrapper:get(Source, Id, #{rev => Rev, history => true})
     end,
   case timer:tc(Get) of
     {Time, {ok, Doc, Meta}} ->

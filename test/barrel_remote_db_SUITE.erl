@@ -75,20 +75,20 @@ update_doc(Config) ->
   Ch = channel(Config),
   Doc = #{ <<"id">> => <<"a">>, <<"v">> => 1},
   {ok, <<"a">>, RevId} = barrel_remote:post(Ch, <<"testdb">>, Doc, #{}),
-  {ok, Doc, _Meta2} = barrel_remote:get(Ch, <<"testdb">>, <<"a">>, []),
+  {ok, Doc, _Meta2} = barrel_remote:get(Ch, <<"testdb">>, <<"a">>, #{}),
   Doc2 = Doc#{ v => 2},
   {ok, <<"a">>, RevId2} = barrel_remote:put(Ch, <<"testdb">>, Doc2, #{}),
   true = (RevId =/= RevId2),
-  {ok, Doc2, _Meta4} = barrel_remote:get(Ch, <<"testdb">>, <<"a">>, []),
+  {ok, Doc2, _Meta4} = barrel_remote:get(Ch, <<"testdb">>, <<"a">>, #{}),
   {ok, <<"a">>, _RevId2} = barrel_remote:delete(Ch, <<"testdb">>, <<"a">>, #{rev => RevId2}),
-  {error, not_found} = barrel_remote:get(Ch, <<"testdb">>, <<"a">>, []),
+  {error, not_found} = barrel_remote:get(Ch, <<"testdb">>, <<"a">>, #{}),
   {ok, <<"a">>, _RevId3} = barrel_remote:post(Ch, <<"testdb">>, Doc, #{}).
 
 create_doc(Config) ->
   Ch = channel(Config),
   Doc = #{<<"v">> => 1},
   {ok, DocId, _RevId} = barrel_remote:post(Ch, <<"testdb">>, Doc, #{}),
-  {ok, CreatedDoc, _} = barrel_remote:get(Ch, <<"testdb">>, DocId, []),
+  {ok, CreatedDoc, _} = barrel_remote:get(Ch, <<"testdb">>, DocId, #{}),
   {error, {conflict, doc_exists}} = barrel_remote:post(Ch, <<"testdb">>, CreatedDoc, #{}),
   {ok, _, _} = barrel_remote:post(Ch, <<"testdb">>, CreatedDoc, #{is_upsert => true}),
   Doc2 = #{<<"id">> => <<"b">>, <<"v">> => 1},
@@ -125,7 +125,7 @@ multi_get(Config) ->
     end,
 
   %% let's process it
-  Results = barrel_remote:multi_get(Ch, <<"testdb">>, Fun, [], Mget, []),
+  Results = barrel_remote:multi_get(Ch, <<"testdb">>, Fun, [], Mget, #{}),
 
   %% check results
   [#{<<"doc">> := #{<<"id">> := <<"a">>, <<"v">> := 1},
@@ -138,7 +138,7 @@ put_rev(Config) ->
   Ch = channel(Config),
   Doc = #{<<"v">> => 1},
   {ok, DocId, RevId} = barrel_remote:post(Ch, <<"testdb">>, Doc, #{}),
-  {ok, Doc2, _} = barrel_remote:get(Ch, <<"testdb">>, DocId, []),
+  {ok, Doc2, _} = barrel_remote:get(Ch, <<"testdb">>, DocId, #{}),
   Doc3 = Doc2#{ v => 2},
   {ok, DocId, RevId2} = barrel_remote:put(Ch, <<"testdb">>, Doc3, #{rev => RevId}),
   Doc4 = Doc2#{ v => 3 },
@@ -147,7 +147,7 @@ put_rev(Config) ->
   History = [NewRev, RevId],
   Deleted = false,
   {ok, DocId, _RevId3} = barrel_remote:put_rev(Ch, <<"testdb">>, Doc4, History, Deleted, #{}),
-  {ok, _Doc5, Meta} = barrel_remote:get(Ch, <<"testdb">>, DocId, [{history, true}]),
+  {ok, _Doc5, Meta} = barrel_remote:get(Ch, <<"testdb">>, DocId, #{history => true}),
   Revisions = [RevId2, RevId],
   io:format("revisions: ~p~nparsed:~p~n", [Revisions, barrel_doc:parse_revisions(Meta)]),
   Revisions = barrel_doc:parse_revisions(Meta).
@@ -156,7 +156,7 @@ revision_conflict(Config) ->
   Ch = channel(Config),
   Doc = #{ <<"id">> => <<"a">>, <<"v">> => 1},
   {ok, _, RevId} = barrel_remote:post(Ch, <<"testdb">>, Doc, #{}),
-  {ok, Doc1, _} = barrel_remote:get(Ch, <<"testdb">>, <<"a">>, []),
+  {ok, Doc1, _} = barrel_remote:get(Ch, <<"testdb">>, <<"a">>, #{}),
   Doc2 = Doc1#{ <<"v">> => 2 },
   {ok, <<"a">>, _RevId2} = barrel_remote:put(Ch, <<"testdb">>, Doc2, #{rev => RevId}),
   {error, {conflict, revision_conflict}} = barrel_remote:put(Ch, <<"testdb">>, Doc2, #{rev => RevId}),
@@ -178,9 +178,9 @@ write_batch(Config) ->
     { put, D4, <<>>}
   ],
 
-  {ok, #{ <<"v">> := 1}, _} = barrel_remote:get(Ch, <<"testdb">>, <<"a">>, []),
-  {error, not_found} = barrel_remote:get(Ch, <<"testdb">>, <<"b">>, []),
-  {ok, #{ <<"v">> := 1}, _} = barrel_remote:get(Ch, <<"testdb">>, <<"c">>, []),
+  {ok, #{ <<"v">> := 1}, _} = barrel_remote:get(Ch, <<"testdb">>, <<"a">>, #{}),
+  {error, not_found} = barrel_remote:get(Ch, <<"testdb">>, <<"b">>, #{}),
+  {ok, #{ <<"v">> := 1}, _} = barrel_remote:get(Ch, <<"testdb">>, <<"c">>, #{}),
 
   Results = barrel_remote:write_batch(Ch, <<"testdb">>, OPs, #{}),
   true = is_list(Results),
@@ -190,9 +190,9 @@ write_batch(Config) ->
     {ok, <<"c">>, _},
     {error, not_found} ] = Results,
 
-  {ok, #{ <<"v">> := 2}, _} = barrel_remote:get(Ch, <<"testdb">>, <<"a">>, []),
-  {ok, #{ <<"v">> := 1}, _} = barrel_remote:get(Ch, <<"testdb">>, <<"b">>, []),
-  {error, not_found} = barrel_remote:get(Ch, <<"testdb">>, <<"c">>, []).
+  {ok, #{ <<"v">> := 2}, _} = barrel_remote:get(Ch, <<"testdb">>, <<"a">>, #{}),
+  {ok, #{ <<"v">> := 1}, _} = barrel_remote:get(Ch, <<"testdb">>, <<"b">>, #{}),
+  {error, not_found} = barrel_remote:get(Ch, <<"testdb">>, <<"c">>, #{}).
 
 
 fold_by_id(Config) ->
@@ -237,7 +237,7 @@ change_since(Config) ->
   [<<"aa">>] = barrel_remote:changes_since(Ch, <<"testdb">>, 0, Fun, [], []),
   Doc2 = #{ <<"id">> => <<"bb">>, <<"v">> => 1},
   {ok, <<"bb">>, _RevId2} = barrel_remote:post(Ch, <<"testdb">>, Doc2, #{}),
-  {ok, _, _} = barrel_remote:get(Ch, <<"testdb">>, <<"bb">>, []),
+  {ok, _, _} = barrel_remote:get(Ch, <<"testdb">>, <<"bb">>, #{}),
   [<<"bb">>, <<"aa">>] = barrel_remote:changes_since(Ch, <<"testdb">>, 0, Fun, [], []),
   [<<"bb">>] = barrel_remote:changes_since(Ch, <<"testdb">>, 1, Fun, [], []),
   [] = barrel_remote:changes_since(Ch, <<"testdb">>, 2, Fun, [], []),

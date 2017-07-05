@@ -71,7 +71,7 @@ order_by_key(_Config) ->
   },
   {ok, <<"AndersenFamily">>, _Rev} = barrel:post(<<"testdb">>, Doc, #{}),
   timer:sleep(400),
-  {ok, _Doc1, _Meta1} = barrel:get(<<"testdb">>, <<"AndersenFamily">>, []),
+  {ok, _Doc1, _Meta1} = barrel:get(<<"testdb">>, <<"AndersenFamily">>, #{}),
 
   Fun = fun(D, _Meta, Acc) -> {ok, [maps:get(<<"id">>, D) | Acc]} end,
   [<<"AndersenFamily">>] = barrel:walk(<<"testdb">>, <<"id">>, Fun, [], []),

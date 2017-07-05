@@ -107,12 +107,12 @@
   revtree := revtree()
 }.
 
--type read_options() :: [
-  {rev, rev()}
-  | {history, boolean()}
-  | {max_history, integer()}
-  | {ancestors, [rev()]}
-].
+-type read_options() :: #{
+  rev => rev(),
+  history => boolean(),
+  max_history => integer(),
+  ancestors => [rev()]
+}.
 
 -type write_options() :: #{
   async => boolean(),
