@@ -70,7 +70,7 @@ changes() ->
   Fun = fun(Change, Acc) ->
             {ok, [Change|Acc]}
         end,
-  Changes = barrel_db:changes_since(Db, Since, Fun, [], [{history, all}]),
+  Changes = barrel_db:changes_since(Db, Since, Fun, [], #{history => all}),
   lists:reverse(Changes).
 
 

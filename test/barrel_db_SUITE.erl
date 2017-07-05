@@ -392,7 +392,7 @@ change_since_include_doc(_Config) ->
   Doc = #{ <<"id">> => <<"aa">>, <<"v">> => 1},
   {ok, <<"aa">>, _RevId} = barrel:post(<<"testdb">>, Doc,  #{}),
   {ok, Doc1, _} = barrel:get(<<"testdb">>, <<"aa">>, #{}),
-  [Change] = barrel:changes_since(<<"testdb">>, 0, Fun, [], [{include_doc, true}]),
+  [Change] = barrel:changes_since(<<"testdb">>, 0, Fun, [], #{include_doc => true}),
   {1, Doc1} = Change,
   ok.
 
@@ -418,7 +418,7 @@ change_since_many(_Config) ->
   {ok, <<"doc1">>, _} = barrel:delete(<<"testdb">>, <<"doc1">>, #{rev => RevId}),
 
   %% 20 changes (for doc1 to doc20)
-  All = barrel:changes_since(<<"testdb">>, 0, Fun, [], [{history, all}]),
+  All = barrel:changes_since(<<"testdb">>, 0, Fun, [], #{history => all}),
   20 = length(All),
   %% History for doc1 includes creation and deletion
   {21, #{<<"changes">> := HistoryDoc1}} = hd(All),
@@ -444,7 +444,7 @@ await_change(_Config) ->
   Parent = self(),
   Pid = spawn(
     fun() ->
-      Stream = barrel_local:subscribe_changes(<<"testdb">>, 0, []),
+      Stream = barrel_local:subscribe_changes(<<"testdb">>, 0, #{}),
       change_loop(Parent, Stream)
     end
   ),

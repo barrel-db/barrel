@@ -231,19 +231,19 @@ change_since(Config) ->
             Id = maps:get(<<"id">>, Change),
             [Id|Acc]
         end,
-  [] = barrel_remote:changes_since(Ch, <<"testdb">>, 0, Fun, [], []),
+  [] = barrel_remote:changes_since(Ch, <<"testdb">>, 0, Fun, [], #{}),
   Doc = #{ <<"id">> => <<"aa">>, <<"v">> => 1},
   {ok, <<"aa">>, _RevId} = barrel_remote:post(Ch, <<"testdb">>, Doc, #{}),
-  [<<"aa">>] = barrel_remote:changes_since(Ch, <<"testdb">>, 0, Fun, [], []),
+  [<<"aa">>] = barrel_remote:changes_since(Ch, <<"testdb">>, 0, Fun, [], #{}),
   Doc2 = #{ <<"id">> => <<"bb">>, <<"v">> => 1},
   {ok, <<"bb">>, _RevId2} = barrel_remote:post(Ch, <<"testdb">>, Doc2, #{}),
   {ok, _, _} = barrel_remote:get(Ch, <<"testdb">>, <<"bb">>, #{}),
-  [<<"bb">>, <<"aa">>] = barrel_remote:changes_since(Ch, <<"testdb">>, 0, Fun, [], []),
-  [<<"bb">>] = barrel_remote:changes_since(Ch, <<"testdb">>, 1, Fun, [], []),
-  [] = barrel_remote:changes_since(Ch, <<"testdb">>, 2, Fun, [], []),
+  [<<"bb">>, <<"aa">>] = barrel_remote:changes_since(Ch, <<"testdb">>, 0, Fun, [], #{}),
+  [<<"bb">>] = barrel_remote:changes_since(Ch, <<"testdb">>, 1, Fun, [], #{}),
+  [] = barrel_remote:changes_since(Ch, <<"testdb">>, 2, Fun, [], #{}),
   Doc3 = #{ <<"id">> => <<"cc">>, <<"v">> => 1},
   {ok, <<"cc">>, _RevId3} = barrel_remote:post(Ch, <<"testdb">>, Doc3, #{}),
-  [<<"cc">>] = barrel_remote:changes_since(Ch, <<"testdb">>, 2, Fun, [], []),
+  [<<"cc">>] = barrel_remote:changes_since(Ch, <<"testdb">>, 2, Fun, [], #{}),
   ok.
 
 await_change(Config) ->
@@ -251,7 +251,7 @@ await_change(Config) ->
   Parent = self(),
   Pid = spawn(
     fun() ->
-      Stream = barrel_remote:subscribe_changes(Ch, <<"testdb">>, 0, []),
+      Stream = barrel_remote:subscribe_changes(Ch, <<"testdb">>, 0, #{}),
       ct:print("la"),
       Change =barrel_remote:await_change(Ch, Stream),
       ct:print("ici"),
@@ -273,7 +273,7 @@ named_await_change(_Config) ->
   Parent = self(),
   Pid = spawn(
     fun() ->
-      Stream = barrel_remote:subscribe_changes(test_channel, <<"testdb">>, 0, []),
+      Stream = barrel_remote:subscribe_changes(test_channel, <<"testdb">>, 0, #{}),
       ct:print("la"),
       Change =barrel_remote:await_change(test_channel, Stream),
       ct:print("ici"),

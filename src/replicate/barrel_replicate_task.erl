@@ -106,7 +106,7 @@ spawn_stream_worker(Source, StartSeq) ->
   spawn_link(?MODULE, stream_worker, [self(), Source, StartSeq]).
 
 stream_worker(Parent, Source, StartSeq) ->
-  Stream = barrel_replicate_api_wrapper:subscribe_changes(Source, StartSeq, []),
+  Stream = barrel_replicate_api_wrapper:subscribe_changes(Source, StartSeq, #{}),
   stream_loop(Parent, Source, Stream).
 
 stream_loop(Parent, Source, Stream) ->

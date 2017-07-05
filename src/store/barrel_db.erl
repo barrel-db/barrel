@@ -309,36 +309,36 @@ changes_since_int(Db = #db{ store=Store}, Since0, Fun, AccIn, Opts) ->
     {start_key, <<Since:64>>},
     {read_options, ReadOptions}
   ],
-  IncludeDoc = proplists:get_value(include_doc, Opts, false),
-  WithHistory = proplists:get_value(history, Opts, last) =:= all,
+  IncludeDoc = maps:get(include_doc, Opts, false),
+  WithHistory = maps:get(history, Opts, last) =:= all,
 
   WrapperFun =
-  fun(Key, BinDocInfo, Acc) ->
-    DocInfo = binary_to_term(BinDocInfo),
-    [_, SeqBin] = binary:split(Key, Prefix),
-    <<Seq:64>> = SeqBin,
-    RevId = maps:get(current_rev, DocInfo),
-    Deleted = maps:get(deleted, DocInfo),
-    DocId = maps:get(id, DocInfo),
-    Rid = maps:get(rid, DocInfo),
-    RevTree = maps:get(revtree, DocInfo),
-    Changes = case WithHistory of
-                false -> [RevId];
-                true -> barrel_revtree:history(RevId, RevTree)
-              end,
+    fun(Key, BinDocInfo, Acc) ->
+      DocInfo = binary_to_term(BinDocInfo),
+      [_, SeqBin] = binary:split(Key, Prefix),
+      <<Seq:64>> = SeqBin,
+      RevId = maps:get(current_rev, DocInfo),
+      Deleted = maps:get(deleted, DocInfo),
+      DocId = maps:get(id, DocInfo),
+      Rid = maps:get(rid, DocInfo),
+      RevTree = maps:get(revtree, DocInfo),
+      Changes = case WithHistory of
+                  false -> [RevId];
+                  true -> barrel_revtree:history(RevId, RevTree)
+                end,
 
-    %% create change
-    Change = change_with_doc(
-      changes_with_deleted(
-        #{ <<"id">> => DocId, <<"seq">> => Seq,
-           <<"rev">> => RevId, <<"changes">> => Changes,
-           <<"rid">> => encode_rid(Rid) },
-        Deleted
+      %% create change
+      Change = change_with_doc(
+        changes_with_deleted(
+          #{ <<"id">> => DocId, <<"seq">> => Seq,
+            <<"rev">> => RevId, <<"changes">> => Changes,
+            <<"rid">> => encode_rid(Rid) },
+          Deleted
+        ),
+        Rid, Db, ReadOptions, IncludeDoc
       ),
-      Rid, Db, ReadOptions, IncludeDoc
-    ),
-    Fun(Change, Acc)
-  end,
+      Fun(Change, Acc)
+    end,
 
   try barrel_fold:fold_prefix(Store, Prefix, WrapperFun, AccIn, FoldOpts)
   after rocksdb:release_snapshot(Snapshot)

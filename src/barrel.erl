@@ -291,7 +291,7 @@ fold_by_id(Db, Fun, Acc, Options) ->
   AccIn :: any(),
   AccOut :: any().
 changes_since(Db, Since, Fun, Acc) ->
-  barrel_db:changes_since(Db, Since, Fun, Acc, []).
+  barrel_db:changes_since(Db, Since, Fun, Acc, #{}).
 
 %% @doc fold all changes since last sequence
 -spec changes_since(Db, Since, Fun, AccIn, Opts) -> AccOut when
@@ -301,7 +301,7 @@ changes_since(Db, Since, Fun, Acc) ->
   Fun :: fun((Change :: change(), Acc :: any()) -> FunRes),
   AccIn :: any(),
   AccOut :: any(),
-  Opts :: list().
+  Opts :: map().
 changes_since(Db, Since, Fun, Acc, Opts) ->
   barrel_db:changes_since(Db, Since, Fun, Acc, Opts).
 
