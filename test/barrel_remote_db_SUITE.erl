@@ -53,54 +53,54 @@ all() ->
 init_per_suite(Config) ->
   {ok, _} = application:ensure_all_started(barrel),
   {ok, RemoteNode} = start_slave(barrel_test1),
-  {ok, ChPid} = barrel_remote:start_channel(#{ type => direct, node => RemoteNode, channel_name => test_channel }),
+  {ok, ChPid} = barrel:start_channel(#{ type => direct, node => RemoteNode, channel_name => test_channel }),
   [{remote, RemoteNode}, {channel, ChPid} | Config].
 
 end_per_suite(Config) ->
-  _ = barrel_remote:close_channel(channel(Config)),
+  _ = barrel:close_channel(channel(Config)),
   ok = stop_slave(barrel_test1),
   Config.
 
 init_per_testcase(_, Config) ->
   Ch = channel(Config),
-  {ok, _} = barrel_remote:create_database(Ch, #{ <<"database_id">> => <<"testdb">> }),
+  {ok, _} = barrel:create_database(Ch, #{ <<"database_id">> => <<"testdb">> }),
   Config.
 
 end_per_testcase(_, Config) ->
-  _ =  barrel_remote:delete_database(channel(Config), <<"testdb">>),
+  _ =  barrel:delete_database(channel(Config), <<"testdb">>),
   ok.
 
 
 update_doc(Config) ->
   Ch = channel(Config),
   Doc = #{ <<"id">> => <<"a">>, <<"v">> => 1},
-  {ok, <<"a">>, RevId} = barrel_remote:post(Ch, <<"testdb">>, Doc, #{}),
-  {ok, Doc, _Meta2} = barrel_remote:get(Ch, <<"testdb">>, <<"a">>, #{}),
+  {ok, <<"a">>, RevId} = barrel:post(Ch, <<"testdb">>, Doc, #{}),
+  {ok, Doc, _Meta2} = barrel:get(Ch, <<"testdb">>, <<"a">>, #{}),
   Doc2 = Doc#{ v => 2},
-  {ok, <<"a">>, RevId2} = barrel_remote:put(Ch, <<"testdb">>, Doc2, #{}),
+  {ok, <<"a">>, RevId2} = barrel:put(Ch, <<"testdb">>, Doc2, #{}),
   true = (RevId =/= RevId2),
-  {ok, Doc2, _Meta4} = barrel_remote:get(Ch, <<"testdb">>, <<"a">>, #{}),
-  {ok, <<"a">>, _RevId2} = barrel_remote:delete(Ch, <<"testdb">>, <<"a">>, #{rev => RevId2}),
-  {error, not_found} = barrel_remote:get(Ch, <<"testdb">>, <<"a">>, #{}),
-  {ok, <<"a">>, _RevId3} = barrel_remote:post(Ch, <<"testdb">>, Doc, #{}).
+  {ok, Doc2, _Meta4} = barrel:get(Ch, <<"testdb">>, <<"a">>, #{}),
+  {ok, <<"a">>, _RevId2} = barrel:delete(Ch, <<"testdb">>, <<"a">>, #{rev => RevId2}),
+  {error, not_found} = barrel:get(Ch, <<"testdb">>, <<"a">>, #{}),
+  {ok, <<"a">>, _RevId3} = barrel:post(Ch, <<"testdb">>, Doc, #{}).
 
 create_doc(Config) ->
   Ch = channel(Config),
   Doc = #{<<"v">> => 1},
-  {ok, DocId, _RevId} = barrel_remote:post(Ch, <<"testdb">>, Doc, #{}),
-  {ok, CreatedDoc, _} = barrel_remote:get(Ch, <<"testdb">>, DocId, #{}),
-  {error, {conflict, doc_exists}} = barrel_remote:post(Ch, <<"testdb">>, CreatedDoc, #{}),
-  {ok, _, _} = barrel_remote:post(Ch, <<"testdb">>, CreatedDoc, #{is_upsert => true}),
+  {ok, DocId, _RevId} = barrel:post(Ch, <<"testdb">>, Doc, #{}),
+  {ok, CreatedDoc, _} = barrel:get(Ch, <<"testdb">>, DocId, #{}),
+  {error, {conflict, doc_exists}} = barrel:post(Ch, <<"testdb">>, CreatedDoc, #{}),
+  {ok, _, _} = barrel:post(Ch, <<"testdb">>, CreatedDoc, #{is_upsert => true}),
   Doc2 = #{<<"id">> => <<"b">>, <<"v">> => 1},
-  {ok, <<"b">>, _RevId2} = barrel_remote:post(Ch, <<"testdb">>, Doc2, #{}).
+  {ok, <<"b">>, _RevId2} = barrel:post(Ch, <<"testdb">>, Doc2, #{}).
 
 system_docs(Config) ->
   Ch = channel(Config),
   Doc = #{<<"v">> => 1},
-  ok = barrel_remote:put_system_doc(Ch, <<"testdb">>, <<"a">>, Doc),
-  {ok, Doc} = barrel_remote:get_system_doc(Ch, <<"testdb">>, <<"a">>),
-  ok = barrel_remote:delete_system_doc(Ch, <<"testdb">>, <<"a">>),
-  {error, not_found} = barrel_remote:get_system_doc(Ch, <<"testdb">>, <<"a">>),
+  ok = barrel:put_system_doc(Ch, <<"testdb">>, <<"a">>, Doc),
+  {ok, Doc} = barrel:get_system_doc(Ch, <<"testdb">>, <<"a">>),
+  ok = barrel:delete_system_doc(Ch, <<"testdb">>, <<"a">>),
+  {error, not_found} = barrel:get_system_doc(Ch, <<"testdb">>, <<"a">>),
   ok.
 
 multi_get(Config) ->
@@ -110,7 +110,7 @@ multi_get(Config) ->
     {<<"b">>, 2},
     {<<"c">>, 3}],
   Docs = [#{ <<"id">> => K, <<"v">> => V} || {K,V} <- Kvs],
-  [ {ok,_,_} = barrel_remote:post(Ch, <<"testdb">>, D, #{}) || D <- Docs ],
+  [ {ok,_,_} = barrel:post(Ch, <<"testdb">>, D, #{}) || D <- Docs ],
 
   %% the "query" to get the id/rev
   Mget = [ Id || {Id, _} <- Kvs],
@@ -125,7 +125,7 @@ multi_get(Config) ->
     end,
 
   %% let's process it
-  Results = barrel_remote:multi_get(Ch, <<"testdb">>, Fun, [], Mget, #{}),
+  Results = barrel:multi_get(Ch, <<"testdb">>, Fun, [], Mget, #{}),
 
   %% check results
   [#{<<"doc">> := #{<<"id">> := <<"a">>, <<"v">> := 1},
@@ -137,17 +137,17 @@ multi_get(Config) ->
 put_rev(Config) ->
   Ch = channel(Config),
   Doc = #{<<"v">> => 1},
-  {ok, DocId, RevId} = barrel_remote:post(Ch, <<"testdb">>, Doc, #{}),
-  {ok, Doc2, _} = barrel_remote:get(Ch, <<"testdb">>, DocId, #{}),
+  {ok, DocId, RevId} = barrel:post(Ch, <<"testdb">>, Doc, #{}),
+  {ok, Doc2, _} = barrel:get(Ch, <<"testdb">>, DocId, #{}),
   Doc3 = Doc2#{ v => 2},
-  {ok, DocId, RevId2} = barrel_remote:put(Ch, <<"testdb">>, Doc3, #{rev => RevId}),
+  {ok, DocId, RevId2} = barrel:put(Ch, <<"testdb">>, Doc3, #{rev => RevId}),
   Doc4 = Doc2#{ v => 3 },
   {Pos, _} = barrel_doc:parse_revision(RevId),
   NewRev = barrel_doc:revid(Pos +1, RevId, barrel_doc:make_doc(Doc4, RevId, false)),
   History = [NewRev, RevId],
   Deleted = false,
-  {ok, DocId, _RevId3} = barrel_remote:put_rev(Ch, <<"testdb">>, Doc4, History, Deleted, #{}),
-  {ok, _Doc5, Meta} = barrel_remote:get(Ch, <<"testdb">>, DocId, #{history => true}),
+  {ok, DocId, _RevId3} = barrel:put_rev(Ch, <<"testdb">>, Doc4, History, Deleted, #{}),
+  {ok, _Doc5, Meta} = barrel:get(Ch, <<"testdb">>, DocId, #{history => true}),
   Revisions = [RevId2, RevId],
   io:format("revisions: ~p~nparsed:~p~n", [Revisions, barrel_doc:parse_revisions(Meta)]),
   Revisions = barrel_doc:parse_revisions(Meta).
@@ -155,11 +155,11 @@ put_rev(Config) ->
 revision_conflict(Config) ->
   Ch = channel(Config),
   Doc = #{ <<"id">> => <<"a">>, <<"v">> => 1},
-  {ok, _, RevId} = barrel_remote:post(Ch, <<"testdb">>, Doc, #{}),
-  {ok, Doc1, _} = barrel_remote:get(Ch, <<"testdb">>, <<"a">>, #{}),
+  {ok, _, RevId} = barrel:post(Ch, <<"testdb">>, Doc, #{}),
+  {ok, Doc1, _} = barrel:get(Ch, <<"testdb">>, <<"a">>, #{}),
   Doc2 = Doc1#{ <<"v">> => 2 },
-  {ok, <<"a">>, _RevId2} = barrel_remote:put(Ch, <<"testdb">>, Doc2, #{rev => RevId}),
-  {error, {conflict, revision_conflict}} = barrel_remote:put(Ch, <<"testdb">>, Doc2, #{rev => RevId}),
+  {ok, <<"a">>, _RevId2} = barrel:put(Ch, <<"testdb">>, Doc2, #{rev => RevId}),
+  {error, {conflict, revision_conflict}} = barrel:put(Ch, <<"testdb">>, Doc2, #{rev => RevId}),
   ok.
 
 write_batch(Config) ->
@@ -169,8 +169,8 @@ write_batch(Config) ->
   D2 = #{<<"id">> => <<"b">>, <<"v">> => 1},
   D3 = #{<<"id">> => <<"c">>, <<"v">> => 1},
   D4 = #{<<"id">> => <<"d">>, <<"v">> => 1},
-  {ok, _, Rev1_1} = barrel_remote:post(Ch, <<"testdb">>, D1, #{}),
-  {ok, _, Rev3_1} = barrel_remote:post(Ch, <<"testdb">>, D3, #{}),
+  {ok, _, Rev1_1} = barrel:post(Ch, <<"testdb">>, D1, #{}),
+  {ok, _, Rev3_1} = barrel:post(Ch, <<"testdb">>, D3, #{}),
   OPs =  [
     { put, D1#{ <<"v">> => 2 }, Rev1_1},
     { post, D2, false},
@@ -178,11 +178,11 @@ write_batch(Config) ->
     { put, D4, <<>>}
   ],
 
-  {ok, #{ <<"v">> := 1}, _} = barrel_remote:get(Ch, <<"testdb">>, <<"a">>, #{}),
-  {error, not_found} = barrel_remote:get(Ch, <<"testdb">>, <<"b">>, #{}),
-  {ok, #{ <<"v">> := 1}, _} = barrel_remote:get(Ch, <<"testdb">>, <<"c">>, #{}),
+  {ok, #{ <<"v">> := 1}, _} = barrel:get(Ch, <<"testdb">>, <<"a">>, #{}),
+  {error, not_found} = barrel:get(Ch, <<"testdb">>, <<"b">>, #{}),
+  {ok, #{ <<"v">> := 1}, _} = barrel:get(Ch, <<"testdb">>, <<"c">>, #{}),
 
-  Results = barrel_remote:write_batch(Ch, <<"testdb">>, OPs, #{}),
+  Results = barrel:write_batch(Ch, <<"testdb">>, OPs, #{}),
   true = is_list(Results),
 
   [ {ok, <<"a">>, _},
@@ -190,38 +190,38 @@ write_batch(Config) ->
     {ok, <<"c">>, _},
     {error, not_found} ] = Results,
 
-  {ok, #{ <<"v">> := 2}, _} = barrel_remote:get(Ch, <<"testdb">>, <<"a">>, #{}),
-  {ok, #{ <<"v">> := 1}, _} = barrel_remote:get(Ch, <<"testdb">>, <<"b">>, #{}),
-  {error, not_found} = barrel_remote:get(Ch, <<"testdb">>, <<"c">>, #{}).
+  {ok, #{ <<"v">> := 2}, _} = barrel:get(Ch, <<"testdb">>, <<"a">>, #{}),
+  {ok, #{ <<"v">> := 1}, _} = barrel:get(Ch, <<"testdb">>, <<"b">>, #{}),
+  {error, not_found} = barrel:get(Ch, <<"testdb">>, <<"c">>, #{}).
 
 
 fold_by_id(Config) ->
   Ch = channel(Config),
   Doc = #{ <<"id">> => <<"a">>, <<"v">> => 1},
-  {ok, <<"a">>, _RevId} = barrel_remote:post(Ch, <<"testdb">>, Doc, #{}),
+  {ok, <<"a">>, _RevId} = barrel:post(Ch, <<"testdb">>, Doc, #{}),
   Doc2 = #{ <<"id">> => <<"b">>, <<"v">> => 1},
-  {ok, <<"b">>, _RevId2} = barrel_remote:post(Ch, <<"testdb">>, Doc2, #{}),
+  {ok, <<"b">>, _RevId2} = barrel:post(Ch, <<"testdb">>, Doc2, #{}),
   Doc3 = #{ <<"id">> => <<"c">>, <<"v">> => 1},
-  {ok, <<"c">>, _RevId3} = barrel_remote:post(Ch, <<"testdb">>, Doc3, #{}),
+  {ok, <<"c">>, _RevId3} = barrel:post(Ch, <<"testdb">>, Doc3, #{}),
   Fun = fun
           (#{ <<"id">> := DocId }, _Meta, Acc1) ->
             [DocId | Acc1]
         end,
-  Acc = barrel_remote:fold_by_id(Ch, <<"testdb">>, Fun, [], #{}),
+  Acc = barrel:fold_by_id(Ch, <<"testdb">>, Fun, [], #{}),
   [<<"c">>, <<"b">>, <<"a">>] = Acc,
-  Acc2 = barrel_remote:fold_by_id(
+  Acc2 = barrel:fold_by_id(
     Ch, <<"testdb">>, Fun, [], #{include_doc => true, lt => <<"b">>}
   ),
   [<<"a">>] = Acc2,
-  Acc3 = barrel_remote:fold_by_id(
+  Acc3 = barrel:fold_by_id(
     Ch, <<"testdb">>, Fun, [], #{include_doc => true, lte => <<"b">>}
   ),
   [<<"b">>, <<"a">>] = Acc3,
-  Acc4 = barrel_remote:fold_by_id(
+  Acc4 = barrel:fold_by_id(
     Ch, <<"testdb">>, Fun, [], #{include_doc => true, gte => <<"b">>}
   ),
   [<<"c">>, <<"b">>] = Acc4,
-  Acc5 = barrel_remote:fold_by_id(
+  Acc5 = barrel:fold_by_id(
     Ch, <<"testdb">>, Fun, [], #{include_doc => true, gt => <<"b">>}),
   [<<"c">>] = Acc5,
   ok.
@@ -234,19 +234,19 @@ change_since(Config) ->
             Id = maps:get(<<"id">>, Change),
             [Id|Acc]
         end,
-  [] = barrel_remote:changes_since(Ch, <<"testdb">>, 0, Fun, [], #{}),
+  [] = barrel:changes_since(Ch, <<"testdb">>, 0, Fun, [], #{}),
   Doc = #{ <<"id">> => <<"aa">>, <<"v">> => 1},
-  {ok, <<"aa">>, _RevId} = barrel_remote:post(Ch, <<"testdb">>, Doc, #{}),
-  [<<"aa">>] = barrel_remote:changes_since(Ch, <<"testdb">>, 0, Fun, [], #{}),
+  {ok, <<"aa">>, _RevId} = barrel:post(Ch, <<"testdb">>, Doc, #{}),
+  [<<"aa">>] = barrel:changes_since(Ch, <<"testdb">>, 0, Fun, [], #{}),
   Doc2 = #{ <<"id">> => <<"bb">>, <<"v">> => 1},
-  {ok, <<"bb">>, _RevId2} = barrel_remote:post(Ch, <<"testdb">>, Doc2, #{}),
-  {ok, _, _} = barrel_remote:get(Ch, <<"testdb">>, <<"bb">>, #{}),
-  [<<"bb">>, <<"aa">>] = barrel_remote:changes_since(Ch, <<"testdb">>, 0, Fun, [], #{}),
-  [<<"bb">>] = barrel_remote:changes_since(Ch, <<"testdb">>, 1, Fun, [], #{}),
-  [] = barrel_remote:changes_since(Ch, <<"testdb">>, 2, Fun, [], #{}),
+  {ok, <<"bb">>, _RevId2} = barrel:post(Ch, <<"testdb">>, Doc2, #{}),
+  {ok, _, _} = barrel:get(Ch, <<"testdb">>, <<"bb">>, #{}),
+  [<<"bb">>, <<"aa">>] = barrel:changes_since(Ch, <<"testdb">>, 0, Fun, [], #{}),
+  [<<"bb">>] = barrel:changes_since(Ch, <<"testdb">>, 1, Fun, [], #{}),
+  [] = barrel:changes_since(Ch, <<"testdb">>, 2, Fun, [], #{}),
   Doc3 = #{ <<"id">> => <<"cc">>, <<"v">> => 1},
-  {ok, <<"cc">>, _RevId3} = barrel_remote:post(Ch, <<"testdb">>, Doc3, #{}),
-  [<<"cc">>] = barrel_remote:changes_since(Ch, <<"testdb">>, 2, Fun, [], #{}),
+  {ok, <<"cc">>, _RevId3} = barrel:post(Ch, <<"testdb">>, Doc3, #{}),
+  [<<"cc">>] = barrel:changes_since(Ch, <<"testdb">>, 2, Fun, [], #{}),
   ok.
 
 await_change(Config) ->
@@ -254,16 +254,16 @@ await_change(Config) ->
   Parent = self(),
   Pid = spawn(
     fun() ->
-      Stream = barrel_remote:subscribe_changes(Ch, <<"testdb">>, 0, #{}),
+      Stream = barrel:subscribe_changes(Ch, <<"testdb">>, 0, #{}),
       ct:print("la"),
-      Change =barrel_remote:await_change(Ch, Stream),
+      Change =barrel:await_change(Ch, Stream, 5000),
       ct:print("ici"),
-      {ok, LastSeq} = barrel_remote:unsubscribe_changes(Ch, Stream),
+      {ok, LastSeq} = barrel:unsubscribe_changes(Ch, Stream),
       Parent ! {change, self(), LastSeq, Change}
     end
   ),
   Doc = #{ <<"id">> => <<"aa">>, <<"v">> => 1},
-  {ok, <<"aa">>, _RevId} = barrel_remote:post(Ch, <<"testdb">>, Doc, #{}),
+  {ok, <<"aa">>, _RevId} = barrel:post(Ch, <<"testdb">>, Doc, #{}),
   receive
     {change, Pid, 1, #{ <<"id">> := <<"aa">>, <<"seq">> := 1 }} -> ok;
     Else ->
@@ -276,16 +276,16 @@ named_await_change(_Config) ->
   Parent = self(),
   Pid = spawn(
     fun() ->
-      Stream = barrel_remote:subscribe_changes(test_channel, <<"testdb">>, 0, #{}),
+      Stream = barrel:subscribe_changes(test_channel, <<"testdb">>, 0, #{}),
       ct:print("la"),
-      Change =barrel_remote:await_change(test_channel, Stream),
+      Change =barrel:await_change(test_channel, Stream, 5000),
       ct:print("ici"),
-      {ok, LastSeq} = barrel_remote:unsubscribe_changes(test_channel, Stream),
+      {ok, LastSeq} = barrel:unsubscribe_changes(test_channel, Stream),
       Parent ! {change, self(), LastSeq, Change}
     end
   ),
   Doc = #{ <<"id">> => <<"aa">>, <<"v">> => 1},
-  {ok, <<"aa">>, _RevId} = barrel_remote:post(test_channel, <<"testdb">>, Doc, #{}),
+  {ok, <<"aa">>, _RevId} = barrel:post(test_channel, <<"testdb">>, Doc, #{}),
   receive
     {change, Pid, 1, #{ <<"id">> := <<"aa">>, <<"seq">> := 1 }} -> ok;
     Else ->
@@ -297,10 +297,10 @@ named_await_change(_Config) ->
 revsdiff(Config) ->
   Ch = channel(Config),
   Doc = #{ <<"id">> => <<"revsdiff">>, <<"v">> => 1},
-  {ok, <<"revsdiff">>, RevId} = barrel_remote:post(Ch, <<"testdb">>, Doc, #{}),
+  {ok, <<"revsdiff">>, RevId} = barrel:post(Ch, <<"testdb">>, Doc, #{}),
   Doc2 = Doc#{<<"v">> => 2},
-  {ok, <<"revsdiff">>, _RevId3} = barrel_remote:put(Ch, <<"testdb">>, Doc2, #{rev => RevId}),
-  {ok, [<<"1-missing">>], []} = barrel_remote:revsdiff(Ch, <<"testdb">>, <<"revsdiff">>, [<<"1-missing">>]),
+  {ok, <<"revsdiff">>, _RevId3} = barrel:put(Ch, <<"testdb">>, Doc2, #{rev => RevId}),
+  {ok, [<<"1-missing">>], []} = barrel:revsdiff(Ch, <<"testdb">>, <<"revsdiff">>, [<<"1-missing">>]),
   ok.
 
 %% ==============================

@@ -50,105 +50,104 @@
 start_channel(Params) ->
   barrel_rpc:start_channel(Params).
 
-close_channel(ChPid) ->
-  barrel_rpc:close_channel(ChPid).
+close_channel(Channel) ->
+  barrel_rpc:close_channel(Channel).
 
-close_channel(ChPid, Timeout) ->
-  barrel_rpc:close_channel(ChPid, Timeout).
+close_channel(Channel, Timeout) ->
+  barrel_rpc:close_channel(Channel, Timeout).
 
 %% ==============================
 %% database operations
 
-database_names(ChPid) ->
-  Ref = barrel_rpc:request(ChPid, {'barrel.v1.Database', 'DatabaseNames', []}),
-  barrel_rpc:await(ChPid, Ref).
+database_names(Channel) ->
+  Ref = barrel_rpc:request(Channel, {'barrel.v1.Database', 'DatabaseNames', []}),
+  barrel_rpc:await(Channel, Ref).
 
-create_database(ChPid, Config) ->
-  Ref = barrel_rpc:request(ChPid, {'barrel.v1.Database', 'CreateDatabase', Config}),
-  barrel_rpc:await(ChPid, Ref).
+create_database(Channel, Config) ->
+  Ref = barrel_rpc:request(Channel, {'barrel.v1.Database', 'CreateDatabase', Config}),
+  barrel_rpc:await(Channel, Ref).
 
-delete_database(ChPid, DbId) ->
-  Ref = barrel_rpc:request(ChPid, {'barrel.v1.Database', 'DeleteDatabase', [DbId]}),
-  barrel_rpc:await(ChPid, Ref).
+delete_database(Channel, DbId) ->
+  Ref = barrel_rpc:request(Channel, {'barrel.v1.Database', 'DeleteDatabase', [DbId]}),
+  barrel_rpc:await(Channel, Ref).
 
-database_infos(ChPid, DbId) ->
-  Ref = barrel_rpc:request(ChPid, {'barrel.v1.Database', 'DatabaseInfos', [DbId]}),
-  barrel_rpc:await(ChPid, Ref).
+database_infos(Channel, DbId) ->
+  Ref = barrel_rpc:request(Channel, {'barrel.v1.Database', 'DatabaseInfos', [DbId]}),
+  barrel_rpc:await(Channel, Ref).
 
 
 %% ==============================
 %% doc operations
 
-get(ChPid, DbId, DocId, Options) ->
-  Ref = barrel_rpc:request(ChPid, {'barrel.v1.Database', 'GetDoc', [DbId, DocId, Options]}),
-  barrel_rpc:await(ChPid, Ref).
+get(Channel, DbId, DocId, Options) ->
+  Ref = barrel_rpc:request(Channel, {'barrel.v1.Database', 'GetDoc', [DbId, DocId, Options]}),
+  barrel_rpc:await(Channel, Ref).
 
-put(ChPid, DbId, Doc, Options) ->
-  Ref = barrel_rpc:request(ChPid, {'barrel.v1.Database', 'PutDoc', [DbId, Doc, Options]}),
-  barrel_rpc:await(ChPid, Ref).
+put(Channel, DbId, Doc, Options) ->
+  Ref = barrel_rpc:request(Channel, {'barrel.v1.Database', 'PutDoc', [DbId, Doc, Options]}),
+  barrel_rpc:await(Channel, Ref).
 
-delete(ChPid, DbId, DocId, Options) ->
-  Ref = barrel_rpc:request(ChPid, {'barrel.v1.Database', 'DeleteDoc', [DbId, DocId, Options]}),
-  barrel_rpc:await(ChPid, Ref).
+delete(Channel, DbId, DocId, Options) ->
+  Ref = barrel_rpc:request(Channel, {'barrel.v1.Database', 'DeleteDoc', [DbId, DocId, Options]}),
+  barrel_rpc:await(Channel, Ref).
 
-post(ChPid, DbId, Doc, Options) ->
-  Ref = barrel_rpc:request(ChPid, {'barrel.v1.Database', 'InsertDoc', [DbId, Doc, Options]}),
-  barrel_rpc:await(ChPid, Ref).
+post(Channel, DbId, Doc, Options) ->
+  Ref = barrel_rpc:request(Channel, {'barrel.v1.Database', 'InsertDoc', [DbId, Doc, Options]}),
+  barrel_rpc:await(Channel, Ref).
 
-multi_get(ChPid, DbId, Fun, Acc, DocIds, Options) ->
-  Ref = barrel_rpc:request(ChPid, {'barrel.v1.Database', 'MultiGetDoc', [DbId, DocIds, Options]}),
-  do_fold(ChPid, Ref, Fun, Acc).
+multi_get(Channel, DbId, Fun, Acc, DocIds, Options) ->
+  Ref = barrel_rpc:request(Channel, {'barrel.v1.Database', 'MultiGetDoc', [DbId, DocIds, Options]}),
+  do_fold(Channel, Ref, Fun, Acc).
 
-put_rev(ChPid, DbId, Doc, History, Deleted, Options) ->
-  Ref = barrel_rpc:request(ChPid, {'barrel.v1.Database', 'PutRev', [DbId, Doc, History, Deleted, Options]}),
-  barrel_rpc:await(ChPid, Ref).
+put_rev(Channel, DbId, Doc, History, Deleted, Options) ->
+  Ref = barrel_rpc:request(Channel, {'barrel.v1.Database', 'PutRev', [DbId, Doc, History, Deleted, Options]}),
+  barrel_rpc:await(Channel, Ref).
 
-write_batch(ChPid, DbId, Updates, Options) ->
-  Ref = barrel_rpc:request(ChPid, {'barrel.v1.Database', 'WriteBatch', [DbId, Options]}),
-  ok = stream_batch_updates(Updates, ChPid, Ref),
-  wait_batch_results(ChPid, Ref, []).
+write_batch(Channel, DbId, Updates, Options) ->
+  Ref = barrel_rpc:request(Channel, {'barrel.v1.Database', 'WriteBatch', [DbId, Options]}),
+  ok = stream_batch_updates(Updates, Channel, Ref),
+  wait_batch_results(Channel, Ref, []).
 
-fold_by_id(ChPid, DbId, Fun, Acc, Options) ->
-  Ref = barrel_rpc:request(ChPid, {'barrel.v1.Database', 'FoldById', [DbId, Options]}),
-  do_fold(ChPid, Ref, Fun, Acc).
+fold_by_id(Channel, DbId, Fun, Acc, Options) ->
+  Ref = barrel_rpc:request(Channel, {'barrel.v1.Database', 'FoldById', [DbId, Options]}),
+  do_fold(Channel, Ref, Fun, Acc).
 
-revsdiff(ChPid, DbId, DocId, RevIds) ->
-  Ref = barrel_rpc:request(ChPid, {'barrel.v1.Database', 'RevsDiff', [DbId, DocId, RevIds]}),
-  barrel_rpc:await(ChPid, Ref).
+revsdiff(Channel, DbId, DocId, RevIds) ->
+  Ref = barrel_rpc:request(Channel, {'barrel.v1.Database', 'RevsDiff', [DbId, DocId, RevIds]}),
+  barrel_rpc:await(Channel, Ref).
 
 %% ==============================
 %% system docs operations
 
+put_system_doc(Channel, DbId, DocId, Doc) ->
+  Ref = barrel_rpc:request(Channel, {'barrel.v1.Database', 'PutSystemDoc', [DbId, DocId, Doc]}),
+  barrel_rpc:await(Channel, Ref).
 
-put_system_doc(ChPid, DbId, DocId, Doc) ->
-  Ref = barrel_rpc:request(ChPid, {'barrel.v1.Database', 'PutSystemDoc', [DbId, DocId, Doc]}),
-  barrel_rpc:await(ChPid, Ref).
+get_system_doc(Channel, DbId, DocId) ->
+  Ref = barrel_rpc:request(Channel, {'barrel.v1.Database', 'GetSystemDoc', [DbId, DocId]}),
+  barrel_rpc:await(Channel, Ref).
 
-get_system_doc(ChPid, DbId, DocId) ->
-  Ref = barrel_rpc:request(ChPid, {'barrel.v1.Database', 'GetSystemDoc', [DbId, DocId]}),
-  barrel_rpc:await(ChPid, Ref).
-
-delete_system_doc(ChPid, DbId, DocId) ->
-  Ref = barrel_rpc:request(ChPid, {'barrel.v1.Database', 'DeleteSystemDoc', [DbId, DocId]}),
-  barrel_rpc:await(ChPid, Ref).
+delete_system_doc(Channel, DbId, DocId) ->
+  Ref = barrel_rpc:request(Channel, {'barrel.v1.Database', 'DeleteSystemDoc', [DbId, DocId]}),
+  barrel_rpc:await(Channel, Ref).
 
 %% ==============================
 %% changes operations
 
-changes_since(ChPid, DbId, Since, Fun, Acc, Options) ->
-  Ref = barrel_rpc:request(ChPid, {'barrel.v1.DatabaseChanges', 'ChangesSince', [DbId, Since, Options]}),
-  do_fold_changes(ChPid, Ref, Fun, Acc).
+changes_since(Channel, DbId, Since, Fun, Acc, Options) ->
+  Ref = barrel_rpc:request(Channel, {'barrel.v1.DatabaseChanges', 'ChangesSince', [DbId, Since, Options]}),
+  do_fold_changes(Channel, Ref, Fun, Acc).
 
 
-subscribe_changes(ChPid, DbId, Since, Options) ->
-  StreamRef = barrel_rpc:request(ChPid, {'barrel.v1.DatabaseChanges', 'ChangesStream', [DbId, Since, Options]}),
+subscribe_changes(Channel, DbId, Since, Options) ->
+  StreamRef = barrel_rpc:request(Channel, {'barrel.v1.DatabaseChanges', 'ChangesStream', [DbId, Since, Options]}),
   _ = erlang:put({StreamRef, last_seq},  Since),
   StreamRef.
 
-await_change(ChPid, StreamRef) -> await_change(ChPid, StreamRef, infinity).
+await_change(Channel, StreamRef) -> await_change(Channel, StreamRef, infinity).
 
-await_change(ChPid, StreamRef, Timeout) ->
-  case barrel_rpc:await(ChPid, StreamRef, Timeout) of
+await_change(Channel, StreamRef, Timeout) ->
+  case barrel_rpc:await(Channel, StreamRef, Timeout) of
     {data, Change} ->
       Seq = maps:get(<<"seq">>, Change),
       OldSeq = erlang:get({StreamRef, last_seq}),
@@ -158,40 +157,40 @@ await_change(ChPid, StreamRef, Timeout) ->
       {end_stream, erlang:erase({StreamRef, last_seq})}
   end.
 
-unsubscribe_changes(ChPid, StreamRef) ->
-  ok = barrel_rpc:end_stream(ChPid, StreamRef),
+unsubscribe_changes(Channel, StreamRef) ->
+  ok = barrel_rpc:end_stream(Channel, StreamRef),
   {ok, erlang:erase({StreamRef, last_seq})}.
 
 
 %% ==============================
 %% internal helpers
 
-do_fold(ChPid, Ref, Fun, Acc) ->
-  case barrel_rpc:await(ChPid, Ref) of
+do_fold(Channel, Ref, Fun, Acc) ->
+  case barrel_rpc:await(Channel, Ref) of
     {data, {Doc, Meta}} ->
       Acc2 = Fun(Doc, Meta, Acc),
-      do_fold(ChPid, Ref, Fun, Acc2);
+      do_fold(Channel, Ref, Fun, Acc2);
     end_stream ->
       Acc
   end.
 
-do_fold_changes(ChPid, Ref, Fun, Acc) ->
-  case barrel_rpc:await(ChPid, Ref) of
+do_fold_changes(Channel, Ref, Fun, Acc) ->
+  case barrel_rpc:await(Channel, Ref) of
     {data, Change} ->
       Acc2 = Fun(Change, Acc),
-      do_fold_changes(ChPid, Ref, Fun, Acc2);
+      do_fold_changes(Channel, Ref, Fun, Acc2);
     end_stream ->
       Acc
   end.
 
-stream_batch_updates([Update | Rest], ChPid, Ref) ->
-  _ = barrel_rpc:stream(ChPid, Ref, Update),
-  stream_batch_updates(Rest,  ChPid, Ref);
-stream_batch_updates([], ChPid, Ref) ->
-  barrel_rpc:stream(ChPid, Ref, end_batch).
+stream_batch_updates([Update | Rest], Channel, Ref) ->
+  _ = barrel_rpc:stream(Channel, Ref, Update),
+  stream_batch_updates(Rest, Channel, Ref);
+stream_batch_updates([], Channel, Ref) ->
+  barrel_rpc:stream(Channel, Ref, end_batch).
 
-wait_batch_results(ChPid, Ref, Acc) ->
-  case barrel_rpc:await(ChPid, Ref) of
-    {data, Result} -> wait_batch_results(ChPid, Ref, [ Result | Acc ]);
+wait_batch_results(Channel, Ref, Acc) ->
+  case barrel_rpc:await(Channel, Ref) of
+    {data, Result} -> wait_batch_results(Channel, Ref, [ Result | Acc ]);
     end_stream -> lists:reverse(Acc)
   end.
