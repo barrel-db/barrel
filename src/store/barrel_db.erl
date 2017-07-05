@@ -707,7 +707,7 @@ do_update_docs(DocBuckets, Db =  #db{id=DbId, store=Store }) ->
         case ResWrite of
           ok ->
             ets:insert(barrel_dbs, Db2),
-            barrel_db_event:notify(Db2#db.id, db_updated),
+            barrel_event:notify(Db2#db.id, db_updated),
             lists:foreach(
               fun(Req) -> send_result(Req, {ok, DocId, WinningRev}) end,
               Reqs
