@@ -125,7 +125,7 @@
   | {conflict, revision_conflict}.
 
 %% TODO: to define
--type fold_options() :: list().
+-type fold_options() :: map().
 
 -type change() :: #{
   id := docid(),
@@ -135,9 +135,9 @@
   doc => doc()
 }.
 
--type batch_options() :: [
-  {async, boolean()}
-].
+-type batch_options() :: #{
+  async => boolean()
+}.
 
 -type batch_results() :: [
   {ok, docid(), revid()}
@@ -254,11 +254,8 @@ post(Db, Doc, Options) ->
   Updates :: [barrel_write_batch:batch_op()],
   Options :: batch_options(),
   Results :: batch_results() | ok.
-write_batch(Db, Updates, Options) when is_list(Options) ->
-  Async = proplists:get_value(async, Options, false),
-  Batch = barrel_write_batch:from_list(Updates, Async),
-  barrel_db:update_docs(Db, Batch);
-write_batch(_, _, _) -> erlang:error(badarg).
+write_batch(Db, Updates, Options) ->
+  barrel_local:write_batch(Db, Updates, Options).
 
 
 put_system_doc(Db, DocId, Doc) ->
@@ -280,7 +277,7 @@ delete_system_doc(Db, DocId) ->
   AccOut :: any(),
   Error :: {error, term()}.
 fold_by_id(Db, Fun, Acc, Options) ->
-  barrel_db:fold_by_id(Db, Fun, Acc, Options).
+  barrel_local:fold_by_id(Db, Fun, Acc, Options).
 
 %% @doc fold all changes since last sequence
 -spec changes_since(Db, Since, Fun, AccIn) -> AccOut when
@@ -291,7 +288,7 @@ fold_by_id(Db, Fun, Acc, Options) ->
   AccIn :: any(),
   AccOut :: any().
 changes_since(Db, Since, Fun, Acc) ->
-  barrel_db:changes_since(Db, Since, Fun, Acc, #{}).
+  changes_since(Db, Since, Fun, Acc, #{}).
 
 %% @doc fold all changes since last sequence
 -spec changes_since(Db, Since, Fun, AccIn, Opts) -> AccOut when
@@ -303,7 +300,7 @@ changes_since(Db, Since, Fun, Acc) ->
   AccOut :: any(),
   Opts :: map().
 changes_since(Db, Since, Fun, Acc, Opts) ->
-  barrel_db:changes_since(Db, Since, Fun, Acc, Opts).
+  barrel_local:changes_since(Db, Since, Fun, Acc, Opts).
 
 %% @doc find in the index a document by its path
 -spec walk(Db, Path, Fun, AccIn, Options) -> AccOut | Error when

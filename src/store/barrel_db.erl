@@ -271,7 +271,7 @@ fold_by_id_int(#db{ store=Store }, UserFun, AccIn, Opts) ->
   Prefix = barrel_keys:prefix(doc),
   {ok, Snapshot} = rocksdb:snapshot(Store),
   ReadOptions = [{snapshot, Snapshot}],
-  Opts2 = [{read_options, ReadOptions} | Opts],
+  Opts2 = Opts#{read_options => ReadOptions},
 
   WrapperFun =
   fun(_Key, << RID:64 >>, Acc) ->
@@ -302,16 +302,17 @@ changes_since_int(Db = #db{ store=Store}, Since0, Fun, AccIn, Opts) ->
             Since0 > 0 -> Since0 + 1;
             true -> Since0
           end,
+  %% setup fold options
   Prefix = barrel_keys:prefix(seq),
   {ok, Snapshot} = rocksdb:snapshot(Store),
   ReadOptions = [{snapshot, Snapshot}],
-  FoldOpts = [
-    {start_key, <<Since:64>>},
-    {read_options, ReadOptions}
-  ],
+  FoldOpts = #{
+    start_key => <<Since:64>>,
+    read_options => ReadOptions
+  },
   IncludeDoc = maps:get(include_doc, Opts, false),
   WithHistory = maps:get(history, Opts, last) =:= all,
-
+  %% wrap fun fold function to handle indexed results
   WrapperFun =
     fun(Key, BinDocInfo, Acc) ->
       DocInfo = binary_to_term(BinDocInfo),
@@ -326,7 +327,6 @@ changes_since_int(Db = #db{ store=Store}, Since0, Fun, AccIn, Opts) ->
                   false -> [RevId];
                   true -> barrel_revtree:history(RevId, RevTree)
                 end,
-
       %% create change
       Change = change_with_doc(
         changes_with_deleted(
@@ -339,7 +339,7 @@ changes_since_int(Db = #db{ store=Store}, Since0, Fun, AccIn, Opts) ->
       ),
       Fun(Change, Acc)
     end,
-
+  %% finally traverse changes
   try barrel_fold:fold_prefix(Store, Prefix, WrapperFun, AccIn, FoldOpts)
   after rocksdb:release_snapshot(Snapshot)
   end.
@@ -534,7 +534,7 @@ init_meta(Store) ->
     end,
     #{<<"docs_count">> => 0,
       <<"system_docs_count">> => 0},
-    []
+    #{}
   ),
   Meta#{ <<"last_rid" >> => last_rid(Store),
          <<"updated_seq">> => last_sequence(Store) }.

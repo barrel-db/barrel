@@ -121,8 +121,8 @@ update_doc(Db, Batch) ->
     [Res] -> Res
   end.
 
-write_batch(Db, Updates, Options) when is_list(Options) ->
-  Async = proplists:get_value(async, Options, false),
+write_batch(Db, Updates, Options) when is_map(Options) ->
+  Async = maps:get(async, Options, false),
   Batch = barrel_write_batch:from_list(Updates, Async),
   barrel_db:update_docs(Db, Batch);
 write_batch(_, _, _) -> erlang:error(badarg).

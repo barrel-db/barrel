@@ -30,8 +30,8 @@
 
 all() ->
   [
-   order_by_key%,
-    %%multiple_docs
+    order_by_key,
+    multiple_docs
   ].
 
 init_per_suite(Config) ->
@@ -74,7 +74,7 @@ order_by_key(_Config) ->
   {ok, _Doc1, _Meta1} = barrel:get(<<"testdb">>, <<"AndersenFamily">>, #{}),
 
   Fun = fun(D, _Meta, Acc) -> {ok, [maps:get(<<"id">>, D) | Acc]} end,
-  [<<"AndersenFamily">>] = barrel:walk(<<"testdb">>, <<"id">>, Fun, [], []),
+  [<<"AndersenFamily">>] = barrel:walk(<<"testdb">>, <<"id">>, Fun, [], #{}),
   ok.
 
 
@@ -83,8 +83,8 @@ multiple_docs(_Config) ->
   DocB = #{ <<"test">> => <<"b">> },
   BatchA = [{post, DocA} || _I <- lists:seq(1, 30)],
   BatchB = [{post, DocB} || _I <- lists:seq(1, 25)],
-  ResultsA = barrel:write_batch(<<"testdb">>, BatchA, []),
-  ResultsB = barrel:write_batch(<<"testdb">>, BatchB, []),
+  ResultsA = barrel:write_batch(<<"testdb">>, BatchA, #{}),
+  ResultsB = barrel:write_batch(<<"testdb">>, BatchB, #{}),
 
   IdsA = [Id || {ok, Id, _} <- ResultsA],
   IdsB = [Id || {ok, Id, _} <- ResultsB],
@@ -92,46 +92,55 @@ multiple_docs(_Config) ->
   30 = length(IdsA),
   25 = length(IdsB),
 
-  All = barrel:fold_by_id(<<"testdb">>,
-                                       fun(#{ <<"id">> := Id }, _, Acc) -> {ok, [Id | Acc]} end,
-                                       [],
-                                       []),
+  All = barrel:fold_by_id(
+    <<"testdb">>,
+    fun(#{ <<"id">> := Id }, _, Acc) -> {ok, [Id | Acc]} end,
+    [],
+    #{}
+  ),
   55 = length(All),
 
-  All20 = barrel:fold_by_id(<<"testdb">>,
-                                       fun(#{ <<"id">> := Id }, _, Acc) -> {ok, [Id | Acc]} end,
-                                       [],
-                                       [{max, 20}]),
+  All20 = barrel:fold_by_id(
+    <<"testdb">>,
+    fun(#{ <<"id">> := Id }, _, Acc) -> {ok, [Id | Acc]} end,
+    [],
+    #{max => 20}
+  ),
   20 = length(All20),
 
-  All40 = barrel:fold_by_id(
+  All40 = barrel:fold_by_id(
     <<"testdb">>,
-    fun(#{<<"id">> := Id }, _ , Acc) ->
-      {ok, [Id | Acc]}
-    end,
+    fun(#{ <<"id">> := Id }, _, Acc) -> {ok, [Id | Acc]} end,
     [],
-    [{max, 40}]
+    #{max => 40}
   ),
+
   40 = length(All40),
 
-  QAll = barrel:query(<<"testdb">>,
-                                  <<"test/a">>,
-                                  fun(Id, _, _, Acc) -> {ok, [Id | Acc]} end,
-                                  [],
-                                  []),
+  QAll = barrel:walk(
+    <<"testdb">>,
+    <<"test/a">>,
+    fun(Id, _, Acc) -> {ok, [Id | Acc]} end,
+    [],
+    #{}
+  ),
   30 = length(QAll),
 
-  Q15 = barrel:query(<<"testdb">>,
-                                  <<"test/a">>,
-                                  fun(Id, _, _, Acc) -> {ok, [Id | Acc]} end,
-                                  [],
-                                  [{max, 15}]),
+  Q15 = barrel:walk(
+    <<"testdb">>,
+    <<"test/a">>,
+    fun(Id, _, Acc) -> {ok, [Id | Acc]} end,
+    [],
+    #{max => 15}
+  ),
   15 = length(Q15),
 
-  QBAll = barrel:query(<<"testdb">>,
-                                  <<"test/b">>,
-                                  fun(Id, _, _, Acc) -> {ok, [Id | Acc]} end,
-                                  [],
-                                  []),
+  QBAll = barrel:walk(
+    <<"testdb">>,
+    <<"test/b">>,
+    fun(Id, _, Acc) -> {ok, [Id | Acc]} end,
+    [],
+    #{}
+  ),
   25 = length(QBAll).
 

@@ -22,24 +22,19 @@
 -define(DEFAULT_MAX, 10000).
 
 
-walk(#db{id=Id, store=Store}, Path, Fun, AccIn, Opts) ->
-  _ = lager:info(
-        "walk(~p,~p,~p,~p,~p)",
-        [Id, Path, Fun, AccIn, Opts]
-       ),
-
-  OrderBy = proplists:get_value(order_by, Opts, order_by_key),
+walk(#db{store=Store}, Path, Fun, AccIn, Opts) ->
+  %% set fold options
+  OrderBy = maps:get(order_by, Opts, order_by_key),
   Prefix = make_prefix(normalize_path(Path), OrderBy),
-  Prefix1 = case proplists:get_value(equal_to, Opts) of
-              undefined -> Prefix;
-              Val -> << Prefix/binary, Val/binary >>
+  Prefix1 = case maps:find(equal_to, Opts) of
+              {ok, Val} -> << Prefix/binary, Val/binary >>;
+              error -> Prefix
             end,
-
-
-  Max= proplists:get_value(max, Opts, proplists:get_value(limit_to_last, Opts, ?DEFAULT_MAX)),
+  Max= maps:get(max, Opts, ?DEFAULT_MAX),
   {ok, Snapshot} = rocksdb:snapshot(Store),
   ReadOptions = [{snapshot, Snapshot}],
-  FoldOptions = [{read_options, ReadOptions}, {max, Max} | Opts],
+  FoldOptions = Opts#{read_options => ReadOptions, max => Max},
+  %% wrap user fun to handle specific options
   WrapperFun = fun(KeyBin, _, Acc) ->
                    Rid = parse_rid(KeyBin, OrderBy),
                    Res = rocksdb:get(Store, barrel_keys:res_key(Rid), ReadOptions),
@@ -52,7 +47,7 @@ walk(#db{id=Id, store=Store}, Path, Fun, AccIn, Opts) ->
                        {ok, Acc}
                    end
                end,
-
+  %% finally do the fold
   try barrel_fold:fold_prefix(Store, Prefix1, WrapperFun, AccIn, FoldOptions)
   after rocksdb:release_snapshot(Snapshot)
   end.

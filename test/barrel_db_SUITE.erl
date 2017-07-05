@@ -263,7 +263,7 @@ write_batch(_Config) ->
   {error, not_found} = barrel:get(<<"testdb">>, <<"b">>, #{}),
   {ok, #{ <<"v">> := 1}, _} = barrel:get(<<"testdb">>, <<"c">>, #{}),
   
-  Results = barrel:write_batch(<<"testdb">>, OPs, []),
+  Results = barrel:write_batch(<<"testdb">>, OPs, #{}),
   true = is_list(Results),
   
   [ {ok, <<"a">>, _},
@@ -294,7 +294,7 @@ write_json_batch(_Config) ->
   {error, not_found} = barrel:get(<<"testdb">>, <<"b">>, #{}),
   {ok, #{ <<"v">> := 1}, _} = barrel:get(<<"testdb">>, <<"c">>, #{}),
   
-  Results = barrel:write_batch(<<"testdb">>, JsonOPs, []),
+  Results = barrel:write_batch(<<"testdb">>, JsonOPs, #{}),
   true = is_list(Results),
 
   [ {ok, <<"a">>, _},
@@ -317,19 +317,23 @@ fold_by_id(_Config) ->
   Fun = fun(#{ <<"id">> := DocId }, _Meta, Acc1) ->
       {ok, [DocId | Acc1]}
     end,
-  Acc = barrel:fold_by_id(<<"testdb">>, Fun, [], []),
+  Acc = barrel:fold_by_id(<<"testdb">>, Fun, [], #{}),
   [<<"c">>, <<"b">>, <<"a">>] = Acc,
-  Acc2 = barrel:fold_by_id(<<"testdb">>, Fun, [],
-                                 [{include_doc, true}, {lt, <<"b">>}]),
+  Acc2 = barrel:fold_by_id(
+    <<"testdb">>, Fun, [],  #{include_doc => true, lt => <<"b">>}
+  ),
   [<<"a">>] = Acc2,
-  Acc3 = barrel:fold_by_id(<<"testdb">>, Fun, [],
-                                 [{include_doc, true}, {lte, <<"b">>}]),
+  Acc3 = barrel:fold_by_id(
+    <<"testdb">>, Fun, [], #{include_doc => true, lte => <<"b">>}
+  ),
   [<<"b">>, <<"a">>] = Acc3,
-  Acc4 = barrel:fold_by_id(<<"testdb">>, Fun, [],
-                                 [{include_doc, true}, {gte, <<"b">>}]),
+  Acc4 = barrel:fold_by_id(
+    <<"testdb">>, Fun, [], #{include_doc => true, gte => <<"b">>}
+  ),
   [<<"c">>, <<"b">>] = Acc4,
-  Acc5 = barrel:fold_by_id(<<"testdb">>, Fun, [],
-                                 [{include_doc, true}, {gt, <<"b">>}]),
+  Acc5 = barrel:fold_by_id(
+    <<"testdb">>, Fun, [], #{include_doc => true, gt => <<"b">>}
+  ),
   [<<"c">>] = Acc5,
   ok.
 

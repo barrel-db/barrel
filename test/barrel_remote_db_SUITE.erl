@@ -207,19 +207,22 @@ fold_by_id(Config) ->
           (#{ <<"id">> := DocId }, _Meta, Acc1) ->
             [DocId | Acc1]
         end,
-  Acc = barrel_remote:fold_by_id(Ch, <<"testdb">>, Fun, [], []),
+  Acc = barrel_remote:fold_by_id(Ch, <<"testdb">>, Fun, [], #{}),
   [<<"c">>, <<"b">>, <<"a">>] = Acc,
-  Acc2 = barrel_remote:fold_by_id(Ch, <<"testdb">>, Fun, [],
-    [{include_doc, true}, {lt, <<"b">>}]),
+  Acc2 = barrel_remote:fold_by_id(
+    Ch, <<"testdb">>, Fun, [], #{include_doc => true, lt => <<"b">>}
+  ),
   [<<"a">>] = Acc2,
-  Acc3 = barrel_remote:fold_by_id(Ch, <<"testdb">>, Fun, [],
-    [{include_doc, true}, {lte, <<"b">>}]),
+  Acc3 = barrel_remote:fold_by_id(
+    Ch, <<"testdb">>, Fun, [], #{include_doc => true, lte => <<"b">>}
+  ),
   [<<"b">>, <<"a">>] = Acc3,
-  Acc4 = barrel_remote:fold_by_id(Ch, <<"testdb">>, Fun, [],
-    [{include_doc, true}, {gte, <<"b">>}]),
+  Acc4 = barrel_remote:fold_by_id(
+    Ch, <<"testdb">>, Fun, [], #{include_doc => true, gte => <<"b">>}
+  ),
   [<<"c">>, <<"b">>] = Acc4,
-  Acc5 = barrel_remote:fold_by_id(Ch, <<"testdb">>, Fun, [],
-    [{include_doc, true}, {gt, <<"b">>}]),
+  Acc5 = barrel_remote:fold_by_id(
+    Ch, <<"testdb">>, Fun, [], #{include_doc => true, gt => <<"b">>}),
   [<<"c">>] = Acc5,
   ok.
 
