@@ -42,7 +42,6 @@ setup_channel(#{ proto := Proto , db := DbId} = Config) ->
   #{ mod => Mod, init_args => [Channel], db => DbId }.
 
 proto_mod(rpc) -> barrel_remote;
-proto_mod(http) -> barrel_httpc;
 proto_mod(Proto) ->
   Supported = application:get_env(barrel, proto_replication, #{}),
   case maps:find(Proto, Supported) of
