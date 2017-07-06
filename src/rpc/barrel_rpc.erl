@@ -55,14 +55,14 @@ close_channel(Ch) -> close_channel(Ch, ?CLOSE_TIMEOUT).
 close_channel(Ch, Timeout) ->
   barrel_channel:close(barrel_channel:channel_pid(Ch), Timeout).
 
-request(Ch, Req) -> request(Ch, Req, []).
+request(Ch, Req) -> request(Ch, Req, #{}).
 
 request(Ch, {_Service, _Method, _Args}=Req, Options) ->
   with_channel(
     Ch,
     fun(ChPid) ->
       StreamRef = make_ref(),
-      ReplyTo = proplists:get_value(reply_to, Options, self()),
+      ReplyTo = maps:get(reply_to, Options, self()),
       ChPid ! {request, StreamRef, ReplyTo, Req},
       StreamRef
     end
