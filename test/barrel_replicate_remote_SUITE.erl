@@ -61,12 +61,12 @@ target(Config) ->
 
 one_doc(Config) ->
   Ch = channel(Config),
-  Options = [{metrics_freq, 100}],
   RepConfig = #{
-    <<"source">> => <<"source">>,
-    <<"target">> => target(Config)
+    source => <<"source">>,
+    target => target(Config),
+    options => #{ metrics_freq => 100 } 
   },
-  {ok, #{<<"replication_id">> := RepId}} = barrel_replicate:start_replication(RepConfig, Options),
+  {ok, #{ id := RepId }} = barrel_replicate:start_replication(RepConfig),
   Doc = #{ <<"id">> => <<"a">>, <<"v">> => 1},
   {ok, <<"a">>, _RevId} = barrel:post(<<"source">>, Doc, #{}),
   timer:sleep(200),

@@ -55,14 +55,17 @@ end_per_suite(Config) ->
   _ = (catch rocksdb:destroy("docs", [])),
   Config.
 
-
-
 checkpoints(_Config) ->
-  RepId = <<"repdid">>,
-  Options = [{checkpoint_size, 5}],
+  RepId = <<"repid">>,
   Source = ?CH(<<"source">>),
   Target = ?CH(<<"testdb">>),
-  C0 = barrel_replicate_checkpoint:new(RepId, Source, Target, Options),
+
+  RepConfig = #{id => RepId,
+                source => Source,
+                target => Target,
+                options => #{ checkpoint_size => 5 } },
+
+  C0 = barrel_replicate_checkpoint:new(RepConfig),
   C1 = barrel_replicate_checkpoint:set_last_seq(4, C0),
   C2 = barrel_replicate_checkpoint:maybe_write_checkpoint(C1),
   {error, not_found} = barrel_replicate_checkpoint:read_checkpoint_doc(Source, RepId),
@@ -89,32 +92,35 @@ checkpoints(_Config) ->
   ok.
 
 history_size(_Config) ->
-  RepId = <<"repdid">>,
-  Source = barrel_replicate_api_wrapper:setup_channel(<<"source">>),
-  Target = barrel_replicate_api_wrapper:setup_channel(<<"testdb">>),
-  Options = [{checkpoint_size, 5}, {checkpoint_max_history, 3}],
+  RepId = <<"repid">>,
+  Source = ?CH(<<"source">>),
+  Target = ?CH(<<"testdb">>),
 
-  replication_session([5,10,12], Source, Target, Options, RepId),
+  RepConfig = #{id => RepId,
+                source => Source,
+                target => Target,
+                options => #{checkpoint_size => 5,
+                             checkpoint_max_history => 3 }
+               },
+
+  replication_session([5,10,12], RepConfig),
   [{0,10}] = read_start_last_seq(Source, RepId),
 
-  replication_session([15,17,22], Source, Target, Options, RepId),
+  replication_session([15,17,22], RepConfig),
   [{10,22}, {0,10}] = read_start_last_seq(Source, RepId),
 
-  replication_session([23,31], Source, Target, Options, RepId),
+  replication_session([23,31], RepConfig),
   [{22,31}, {10,22}, {0,10}] = read_start_last_seq(Source, RepId),
 
-  replication_session([40,50], Source, Target, Options, RepId),
+  replication_session([40,50], RepConfig),
   [{31, 50}, {22,31}, {10,22}] = read_start_last_seq(Source, RepId),
 
-  replication_session([60,70], Source, Target, Options, RepId),
+  replication_session([60,70], RepConfig),
   [{50, 70}, {31, 50}, {22,31}] = read_start_last_seq(Source, RepId),
   ok.
 
-
-
-
-replication_session(Seqs, Source, Target, Options, RepId) ->
-  C0 = barrel_replicate_checkpoint:new(RepId, Source, Target, Options),
+replication_session(Seqs, RepConfig) ->
+  C0 = barrel_replicate_checkpoint:new(RepConfig),
   MoveSeq = fun (N, Acc) ->
                 Acc2 = barrel_replicate_checkpoint:set_last_seq(N, Acc),
                 barrel_replicate_checkpoint:maybe_write_checkpoint(Acc2)

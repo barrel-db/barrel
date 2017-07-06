@@ -16,20 +16,19 @@
 
 %% specific API
 -export([
-  start_link/4,
+  start_link/1,
   info/1
 ]).
 
 %% gen_server API
 -export([
-  init/5,
+  init/2,
   loop/1
 ]).
 
 %% internal api
 -export([
   replication_key/1,
-  delete/3,
   stream_worker/3
 ]).
 
@@ -53,9 +52,8 @@
 }).
 
 
-start_link(RepId, Source, Target, Options) ->
-  proc_lib:start_link(?MODULE, init, [self(), RepId, Source, Target, Options]).
-
+start_link(Config) ->
+  proc_lib:start_link(?MODULE, init, [self(), Config]).
 
 info(Pid) when is_pid(Pid)->
   MRef = erlang:monitor(process, Pid),
@@ -68,38 +66,41 @@ info(Pid) when is_pid(Pid)->
       erlang:error(Reason)
   end.
 
-delete(RepId, Source, Target) ->
-  Checkpoint = barrel_replicate_checkpoint:new(RepId, Source, Target, []),
-  ok = barrel_replicate_checkpoint:delete(Checkpoint),
-  ok.
-
 replication_key(RepId) -> {n, l, {barrel_replicate, RepId}}.
 
-init(Parent, RepId, Source0, Target0, Options) ->
+init(Parent, Config) ->
   process_flag(trap_exit, true),
   proc_lib:init_ack(Parent, {ok, self()}),
+
+  #{ id := RepId,
+     source := Source0,
+     target := Target0 } = Config,
+
+  Options = maps:get(options, Config, #{}),
+
   %% source and target should be connected before we start a replication
   Source = barrel_replicate_api_wrapper:setup_channel(Source0),
   Target = barrel_replicate_api_wrapper:setup_channel(Target0),
+
+  Config1 = Config#{ source => Source, target => Target },
+
   %% init_metrics
   Metrics = barrel_replicate_metrics:new(),
   ok = barrel_replicate_metrics:create_task(Metrics, Options),
   barrel_replicate_metrics:update_task(Metrics),
   %% initialize the changes feed
-  Checkpoint = barrel_replicate_checkpoint:new(RepId, Source, Target, Options),
+  Checkpoint = barrel_replicate_checkpoint:new(Config1),
   _ = lager:info("checkpoint is ~p~n", [Checkpoint]),
   StartSeq = barrel_replicate_checkpoint:get_start_seq(Checkpoint),
   Stream = spawn_stream_worker(Source, StartSeq),
   %% start loop
-  State = #st{
-    id=RepId,
-    source=Source,
-    target=Target,
-    parent = Parent,
-    checkpoint=Checkpoint,
-    stream = Stream,
-    metrics = Metrics
-    },
+  State = #st{ id = RepId,
+               source = Source,
+               target = Target,
+               parent = Parent,
+               checkpoint=Checkpoint,
+               stream = Stream,
+               metrics = Metrics },
   loop(State).
 
 spawn_stream_worker(Source, StartSeq) ->
@@ -149,8 +150,8 @@ handle_change(Change, State) ->
     checkpoint=Checkpoint,
     metrics=Metrics
   } = State,
-  
-  
+
+
   LastSeq = maps:get(<<"seq">>, Change),
   %% TODO: better handling of edge case, asserting is quite bad there
   true = (LastSeq > barrel_replicate_checkpoint:get_last_seq(Checkpoint)),

@@ -17,7 +17,7 @@
 -author("Bernard Notarianni").
 
 %% gen_server API
--export([ new/4
+-export([ new/1
         , set_last_seq/2
         , get_last_seq/1
         , get_start_seq/1
@@ -35,22 +35,31 @@
             , start_seq=0 :: integer() % start seq for current repl session
             , last_seq=0  :: integer() % last received seq from source
             , target_seq  :: undefined | integer() % target seq for current repl session
-            , options
+            , options :: map()
             }).
+
+-define(CHECKPOINT_SIZE, 10).
+-define(MAX_CHECKPOINT_HISTORY, 20).
 
 %% =============================================================================
 %% Checkpoints management: when, where and what
 %% =============================================================================
 
 %% @doc Create a checkpoint object
-new(RepId, Source, Target, Options) ->
+new(RepConfig) ->
+  #{ id := RepId,
+     source := Source,
+     target := Target } = RepConfig,
+
+  Options = maps:get(options, RepConfig, #{}),
+
   StartSeq = checkpoint_start_seq(Source, Target, RepId),
   State = #st{ repid=RepId
              , source=Source
              , target=Target
              , session_id=barrel_lib:uniqid(binary)
              , start_seq=StartSeq
-             , options=Options
+             , options = Options
              },
   set_next_target_seq(State).
 
@@ -70,22 +79,29 @@ maybe_write_checkpoint(
 maybe_write_checkpoint(State) ->
   State.
 
+checkpoint_size(#st{ options = #{ checkpoint_size := Sz }}) -> Sz;
+checkpoint_size(_) -> ?CHECKPOINT_SIZE.
+
 set_next_target_seq(State) ->
   LastSeq = State#st.last_seq,
-  CheckpointSize = proplists:get_value(checkpoint_size, State#st.options, 10),
+  CheckpointSize = checkpoint_size(State),
   TargetSeq = LastSeq + CheckpointSize,
   State#st{target_seq=TargetSeq}.
 
 
+history_size(#st{options = #{ checkpoint_max_history := Max } }) -> Max;
+history_size(_) -> ?MAX_CHECKPOINT_HISTORY.
+
 %% @doc Write checkpoint information on both source and target databases.
 write_checkpoint(State)  ->
-  RepId = State#st.repid,
-  StartSeq = State#st.start_seq,
-  LastSeq = State#st.last_seq,
-  Source = State#st.source,
-  Target = State#st.target,
-  SessionId = State#st.session_id,
-  HistorySize = proplists:get_value(checkpoint_max_history, State#st.options, 20),
+  #st{repid = RepId,
+      start_seq = StartSeq,
+      last_seq = LastSeq,
+      source = Source,
+      target = Target,
+      session_id = SessionId} = State,
+
+  HistorySize = history_size(State),
   Checkpoint = #{<<"source_last_seq">>   => LastSeq
                 ,<<"source_start_seq">>  => StartSeq
                 ,<<"session_id">> => State#st.session_id
@@ -149,9 +165,10 @@ read_checkpoint_doc(Db, RepId) ->
 
 
 delete(Checkpoint) ->
-  RepId = Checkpoint#st.repid,
-  Source = Checkpoint#st.source,
-  Target = Checkpoint#st.target,
+  #st{repid = RepId,
+      source = Source,
+      target = Target} = Checkpoint,
+
   ok = delete_checkpoint_doc(Source, RepId),
   ok = delete_checkpoint_doc(Target, RepId),
   ok.

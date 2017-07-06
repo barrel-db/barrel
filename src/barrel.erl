@@ -69,8 +69,7 @@
 
 
 -export([
-  start_replication/3,
-  start_replication/4,
+  start_replication/1,
   stop_replication/1,
   delete_replication/1,
   replication_info/1
@@ -431,15 +430,11 @@ find_by_key(Db, Path, Fun, AccIn, Opts) ->
   barrel:walk(Db, Path, Fun, AccIn, Opts).
 
 
-start_replication(Name, Source, Target) ->
-  start_replication(Name, Source, Target, []).
+%% ==============================
+%% replication
 
-start_replication(Name, Source, Target, Options) ->
-  Config = #{source => Source, target => Target, options => Options},
-  case barrel_replicate:start_replication(Name, Config) of
-    ok -> {ok, Name};
-    Error -> Error
-  end.
+start_replication(Config) ->
+  barrel_replicate:start_replication(Config).
 
 stop_replication(Name) ->
   barrel_replicate:stop_replication(Name).
