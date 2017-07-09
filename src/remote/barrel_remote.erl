@@ -11,8 +11,8 @@
 
 %% API
 -export([
-  start_channel/1,
-  close_channel/1, close_channel/2
+  connect/1,
+  disconnect/1, disconnect/2
 ]).
 
 -export([
@@ -47,13 +47,13 @@
   unsubscribe_changes/2
 ]).
 
-start_channel(Params) ->
+connect(Params) ->
   barrel_rpc:start_channel(Params).
 
-close_channel(Channel) ->
+disconnect(Channel) ->
   barrel_rpc:close_channel(Channel).
 
-close_channel(Channel, Timeout) ->
+disconnect(Channel, Timeout) ->
   barrel_rpc:close_channel(Channel, Timeout).
 
 %% ==============================

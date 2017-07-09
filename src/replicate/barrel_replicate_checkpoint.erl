@@ -14,7 +14,6 @@
 %% the License.
 
 -module(barrel_replicate_checkpoint).
--author("Bernard Notarianni").
 
 %% gen_server API
 -export([ new/1

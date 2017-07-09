@@ -46,7 +46,7 @@ end_per_testcase(_, _Config) -> ok.
 
 basic(Config) ->
   RemoteNode = proplists:get_value(remote, Config),
-  {ok, ChPid} = barrel_remote:start_channel(#{ type => direct, node => RemoteNode }),
+  {ok, ChPid} = barrel_remote:connect(#{ type => direct, endpoint => RemoteNode }),
   [] = barrel_remote:database_names(ChPid),
   {ok, _} = barrel_remote:create_database(ChPid, #{ <<"database_id">> => <<"testdb">> }),
   [<<"testdb">>] = barrel_remote:database_names(ChPid),
@@ -59,13 +59,13 @@ basic(Config) ->
   {error, not_found} = barrel_remote:get(ChPid, <<"testdb">>, <<"a">>, #{}),
   ok = barrel_remote:delete_database(ChPid, <<"testdb">>),
   [] = barrel_remote:database_names(ChPid),
-  ok = barrel_remote:close_channel(ChPid).
+  ok = barrel_remote:disconnect(ChPid).
 
 named_channel(Config) ->
   RemoteNode = proplists:get_value(remote, Config),
-  {ok, ChPid} = barrel_remote:start_channel(#{ type => direct, node => RemoteNode, channel_name => mychannel }),
+  {ok, ChPid} = barrel_remote:connect(#{ type => direct, endpoint => RemoteNode, channel => mychannel }),
   %% connection should be reused
-  {ok, ChPid} = barrel_remote:start_channel(#{ type => direct, node => RemoteNode, channel_name => mychannel }),
+  {ok, ChPid} = barrel_remote:connect(#{ type => direct, endpoint => RemoteNode, channel => mychannel }),
   true = (ChPid =:= barrel_channel:channel_pid(mychannel)),
   [] = barrel_remote:database_names(mychannel),
   {ok, _} = barrel_remote:create_database(mychannel, #{ <<"database_id">> => <<"testdb">> }),
@@ -79,7 +79,7 @@ named_channel(Config) ->
   {error, not_found} = barrel_remote:get(mychannel, <<"testdb">>, <<"a">>, #{}),
   ok = barrel_remote:delete_database(mychannel, <<"testdb">>),
   [] = barrel_remote:database_names(mychannel),
-  ok = barrel_remote:close_channel(mychannel),
+  ok = barrel_remote:disconnect(mychannel),
   false = erlang:is_process_alive(ChPid),
   undefined = barrel_channel:channel_pid(mychannel).
 

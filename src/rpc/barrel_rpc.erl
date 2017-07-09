@@ -42,7 +42,7 @@ start_channel(Params) ->
     {ok, _Sup, Connection} ->
       barrel_channel:connect(Connection);
     {error, {already_started, _}} ->
-      ChannelName = maps:get(channel_name, Params),
+      ChannelName = maps:get(channel, Params),
       Channel = gproc:where({n, l, {channel_by_name, ChannelName}}),
       {ok, Channel}
   end.

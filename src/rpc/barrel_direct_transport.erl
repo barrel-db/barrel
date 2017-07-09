@@ -29,7 +29,7 @@ channel_id(Params) -> maps:get(node, Params).
 init() -> {ok, #{}}.
 
 connect(Params, _TypeSup, _State) ->
-  #{ node :=  Node} = Params,
+  #{ endpoint :=  Node} = Params,
   State1 = #{
     node => Node,
     params => Params,

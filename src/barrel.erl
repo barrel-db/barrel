@@ -19,8 +19,8 @@
 %% Database API
 
 -export([
-  start_channel/1,
-  close_channel/1, close_channel/2
+  connect/1,
+  disconnect/1, disconnect/2
 ]).
 
 -export([
@@ -175,14 +175,14 @@
 
 -include("barrel.hrl").
 
-start_channel(Params) ->
-  barrel_remote:start_channel(Params).
+connect(Params) ->
+  barrel_remote:connect(Params).
 
-close_channel(Channel) ->
-  barrel_remote:close_channel(Channel).
+disconnect(Channel) ->
+  barrel_remote:disconnect(Channel).
 
-close_channel(Channel, Timeout) ->
-  barrel_remote:close_channel(Channel, Timeout).
+disconnect(Channel, Timeout) ->
+  barrel_remote:disconnect(Channel, Timeout).
 
 %% ==============================
 %% database operations

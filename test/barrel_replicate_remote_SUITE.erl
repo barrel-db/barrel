@@ -33,21 +33,21 @@ channel(Config) -> proplists:get_value(channel, Config).
 init_per_suite(Config) ->
   {ok, _} = application:ensure_all_started(barrel),
   {ok, RemoteNode} = start_slave(barrel_test1),
-  {ok, ChPid} = barrel_remote:start_channel(#{ type => direct, node => RemoteNode, channel_name => rep_test_channel }),
+  {ok, ChPid} = barrel:connect(#{ type => direct, endpoint => RemoteNode, channel => rep_test_channel }),
   [{remote, RemoteNode}, {channel, ChPid} | Config].
 
 end_per_suite(Config) ->
-  _ = barrel_remote:close_channel(channel(Config)),
+  _ = barrel:disconnect(channel(Config)),
   ok = stop_slave(barrel_test1),
   Config.
 
 init_per_testcase(_, Config) ->
   {ok, _} = barrel_local:create_database(#{ <<"database_id">> => <<"source">> }),
-  {ok, _} = barrel_remote:create_database(rep_test_channel, #{ <<"database_id">> => <<"testdb">> }),
+  {ok, _} = barrel:create_database(rep_test_channel, #{ <<"database_id">> => <<"testdb">> }),
   Config.
 
 end_per_testcase(_, _Config) ->
-  ok = barrel_remote:delete_database(rep_test_channel, <<"testdb">>),
+  ok = barrel:delete_database(rep_test_channel, <<"testdb">>),
   ok = barrel:delete_database(<<"source">>),
   ok.
 
@@ -55,8 +55,8 @@ target(Config) ->
   Remote = proplists:get_value(remote, Config),
   #{ proto => rpc,
      type => direct,
-     node => Remote,
-     channel_name => rep_test_channel,
+     endpoint => Remote,
+     channel => rep_test_channel,
      db => <<"testdb">> }.
 
 one_doc(Config) ->
@@ -64,7 +64,7 @@ one_doc(Config) ->
   RepConfig = #{
     source => <<"source">>,
     target => target(Config),
-    options => #{ metrics_freq => 100 } 
+    options => #{ metrics_freq => 100 }
   },
   {ok, #{ id := RepId }} = barrel_replicate:start_replication(RepConfig),
   Doc = #{ <<"id">> => <<"a">>, <<"v">> => 1},

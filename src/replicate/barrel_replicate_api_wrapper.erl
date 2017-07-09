@@ -34,11 +34,11 @@
 setup_channel(DbId) when is_binary(DbId) ->
   #{ mod => barrel_local, init_args => [], db => DbId };
 setup_channel(#{ mod := Mod, db := DbId } = Config) ->
-  Channel = Mod:start_channel(Config),
+  Channel = Mod:connect(Config),
   #{ mod => Mod, init_args => [Channel], db => DbId };
 setup_channel(#{ proto := Proto , db := DbId} = Config) ->
   Mod = proto_mod(Proto),
-  {ok, Channel} = Mod:start_channel(Config),
+  {ok, Channel} = Mod:connect(Config),
   #{ mod => Mod, init_args => [Channel], db => DbId }.
 
 proto_mod(rpc) -> barrel_remote;

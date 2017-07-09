@@ -46,7 +46,7 @@ channel_pid(Name) ->
 %% internal API
 
 start_link(TypeSup, Params) ->
-  case maps:get(channel_name, Params, undefined) of
+  case maps:get(channel, Params, undefined) of
     undefined ->
       gen_statem:start_link(?MODULE, {TypeSup, Params}, []);
     Name ->

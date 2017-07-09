@@ -16,7 +16,7 @@
 %% supervisor callbacks
 -export([init/1]).
 
-start_link(#{ channel_name := Name } = Params) ->
+start_link(#{ channel := Name } = Params) ->
   SupName = {via, gproc, {n, l, {?MODULE, Name}}},
   case supervisor:start_link(SupName, ?MODULE, []) of
     {ok, Sup} -> start_children(Sup, Params);

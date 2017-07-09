@@ -53,11 +53,11 @@ all() ->
 init_per_suite(Config) ->
   {ok, _} = application:ensure_all_started(barrel),
   {ok, RemoteNode} = start_slave(barrel_test1),
-  {ok, ChPid} = barrel:start_channel(#{ type => direct, node => RemoteNode, channel_name => test_channel }),
+  {ok, ChPid} = barrel:connect(#{ type => direct, endpoint => RemoteNode, channel => test_channel }),
   [{remote, RemoteNode}, {channel, ChPid} | Config].
 
 end_per_suite(Config) ->
-  _ = barrel:close_channel(channel(Config)),
+  _ = barrel:disconnect(channel(Config)),
   ok = stop_slave(barrel_test1),
   Config.
 
