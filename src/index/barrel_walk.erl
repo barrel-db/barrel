@@ -19,39 +19,171 @@
 -include("barrel.hrl").
 
 
--define(DEFAULT_MAX, 10000).
+-define(DEFAULT_MAX, 1000).
 
 
-walk(#db{store=Store}, Path, Fun, AccIn, Opts) ->
+walk(#db{store=Store}, Path, UserFun, AccIn, Options0) ->
+  Options1 = validate_options(Options0),
+
   %% set fold options
-  OrderBy = maps:get(order_by, Opts, order_by_key),
-  Prefix = make_prefix(normalize_path(Path), OrderBy),
-  Prefix1 = case maps:find(equal_to, Opts) of
-              {ok, Val} -> << Prefix/binary, Val/binary >>;
-              error -> Prefix
-            end,
-  Max= maps:get(max, Opts, ?DEFAULT_MAX),
+  {MoveAction, First, InRange} = make_range(Path, Options1),
+  OrderBy = maps:get(order_by, Options1, order_by_key),
+  EqualTo = maps:get(equal_to, Options1, undefined),
+  Limit = maps:get(limit, Options1, ?DEFAULT_MAX),
+
+  %% rocksdb options
   {ok, Snapshot} = rocksdb:snapshot(Store),
   ReadOptions = [{snapshot, Snapshot}],
-  FoldOptions = Opts#{read_options => ReadOptions, max => Max},
-  %% wrap user fun to handle specific options
-  WrapperFun = fun(KeyBin, _, Acc) ->
-                   Rid = parse_rid(KeyBin, OrderBy),
-                   Res = rocksdb:get(Store, barrel_keys:res_key(Rid), ReadOptions),
-                   case Res of
-                     {ok, Bin} ->
-                       DocInfo = binary_to_term(Bin),
-                       {ok, Doc, Meta} = barrel_db:get_current_revision(DocInfo),
-                       Fun(Doc, Meta, Acc);
-                     _Else ->
-                       {ok, Acc}
-                   end
-               end,
-  %% finally do the fold
-  try barrel_fold:fold_prefix(Store, Prefix1, WrapperFun, AccIn, FoldOptions)
-  after rocksdb:release_snapshot(Snapshot)
+
+  %% wrapper function to retrieve the results from the iterator
+  WrapperFun =
+    fun(KeyBin, _, Acc) ->
+      {Rid, Pointer} = parse_rid(KeyBin, OrderBy),
+      Res = rocksdb:get(Store, barrel_keys:res_key(Rid), ReadOptions),
+      case Res of
+        {ok, Bin} ->
+          DocInfo = binary_to_term(Bin),
+          {ok, Doc, Meta} = barrel_db:get_current_revision(DocInfo),
+          case EqualTo of
+            undefined ->
+              UserFun(Doc, Meta, Acc);
+            Val ->
+              case get_value(Pointer, Doc) of
+                Val -> UserFun(Doc, Meta, Acc);
+                _ -> {ok, Acc}
+              end
+          end;
+        _Else ->
+          {ok, Acc}
+      end
+    end,
+
+  %% initialize the iterator
+  {ok, Itr} = rocksdb:iterator(Store, ReadOptions),
+  Next = fun() -> rocksdb:iterator_move(Itr, MoveAction) end,
+  Start = case MoveAction of
+            next -> rocksdb:iterator_move(Itr, First);
+            prev -> rocksdb:iterator_move(Itr, {seek_for_prev, First})
+          end,
+
+  %% start folding
+  try
+    fold_loop(
+      Start, Next, WrapperFun, AccIn, InRange, Limit - 1
+    )
+  after safe_iterator_close(Itr)
   end.
 
+safe_iterator_close(Itr) -> (catch rocksdb:iterator_close(Itr)).
+
+fold_loop({error, iterator_closed}, _Next, _WrapperFun, Acc, _Cmp, _Limit) ->
+  throw({iterator_closed, Acc});
+fold_loop({error, invalid_iterator}, _Next, _WrapperFun, Acc, _Cmp, _Limit) ->
+  Acc;
+fold_loop({ok, K, V}, Next, WrapperFun, Acc0, Cmp, Limit) ->
+  case Cmp(K) of
+    true ->
+      case WrapperFun(K, V, Acc0) of
+        {ok, Acc1} when Limit > 0 ->
+          fold_loop(Next(), Next, WrapperFun, Acc1, Cmp, Limit - 1);
+        {ok, Acc1} -> Acc1;
+        stop -> Acc0;
+        {stop, Acc1} -> Acc1;
+        Acc1 -> Acc1
+      end;
+    false ->
+      Acc0
+  end.
+
+get_value([Key | Rest], Obj) when is_map(Obj) ->
+  get_value(Rest, maps:get(Key, Obj));
+get_value([BinInt | Rest], Obj) when is_list(Obj) ->
+  Idx = binary_to_integer(BinInt) + 1, %% erlang lists start at 1
+  get_value(Rest, lists:nth(Idx, Obj));
+get_value([Key], Obj) ->
+  ToMatch = case jsx:is_json(Key) of
+              true -> jsx:decode(Key);
+              false -> Key
+            end,
+  if
+    Obj =:= ToMatch -> null;
+    true -> erlang:error(badarg)
+  end;
+get_value([], Obj) ->
+  Obj.
+
+make_range(Path, #{ move := prev }= Options) ->
+  OrderBy = maps:get(order_by, Options, order_by_key),
+  Prefix = make_prefix(normalize_path(Path), OrderBy),
+  First  = case maps:find(end_at, Options) of
+             {ok, EndAt} ->
+               make_prefix(
+                 << (normalize_path(append_path(Path, EndAt)))/binary, 16#7FFFFFFFFFFFFFFF >>,
+                 OrderBy
+               );
+             error ->
+               << (make_prefix(normalize_path(Path), OrderBy))/binary, 16#7FFFFFFFFFFFFFFF >>
+           end,
+  InRange = case maps:get(start_at, Options, undefined)  of
+              undefined ->
+                fun(K) -> match_prefix(K, Prefix) end;
+              StartAt0 ->
+                StartAt1 = make_prefix(
+                  normalize_path(append_path(Path, StartAt0)),
+                  OrderBy
+                ),
+                fun(K) -> (match_prefix(K, Prefix) andalso K >= StartAt1) end
+            end,
+  {prev, First, InRange};
+make_range(Path, #{ move := next }= Options) ->
+  OrderBy = maps:get(order_by, Options, order_by_key),
+  Prefix = make_prefix(normalize_path(Path), OrderBy),
+  First = case maps:find(start_at, Options) of
+            {ok, StartAt} -> make_prefix(normalize_path(append_path(Path, StartAt)), OrderBy);
+            error -> Prefix
+          end,
+  InRange = case maps:get(end_at, Options, undefined)  of
+              undefined ->
+                fun(K) -> match_prefix(K, Prefix) end;
+              EndAt0 ->
+                EndAt1 = make_prefix(
+                  << (normalize_path(append_path(Path, EndAt0)))/binary, 16#7FFFFFFFFFFFFFFF >>,
+                  OrderBy
+                ),
+                fun(K) -> (match_prefix(K, Prefix) andalso K =< EndAt1) end
+            end,
+  {next, First, InRange}.
+
+match_prefix(Bin, Prefix) ->
+  L = byte_size(Prefix),
+  case Bin of
+    << Prefix:L/binary, _/binary >> -> true;
+    _ -> false
+  end.
+
+validate_options(Opts) ->
+  maps:fold(fun validate_options_fun/3, #{ move => next }, Opts).
+
+validate_options_fun(order_by, OrderBy, Options) when OrderBy =:= order_by_key; OrderBy =:= order_by_value ->
+  Options#{ order_by => OrderBy };
+validate_options_fun(start_at, Key, Options) when is_binary(Key) ->
+  Options#{ start_at => Key };
+validate_options_fun(end_at, Key, Options) when is_binary(Key) ->
+  Options#{ end_at => Key };
+validate_options_fun(equal_to, Key, Options) when is_binary(Key) ->
+  Options#{ equal_to => Key };
+validate_options_fun(limit_to_last, Limit, Options) when is_integer(Limit), Limit > 0 ->
+  case maps:find(limit_to_first, Options) of
+    {ok, _} -> erlang:error(badarg);
+    error -> Options#{ limit => Limit, move => prev }
+  end;
+validate_options_fun(limit_to_first, Limit, Options) when is_integer(Limit), Limit > 0 ->
+  case maps:find(limit_to_last, Options) of
+    {ok, _} -> erlang:error(badarg);
+    error -> Options#{ limit => Limit, move => next }
+  end;
+validate_options_fun(_, _, _) ->
+  erlang:error(badarg).
 
 make_prefix(Path, order_by_key) ->
   Prefix =  barrel_keys:prefix(idx_forward_path),
@@ -70,6 +202,12 @@ partial_path(Path0) ->
   Parts = binary:split(Path1, <<"/">>, [global]),
   partial_path(Parts, length(Parts)).
 
+append_path(Path, Segment) ->
+  case binary:last(Path) of
+    $/ -> << Path/binary, Segment/binary >>;
+    _ -> << Path/binary, $/, Segment/binary >>
+  end.
+
 partial_path(Parts, Len) when Len =< 3 -> Parts;
 partial_path(Parts, Len) -> lists:sublist(Parts, Len - 2, Len).
 
@@ -80,8 +218,8 @@ parse_rid(Path, OrderBy) ->
            end,
   Sz = byte_size(Prefix),
   << Prefix:Sz/binary, Encoded/binary >> = Path,
-  [Rid | _] = decode_partial_path(Encoded, []),
-  Rid.
+  [ Rid | Rest ] = decode_partial_path(Encoded, []),
+  {Rid, lists:reverse(Rest)}.
 
 decode_partial_path(<<"">>, Parts) ->
   Parts;
@@ -89,14 +227,14 @@ decode_partial_path(B, Parts) ->
   case barrel_encoding:pick_encoding(B) of
     int ->
       {P, R} = barrel_encoding:decode_varint_ascending(B),
-      decode_partial_path(R, [P | Parts]);
+      decode_partial_path(R, [P | Parts]);
     float ->
       {P, R} = barrel_encoding:decode_float_ascending(B),
-      decode_partial_path(R, [P | Parts]);
+      decode_partial_path(R, [P | Parts]);
     literal ->
       {P, R} = barrel_encoding:decode_literal_ascending(B),
-      decode_partial_path(R, [P | Parts]);
+      decode_partial_path(R, [P | Parts]);
     bytes ->
       {P, R} = barrel_encoding:decode_binary_ascending(B),
-      decode_partial_path(R, [P | Parts])
+      decode_partial_path(R, [P | Parts])
   end.

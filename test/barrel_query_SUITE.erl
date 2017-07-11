@@ -25,13 +25,17 @@
 
 -export([
   order_by_key/1,
-  multiple_docs/1
+  multiple_docs/1,
+  range/1,
+  limit_at/1
 ]).
 
 all() ->
   [
     order_by_key,
-    multiple_docs
+    multiple_docs,
+    range,
+    limit_at
   ].
 
 init_per_suite(Config) ->
@@ -129,9 +133,9 @@ multiple_docs(_Config) ->
   Q15 = barrel:walk(
     <<"testdb">>,
     <<"test/a">>,
-    fun(Id, _, Acc) -> {ok, [Id | Acc]} end,
+    fun(#{ <<"id">> := Id}, _, Acc) -> {ok, [Id | Acc]} end,
     [],
-    #{max => 15}
+    #{ limit_to_first => 15 }
   ),
   15 = length(Q15),
 
@@ -143,4 +147,89 @@ multiple_docs(_Config) ->
     #{}
   ),
   25 = length(QBAll).
+
+limit_at(_Config) ->
+  Batch = [{post, #{ <<"id">> => << I:32 >>}} || I <- lists:seq(1, 30)],
+  _ = barrel:write_batch(<<"testdb">>, Batch, #{}),
+
+  Q15 = barrel:walk(
+    <<"testdb">>,
+    <<"id">>,
+    fun(#{ <<"id">> := Id}, _, Acc) -> {ok, [Id | Acc]} end,
+    [],
+    #{ limit_to_first => 15 }
+  ),
+  15 = length(Q15),
+
+  E15 = [ << I:32 >> || I <- lists:seq(1, 15)],
+  E15 = lists:reverse(Q15),
+
+  QL15 = barrel:walk(
+    <<"testdb">>,
+    <<"id">>,
+    fun(#{ <<"id">> := Id}, _, Acc) -> {ok, [Id | Acc]} end,
+    [],
+    #{ limit_to_last => 15 }
+  ),
+  15 = length(QL15),
+  true = (QL15 =/= Q15),
+  EL15 = [ << I:32 >> || I <- lists:seq(16, 30)],
+  EL15 = QL15,
+  ok.
+
+range(_Config) ->
+  Batch = [
+    {post, #{ <<"id">> => <<"a">>, <<"o">> => #{ <<"test1">> => 1 }}},
+    {post, #{ <<"id">> => <<"b">>, <<"o">> => #{ <<"test2">> => 1 }}},
+    {post, #{ <<"id">> => <<"c">>, <<"o">> => #{ <<"test3">> => 1 }}},
+    {post, #{ <<"id">> => <<"d">>, <<"o">> => #{ <<"test4">> => 1 }}},
+    {post, #{ <<"id">> => <<"e">>, <<"o">> => #{ <<"test5">> => 1 }}},
+    {post, #{ <<"id">> => <<"f">>, <<"o">> => #{ <<"test6">> => 1 }}},
+    {post, #{ <<"id">> => <<"g">>, <<"o">> => #{ <<"test7">> => 1 }}},
+    {post, #{ <<"id">> => <<"h">>, <<"o">> => #{ <<"test8">> => 1 }}}
+  ],
+  _ = barrel:write_batch(<<"testdb">>, Batch, #{}),
+
+  Fun = fun(#{ <<"id">> := Id }, _, Acc) -> {ok, [ Id | Acc ]} end,
+  All = [<<"h">>, <<"g">>, <<"f">>, <<"e">>, <<"d">>, <<"c">>, <<"b">>, <<"a">>],
+  QAll = barrel:walk(
+    <<"testdb">>,
+    <<"o">>,
+    Fun,
+    [],
+    #{}
+  ),
+  8  = length(QAll),
+  All = QAll,
+
+  C = [<<"h">>, <<"g">>, <<"f">>, <<"e">>, <<"d">>, <<"c">>],
+  QC = barrel:walk(
+    <<"testdb">>,
+    <<"o">>,
+    Fun,
+    [],
+    #{ start_at => <<"test3">> }
+  ),
+  C = QC,
+
+  F = [<<"f">>, <<"e">>, <<"d">>, <<"c">>, <<"b">>, <<"a">>],
+  QF = barrel:walk(
+    <<"testdb">>,
+    <<"o">>,
+    Fun,
+    [],
+    #{ end_at => <<"test6">> }
+  ),
+  F = QF,
+
+  FC = [<<"f">>, <<"e">>, <<"d">>, <<"c">>],
+  QFC = barrel:walk(
+    <<"testdb">>,
+    <<"o">>,
+    Fun,
+    [],
+    #{ start_at => <<"test3">>, end_at => <<"test6">> }
+  ),
+  FC = QFC,
+  ok.
 
