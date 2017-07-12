@@ -123,9 +123,6 @@ init_feed(Parent, Db, Options) ->
               end,
 
   %% retrieve change options from the options given to the feed
-  %% TODO: have changes_since function accepting a map
-  ChangeOpts = parse_options(Options),
-
   Ref = erlang:monitor(process, Db#db.pid),
 
   %% initialize the changes
@@ -133,7 +130,7 @@ init_feed(Parent, Db, Options) ->
   #{parent => Parent,
     db => Db,
     db_ref => Ref,
-    opts => ChangeOpts,
+    opts => Options,
     change_fun => ChangeFun,
     changes => queue:new(),
     last_seq => Since},
@@ -194,20 +191,6 @@ get_changes(State) ->
     Opts
   ),
   State#{ last_seq => LastSeq1, changes => Changes1}.
-
-
-parse_options(Options) ->
-  maps:fold(
-    fun
-      (include_doc, IncludeDocs, Acc) ->
-        [{include_doc, IncludeDocs} | Acc];
-      (history, History, Acc) ->
-        [{history, History} | Acc];
-      (_, _, Acc) -> Acc
-    end,
-    [],
-    Options
-  ).
 
 encode_sse(Change) ->
   Seq = maps:get(<<"seq">>, Change),

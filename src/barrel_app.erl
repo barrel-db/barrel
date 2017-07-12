@@ -24,9 +24,24 @@
 %%====================================================================
 
 start(_StartType, _StartArgs) ->
-  barrel_sup:start_link().
+  {ok, Sup} = barrel_sup:start_link(),
+  %% load default rpc services
+  ok = load_services(),
+  {ok, Sup}.
+
 
 %%--------------------------------------------------------------------
 stop(_State) ->
   ok.
 
+services() ->
+  #{
+    'barrel.v1.Database' => barrel_db_service,
+    'barrel.v1.DatabaseChanges' => barrel_changes_services,
+    'barrel.v1.Replicate' => barrel_replicate_service
+  }.
+
+load_services() ->
+  Services = services(),
+  ok = barrel_rpc:load_services(Services),
+  ok.

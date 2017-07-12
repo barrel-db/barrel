@@ -44,7 +44,7 @@ init([]) ->
       type => supervisor,
       modules => [barrel_replicate_task_sup]},
 
-    {ok, {{one_for_all, 10000, 1}, [Manager, TaskSup]}}.
+    {ok, {{one_for_all, 0, 1}, [Manager, TaskSup]}}.
 
 %%====================================================================
 %% Internal functions

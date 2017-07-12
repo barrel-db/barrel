@@ -18,7 +18,8 @@
   put_rev/4,
   to_buckets/1,
   from_list/2,
-  is_batch/1
+  is_batch/1,
+  add_op/2
 ]).
 
 -include("barrel.hrl").
@@ -122,22 +123,24 @@ from_list(OPs, Async) ->
 
 
 from_list_1([Op | Rest], Batch) ->
-  case parse_op(Op) of
-    {put, Obj, Rev} ->
-      Batch2 = barrel_write_batch:put(Obj, Rev, Batch),
-      from_list_1(Rest, Batch2);
-    {post, Obj, IsUpsert} ->
-      Batch2 = barrel_write_batch:post(Obj, IsUpsert, Batch),
-      from_list_1(Rest, Batch2);
-    {delete, Id, Rev} ->
-      Batch2 = barrel_write_batch:delete(Id, Rev, Batch),
-      from_list_1(Rest, Batch2);
-    {put_rev, Obj, History, Deleted} ->
-      Batch2 = barrel_write_batch:put_rev(Obj, History, Deleted, Batch),
-      from_list_1(Rest, Batch2)
-  end;
+  Batch2 = add_op(Op, Batch),
+  from_list_1(Rest, Batch2);
 from_list_1([], Batch) ->
   Batch.
+
+-spec add_op(batch_op(), batch()) -> batch().
+add_op(Op, Batch) ->
+  case parse_op(Op) of
+    {put, Obj, Rev} ->
+      barrel_write_batch:put(Obj, Rev, Batch);
+    {post, Obj, IsUpsert} ->
+      barrel_write_batch:post(Obj, IsUpsert, Batch);
+    {delete, Id, Rev} ->
+      barrel_write_batch:delete(Id, Rev, Batch);
+    {put_rev, Obj, History, Deleted} ->
+      barrel_write_batch:put_rev(Obj, History, Deleted, Batch)
+  end.
+  
 
 is_batch({_, _, _, _, _}) -> true;
 is_batch(_) -> false.
@@ -164,7 +167,7 @@ parse_op({post, Doc, IsUpsert} = OP) when is_map(Doc), is_boolean(IsUpsert) -> O
 parse_op({delete, Id, Rev} = OP) when is_binary(Id), is_binary(Rev) -> OP;
 parse_op({put_rev, Doc, History, Deleted} = OP)  when is_map(Doc), is_list(History), is_boolean(Deleted) -> OP;
 
-parse_op(_) -> erlang:error(badarg).
+parse_op(_Op) -> erlang:error(badarg).
 
 
 make_op(Doc, Req, WithConflict, CreateIfMissing, ErrorIfExists) ->

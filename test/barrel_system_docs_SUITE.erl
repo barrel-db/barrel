@@ -34,11 +34,11 @@ init_per_suite(Config) ->
   Config.
 
 init_per_testcase(_, Config) ->
-  {ok, _} = barrel_store:create_db(<<"testdb">>, #{}),
+  {ok, _} = barrel:create_database(#{ <<"database_id">> => <<"testdb">> }),
   [{db, <<"testdb">>} | Config].
 
 end_per_testcase(_, _Config) ->
-  ok = barrel_store:delete_db(<<"testdb">>),
+  ok = barrel:delete_database(<<"testdb">>),
   ok.
 
 end_per_suite(Config) ->
@@ -52,4 +52,3 @@ write_and_get(_Config) ->
   ok = barrel_db:delete_system_doc(<<"testdb">>, <<"a">>),
   {error, not_found} = barrel_db:get_system_doc(<<"testdb">>, <<"a">>),
   ok.
-

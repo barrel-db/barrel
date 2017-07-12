@@ -13,7 +13,6 @@
 %% the License.
 
 -module(barrel_replicate_SUITE).
--author("Bernard Notarianni").
 
 %% API
 -export(
@@ -37,7 +36,6 @@
    , list_replication_tasks/1
    ]).
 
-
  all() ->
    [ one_doc
    , source_not_empty
@@ -56,13 +54,13 @@ init_per_suite(Config) ->
   Config.
 
 init_per_testcase(_, Config) ->
-  {ok, _} = barrel_store:create_db(<<"testdb">>, #{}),
-  {ok, _} = barrel_store:create_db(<<"source">>, #{}),
+  {ok, _} = barrel:create_database(#{ <<"database_id">> => <<"testdb">> }),
+  {ok, _} = barrel:create_database(#{ <<"database_id">> => <<"source">> }),
   [{db, <<"testdb">>} | Config].
 
 end_per_testcase(_, _Config) ->
-  ok = barrel_store:delete_db(<<"testdb">>),
-  ok = barrel_store:delete_db(<<"source">>),
+  ok = barrel:delete_database(<<"testdb">>),
+  ok = barrel:delete_database(<<"source">>),
   ok.
 
 end_per_suite(Config) ->
@@ -74,111 +72,108 @@ end_per_suite(Config) ->
 %% =============================================================================
 
 one_doc(_Config) ->
-  Options = [{metrics_freq, 100}],
-  RepConfig = #{<<"source">> => <<"source">>,
-                <<"target">> => <<"testdb">>},
-  {ok, #{<<"replication_id">> := RepId}} = barrel_replicate:start_replication(RepConfig, Options),
+  RepConfig = #{source => <<"source">>,
+                target => <<"testdb">>,
+                options => #{ metrics_freq => 100 }},
+
+  {ok, #{ id := RepId}} = barrel_replicate:start_replication(RepConfig),
   %% Info = barrel_replicate:info(Pid),
   Doc = #{ <<"id">> => <<"a">>, <<"v">> => 1},
-  {ok, <<"a">>, _RevId} = barrel:post(<<"source">>, Doc, []),
+  {ok, <<"a">>, _RevId} = barrel:post(<<"source">>, Doc, #{}),
   timer:sleep(200),
-  {ok, Doc2, _} = barrel:get(<<"source">>, <<"a">>, []),
-  {ok, Doc2, _} = barrel:get(<<"testdb">>, <<"a">>, []),
+  {ok, Doc2, _} = barrel:get(<<"source">>, <<"a">>, #{}),
+  {ok, Doc2, _} = barrel:get(<<"testdb">>, <<"a">>, #{}),
   ok = barrel_replicate:stop_replication(RepId),
-
-  %%[Stats] = barrel_task_status:all(),
-  %%1 = proplists:get_value(docs_read, Stats),
-  %%1 = proplists:get_value(docs_written, Stats),
-
   ok = delete_doc("a", <<"source">>),
   ok = delete_doc("a", <<"testdb">>),
-  %% Id = maps:get(id, Info),
-  %% {ok, _Checkpoint} = barrel:get(<<"source">>(), <<"_replication_", Id/binary>>, []),
-  %% {ok, _Checkpoint} = barrel:get(target(), <<"_replication_", Id/binary>>, []),
   ok.
 
 source_not_empty(_Config) ->
   RepId = <<"source_notempty">>,
   Doc = #{ <<"id">> => <<"a">>, <<"v">> => 1},
-  {ok, <<"a">>, _RevId} = barrel:post(<<"source">>, Doc, []),
-  {ok, Doc2, _} = barrel:get(<<"source">>, <<"a">>, []),
-  RepConfig = #{<<"replication_id">> => RepId,
-                <<"source">> => <<"source">>,
-                <<"target">> => <<"testdb">>},
-  {ok, #{<<"replication_id">> := RepId}} =
-    barrel_replicate:start_replication(RepConfig, []),
+  {ok, <<"a">>, _RevId} = barrel:post(<<"source">>, Doc, #{}),
+  {ok, Doc2, _} = barrel:get(<<"source">>, <<"a">>, #{}),
+  RepConfig = #{id => RepId,
+                source => <<"source">>,
+                target => <<"testdb">> },
+  {ok, #{ id := RepId}} =  barrel_replicate:start_replication(RepConfig),
   timer:sleep(200),
-  {ok, Doc2, _} = barrel:get(<<"testdb">>, <<"a">>, []),
+  {ok, Doc2, _} = barrel:get(<<"testdb">>, <<"a">>, #{}),
   ok = barrel_replicate:stop_replication(RepId),
   ok.
 
 deleted_doc(_Config) ->
   RepId = <<"deleteddoc">>,
   Doc = #{ <<"id">> => <<"a">>, <<"v">> => 1},
-  {ok, <<"a">>, RevId} = barrel:post(<<"source">>, Doc, []),
+  {ok, <<"a">>, RevId} = barrel:post(<<"source">>, Doc, #{}),
 
-  RepConfig = #{<<"replication_id">> => RepId,
-                <<"source">> => <<"source">>,
-                <<"target">> => <<"testdb">>},
-  {ok, #{<<"replication_id">> := RepId}} =
-    barrel_replicate:start_replication(RepConfig, []),
+  RepConfig = #{id => RepId,
+                source => <<"source">>,
+                target => <<"testdb">>},
+
+  {ok, #{ id := RepId}} = barrel_replicate:start_replication(RepConfig),
   timer:sleep(200),
-  {ok, #{ <<"id">> := <<"a">>} ,#{<<"rev">> := RevId }} = barrel:get(<<"source">>, <<"a">>, []),
-  {ok, _, _} = barrel:delete(<<"source">>, <<"a">>, [{rev, RevId}]),
-  {error, not_found} = barrel:get(<<"source">>, <<"a">>, []),
+  {ok, #{ <<"id">> := <<"a">>} ,#{<<"rev">> := RevId }} = barrel:get(<<"source">>, <<"a">>, #{}),
+  {ok, _, _} = barrel:delete(<<"source">>, <<"a">>, #{rev => RevId}),
+  {error, not_found} = barrel:get(<<"source">>, <<"a">>, #{}),
   timer:sleep(400),
-  {error, not_found} = barrel:get(<<"testdb">>, <<"a">>, []),
+  {error, not_found} = barrel:get(<<"testdb">>, <<"a">>, #{}),
   ok = barrel_replicate:stop_replication(RepId),
   ok.
 
 list_replication_tasks(_Config) ->
   RepId = <<"a">>,
-  Options = [{metrics_freq, 100}, {persist, true}],
-  RepConfig = #{<<"replication_id">> => RepId,
-    <<"source">> => <<"source">>,
-    <<"target">> => <<"testdb">>},
-  {ok, #{<<"replication_id">> := RepId}} = barrel_replicate:start_replication(RepConfig, Options),
+  RepConfig = #{id => RepId,
+                source => <<"source">>,
+                target => <<"testdb">>,
+                options => #{ metrics_freq => 100 },
+                persist => true },
+
+  [] = barrel_replicate:all_replication_tasks(),
+  {ok, #{id := RepId}} = barrel_replicate:start_replication(RepConfig),
   [<<"a">>] = barrel_replicate:all_replication_tasks(),
-  RepConfig1 = #{<<"replication_id">> => <<"b">>,
-    <<"source">> => <<"source">>,
-    <<"target">> => <<"testdb">>},
-  {ok, #{<<"replication_id">> := <<"b">>}} = barrel_replicate:start_replication(RepConfig1, Options),
+  RepConfig1 = RepConfig#{ id => <<"b">> },
+  {ok, #{id := <<"b">>}} = barrel_replicate:start_replication(RepConfig1),
   [<<"a">>, <<"b">>] = barrel_replicate:all_replication_tasks(),
   ok = barrel_replicate:delete_replication(<<"b">>),
   [<<"a">>] = barrel_replicate:all_replication_tasks(),
-  ok = barrel_replicate:delete_replication(<<"a">>).
- 
+  ok = barrel_replicate:delete_replication(<<"a">>),
+  [] = barrel_replicate:all_replication_tasks().
+
 persistent_replication(_Config) ->
   RepId = <<"a">>,
-  Options = [{metrics_freq, 100}, {persist, true}],
-  RepConfig = #{<<"replication_id">> => RepId,
-                <<"source">> => <<"source">>,
-                <<"target">> => <<"testdb">>},
-  {ok, #{<<"replication_id">> := RepId}} =
-    barrel_replicate:start_replication(RepConfig, Options),
+  Options = #{metrics_freq => 100},
+  RepConfig = #{id => RepId,
+                source => <<"source">>,
+                target => <<"testdb">>,
+                options => Options,
+                persist => true },
+  {ok, #{id := RepId}} = barrel_replicate:start_replication(RepConfig),
   [{RepId, {true, Pid, _}}] = ets:lookup(replication_ids, RepId),
   true = is_pid(Pid),
   [{Pid, {true, RepId}}] = ets:lookup(replication_ids, Pid),
   ok = barrel_replicate:stop_replication(RepId),
   [{RepId, {true, nil, nil}}] = ets:lookup(replication_ids, RepId),
   [] = ets:lookup(replication_ids, Pid),
-  {ok, [AllConfig2]} = file:consult("data/replication.config"),
+  {ok, [AllConfig2]} = file:consult(config_file()),
   RepConfig2 = maps:get(<<"a">>, AllConfig2),
-  #{ <<"source">> := <<"source">>, <<"target">> := <<"testdb">>, options := Options} = RepConfig2,
+  #{ source := <<"source">>,
+     target := <<"testdb">>,
+     options := Options} = RepConfig2,
   ok = barrel_replicate:delete_replication(RepId),
-  {ok, [AllConfig3]} = file:consult("data/replication.config"),
+  {ok, [AllConfig3]} = file:consult(config_file()),
   undefined = maps:get(RepId, AllConfig3, undefined),
   [] = ets:lookup(replication_ids, RepId),
   ok.
 
 restart_persistent_replication(_Config) ->
   RepId = <<"restart">>,
-  Options = [{metrics_freq, 100}, {persist, true}],
-  RepConfig = #{<<"replication_id">> => RepId,
-                <<"source">> => <<"source">>,
-                <<"target">> => <<"testdb">>},
-  {ok, #{<<"replication_id">> := RepId}} =
-    barrel_replicate:start_replication(RepConfig, Options),
+  RepConfig = #{id => RepId,
+                source => <<"source">>,
+                target => <<"testdb">>,
+                options => #{ metrics_freq => 100 },
+                persist => true },
+  {ok, #{id := RepId}} = barrel_replicate:start_replication(RepConfig),
   %% {ok, [AllConfig]} = file:consult("data/replication.config"),
   %% RepConfig = maps:get(RepId, AllConfig),
   Manager = whereis(barrel_replicate),
@@ -195,7 +190,7 @@ restart_persistent_replication(_Config) ->
   {'EXIT', {badarg, _}} = (catch ets:lookup(replication_ids, RepId)),
   timer:sleep(200),
   ok = barrel_replicate:delete_replication(RepId),
-  {ok, [AllConfig3]} = file:consult("data/replication.config"),
+  {ok, [AllConfig3]} = file:consult(config_file()),
   undefined = maps:get(RepId, AllConfig3, undefined),
   [] = ets:lookup(replication_ids, RepId),
   ok.
@@ -203,30 +198,27 @@ restart_persistent_replication(_Config) ->
 
 start_duplicate_replication(_Config) ->
   RepId = <<"duplicate">>,
-  Options = [{metrics_freq, 100}, {persist, true}],
-  RepConfig = #{<<"replication_id">> => RepId,
-                <<"source">> => <<"source">>,
-                <<"target">> => <<"testdb">>},
-  {ok, #{<<"replication_id">> := RepId}} =
-    barrel_replicate:start_replication(RepConfig, Options),
-  {error, {task_already_running, RepId}} =
-    barrel_replicate:start_replication(RepConfig, Options),
+  RepConfig = #{id => RepId,
+                source => <<"source">>,
+                target => <<"testdb">>,
+                options => #{ metrics_freq => 100 },
+                persist => true },
+  {ok, #{id := RepId}} = barrel_replicate:start_replication(RepConfig),
+  {error, {task_already_running, RepId}} = barrel_replicate:start_replication(RepConfig),
   ok = barrel_replicate:delete_replication(RepId),
   ok.
 
 
 delete_database_being_replicated(_Config) ->
-  {ok, _} = barrel_store:create_db(<<"tobedeleted">>, #{}),
+  {ok, _} = barrel:create_database(#{ <<"database_id">> => <<"tobedeleted">> }),
   RepId = <<"sourcedatabasedeleted">>,
-  Options = [],
-  RepConfig = #{<<"replication_id">> => RepId,
-                <<"source">> => <<"tobedeleted">>,
-                <<"target">> => <<"testdb">>},
-  {ok, #{<<"replication_id">> := RepId}} =
-    barrel_replicate:start_replication(RepConfig, Options),
+  RepConfig = #{id => RepId,
+                source => <<"tobedeleted">>,
+                target => <<"testdb">>},
+  {ok, #{id := RepId}} = barrel_replicate:start_replication(RepConfig),
   Manager = whereis(barrel_replicate),
   [{<<"sourcedatabasedeleted">>, {false, _Pid, _}}] = ets:lookup(replication_ids, RepId),
-  ok = barrel_store:delete_db(<<"tobedeleted">>),
+  ok = barrel:delete_database(<<"tobedeleted">>),
   timer:sleep(200),
   Manager = whereis(barrel_replicate),
   [] = ets:lookup(replication_ids, RepId),
@@ -240,12 +232,10 @@ delete_database_being_replicated(_Config) ->
 random_activity(_Config) ->
   Scenario = scenario(),
   RepId = <<"random">>,
-  Options = [],
-  RepConfig = #{<<"replication_id">> => RepId,
-                <<"source">> => <<"source">>,
-                <<"target">> => <<"testdb">>},
-  {ok, #{<<"replication_id">> := RepId}} =
-    barrel_replicate:start_replication(RepConfig, Options),
+  RepConfig = #{id => RepId,
+                source => <<"source">>,
+                target => <<"testdb">>},
+  {ok, #{id := RepId}} = barrel_replicate:start_replication(RepConfig),
   ExpectedResults = play_scenario(Scenario, <<"source">>),
   timer:sleep(200),
   ok = check_all(ExpectedResults, <<"source">>, <<"testdb">>),
@@ -271,6 +261,7 @@ checkpoints(_Config) ->
   SourceDbId = <<"source">>,
   RepId = <<"checkpoints">>,
   {ok, SourceCheckpoints} = read_checkpoint_doc(SourceDbId, RepId),
+  lager:info("source checkpoint is ~p~n", [SourceCheckpoints]),
   History = maps:get(<<"history">>, SourceCheckpoints),
   4 = length(History),
   LastSession = hd(History),
@@ -282,12 +273,10 @@ checkpoints(_Config) ->
 
 play_checkpoint(Scenario, M) ->
   RepId = <<"checkpoints">>,
-  Options = [],
-  RepConfig = #{<<"replication_id">> => RepId,
-                <<"source">> => <<"source">>,
-                <<"target">> => <<"testdb">>},
-  {ok, #{<<"replication_id">> := RepId}} =
-    barrel_replicate:start_replication(RepConfig, Options),
+  RepConfig = #{id => RepId,
+                source => <<"source">>,
+                target => <<"testdb">>},
+  {ok, #{id := RepId}} = barrel_replicate:start_replication(RepConfig),
   Expected = play_scenario(Scenario, <<"source">>, M),
   timer:sleep(200),
   ok = check_all(Expected, <<"source">>, <<"testdb">>),
@@ -331,11 +320,11 @@ check(DocName, Map, Db1, Db2) ->
   Id = list_to_binary(DocName),
   case maps:get(DocName, Map) of
     deleted ->
-      {error, not_found} = barrel:get(Db1, Id, []),
-      {error, not_found} = barrel:get(Db2, Id, []);
+      {error, not_found} = barrel:get(Db1, Id, #{}),
+      {error, not_found} = barrel:get(Db2, Id, #{});
     Expected ->
-      {ok, DocSource, _} = barrel:get(Db1, Id, []),
-      {ok, DocTarget, _} = barrel:get(Db2, Id, []),
+      {ok, DocSource, _} = barrel:get(Db1, Id, #{}),
+      {ok, DocTarget, _} = barrel:get(Db2, Id, #{}),
       Expected = maps:get(<<"v">>, DocSource),
       Expected = maps:get(<<"v">>, DocTarget)
   end,
@@ -349,24 +338,24 @@ purge_scenario(Map, Db) ->
 %% todo: when the api ois ok prefer a post followed by a put if a conflict is returned
 put_doc(DocName, Value, Db) ->
   Id = list_to_binary(DocName),
-  case barrel:get(Db, Id, []) of
+  case barrel:get(Db, Id, #{}) of
     {ok, Doc, Meta} ->
       Doc2 = Doc#{<<"v">> => Value},
       RevId = maps:get(<<"rev">>, Meta),
-      {ok,_,_} = barrel:put(Db, Doc2, [{rev, RevId}]);
+      {ok,_,_} = barrel:put(Db, Doc2, #{rev => RevId});
     {error, not_found} ->
       Doc = #{<<"id">> => Id, <<"v">> => Value},
-      {ok,_,_} = barrel:post(Db, Doc, [])
+      {ok,_,_} = barrel:post(Db, Doc, #{})
   end.
 
 %% todo: only delete ? delete should return not_found if the resoure don't exist
 delete_doc(DocName, Db) ->
   Id = list_to_binary(DocName),
-  case barrel:get(Db, Id, []) of
+  case barrel:get(Db, Id, #{}) of
     {error, not_found} -> ok;
     {ok, _Doc, Meta} ->
       RevId = maps:get(<<"rev">>, Meta),
-      {ok, _, _} = barrel:delete(Db, Id, [{rev, RevId}]),
+      {ok, _, _} = barrel:delete(Db, Id, #{rev => RevId}),
       ok
   end.
 
@@ -390,3 +379,7 @@ read_checkpoint_doc(Db, RepId) ->
 
 checkpoint_docid(RepId) ->
   <<"replication-checkpoint-", RepId/binary>>.
+
+
+config_file() ->
+  filename:join([barrel_store:data_dir(), "replication.config"]).

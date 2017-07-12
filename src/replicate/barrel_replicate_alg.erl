@@ -1,4 +1,5 @@
 %% Copyright 2017, Bernard Notarianni
+%% Copyright 2017, Benoit Chesneau
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License"); you may not
 %% use this file except in compliance with the License. You may obtain a copy of
@@ -29,7 +30,7 @@ replicate(Source, Target, Changes, Metrics) ->
 
 sync_change(Source, Target, Change, Metrics) ->
   #{<<"id">> := DocId, <<"changes">> := History} = Change,
-  {ok, MissingRevisions, _PossibleAncestors} = revsdiff(Target, DocId, History),
+  {ok, MissingRevisions, _PossibleAncestors} = barrel_replicate_api_wrapper:revsdiff(Target, DocId, History),
   Metrics2 = lists:foldr(fun(Revision, Acc) ->
                              sync_revision(Source, Target, DocId, Revision, Acc)
                          end, Metrics, MissingRevisions),
@@ -43,7 +44,10 @@ sync_revision(Source, Target, DocId, Revision, Metrics) ->
   Metrics3.
 
 read_doc_with_history(Source, Id, Rev, Metrics) ->
-  Get = fun() -> get(Source, Id, [{rev, Rev}, {history, true}]) end,
+  Get =
+    fun() ->
+      barrel_replicate_api_wrapper:get(Source, Id, #{rev => Rev, history => true})
+    end,
   case timer:tc(Get) of
     {Time, {ok, Doc, Meta}} ->
       Metrics2 = barrel_replicate_metrics:inc(docs_read, Metrics, 1),
@@ -57,7 +61,10 @@ read_doc_with_history(Source, Id, Rev, Metrics) ->
 write_doc(_, undefined, _, _, Metrics) ->
   Metrics;
 write_doc(Target, Doc, History, Deleted, Metrics) ->
-  PutRev = fun() -> put_rev(Target, Doc, History, Deleted, []) end,
+  PutRev =
+    fun() ->
+      barrel_replicate_api_wrapper:put_rev(Target, Doc, History, Deleted, #{})
+    end,
   case timer:tc(PutRev) of
     {Time, {ok, _, _}} ->
       Metrics2 = barrel_replicate_metrics:inc(docs_written, Metrics, 1),
@@ -70,14 +77,3 @@ write_doc(Target, Doc, History, Deleted, Metrics) ->
       ),
       barrel_replicate_metrics:inc(doc_write_failures, Metrics, 1)
   end.
-
-get({Mod, ModState}, Id, Opts) ->
-  Mod:get(ModState, Id, [{attachments_parsing, false}|Opts]);
-get(Db, Id, Opts) when is_binary(Db) ->
-  barrel_db:get(Db, Id, Opts).
-
-put_rev({Mod, ModState}, Doc, History, Deleted, Opts) ->
-  Mod:put_rev(ModState, Doc, History, Deleted, Opts).
-
-revsdiff({Mod, ModState}, DocId, History) ->
-  Mod:revsdiff(ModState, DocId, History).

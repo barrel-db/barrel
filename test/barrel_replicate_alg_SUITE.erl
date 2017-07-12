@@ -13,7 +13,7 @@
 %% the License.
 
 -module(barrel_replicate_alg_SUITE).
--author("Bernard Notarianni").
+
 
 %% API
 -export(
@@ -38,18 +38,21 @@ all() ->
   , random_activity
   ].
 
+-define(CH(DbId), barrel_replicate_api_wrapper:setup_channel(DbId)).
+
+
 init_per_suite(Config) ->
   {ok, _} = application:ensure_all_started(barrel),
   Config.
 
 init_per_testcase(_, Config) ->
-  {ok, _} = barrel_store:create_db(<<"testdb">>, #{}),
-  {ok, _} = barrel_store:create_db(<<"source">>, #{}),
+  {ok, _} = barrel:create_database(#{ <<"database_id">> => <<"testdb">> }),
+  {ok, _} = barrel:create_database(#{ <<"database_id">> => <<"source">> }),
   [{db, <<"testdb">>} | Config].
 
 end_per_testcase(_, _Config) ->
-  ok = barrel_store:delete_db(<<"testdb">>),
-  ok = barrel_store:delete_db(<<"source">>),
+  ok = barrel:delete_database(<<"testdb">>),
+  ok = barrel:delete_database(<<"source">>),
   ok.
 
 end_per_suite(Config) ->
@@ -67,7 +70,7 @@ changes() ->
   Fun = fun(Change, Acc) ->
             {ok, [Change|Acc]}
         end,
-  Changes = barrel_db:changes_since(Db, Since, Fun, [], [{history, all}]),
+  Changes = barrel_db:changes_since(Db, Since, Fun, [], #{history => all}),
   lists:reverse(Changes).
 
 
@@ -77,17 +80,17 @@ changes() ->
 
 one_doc(_Config) ->
   Doc = #{ <<"id">> => <<"a">>, <<"v">> => 1},
-  {ok, <<"a">>, _RevId} = barrel:post(<<"source">>, Doc, []),
+  {ok, <<"a">>, _RevId} = barrel:post(<<"source">>, Doc, #{}),
   Metrics = barrel_replicate_metrics:new(),
   Changes = changes(),
   {ok, _} = barrel_replicate_alg:replicate(
-    {barrel, <<"source">>},
-    {barrel, <<"testdb">>},
+    ?CH(<<"source">>),
+    ?CH(<<"testdb">>),
     Changes,
     Metrics
   ),
-  {ok, Doc2, _} = barrel:get(<<"source">>, <<"a">>, []),
-  {ok, Doc2, _} = barrel:get(<<"testdb">>, <<"a">>, []),
+  {ok, Doc2, _} = barrel:get(<<"source">>, <<"a">>, #{}),
+  {ok, Doc2, _} = barrel:get(<<"testdb">>, <<"a">>, #{}),
 
   ok = delete_doc("a", <<"source">>),
   ok = delete_doc("a", <<"testdb">>),
@@ -95,33 +98,33 @@ one_doc(_Config) ->
 
 source_not_empty(_Config) ->
   Doc = #{ <<"id">> => <<"a">>, <<"v">> => 1},
-  {ok, <<"a">>, _RevId} = barrel:post(<<"source">>, Doc, []),
-  {ok, Doc2, _} = barrel:get(<<"source">>, <<"a">>, []),
+  {ok, <<"a">>, _RevId} = barrel:post(<<"source">>, Doc, #{}),
+  {ok, Doc2, _} = barrel:get(<<"source">>, <<"a">>, #{}),
   Metrics = barrel_replicate_metrics:new(),
   Changes = changes(),
   {ok, _} = barrel_replicate_alg:replicate(
-    {barrel, <<"source">>},
-    {barrel, <<"testdb">>},
+    ?CH(<<"source">>),
+    ?CH(<<"testdb">>),
     Changes,
     Metrics
   ),
-  {ok, Doc2, _} = barrel:get(<<"testdb">>, <<"a">>, []),
+  {ok, Doc2, _} = barrel:get(<<"testdb">>, <<"a">>, #{}),
   ok.
 
 deleted_doc(_Config) ->
   Doc = #{ <<"id">> => <<"a">>, <<"v">> => 1},
-  {ok, <<"a">>, RevId} = barrel:post(<<"source">>, Doc, []),
-  {ok, #{ <<"id">> := <<"a">>}, #{<<"rev">> := RevId }} = barrel:get(<<"source">>, <<"a">>, []),
-  {ok, _, _} = barrel:delete(<<"source">>, <<"a">>, [{rev, RevId}]),
+  {ok, <<"a">>, RevId} = barrel:post(<<"source">>, Doc, #{}),
+  {ok, #{ <<"id">> := <<"a">>}, #{<<"rev">> := RevId }} = barrel:get(<<"source">>, <<"a">>, #{}),
+  {ok, _, _} = barrel:delete(<<"source">>, <<"a">>, #{rev => RevId}),
   Metrics = barrel_replicate_metrics:new(),
   Changes = changes(),
   {ok, _} = barrel_replicate_alg:replicate(
-    {barrel, <<"source">>},
-    {barrel, <<"testdb">>},
+    ?CH(<<"source">>),
+    ?CH(<<"testdb">>),
     Changes,
     Metrics
   ),
-  {error, not_found} = barrel:get(<<"testdb">>, <<"a">>, []),
+  {error, not_found} = barrel:get(<<"testdb">>, <<"a">>, #{}),
   ok.
 
 %% =============================================================================
@@ -134,8 +137,8 @@ random_activity(_Config) ->
   Metrics = barrel_replicate_metrics:new(),
   Changes = changes(),
   {ok, _} = barrel_replicate_alg:replicate(
-    {barrel, <<"source">>},
-    {barrel, <<"testdb">>},
+    ?CH(<<"source">>),
+    ?CH(<<"testdb">>),
     Changes,
     Metrics
   ),
@@ -172,11 +175,11 @@ check(DocName, Map, Db1, Db2) ->
   Id = list_to_binary(DocName),
   case maps:get(DocName, Map) of
     deleted ->
-      {error, not_found} = barrel:get(Db1, Id, []),
-      {error, not_found} = barrel:get(Db2, Id, []);
+      {error, not_found} = barrel:get(Db1, Id, #{}),
+      {error, not_found} = barrel:get(Db2, Id, #{});
     Expected ->
-      {ok, DocSource, _} = barrel:get(Db1, Id, []),
-      {ok, DocTarget, _} = barrel:get(Db2, Id, []),
+      {ok, DocSource, _} = barrel:get(Db1, Id, #{}),
+      {ok, DocTarget, _} = barrel:get(Db2, Id, #{}),
       Expected = maps:get(<<"v">>, DocSource),
       Expected = maps:get(<<"v">>, DocTarget)
   end,
@@ -189,23 +192,23 @@ purge_scenario(Map, Db) ->
 
 put_doc(DocName, Value, Db) ->
   Id = list_to_binary(DocName),
-  case barrel:get(Db, Id, []) of
+  case barrel:get(Db, Id, #{}) of
     {ok, Doc, Meta} ->
       Doc2 = Doc#{<<"v">> => Value},
       RevId = maps:get(<<"rev">>, Meta),
-      {ok,_,_} = barrel:put(Db, Doc2, [{rev, RevId}]);
+      {ok,_,_} = barrel:put(Db, Doc2, #{rev => RevId});
     {error, not_found} ->
       Doc = #{<<"id">> => Id, <<"v">> => Value},
-      {ok,_,_} = barrel:post(Db, Doc, [])
+      {ok,_,_} = barrel:post(Db, Doc, #{})
   end.
 
 delete_doc(DocName, Db) ->
   Id = list_to_binary(DocName),
-  case barrel:get(Db, Id, []) of
+  case barrel:get(Db, Id, #{}) of
     {error, not_found} -> ok;
     {ok, _Doc, Meta} ->
       RevId = maps:get(<<"rev">>, Meta),
-      {ok, _, _} = barrel:delete(Db, Id, [{rev, RevId}]),
+      {ok, _, _} = barrel:delete(Db, Id, #{rev => RevId}),
       ok
   end.
 

@@ -67,6 +67,7 @@ mean([V|Others], Acc, Sum, Size, Period) ->
 %% Storage of collected metrics
 %%==============================================================================
 
+%% TODO: why metrics options are not set?
 create_task(Metrics, _Options) ->
   ok = barrel_task_status:add_task(barrel_stat_replication, Metrics),
   ok.

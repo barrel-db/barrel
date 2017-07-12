@@ -95,23 +95,24 @@ multi_get(DbName, Fun, AccIn, DocIds, Options) ->
     DbName,
     fun(Db) ->
       %% parse options
-      WithHistory = proplists:get_value(history, Options, false),
-      MaxHistory = proplists:get_value(max_history, Options, ?IMAX1),
-      Ancestors = proplists:get_value(ancestors, Options, []),
+      WithHistory = maps:get(history, Options, false),
+      MaxHistory = maps:get(max_history, Options, ?IMAX1),
+      Ancestors = maps:get(ancestors, Options, []),
       %% initialize a snapshot for reads
       {ok, Snapshot} = rocksdb:snapshot(Db#db.store),
       ReadOptions = [{snapshot, Snapshot}],
       Rev = <<"">>,
-      GetRevs = fun(DocId, Acc) ->
-        Res = get_doc1(Db, DocId, Rev,
-          WithHistory, MaxHistory,
-          Ancestors, ReadOptions),
-        case Res of
-          {ok, Doc, Meta} ->
-            Fun(Doc, Meta, Acc);
-          _ -> Acc
-        end
-                end,
+      GetRevs =
+        fun(DocId, Acc) ->
+          Res = get_doc1(
+            Db, DocId, Rev, WithHistory, MaxHistory, Ancestors,
+            ReadOptions),
+          case Res of
+            {ok, Doc, Meta} ->
+              Fun(Doc, Meta, Acc);
+            _ -> Acc
+          end
+        end,
       %% finally retrieve the docs
       try
         lists:foldl(GetRevs, AccIn, DocIds)
@@ -127,10 +128,10 @@ get(DbName, DocId, Options) ->
     DbName,
     fun(Db) ->
       %% parse options
-      Rev = proplists:get_value(rev, Options, <<"">>),
-      WithHistory = proplists:get_value(history, Options, false),
-      MaxHistory = proplists:get_value(max_history, Options, ?IMAX1),
-      Ancestors = proplists:get_value(ancestors, Options, []),
+      Rev = maps:get(rev, Options, <<"">>),
+      WithHistory = maps:get(history, Options, false),
+      MaxHistory = maps:get(max_history, Options, ?IMAX1),
+      Ancestors = maps:get(ancestors, Options, []),
       get_doc1(Db, DocId, Rev, WithHistory, MaxHistory, Ancestors, [])
     end
   ).
@@ -270,7 +271,7 @@ fold_by_id_int(#db{ store=Store }, UserFun, AccIn, Opts) ->
   Prefix = barrel_keys:prefix(doc),
   {ok, Snapshot} = rocksdb:snapshot(Store),
   ReadOptions = [{snapshot, Snapshot}],
-  Opts2 = [{read_options, ReadOptions} | Opts],
+  Opts2 = Opts#{read_options => ReadOptions},
 
   WrapperFun =
   fun(_Key, << RID:64 >>, Acc) ->
@@ -301,44 +302,44 @@ changes_since_int(Db = #db{ store=Store}, Since0, Fun, AccIn, Opts) ->
             Since0 > 0 -> Since0 + 1;
             true -> Since0
           end,
+  %% setup fold options
   Prefix = barrel_keys:prefix(seq),
   {ok, Snapshot} = rocksdb:snapshot(Store),
   ReadOptions = [{snapshot, Snapshot}],
-  FoldOpts = [
-    {start_key, <<Since:64>>},
-    {read_options, ReadOptions}
-  ],
-  IncludeDoc = proplists:get_value(include_doc, Opts, false),
-  WithHistory = proplists:get_value(history, Opts, last) =:= all,
-
+  FoldOpts = #{
+    start_key => <<Since:64>>,
+    read_options => ReadOptions
+  },
+  IncludeDoc = maps:get(include_doc, Opts, false),
+  WithHistory = maps:get(history, Opts, last) =:= all,
+  %% wrap fun fold function to handle indexed results
   WrapperFun =
-  fun(Key, BinDocInfo, Acc) ->
-    DocInfo = binary_to_term(BinDocInfo),
-    [_, SeqBin] = binary:split(Key, Prefix),
-    <<Seq:64>> = SeqBin,
-    RevId = maps:get(current_rev, DocInfo),
-    Deleted = maps:get(deleted, DocInfo),
-    DocId = maps:get(id, DocInfo),
-    Rid = maps:get(rid, DocInfo),
-    RevTree = maps:get(revtree, DocInfo),
-    Changes = case WithHistory of
-                false -> [RevId];
-                true -> barrel_revtree:history(RevId, RevTree)
-              end,
-
-    %% create change
-    Change = change_with_doc(
-      changes_with_deleted(
-        #{ <<"id">> => DocId, <<"seq">> => Seq,
-           <<"rev">> => RevId, <<"changes">> => Changes,
-           <<"rid">> => encode_rid(Rid) },
-        Deleted
+    fun(Key, BinDocInfo, Acc) ->
+      DocInfo = binary_to_term(BinDocInfo),
+      [_, SeqBin] = binary:split(Key, Prefix),
+      <<Seq:64>> = SeqBin,
+      RevId = maps:get(current_rev, DocInfo),
+      Deleted = maps:get(deleted, DocInfo),
+      DocId = maps:get(id, DocInfo),
+      Rid = maps:get(rid, DocInfo),
+      RevTree = maps:get(revtree, DocInfo),
+      Changes = case WithHistory of
+                  false -> [RevId];
+                  true -> barrel_revtree:history(RevId, RevTree)
+                end,
+      %% create change
+      Change = change_with_doc(
+        changes_with_deleted(
+          #{ <<"id">> => DocId, <<"seq">> => Seq,
+            <<"rev">> => RevId, <<"changes">> => Changes,
+            <<"rid">> => encode_rid(Rid) },
+          Deleted
+        ),
+        Rid, Db, ReadOptions, IncludeDoc
       ),
-      Rid, Db, ReadOptions, IncludeDoc
-    ),
-    Fun(Change, Acc)
-  end,
-
+      Fun(Change, Acc)
+    end,
+  %% finally traverse changes
   try barrel_fold:fold_prefix(Store, Prefix, WrapperFun, AccIn, FoldOpts)
   after rocksdb:release_snapshot(Snapshot)
   end.
@@ -499,7 +500,6 @@ decode_rid(Bin) ->
   << Rid:64 >> = base64:decode(Bin),
   Rid.
 
-
 %% TODO: put dbinfo in a template
 init([Cache, MemEnv, DbId, Config]) ->
   process_flag(trap_exit, true),
@@ -534,7 +534,7 @@ init_meta(Store) ->
     end,
     #{<<"docs_count">> => 0,
       <<"system_docs_count">> => 0},
-    []
+    #{}
   ),
   Meta#{ <<"last_rid" >> => last_rid(Store),
          <<"updated_seq">> => last_sequence(Store) }.
@@ -708,7 +708,7 @@ do_update_docs(DocBuckets, Db =  #db{id=DbId, store=Store }) ->
         case ResWrite of
           ok ->
             ets:insert(barrel_dbs, Db2),
-            barrel_db_event:notify(Db2#db.id, db_updated),
+            barrel_event:notify(Db2#db.id, db_updated),
             lists:foreach(
               fun(Req) -> send_result(Req, {ok, DocId, WinningRev}) end,
               Reqs

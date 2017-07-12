@@ -43,11 +43,11 @@ init_per_suite(Config) ->
   Config.
 
 init_per_testcase(_, Config) ->
-  _ = barrel_store:create_db(#{ <<"database_id">> => <<"testdb">> }),
+  _ = barrel:create_database(#{ <<"database_id">> => <<"testdb">> }),
   Config.
 
 end_per_testcase(_, _Config) ->
-  _ = barrel_store:delete_db(<<"testdb">>),
+  _ = barrel:delete_database(<<"testdb">>),
   ok.
 
 end_per_suite(Config) ->
@@ -58,7 +58,7 @@ collect_change(_Config) ->
   {ok, Pid} = barrel_changes_listener:start_link(<<"testdb">>, #{since => 0, mode => sse}),
   [] = barrel_changes_listener:changes(Pid),
   Doc = #{ <<"id">> => <<"aa">>, <<"v">> => 1},
-  {ok, <<"aa">>, _RevId} = barrel:post(<<"testdb">>, Doc, []),
+  {ok, <<"aa">>, _RevId} = barrel:post(<<"testdb">>, Doc, #{}),
   timer:sleep(100),
   [#{ <<"seq">> := 1, <<"id">> := <<"aa">>}] = barrel_changes_listener:changes(Pid),
   [] = barrel_changes_listener:changes(Pid),
@@ -68,22 +68,22 @@ collect_changes(_Config) ->
   {ok, Pid} = barrel_changes_listener:start_link(<<"testdb">>, #{since => 0, mode => sse}),
   [] = barrel_changes_listener:changes(Pid),
   Doc = #{ <<"id">> => <<"aa">>, <<"v">> => 1},
-  {ok, <<"aa">>, _} = barrel:post(<<"testdb">>, Doc, []),
+  {ok, <<"aa">>, _} = barrel:post(<<"testdb">>, Doc, #{}),
   timer:sleep(100),
   [#{ <<"seq">> := 1, <<"id">> := <<"aa">>}] = barrel_changes_listener:changes(Pid),
   [] = barrel_changes_listener:changes(Pid),
   Doc2 = #{ <<"id">> => <<"bb">>, <<"v">> => 1},
-  {ok, <<"bb">>, _} = barrel:post(<<"testdb">>, Doc2, []),
-  {ok, _, _} = barrel:get(<<"testdb">>, <<"bb">>, []),
+  {ok, <<"bb">>, _} = barrel:post(<<"testdb">>, Doc2, #{}),
+  {ok, _, _} = barrel:get(<<"testdb">>, <<"bb">>, #{}),
   timer:sleep(100),
   [#{ <<"seq">> := 2, <<"id">> := <<"bb">>}] = barrel_changes_listener:changes(Pid),
   [] = barrel_changes_listener:changes(Pid),
   Doc3 = #{ <<"id">> => <<"cc">>, <<"v">> => 1},
   Doc4 = #{ <<"id">> => <<"dd">>, <<"v">> => 1},
-  {ok, <<"cc">>, _} = barrel:post(<<"testdb">>, Doc3, []),
-  {ok, <<"dd">>, _} = barrel:post(<<"testdb">>, Doc4, []),
-  {ok, _, _} = barrel:get(<<"testdb">>, <<"cc">>, []),
-  {ok, _, _} = barrel:get(<<"testdb">>, <<"dd">>, []),
+  {ok, <<"cc">>, _} = barrel:post(<<"testdb">>, Doc3, #{}),
+  {ok, <<"dd">>, _} = barrel:post(<<"testdb">>, Doc4, #{}),
+  {ok, _, _} = barrel:get(<<"testdb">>, <<"cc">>, #{}),
+  {ok, _, _} = barrel:get(<<"testdb">>, <<"dd">>, #{}),
   timer:sleep(100),
   [
     #{ <<"seq">> := 3, <<"id">> := <<"cc">>},
@@ -103,10 +103,10 @@ changes_feed_callback(_Config) ->
   
   Doc1 = #{ <<"id">> => <<"aa">>, <<"v">> => 1},
   Doc2 = #{ <<"id">> => <<"bb">>, <<"v">> => 1},
-  {ok, <<"aa">>, _} = barrel:post(<<"testdb">>, Doc1, []),
-  {ok, <<"bb">>, _} = barrel:post(<<"testdb">>, Doc2, []),
-  {ok, _, _} = barrel:get(<<"testdb">>, <<"aa">>, []),
-  {ok, _, _} = barrel:get(<<"testdb">>, <<"bb">>, []),
+  {ok, <<"aa">>, _} = barrel:post(<<"testdb">>, Doc1, #{}),
+  {ok, <<"bb">>, _} = barrel:post(<<"testdb">>, Doc2, #{}),
+  {ok, _, _} = barrel:get(<<"testdb">>, <<"aa">>, #{}),
+  {ok, _, _} = barrel:get(<<"testdb">>, <<"bb">>, #{}),
   timer:sleep(100),
   [
     #{ <<"seq">> := 1, <<"id">> := <<"aa">>},
