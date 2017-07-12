@@ -27,7 +27,8 @@
   order_by_key/1,
   multiple_docs/1,
   range/1,
-  limit_at/1
+  limit_at/1,
+  equal_to/1
 ]).
 
 all() ->
@@ -35,7 +36,8 @@ all() ->
     order_by_key,
     multiple_docs,
     range,
-    limit_at
+    limit_at,
+    equal_to
   ].
 
 init_per_suite(Config) ->
@@ -231,5 +233,48 @@ range(_Config) ->
     #{ start_at => <<"test3">>, end_at => <<"test6">> }
   ),
   FC = QFC,
+  ok.
+
+
+equal_to(_Config) ->
+  Batch = [
+    {post, #{ <<"id">> => <<"a">>, <<"o">> => #{ <<"test1">> => 1 }}},
+    {post, #{ <<"id">> => <<"b">>, <<"o">> => #{ <<"test2">> => 1 }}},
+    {post, #{ <<"id">> => <<"c">>, <<"o">> => #{ <<"test3">> => 2 }}},
+    {post, #{ <<"id">> => <<"d">>, <<"o">> => #{ <<"test4">> => 2 }}},
+    {post, #{ <<"id">> => <<"e">>, <<"o">> => #{ <<"test5">> => 1 }}},
+    {post, #{ <<"id">> => <<"f">>, <<"o">> => #{ <<"test6">> => 3 }}},
+    {post, #{ <<"id">> => <<"g">>, <<"o">> => #{ <<"test7">> => 1 }}},
+    {post, #{ <<"id">> => <<"h">>, <<"o">> => #{ <<"test8">> => 1 }}}
+  ],
+  _ = barrel:write_batch(<<"testdb">>, Batch, #{}),
+  Fun = fun(#{ <<"id">> := Id }, _, Acc) -> {ok, [ Id | Acc ]} end,
+  Q1 = barrel:walk(
+    <<"testdb">>,
+    <<"o">>,
+    Fun,
+    [],
+    #{ equal_to => 1}
+  ),
+  5 = length(Q1),
+  [<<"h">>, <<"g">>,  <<"e">>,  <<"b">>, <<"a">>] = Q1,
+  Q2 = barrel:walk(
+    <<"testdb">>,
+    <<"o">>,
+    Fun,
+    [],
+    #{ equal_to => 2}
+  ),
+   2 = length(Q2),
+  [<<"d">>, <<"c">>] = Q2,
+  Q3 = barrel:walk(
+    <<"testdb">>,
+    <<"o">>,
+    Fun,
+    [],
+    #{ equal_to => 3}
+  ),
+  1 = length(Q3),
+  [<<"f">>] = Q3,
   ok.
 

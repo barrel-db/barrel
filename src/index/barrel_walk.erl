@@ -170,8 +170,8 @@ validate_options_fun(start_at, Key, Options) when is_binary(Key) ->
   Options#{ start_at => Key };
 validate_options_fun(end_at, Key, Options) when is_binary(Key) ->
   Options#{ end_at => Key };
-validate_options_fun(equal_to, Key, Options) when is_binary(Key) ->
-  Options#{ equal_to => Key };
+validate_options_fun(equal_to, Val, Options)  ->
+  Options#{ equal_to => Val };
 validate_options_fun(limit_to_last, Limit, Options) when is_integer(Limit), Limit > 0 ->
   case maps:find(limit_to_first, Options) of
     {ok, _} -> erlang:error(badarg);
@@ -219,7 +219,8 @@ parse_rid(Path, OrderBy) ->
   Sz = byte_size(Prefix),
   << Prefix:Sz/binary, Encoded/binary >> = Path,
   [ Rid | Rest ] = decode_partial_path(Encoded, []),
-  {Rid, lists:reverse(Rest)}.
+  [ << "$" >> | Rest1 ] =  lists:reverse(Rest),
+  {Rid, Rest1}.
 
 decode_partial_path(<<"">>, Parts) ->
   Parts;
