@@ -182,6 +182,8 @@ validate_options_fun(limit_to_first, Limit, Options) when is_integer(Limit), Lim
     {ok, _} -> erlang:error(badarg);
     error -> Options#{ limit => Limit, move => next }
   end;
+validate_options_fun(include_docs, IncludeDocs, Options) ->
+  Options#{ include_docs => IncludeDocs };
 validate_options_fun(_, _, _) ->
   erlang:error(badarg).
 
