@@ -15,7 +15,7 @@
   id/0, id/1
 ]).
 
--export([curr_time_millis/0]).
+-export([curr_time_millis/0, as_list/2]).
 
 -export([
   init/1,
@@ -47,7 +47,7 @@ id(Base) ->
 init([]) ->
   WorkerId = worker_id(),
   MaxTime = curr_time_millis(),
-  {ok, #{ max_time => MaxTime, worker_id => WorkerId, sequecne => 0}}.
+  {ok, #{ max_time => MaxTime, worker_id => WorkerId, sequence => 0}}.
 
 
 handle_call(get_id, _From, State) ->
@@ -176,9 +176,7 @@ as_list(I0, Base, R0) ->
       as_list(I1, Base, R1)
   end.
 
-curr_time_millis() ->
-  {MegaSec,Sec, MicroSec} = os:timestamp(),
-  1000000000*MegaSec + Sec*1000 + erlang:trunc(MicroSec/1000).
+curr_time_millis() -> erlang:system_time(millisecond).
 
 
 %% ==============================
