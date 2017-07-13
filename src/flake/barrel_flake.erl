@@ -142,10 +142,9 @@ gen_id(Time,WorkerId,Sequence) ->
 %% n.b. - unique_id_62/0 and friends pulled from riak
 %%
 
-%% @spec integer_to_list(Integer :: integer(), Base :: integer()) ->
-%%          string()
 %% @doc Convert an integer to its string representation in the given
 %%      base.  Bases 2-62 are supported.
+-spec as_list(I :: integer(), Base :: integer()) -> string().
 as_list(I, 10) ->
   erlang:integer_to_list(I);
 as_list(I, Base)
@@ -153,12 +152,7 @@ as_list(I, Base)
        is_integer(Base),
        Base >= 2,
        Base =< 1+$Z-$A+10+1+$z-$a ->
-  if
-    I < 0 ->
-      [$-|as_list(-I, Base, [])];
-    true ->
-      as_list(I, Base, [])
-  end;
+  as_list(I, Base, []);
 as_list(I, Base) ->
   erlang:error(badarg, [I, Base]).
 
