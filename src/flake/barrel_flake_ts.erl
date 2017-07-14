@@ -29,7 +29,7 @@
   code_change/3
 ]).
 
--define(DEFAULT_CONFIG, "BARREL_TIMESTAMP").
+-define(DEFAULT_CONFIG, "BARREL_TS").
 -define(DEFAULT_INTERVAL, 1000).
 
 %% ==============================
@@ -74,7 +74,7 @@ code_change(_, State, _) -> {ok, State}.
 
 read_timestamp() ->
   case read_file(persist_file()) of
-    {ok, [#{ ts := Ts}]} -> {ok, Ts};
+    {ok, Ts} -> {ok, Ts};
     {error, enoent} -> write_timestamp();
     Error ->
       Error
@@ -82,7 +82,7 @@ read_timestamp() ->
 
 write_timestamp() ->
   Ts = barrel_flake:curr_time_millis(),
-  ok = file:write_file(persist_file(), io_lib:fwrite("~p.\n",[ #{ ts => Ts}])),
+  ok = file:write_file(persist_file(), term_to_binary(Ts)),
   {ok, Ts}.
   
 
@@ -111,7 +111,15 @@ persist_file() ->
       FullPath
   end.
 
-read_file(Name) -> file:consult(Name).
+read_file(Name) ->
+  case file:read_file(Name) of
+    {ok, Bin} ->
+      Term = erlang:binary_to_term(Bin),
+      {ok,  Term};
+    Error ->
+      Error
+  end.
+ 
 
 get_interval() ->
   application:get_env(barrel, persist_ts_interval, ?DEFAULT_INTERVAL).

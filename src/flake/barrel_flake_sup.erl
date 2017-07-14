@@ -23,12 +23,12 @@ start_link() ->
 
 init([]) ->
   AllowableDowntime = application:get_env(barrel, ts_allowable_downtime, ?ALLOWABLE_DOWNTIME),
-  Now = barrel_flake:curr_time_millis(),
   {ok, LastTs} = barrel_flake_ts:read_timestamp(),
+  Now = barrel_flake:curr_time_millis(),
   TimeSinceLastRun = Now - LastTs,
   
-  _ = lager:info(
-    "now: ~p, last: ~p, delta: ~p~n, allowable_downtime: ~p",
+  _ = lager:debug(
+    "timestamp: now: ~p, last: ~p, delta: ~p~n, allowable_downtime: ~p",
     [Now, LastTs, TimeSinceLastRun, AllowableDowntime]
   ),
   
