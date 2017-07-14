@@ -17,7 +17,8 @@
 ]).
 
 -export([
-  as_list/2
+  as_list/2,
+  timestamp/1
 ]).
 
 -export([
@@ -38,8 +39,6 @@
 start_link() ->
   gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
-
-
 id() ->
   ?THROW_FLAKE_ERROR(gen_server:call(?MODULE, get_id)).
 
@@ -47,6 +46,9 @@ id(Base) ->
   ?THROW_FLAKE_ERROR(gen_server:call(?MODULE, {get_id, Base})).
 
 binary_id(Base) -> erlang:list_to_binary(id(Base)).
+
+timestamp(<<Time:64/integer, _:48/integer, _Seq:16/integer >>) -> Time;
+timestamp(_) -> erlang:error(badarg).
 
 init([]) ->
   WorkerId = worker_id(),
@@ -91,10 +93,69 @@ get_id(Ts, State =  #{ max_time := Max }) when Max > Ts ->
   {{error, clock_running_backwards}, State}.
 
 
+%% ols implementation just based on hw address and node name
+%%worker_id() ->
+%%  If = application:get_env(barrel, ts_inteface, get_default_if()),
+%%  {ok, Hw} = get_if_hw(If),
+%%  % 48 bits for the first Hardware address found
+%%  % with the distributed Erlang node name
+%%  << WorkerId:48/integer, _/binary >> =
+%%    crypto:hash(sha, erlang:list_to_binary(Hw ++ erlang:atom_to_list(node()))),
+%%  WorkerId.
+
+
+%% worker id is based on the UUID library from okeuday
+%% https://github.com/okeuday/uuid/
 worker_id() ->
   If = application:get_env(barrel, ts_inteface, get_default_if()),
-  {ok, WorkerId} = get_if_hw_int(If),
+  {ok, Hw} = get_if_hw(If),
+  <<NodeD01, NodeD02, NodeD03, NodeD04, NodeD05,
+    NodeD06, NodeD07, NodeD08, NodeD09, NodeD10,
+    NodeD11, NodeD12, NodeD13, NodeD14, NodeD15,
+    NodeD16, NodeD17, NodeD18, NodeD19, NodeD20>> =
+    crypto:hash(sha, erlang:list_to_binary(Hw ++ erlang:atom_to_list(node()))),
+  % later, when the pid format changes, handle the different format
+  ExternalTermFormatVersion = 131,
+  PidExtType = 103,
+  <<ExternalTermFormatVersion:8,
+    PidExtType:8,
+    PidBin/binary>> = erlang:term_to_binary(self()),
+  % 72 bits for the Erlang pid
+  <<PidID1:8, PidID2:8, PidID3:8, PidID4:8, % ID (Node specific, 15 bits)
+    PidSR1:8, PidSR2:8, PidSR3:8, PidSR4:8, % Serial (extra uniqueness)
+    PidCR1:8                       % Node Creation Count
+  >> = binary:part(PidBin, erlang:byte_size(PidBin), -9),
+  % reduce the 160 bit NodeData checksum to 16 bits
+  NodeByte1 = ((((((((NodeD01 bxor NodeD02)
+    bxor NodeD03)
+    bxor NodeD04)
+    bxor NodeD05)
+    bxor NodeD06)
+    bxor NodeD07)
+    bxor NodeD08)
+    bxor NodeD09)
+    bxor NodeD10,
+  NodeByte2 = (((((((((NodeD11 bxor NodeD12)
+    bxor NodeD13)
+    bxor NodeD14)
+    bxor NodeD15)
+    bxor NodeD16)
+    bxor NodeD17)
+    bxor NodeD18)
+    bxor NodeD19)
+    bxor NodeD20)
+    bxor PidCR1,
+  % reduce the Erlang pid to 32 bits
+  PidByte1 = PidID1 bxor PidSR4,
+  PidByte2 = PidID2 bxor PidSR3,
+  PidByte3 = PidID3 bxor PidSR2,
+  PidByte4 = PidID4 bxor PidSR1,
+  %% 48 bits worker id
+  << WorkerId:48/integer >> =
+    << NodeByte1:8, NodeByte2:8,  PidByte1:8,
+       PidByte2:8,  PidByte3:8, PidByte4:8 >>,
   WorkerId.
+
 
 %% ==============================
 %% internals helpers
@@ -120,10 +181,10 @@ filter_hwaddr([0,0,0,0,0,0]) ->
 filter_hwaddr(_) ->
   true.
 
-%% get the mac/hardware address of the given interface as a 48-bit integer
-get_if_hw_int(undefined) ->
+%% get the mac/hardware address of the given interface
+get_if_hw(undefined) ->
   {error, if_not_found};
-get_if_hw_int(IfName) ->
+get_if_hw(IfName) ->
   {ok, IfAddrs} = inet:getifaddrs(),
   IfProps = proplists:get_value(IfName, IfAddrs),
   case IfProps of
@@ -131,13 +192,8 @@ get_if_hw_int(IfName) ->
       {error, if_not_found};
     _ ->
       HwAddr = proplists:get_value(hwaddr, IfProps),
-      {ok, hw_addr_to_int(HwAddr)}
+      {ok, HwAddr}
   end.
-
-%% convert an array of 6 bytes into a 48-bit integer
-hw_addr_to_int(HwAddr) ->
-  <<WorkerId:48/integer>> = erlang:list_to_binary(HwAddr),
-  WorkerId.
 
 gen_id(Time, WorkerId, Sequence) ->
   <<Time:64/integer, WorkerId:48/integer, Sequence:16/integer>>.
@@ -188,10 +244,11 @@ as_list(I0, Base, R0) ->
 
 flake_test() ->
   TS = barrel_ts:curr_time_millis(),
-  Worker = hw_addr_to_int(lists:seq(1, 6)),
+  << Worker:48/integer >> = list_to_binary(lists:seq(1, 6)),
   Flake = gen_id(TS, Worker, 0),
   <<Time:64/integer, WorkerId:48/integer, Sequence:16/integer>> = Flake,
   ?assert(Time =:= TS),
+  ?assert(timestamp(Flake) =:= TS),
   ?assert(Worker =:= WorkerId),
   ?assert(Sequence =:= 0),
   <<FlakeInt:128/integer>> = Flake,
