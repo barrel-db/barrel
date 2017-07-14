@@ -44,6 +44,8 @@
   write_batch/3, write_batch/4
 ]).
 
+-export([object_id/0, object_id/1]).
+
 -export([
   put_system_doc/3, put_system_doc/4,
   get_system_doc/2, get_system_doc/3,
@@ -333,6 +335,19 @@ revsdiff(Db, DocId, RevIds) ->
 
 revsdiff(Channel, DbId, DocId, RevIds) ->
   barrel_remote:revsdiff(Channel, DbId, DocId, RevIds).
+
+
+%% @doc return a new 16-bytes object ID. an Object ID value consist of:
+%% * a 8-bytes value representing the milliseconds since the Unix epoch,
+%% * a 6-bytes value corresponding to the node ID (2-bytes) and the erlang pid (3-bytes)
+%% * a 2-bytes counter.
+-spec object_id() -> Id :: binary().
+object_id() -> barrel_id:id().
+
+
+%% @doc generate a new 16-bytes object ID and return it in a different base.
+-spec object_id(Base :: non_neg_integer()) -> Id :: binary().
+object_id(Base) -> barrel_id:binary_id(Base).
 
 %% ==============================
 %% system docs operations
