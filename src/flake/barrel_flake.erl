@@ -135,7 +135,7 @@ hw_addr_to_int(HwAddr) ->
   <<WorkerId:48/integer>> = erlang:list_to_binary(HwAddr),
   WorkerId.
 
-gen_id(Time,WorkerId,Sequence) ->
+gen_id(Time, WorkerId, Sequence) ->
   <<Time:64/integer, WorkerId:48/integer, Sequence:16/integer>>.
 
 %%
