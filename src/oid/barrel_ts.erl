@@ -6,7 +6,7 @@
 %%% @end
 %%% Created : 13. Jul 2017 10:51
 %%%-------------------------------------------------------------------
--module(barrel_flake_ts).
+-module(barrel_ts).
 -behaviouur(gen_server).
 %% API
 -export([
@@ -16,7 +16,8 @@
 
 -export([
   read_timestamp/0,
-  write_timestamp/0
+  write_timestamp/0,
+  curr_time_millis/0
 ]).
 
 
@@ -81,9 +82,11 @@ read_timestamp() ->
   end.
 
 write_timestamp() ->
-  Ts = barrel_flake:curr_time_millis(),
+  Ts = curr_time_millis(),
   ok = file:write_file(persist_file(), term_to_binary(Ts)),
   {ok, Ts}.
+
+curr_time_millis() -> erlang:system_time(millisecond).
   
 
 read_ts(#{ ts := Ts} = State) -> {Ts, State};

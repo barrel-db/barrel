@@ -45,13 +45,13 @@ start_link() ->
 %% Child :: {Id,StartFunc,Restart,Shutdown,Type,Modules}
 init([]) ->
   
-  Flake =
-    #{id => barrel_flake_sup,
-      start => {barrel_flake_sup, start_link, [] },
+  OID =
+    #{id => barrel_id_sup,
+      start => {barrel_id_sup, start_link, [] },
       restart => permanent,
       shutdown => infinity,
       type => supervisor,
-      modules => [barrel_flake_sup]
+      modules => [barrel_id_sup]
     },
   
   Rpc =
@@ -95,7 +95,7 @@ init([]) ->
       modules => [barrel_replicate_sup]},
   
   Specs = [
-    Flake,
+    OID,
     Rpc,
     LocalChangesSup,
     StoreSup,

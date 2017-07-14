@@ -6,7 +6,7 @@
 %%% @end
 %%% Created : 13. Jul 2017 12:23
 %%%-------------------------------------------------------------------
--module(barrel_flake_sup).
+-module(barrel_id_sup).
 -behaviour(supervisor).
 
 %% API
@@ -23,8 +23,8 @@ start_link() ->
 
 init([]) ->
   AllowableDowntime = application:get_env(barrel, ts_allowable_downtime, ?ALLOWABLE_DOWNTIME),
-  {ok, LastTs} = barrel_flake_ts:read_timestamp(),
-  Now = barrel_flake:curr_time_millis(),
+  {ok, LastTs} = barrel_ts:read_timestamp(),
+  Now = barrel_ts:curr_time_millis(),
   TimeSinceLastRun = Now - LastTs,
   
   _ = lager:debug(
@@ -35,18 +35,18 @@ init([]) ->
   %% restart if we detected a clock change
   ok = check_for_clock_error(Now >= LastTs, TimeSinceLastRun < AllowableDowntime),
   
-  PersistServer = #{
+  PersistTimeServer = #{
     id => persist_time_server,
-    start => {barrel_flake_ts, start_link, []},
+    start => {barrel_ts, start_link, []},
     restart => permanent,
     shutdown => 5000,
     type => worker,
     modules => [barrel_flake_ts]
   },
   
-  FlakeServer = #{
+  IdServer = #{
     id => server,
-    start => {barrel_flake, start_link, []},
+    start => {barrel_id, start_link, []},
     restart => permanent,
     shutdown => 5000,
     type => worker,
@@ -54,7 +54,7 @@ init([]) ->
   },
   
   SupFlags = #{ strategy => one_for_one, intensity => 10, period => 10},
-  {ok, {SupFlags, [PersistServer, FlakeServer]}}.
+  {ok, {SupFlags, [PersistTimeServer, IdServer]}}.
 
 
 check_for_clock_error(true, true) -> ok;

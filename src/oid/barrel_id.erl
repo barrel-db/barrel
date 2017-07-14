@@ -6,16 +6,19 @@
 %%% @end
 %%% Created : 13. Jul 2017 11:13
 %%%-------------------------------------------------------------------
--module(barrel_flake).
+-module(barrel_id).
 -behaviour(gen_server).
 
 %% API
 -export([
   start_link/0,
-  id/0, id/1
+  id/0, id/1,
+  binary_id/1
 ]).
 
--export([curr_time_millis/0, as_list/2]).
+-export([
+  as_list/2
+]).
 
 -export([
   init/1,
@@ -43,18 +46,19 @@ id() ->
 id(Base) ->
   ?THROW_FLAKE_ERROR(gen_server:call(?MODULE, {get_id, Base})).
 
+binary_id(Base) -> erlang:list_to_binary(id(Base)).
 
 init([]) ->
   WorkerId = worker_id(),
-  MaxTime = curr_time_millis(),
+  MaxTime = barrel_ts:curr_time_millis(),
   {ok, #{ max_time => MaxTime, worker_id => WorkerId, sequence => 0}}.
 
 
 handle_call(get_id, _From, State) ->
-  {Reply, NewState} = get_id(curr_time_millis(), State),
+  {Reply, NewState} = get_id(barrel_ts:curr_time_millis(), State),
   {reply, Reply, NewState};
 handle_call({get_id, Base}, _From, State) ->
-  {Reply0, NewState} = get_id(curr_time_millis(), State),
+  {Reply0, NewState} = get_id(barrel_ts:curr_time_millis(), State),
   case Reply0 of
     {ok, Id} ->
       <<IntId:128/integer>> = Id,
@@ -176,9 +180,6 @@ as_list(I0, Base, R0) ->
       as_list(I1, Base, R1)
   end.
 
-curr_time_millis() -> erlang:system_time(millisecond).
-
-
 %% ==============================
 %% tests
 
@@ -186,7 +187,7 @@ curr_time_millis() -> erlang:system_time(millisecond).
 -include_lib("eunit/include/eunit.hrl").
 
 flake_test() ->
-  TS = curr_time_millis(),
+  TS = barrel_ts:curr_time_millis(),
   Worker = hw_addr_to_int(lists:seq(1, 6)),
   Flake = gen_id(TS, Worker, 0),
   <<Time:64/integer, WorkerId:48/integer, Sequence:16/integer>> = Flake,

@@ -14,7 +14,7 @@
 %%% limitations under the License.
 %%%
 
--module (barrel_flake_harness).
+-module (barrel_id_harness).
 -author ('Dietrich Featherston <d@boundary.com>').
 
 -export ([
@@ -43,8 +43,8 @@ generate_ids(0, _Base, Acc) ->
 generate_ids(N, Base, Acc) ->
   {ok, Flake} = case Base of
                   undefined ->
-                    barrel_flake:id();
+                    barrel_id:id();
                   _ ->
-                    barrel_flake:id(Base)
+                    barrel_id:id(Base)
                 end,
   generate_ids(N-1, Base, [Flake|Acc]).
