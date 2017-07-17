@@ -460,7 +460,7 @@ with_db(DbName, Fun) ->
 
 transact(Trans, DbName, Fun) ->
   case barrel_store:whereis_db(DbName) of
-    undefined -> {error, found};
+    undefined -> {error, not_found};
     Db ->
       hooks:run(barrel_start_transaction, [Trans, DbName]),
       try Fun(Db)

@@ -9,6 +9,8 @@
      sasl,
      lager,
      crypto,
+     public_key,
+     ssl,
      rocksdb,
      jsx,
      jsone,

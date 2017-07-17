@@ -169,7 +169,7 @@ process_config(Config, State) ->
   {ok, State2}.
 
 
-maybe_start_replication(Config = #{ id := RepId}, State) ->
+maybe_start_replication(Config = #{ id := RepId}, State) ->
   case find_repid(RepId) of
     undefined ->
       do_start_replication(Config, State);
