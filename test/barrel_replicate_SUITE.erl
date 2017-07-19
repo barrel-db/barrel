@@ -74,7 +74,7 @@ end_per_suite(Config) ->
 one_doc(_Config) ->
   RepConfig = #{source => <<"source">>,
                 target => <<"testdb">>,
-                options => #{ metrics_freq => 100 }},
+                options => #{ metrics_freq => 100 }},
 
   {ok, #{ id := RepId}} = barrel_replicate:start_replication(RepConfig),
   %% Info = barrel_replicate:info(Pid),

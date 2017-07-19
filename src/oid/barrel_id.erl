@@ -31,7 +31,7 @@
 ]).
 
 
--define(THROW_FLAKE_ERROR(Res), case Res of
+-define(THROW_ERROR(Res), case Res of
                                   {ok, R} -> R;
                                   E -> throw(E)
                                 end).
@@ -40,10 +40,10 @@ start_link() ->
   gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
 id() ->
-  ?THROW_FLAKE_ERROR(gen_server:call(?MODULE, get_id)).
+  ?THROW_ERROR(gen_server:call(?MODULE, get_id)).
 
 id(Base) ->
-  ?THROW_FLAKE_ERROR(gen_server:call(?MODULE, {get_id, Base})).
+  ?THROW_ERROR(gen_server:call(?MODULE, {get_id, Base})).
 
 binary_id(Base) -> erlang:list_to_binary(id(Base)).
 
