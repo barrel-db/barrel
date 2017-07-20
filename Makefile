@@ -39,6 +39,12 @@ test: cleantest dialyzer
 
 cover:
 	@$(REBAR) cover
+eqc:
+		@$(REBAR) as eqc eqc
+
+eqcshell:
+		@$(REBAR) as eqc shell --sname barreleqc@localhost
+
 
 
 help: ## This documentation

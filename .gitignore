@@ -18,3 +18,5 @@ _build
 docs
 data
 *.iml
+current_counterexample.eqc
+.eqc-info
