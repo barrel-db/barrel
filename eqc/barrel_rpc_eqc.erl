@@ -7,7 +7,7 @@
 -define(DB, <<"testdb1">>).
 
 init_db()->
-		{ok, _} = application:ensure_all_started(barrel_rest),
+    {ok, _} = application:ensure_all_started(barrel),
     barrel:create_database(#{ <<"database_id">> => ?DB }),
     fun delete_db/0.
 
@@ -23,10 +23,9 @@ prop_rpc_crud() ->
                     non_empty(map(non_empty(utf8()), non_empty(utf8())))},
                    begin
                        Doc1         = maps:put(<<"id">>, Id, Doc),
-											 {ok, Id,_r}  = barrel:post(?DB, Doc1, #{}),
-
-											 {ok, Doc1,_} = barrel:get(?DB, Id, #{}),
-											 {ok, _,_}    = barrel:delete(?DB, Id, #{}),
-											 true
-
-            end)).
+                       {ok, Id,_r}  = barrel:post(?DB, Doc1, #{}),
+                       
+                       {ok, Doc1,_} = barrel:get(?DB, Id, #{}),
+                       {ok, _,_}    = barrel:delete(?DB, Id, #{}),
+                       true
+                   end)).

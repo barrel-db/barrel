@@ -14,10 +14,13 @@ run(X) ->
      barrel_httpc_eqc:run(X).
 
 eqc() ->
+    eqc(25).
+
+eqc(N) ->
     lager:set_loglevel(lager_console_backend, notice),
-    [] = eqc:module({numtests,100}, create_delete_database_eqc),
-    [] = eqc:module({numtests,15}, barrel_rpc_events_eqc),
-    [] = eqc:module({numtests,250}, barrel_rpc_eqc),
+    [] = eqc:module({numtests,N}, create_delete_database_eqc),
+    [] = eqc:module({numtests,N}, barrel_rpc_eqc),
+    [] = eqc:module({numtests,N}, barrel_rpc_events_eqc),
     ok.
 
 

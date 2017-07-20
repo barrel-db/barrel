@@ -13,8 +13,8 @@
 -compile(export_all).
 %% -- State and state functions ----------------------------------------------
 -record(state,{
-					db :: binary(),
-					cmds = 0:: integer(),
+          db :: binary(),
+          cmds = 0:: integer(),
           keys:: dict:dict(binary(), term()),
           online = true :: boolean()
 
@@ -34,14 +34,14 @@ db(#state{db= DB}) ->
 
 
 id() ->
-		utf8(16).
+    utf8(16).
 
 
 doc()->
     #{
-		 <<"id">> => id(),
-		 <<"content">> => utf8(8)
-		 }.
+     <<"id">> => id(),
+     <<"content">> => utf8(8)
+    }.
 
 
 
@@ -50,25 +50,25 @@ doc()->
 % Validate the results of a call
 
 create_database_pre(#state{cmds = 0}) ->
-		true;
+    true;
 create_database_pre(#state{cmds = N}) when N > 0->
-		false.
+    false.
 
 create_database_next(S=  #state{cmds = C},_,_) ->
-		S#state{cmds = C + 1}.
+    S#state{cmds = C + 1}.
 
 create_database_command(#state{cmds = 0, db = DB}) ->
-		oneof([{call, ?MODULE, create_database, [ DB]}]).
+    oneof([{call, ?MODULE, create_database, [ DB]}]).
 
 create_database(DB) ->
-		case barrel:database_infos(DB) of
-				{ok, _} -> barrel:delete_database(DB);
-				_ -> ok
-		end,
-		barrel:create_database(#{<<"database_id">> => DB}).
+    case barrel:database_infos(DB) of
+        {ok, _} -> barrel:delete_database(DB);
+        _ -> ok
+    end,
+    barrel:create_database(#{<<"database_id">> => DB}).
 
 
-%********************************************************************************
+                                                %********************************************************************************
 
 get_command(S= #state{keys = Dict}) ->
     oneof([
@@ -81,7 +81,7 @@ get_pre(#state{keys = Dict}) ->
     not(dict:is_empty(Dict)).
 
 get_next(S=  #state{cmds = C},_,_) ->
-		S#state{cmds = C + 1}.
+    S#state{cmds = C + 1}.
 
 
 get_post(#state{keys= Dict}, [_DB, Id, #{}], {error, not_found}) ->
@@ -93,14 +93,14 @@ get_post(#state{keys= Dict}, [_DB, Id, #{}],
     {ok, Doc} == dict:find(Id, Dict).
 
 
-%********************************************************************************
+                                                %********************************************************************************
 post_pre(#state{cmds = 0}) ->false;
 post_pre(_S) ->
     true.
 
 
 post_post(#state{keys = Dict} , [_DB, #{<<"id">> := Id}, #{}], {error, {conflict, doc_exists}}) ->
-		dict:is_key(Id, Dict);
+    dict:is_key(Id, Dict);
 
 post_post(_State, _Args, _Ret) ->
 
@@ -108,18 +108,18 @@ post_post(_State, _Args, _Ret) ->
 
 post_command(S = #state{keys = Dict}) ->
 
-		case dict:is_empty(Dict) of
+    case dict:is_empty(Dict) of
         true ->
             oneof([{call, barrel, post,  [db(S), doc(), #{}]}]);
         false ->
             oneof([
                    {call, barrel, post,  [db(S), doc(), #{}]},
-									 {call, barrel, put,   [db(S), doc(), #{}]},
-									 {call, barrel, post,  [db(S), update_doc(Dict), #{}]},
+                   {call, barrel, put,   [db(S), doc(), #{}]},
+                   {call, barrel, post,  [db(S), update_doc(Dict), #{}]},
                    {call, barrel, put,   [db(S), update_doc(Dict), #{}]}
                   ]
                  )
-		end.
+    end.
 
 
 
@@ -130,10 +130,10 @@ post_next(State = #state{keys = Dict,cmds = C},_V,[_DB, Doc = #{<<"id">> := Id} 
             State#state {keys = dict:store(Id, Doc, Dict), cmds= C + 1};
         false ->
             State#state {keys = dict:store(Id, Doc, Dict), cmds = C + 1}
-        end.
+    end.
 
 
-%********************************************************************************
+                                                %********************************************************************************
 
 delete_pre(#state{cmds = 0}) ->false;
 delete_pre(#state{keys = Dict}) ->
@@ -178,25 +178,25 @@ update_doc(Dict) ->
 %% -- Common pre-/post-conditions --------------------------------------------
 %% @doc General command filter, checked before a command is generated.
 -spec command_precondition_common(S, Cmd) -> boolean()
-    when S    :: eqc_statem:symbolic_state(),
-         Cmd  :: atom().
+                                                 when S    :: eqc_statem:symbolic_state(),
+                                                      Cmd  :: atom().
 command_precondition_common(_S, _Cmd) ->
     true.
 
 %% @doc General precondition, applied *before* specialized preconditions.
 -spec precondition_common(S, Call) -> boolean()
-    when S    :: eqc_statem:symbolic_state(),
-         Call :: eqc_statem:call().
+                                          when S    :: eqc_statem:symbolic_state(),
+                                               Call :: eqc_statem:call().
 precondition_common(#state{ cmds = 0}, _Call) ->
-		true;
+    true;
 precondition_common(#state{ cmds = 1}, _Call) ->
-		true;
+    true;
 precondition_common(#state{db = DB, cmds = N}, _Call) ->
-		case barrel:database_infos(DB) of
-				{error,not_found} -> true;
-				{ok, _A = #{docs_count := DocCount}} ->
-							DocCount >= 0
-		end.
+    case barrel:database_infos(DB) of
+        {error,not_found} -> true;
+        {ok, _A = #{docs_count := DocCount}} ->
+            DocCount >= 0
+    end.
 
 
 
@@ -205,21 +205,22 @@ precondition_common(#state{db = DB, cmds = N}, _Call) ->
 
 %% @doc General postcondition, applied *after* specialized postconditions.
 -spec postcondition_common(S, Call, Res) -> true | term()
-    when S    :: eqc_statem:dynamic_state(),
-         Call :: eqc_statem:call(),
-         Res  :: term().
+                                                when S    :: eqc_statem:dynamic_state(),
+                                                     Call :: eqc_statem:call(),
+                                                     Res  :: term().
 postcondition_common(_S= #state{keys = _Dict, cmds = 0}, _Call, _Res) ->
-		true;
+    true;
 postcondition_common(_S= #state{keys = Dict, db = DB}, _Call, _Res) ->
 
-	  case  barrel:database_infos(DB) of
-				{error, not_found } -> false;
-				{ok, _A = #{docs_count := DocCount}} ->
-						DocCount >= dict:size(Dict)
-		end;
+    case  barrel:database_infos(DB) of
+        {error, not_found } -> false;
+        {ok, _A = #{docs_count := DocCount}} ->
+            io:format("DocCount ~p ~p~n~n~n",[DocCount, dict:size(Dict)]),
+            DocCount >= dict:size(Dict)
+    end;
 
 postcondition_common(_,_,_) ->
-		true.
+    true.
 
 %% -- Operations -------------------------------------------------------------
 
@@ -231,47 +232,34 @@ postcondition_common(_,_,_) ->
 %% @doc Default generated property
 
 
-init_db()->
-		lager:set_loglevel(lager_console_backend, error),
-    {ok, _} = application:ensure_all_started(barrel_rest),
-		fun delete_db/0.
 
-cleanup() ->
-		Dbs = barrel:database_names(),
-		[ok = barrel:delete_database(D)|| D<- Dbs],
-	  [] = barrel:database_names(),
-    ok.
-
-delete_db() ->
-		application:stop(barrel_rest),
-		cleanup(),
-    ok.
+cleanup() -> 
+    common_eqc:cleanup().
 
 
 -spec prop_barrel_rpc_events_eqc() -> eqc:property().
 prop_barrel_rpc_events_eqc() ->
-    ?SETUP(fun init_db/0,
+    ?SETUP(fun common_eqc:init_db/0,
            ?FORALL( Cmds,
-										commands(?MODULE,
-														 #state{keys = dict:new() ,
-																		db = <<"test4">> % uuid:get_v4_urandom()
-																	 }),
-                   begin
-											 cleanup(),
-											 {H, S, Res} = run_commands(Cmds),
-											 DB = S#state.db,
+                    commands(?MODULE,
+                             #state{keys = dict:new() ,
+                                    db = <<"test4">> % uuid:get_v4_urandom()
+                                   }),
+                    begin
+                        cleanup(),
+                        {H, S, Res} = run_commands(Cmds),
+                        DB = S#state.db,
 
-											 ?WHENFAIL(begin
-																		 cleanup(),
-																		 ok
+                        ?WHENFAIL(begin
+                                      cleanup(),
+                                      ok
 
-											 					 end,
-											 					 check_command_names(Cmds,
-											 															 measure(length, commands_length(Cmds),
-											 																			 pretty_commands(?MODULE, Cmds, {H, S, Res},
-											 																											 Res == ok))))
-
-                   end)).
+                                  end,
+                                  check_command_names(Cmds,
+                                                      measure(length, commands_length(Cmds),
+                                                              pretty_commands(?MODULE, Cmds, {H, S, Res},
+                                                                              Res == ok))))
+                    end)).
 
 %% @doc Run property repeatedly to find as many different bugs as
 %% possible. Runs for 10 seconds before giving up finding more bugs.
