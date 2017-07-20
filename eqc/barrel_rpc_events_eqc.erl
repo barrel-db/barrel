@@ -100,6 +100,7 @@ post_pre(_S) ->
 
 
 post_post(#state{keys = Dict} , [_DB, #{<<"id">> := Id}, #{}], {error, {conflict, doc_exists}}) ->
+    io:format("Id ~p ~p~n", [Id,     dict:is_key(Id, Dict)]),
     dict:is_key(Id, Dict);
 
 post_post(_State, _Args, _Ret) ->
@@ -215,7 +216,7 @@ postcondition_common(_S= #state{keys = Dict, db = DB}, _Call, _Res) ->
     case  barrel:database_infos(DB) of
         {error, not_found } -> false;
         {ok, _A = #{docs_count := DocCount}} ->
-            io:format("DocCount ~p ~p~n~n~n",[DocCount, dict:size(Dict)]),
+            
             DocCount >= dict:size(Dict)
     end;
 
