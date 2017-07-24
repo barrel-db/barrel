@@ -49,16 +49,6 @@ doc()->
 %********************************************************************************
 % Validate the results of a call
 
-create_database_pre(#state{cmds = 0}) ->
-    true;
-create_database_pre(#state{cmds = N}) when N > 0->
-    false.
-
-create_database_next(S=  #state{cmds = C},_,_) ->
-    S#state{cmds = C + 1}.
-
-create_database_command(#state{cmds = 0, db = DB}) ->
-    oneof([{call, ?MODULE, create_database, [ DB]}]).
 
 create_database(DB) ->
     case barrel:database_infos(DB) of
@@ -66,9 +56,11 @@ create_database(DB) ->
         _ -> ok
     end,
     barrel:create_database(#{<<"database_id">> => DB}).
+    
 
 
-                                                %********************************************************************************
+                                                
+%********************************************************************************
 
 get_command(S= #state{keys = Dict}) ->
     oneof([
@@ -76,7 +68,7 @@ get_command(S= #state{keys = Dict}) ->
            {call, barrel, get,       [db(S), id(), #{}]}
           ]).
 
-get_pre(#state{cmds = 0}) ->false;
+
 get_pre(#state{keys = Dict}) ->
     not(dict:is_empty(Dict)).
 
@@ -85,22 +77,24 @@ get_next(S=  #state{cmds = C},_,_) ->
 
 
 get_post(#state{keys= Dict}, [_DB, Id, #{}], {error, not_found}) ->
-
     not(dict:is_key(Id, Dict));
 get_post(#state{keys= Dict}, [_DB, Id, #{}],
          {ok, Doc = #{<<"id">> := Id, <<"content">> := _Content} ,
           _rev}) ->
-    {ok, Doc} == dict:find(Id, Dict).
+    R =  {ok, Doc} == dict:find(Id, Dict),
+    case R of
+        false ->
+            io:format("Get Doc ~p~n R : ~p ~n~p~n~n~n", [Doc,R,   dict:find(Id, Dict)]);
+        _ -> ok
+    end,
+    R.
 
 
                                                 %********************************************************************************
-post_pre(#state{cmds = 0}) ->false;
-post_pre(_S) ->
-    true.
 
 
 post_post(#state{keys = Dict} , [_DB, #{<<"id">> := Id}, #{}], {error, {conflict, doc_exists}}) ->
-    io:format("Id ~p ~p~n", [Id,     dict:is_key(Id, Dict)]),
+   
     dict:is_key(Id, Dict);
 
 post_post(_State, _Args, _Ret) ->
@@ -116,8 +110,8 @@ post_command(S = #state{keys = Dict}) ->
             oneof([
                    {call, barrel, post,  [db(S), doc(), #{}]},
                    {call, barrel, put,   [db(S), doc(), #{}]},
-                   {call, barrel, post,  [db(S), update_doc(Dict), #{}]},
-                   {call, barrel, put,   [db(S), update_doc(Dict), #{}]}
+                   {call, barrel, post,  [db(S), update_doc(Dict), #{}]}
+  %                 {call, barrel, put,   [db(S), update_doc(Dict), #{}]}
                   ]
                  )
     end.
@@ -126,17 +120,13 @@ post_command(S = #state{keys = Dict}) ->
 
 
 post_next(State = #state{keys = Dict,cmds = C},_V,[_DB, Doc = #{<<"id">> := Id} |_]) ->
-    case dict:is_key(Id, Dict) of
-        true ->
-            State#state {keys = dict:store(Id, Doc, Dict), cmds= C + 1};
-        false ->
-            State#state {keys = dict:store(Id, Doc, Dict), cmds = C + 1}
-    end.
+    State#state {keys = dict:store(Id, Doc, Dict), cmds= C + 1}.
 
 
-                                                %********************************************************************************
+                                                
+%********************************************************************************
 
-delete_pre(#state{cmds = 0}) ->false;
+
 delete_pre(#state{keys = Dict}) ->
     not(dict:is_empty(Dict)).
 
@@ -157,12 +147,12 @@ delete_next(State = #state{keys = Dict, cmds = C},_V,[_DB, Id|_]) ->
 
 
 update_doc(Dict) ->
-    ?LET({Key, NewContent},
-         {oneof(dict:fetch_keys(Dict)), utf8(9)},
+    ?LET({Key, NewContent,N2 },
+         {oneof(dict:fetch_keys(Dict)), utf8(4), utf8(16)},
          begin
              {ok, Doc1} = dict:find(Key, Dict),
-             Doc1#{<<"content">> => NewContent}
-
+             Doc1#{<<"content">> => NewContent, 
+                   <<"new">> => N2}
          end).
 
 
@@ -188,11 +178,7 @@ command_precondition_common(_S, _Cmd) ->
 -spec precondition_common(S, Call) -> boolean()
                                           when S    :: eqc_statem:symbolic_state(),
                                                Call :: eqc_statem:call().
-precondition_common(#state{ cmds = 0}, _Call) ->
-    true;
-precondition_common(#state{ cmds = 1}, _Call) ->
-    true;
-precondition_common(#state{db = DB, cmds = N}, _Call) ->
+precondition_common(#state{db = DB, cmds = _N}, _Call) ->
     case barrel:database_infos(DB) of
         {error,not_found} -> true;
         {ok, _A = #{docs_count := DocCount}} ->
@@ -209,15 +195,13 @@ precondition_common(#state{db = DB, cmds = N}, _Call) ->
                                                 when S    :: eqc_statem:dynamic_state(),
                                                      Call :: eqc_statem:call(),
                                                      Res  :: term().
-postcondition_common(_S= #state{keys = _Dict, cmds = 0}, _Call, _Res) ->
-    true;
-postcondition_common(_S= #state{keys = Dict, db = DB}, _Call, _Res) ->
+postcondition_common(_S= #state{keys = _Dict, db = DB}, _Call, _Res) ->
 
     case  barrel:database_infos(DB) of
         {error, not_found } -> false;
-        {ok, _A = #{docs_count := DocCount}} ->
-            
-            DocCount >= dict:size(Dict)
+        {ok, _A = #{docs_count := _DocCount}} ->
+            true
+        %DocCount >= dict:size(Dict)
     end;
 
 postcondition_common(_,_,_) ->
@@ -236,7 +220,8 @@ postcondition_common(_,_,_) ->
 
 cleanup() -> 
     common_eqc:cleanup().
-
+uuid() ->
+     list_to_binary(uuid:uuid_to_string(uuid:get_v4_urandom())).
 
 -spec prop_barrel_rpc_events_eqc() -> eqc:property().
 prop_barrel_rpc_events_eqc() ->
@@ -244,13 +229,13 @@ prop_barrel_rpc_events_eqc() ->
            ?FORALL( Cmds,
                     commands(?MODULE,
                              #state{keys = dict:new() ,
-                                    db = <<"test4">> % uuid:get_v4_urandom()
+                                    db =  uuid()
                                    }),
                     begin
-                        cleanup(),
+                        [{model, ?MODULE},{init, #state{db= DB}}|_] = Cmds,
+                        {ok,#{<<"database_id">> := DB}} = create_database(DB),
+%                        cleanup(),
                         {H, S, Res} = run_commands(Cmds),
-                        DB = S#state.db,
-
                         ?WHENFAIL(begin
                                       cleanup(),
                                       ok
