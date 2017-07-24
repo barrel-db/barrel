@@ -82,15 +82,15 @@ get_post(#state{keys= Dict}, [_DB, Id, #{}],
          {ok, Doc = #{<<"id">> := Id, <<"content">> := _Content} ,
           _rev}) ->
     R =  {ok, Doc} == dict:find(Id, Dict),
-    case R of
-        false ->
-            io:format("Get Doc ~p~n R : ~p ~n~p~n~n~n", [Doc,R,   dict:find(Id, Dict)]);
-        _ -> ok
-    end,
+    %% case R of
+    %%     false ->
+    %%         io:format("Get Doc ~p~n R : ~p ~n~p~n~n~n", [Doc,R,   dict:find(Id, Dict)]);
+    %%     _ -> ok
+    %% end,
     R.
 
 
-                                                %********************************************************************************
+%********************************************************************************
 
 
 post_post(#state{keys = Dict} , [_DB, #{<<"id">> := Id}, #{}], {error, {conflict, doc_exists}}) ->
@@ -102,25 +102,42 @@ post_post(_State, _Args, _Ret) ->
     true.
 
 post_command(S = #state{keys = Dict}) ->
-
-    case dict:is_empty(Dict) of
-        true ->
-            oneof([{call, barrel, post,  [db(S), doc(), #{}]}]);
-        false ->
-            oneof([
-                   {call, barrel, post,  [db(S), doc(), #{}]},
-                   {call, barrel, put,   [db(S), doc(), #{}]},
-                   {call, barrel, post,  [db(S), update_doc(Dict), #{}]}
-  %                 {call, barrel, put,   [db(S), update_doc(Dict), #{}]}
-                  ]
-                 )
-    end.
+    oneof([{call, barrel, post,  [db(S), doc(), #{}]}]).
 
 
+post_next(State = #state{keys = Dict,cmds = C},{var, N},_Cmd = [_DB, Doc = #{<<"id">> := Id} , _opt]) ->
+    State#state {keys = dict:store(Id, Doc, Dict), cmds= C + 1};
+post_next(State = #state{keys = Dict,cmds = C},
+          _V    = {ok, Id, _Rev},
+          _Cmd  = [_DB, Doc = #{<<"id">> := Id}, _opt]) ->
+    State#state{keys = dict:store(Id, Doc, Dict), cmds= C + 1}.
 
 
-post_next(State = #state{keys = Dict,cmds = C},_V,[_DB, Doc = #{<<"id">> := Id} |_]) ->
-    State#state {keys = dict:store(Id, Doc, Dict), cmds= C + 1}.
+%********************************************************************************
+
+put_pre(#state{keys = Dict}) ->
+    not(dict:is_empty(Dict)).
+
+put_post(#state{keys = Dict} , [_DB, #{<<"id">> := Id}, #{}], {error, {conflict, doc_exists}}) ->
+    dict:is_key(Id, Dict);
+
+put_post(_State, _Args, _Ret) ->
+    true.
+
+put_command(S = #state{keys = Dict}) ->
+    oneof([
+           {call, barrel, put,   [db(S), update_doc(Dict), #{}]}
+          ]).
+
+put_next(State = #state{keys = Dict,cmds = C},{var, N},_Cmd = [_DB, Doc = #{<<"id">> := Id} , _opt]) ->
+    State#state {keys = dict:store(Id, Doc, Dict), cmds= C + 1};
+put_next(State = #state{keys = Dict,cmds = C},
+          _V    = {ok, Id, _Rev},
+          _Cmd  = [_DB, Doc = #{<<"id">> := Id}, _opt]) ->
+    io:format("-----------------------------------------------------------------------------------------~n~n~n"),
+    io:format("Put Doc ~p ~n~p~n", [Doc, _V]),
+    State#state{keys = dict:store(Id, Doc, Dict), cmds= C + 1}.
+
 
 
                                                 
@@ -146,8 +163,8 @@ delete_next(State = #state{keys = Dict, cmds = C},_V,[_DB, Id|_]) ->
     State#state{keys = dict:erase(Id, Dict), cmds = C + 1}.
 
 
-update_doc(Dict) ->
-    ?LET({Key, NewContent,N2 },
+update_doc(Dict) -> 
+    ?LET({Key, NewContent, N2 },
          {oneof(dict:fetch_keys(Dict)), utf8(4), utf8(16)},
          begin
              {ok, Doc1} = dict:find(Key, Dict),
