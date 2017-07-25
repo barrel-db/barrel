@@ -13,12 +13,12 @@
 -compile(export_all).
 %% -- State and state functions ----------------------------------------------
 -record(state,{
-          db :: binary(),
+          db :: [binary()],
           cmds = 0:: integer(),
           keys:: dict:dict(binary(), term()),
           online = true :: boolean()
 
-              }).
+         }).
 
 
 
@@ -30,7 +30,7 @@ initial_state() ->
 
 
 db(#state{db= DB}) ->
-    DB.
+    oneof(DB).
 
 
 id() ->
@@ -45,8 +45,7 @@ doc()->
 
 
 
-
-%********************************************************************************
+%********************************************************************************                                                
 % Validate the results of a call
 
 
@@ -56,11 +55,10 @@ create_database(DB) ->
         _ -> ok
     end,
     barrel:create_database(#{<<"database_id">> => DB}).
-    
 
 
-                                                
-%********************************************************************************
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 get_command(S= #state{keys = Dict}) ->
     oneof([
@@ -81,20 +79,15 @@ get_post(#state{keys= Dict}, [_DB, Id, #{}], {error, not_found}) ->
 get_post(#state{keys= Dict}, [_DB, Id, #{}],
          {ok, Doc = #{<<"id">> := Id, <<"content">> := _Content} ,
           _rev}) ->
-    R =  {ok, Doc} == dict:find(Id, Dict),
-    %% case R of
-    %%     false ->
-    %%         io:format("Get Doc ~p~n R : ~p ~n~p~n~n~n", [Doc,R,   dict:find(Id, Dict)]);
-    %%     _ -> ok
-    %% end,
-    R.
+    {ok, Doc} == dict:find(Id, Dict).
 
 
-%********************************************************************************
+
+                                                %********************************************************************************
 
 
 post_post(#state{keys = Dict} , [_DB, #{<<"id">> := Id}, #{}], {error, {conflict, doc_exists}}) ->
-   
+
     dict:is_key(Id, Dict);
 
 post_post(_State, _Args, _Ret) ->
@@ -113,7 +106,7 @@ post_next(State = #state{keys = Dict,cmds = C},
     State#state{keys = dict:store(Id, Doc, Dict), cmds= C + 1}.
 
 
-%********************************************************************************
+                                                %********************************************************************************
 
 put_pre(#state{keys = Dict}) ->
     not(dict:is_empty(Dict)).
@@ -132,16 +125,14 @@ put_command(S = #state{keys = Dict}) ->
 put_next(State = #state{keys = Dict,cmds = C},{var, N},_Cmd = [_DB, Doc = #{<<"id">> := Id} , _opt]) ->
     State#state {keys = dict:store(Id, Doc, Dict), cmds= C + 1};
 put_next(State = #state{keys = Dict,cmds = C},
-          _V    = {ok, Id, _Rev},
-          _Cmd  = [_DB, Doc = #{<<"id">> := Id}, _opt]) ->
-    io:format("-----------------------------------------------------------------------------------------~n~n~n"),
-    io:format("Put Doc ~p ~n~p~n", [Doc, _V]),
+         _V   = {ok, Id, _Rev},
+         _Cmd = [_DB, Doc = #{<<"id">> := Id}, _opt]) ->
     State#state{keys = dict:store(Id, Doc, Dict), cmds= C + 1}.
 
 
 
-                                                
-%********************************************************************************
+
+                                                %********************************************************************************
 
 
 delete_pre(#state{keys = Dict}) ->
@@ -172,14 +163,6 @@ update_doc(Dict) ->
                    <<"new">> => N2}
          end).
 
-
-
-
-%% offline_pre(#state{online= Online}) ->
-%%      not(Online).
-
-%% offline_command(_S) ->
-%%       [].
 
 %% -- Generators -------------------------------------------------------------
 
@@ -218,7 +201,7 @@ postcondition_common(_S= #state{keys = _Dict, db = DB}, _Call, _Res) ->
         {error, not_found } -> false;
         {ok, _A = #{docs_count := _DocCount}} ->
             true
-        %DocCount >= dict:size(Dict)
+                                                %DocCount >= dict:size(Dict)
     end;
 
 postcondition_common(_,_,_) ->
@@ -235,28 +218,28 @@ postcondition_common(_,_,_) ->
 
 
 
-cleanup() -> 
+cleanup() ->
     common_eqc:cleanup().
 uuid() ->
-     list_to_binary(uuid:uuid_to_string(uuid:get_v4_urandom())).
+    list_to_binary(uuid:uuid_to_string(uuid:get_v4_urandom())).
 
 -spec prop_barrel_rpc_events_eqc() -> eqc:property().
 prop_barrel_rpc_events_eqc() ->
     ?SETUP(fun common_eqc:init_db/0,
            ?FORALL( Cmds,
                     commands(?MODULE,
-                             #state{keys = dict:new() ,
-                                    db =  uuid()
+                             #state{keys = dict:new(),
+                                    db =  [uuid(),uuid()]
                                    }),
                     begin
-                        [{model, ?MODULE},{init, #state{db= DB}}|_] = Cmds,
-                        {ok,#{<<"database_id">> := DB}} = create_database(DB),
-%                        cleanup(),
+                        [{model, ?MODULE},
+                         {init, #state{db= [DB1,DB2]}}|_] = Cmds,
+                        {ok,#{<<"database_id">> := DB1}} = create_database(DB1),
+                        {ok,#{<<"database_id">> := DB2}} = create_database(DB2),
                         {H, S, Res} = run_commands(Cmds),
                         ?WHENFAIL(begin
                                       cleanup(),
                                       ok
-
                                   end,
                                   check_command_names(Cmds,
                                                       measure(length, commands_length(Cmds),
