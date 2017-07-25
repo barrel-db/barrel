@@ -20,8 +20,11 @@ init_db()->
 cleanup() ->
     Dbs = barrel:database_names(),
     [ok = barrel:delete_database(D)|| D<- Dbs],
-    [] = barrel:database_names(),
+
+   % [] = barrel:database_names(),
     ok.
+
+
 
 delete_db() ->
     cleanup(),

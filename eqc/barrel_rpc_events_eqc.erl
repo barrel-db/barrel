@@ -29,8 +29,8 @@ initial_state() ->
     #state{keys = dict:new() , db = uuid:get_v4_urandom()}.
 
 
-db(#state{db= DB}) ->
-    oneof(DB).
+db(#state{db= [DB|_]}) ->
+		DB.
 
 
 id() ->
@@ -45,8 +45,8 @@ doc()->
 
 
 
-%********************************************************************************                                                
-% Validate the results of a call
+%%********************************************************************************                                                
+%% Validate the results of a call
 
 
 create_database(DB) ->
@@ -83,15 +83,13 @@ get_post(#state{keys= Dict}, [_DB, Id, #{}],
 
 
 
-                                                %********************************************************************************
+%%********************************************************************************
 
 
 post_post(#state{keys = Dict} , [_DB, #{<<"id">> := Id}, #{}], {error, {conflict, doc_exists}}) ->
-
     dict:is_key(Id, Dict);
 
 post_post(_State, _Args, _Ret) ->
-
     true.
 
 post_command(S = #state{keys = Dict}) ->
@@ -106,7 +104,7 @@ post_next(State = #state{keys = Dict,cmds = C},
     State#state{keys = dict:store(Id, Doc, Dict), cmds= C + 1}.
 
 
-                                                %********************************************************************************
+%%********************************************************************************
 
 put_pre(#state{keys = Dict}) ->
     not(dict:is_empty(Dict)).
@@ -132,7 +130,7 @@ put_next(State = #state{keys = Dict,cmds = C},
 
 
 
-                                                %********************************************************************************
+%%********************************************************************************
 
 
 delete_pre(#state{keys = Dict}) ->
@@ -195,13 +193,15 @@ precondition_common(#state{db = DB, cmds = _N}, _Call) ->
                                                 when S    :: eqc_statem:dynamic_state(),
                                                      Call :: eqc_statem:call(),
                                                      Res  :: term().
-postcondition_common(_S= #state{keys = _Dict, db = DB}, _Call, _Res) ->
+postcondition_common(_S= #state{keys = _Dict, db = [DB|_]}, _Call, _Res) ->
 
     case  barrel:database_infos(DB) of
-        {error, not_found } -> false;
+        {error, not_found } -> 
+						io:format("Database Not found ~p~n", [DB]),
+						false;
         {ok, _A = #{docs_count := _DocCount}} ->
             true
-                                                %DocCount >= dict:size(Dict)
+						%%DocCount >= dict:size(Dict)
     end;
 
 postcondition_common(_,_,_) ->
@@ -237,6 +237,8 @@ prop_barrel_rpc_events_eqc() ->
                         {ok,#{<<"database_id">> := DB1}} = create_database(DB1),
                         {ok,#{<<"database_id">> := DB2}} = create_database(DB2),
                         {H, S, Res} = run_commands(Cmds),
+												barrel:delete_database(DB1),
+												barrel:delete_database(DB2),
                         ?WHENFAIL(begin
                                       cleanup(),
                                       ok

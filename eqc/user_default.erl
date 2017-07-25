@@ -14,13 +14,24 @@ run(X) ->
      barrel_httpc_eqc:run(X).
 
 eqc() ->
-    eqc(25).
+    eqc(150).
 
 eqc(N) ->
     lager:set_loglevel(lager_console_backend, notice),
+    [] = eqc:module({numtests,N}, barrel_rpc_events_eqc),
     [] = eqc:module({numtests,N}, create_delete_database_eqc),
     [] = eqc:module({numtests,N}, barrel_rpc_eqc),
-    [] = eqc:module({numtests,N}, barrel_rpc_events_eqc),
+ 
+    ok.
+
+
+create_delete() ->
+    DB     = uuid:get_v4_urandom(),
+    barrel:delete_database(DB),
+    N      = barrel:database_names(),
+    {ok,_} = barrel:create_database(#{<<"database_id">> => DB}),
+    ok     = barrel:delete_database(DB),
+    N      = barrel:database_names(),
     ok.
 
 
