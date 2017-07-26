@@ -119,7 +119,7 @@ stop_replication_pre(#state{replicate = _S}) ->
 
 
 stop_replication({ok, #{id := Id}}) -> 
-		timer:sleep(100),
+		%timer:sleep(100),
 		barrel:stop_replication(Id).
 
 stop_replication_command(#state{replicate = RepId}) ->
@@ -232,16 +232,16 @@ update_doc(Dict) ->
 command_precondition_common(_S, _Cmd) ->
     true.
 
-%% @doc General precondition, applied *before* specialized preconditions.
-%% -spec precondition_common(S, Call) -> boolean()
-%%                                           when S    :: eqc_statem:symbolic_state(),
-%%                                                Call :: eqc_statem:call().
-%% precondition_common(#state{db = DB, cmds = _N}, _Call) ->
-%%     case barrel:database_infos(DB) of
-%%         {error,not_found} -> true;
-%%         {ok, _A = #{docs_count := DocCount}} ->
-%% 						DocCount >= 0
-%%     end.
+%%@doc General precondition, applied *before* specialized preconditions.
+-spec precondition_common(S, Call) -> boolean()
+                                          when S    :: eqc_statem:symbolic_state(),
+                                               Call :: eqc_statem:call().
+precondition_common(#state{db = [DB|_], cmds = _N}, _Call) ->
+    case barrel:database_infos(DB) of
+        {error,not_found} -> true;
+        {ok, _A = #{docs_count := DocCount}} ->
+						DocCount >= 0
+    end.
 
 
 
@@ -294,6 +294,10 @@ cleanup() ->
 %% uuid() ->
 %%     list_to_binary(uuid:uuid_to_string(uuid:get_v4_urandom())).
 
+stop(#state{replicate = S}) when is_binary(S) ->
+		barrel:stop_replication(S);
+stop(#state{}) ->
+		ok.
 -spec prop_barrel_rpc_events_eqc() -> eqc:property().
 prop_barrel_rpc_events_eqc() ->
     ?SETUP(fun common_eqc:init_db/0,
@@ -311,17 +315,11 @@ prop_barrel_rpc_events_eqc() ->
 														 {ok,#{<<"database_id">> := D}} = create_database(D)
 												 end
 												 || D <-DBS],
-												timer:sleep(250),
+											%	timer:sleep(250),
 												
                         {H, S, Res} = run_commands(Cmds),
-												R = S#state.replicate,
-												case R of
-														S when is_binary(S) ->
-																barrel:stop_replication(S);
-														_ ->ok
-												end,
-																
-																				 
+												stop(S),
+
 												[ok = barrel:delete_database(D)|| D <-DBS],
                         ?WHENFAIL(begin
                                       cleanup(),
