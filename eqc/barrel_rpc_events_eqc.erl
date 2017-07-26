@@ -43,13 +43,28 @@ doc()->
 
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-
+get_command(S= #state{keys = Dict, replicate={var,_}, db= DBS}) ->
+		oneof([
+					 {call, barrel, get,       [oneof(DBS), oneof(dict:fetch_keys(Dict)), #{}]},
+           {call, barrel, get,       [oneof(DBS), id(), #{}]}
+					]);
 get_command(S= #state{keys = Dict}) ->
     oneof([
            {call, barrel, get,       [db(S), oneof(dict:fetch_keys(Dict)), #{}]},
            {call, barrel, get,       [db(S), id(), #{}]}
           ]).
 
+get_adapt(#state{replicate = false}, [<<"test02">>, Key, Meta])->
+ 		lager:error("+++++New Command ~p~n",[		{call, barrel, get, [<<"test01">>, Key, Meta]}]),
+		{call, barrel, get, [<<"test01">>, Key, Meta]};
+get_adapt(_S,_C) ->
+		false.
+
+
+get_pre(#state{replicate={var,_}}, [<<"test02">>, _, _]) ->
+		false;
+get_pre(_,_) ->
+		true.
 
 get_pre(#state{keys = Dict}) ->
     not(dict:is_empty(Dict)).
@@ -104,7 +119,7 @@ stop_replication_pre(#state{replicate = _S}) ->
 
 
 stop_replication({ok, #{id := Id}}) -> 
-
+		timer:sleep(100),
 		barrel:stop_replication(Id).
 
 stop_replication_command(#state{replicate = RepId}) ->
@@ -276,8 +291,8 @@ create_database(DB) ->
 cleanup() ->
     common_eqc:cleanup().
 
-uuid() ->
-    list_to_binary(uuid:uuid_to_string(uuid:get_v4_urandom())).
+%% uuid() ->
+%%     list_to_binary(uuid:uuid_to_string(uuid:get_v4_urandom())).
 
 -spec prop_barrel_rpc_events_eqc() -> eqc:property().
 prop_barrel_rpc_events_eqc() ->
@@ -296,9 +311,17 @@ prop_barrel_rpc_events_eqc() ->
 														 {ok,#{<<"database_id">> := D}} = create_database(D)
 												 end
 												 || D <-DBS],
-
+												timer:sleep(250),
 												
                         {H, S, Res} = run_commands(Cmds),
+												R = S#state.replicate,
+												case R of
+														S when is_binary(S) ->
+																barrel:stop_replication(S);
+														_ ->ok
+												end,
+																
+																				 
 												[ok = barrel:delete_database(D)|| D <-DBS],
                         ?WHENFAIL(begin
                                       cleanup(),
