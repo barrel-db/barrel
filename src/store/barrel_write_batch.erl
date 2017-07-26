@@ -12,7 +12,7 @@
 %% API
 -export([
   new/1,
-  put/3,
+  put/3, put/4,
   post/3,
   delete/3,
   put_rev/4,
@@ -27,6 +27,7 @@
 -type batch() :: tuple().
 -type batch_op() :: {put, Doc :: barrel:doc()} |
                     {put, Doc :: barrel:doc(), Rev :: barrel:revid()} |
+                    {put, Doc :: barrel:doc(), CreateIfMissing :: boolean(), Rev :: barrel:revid()} |
                     {post, Doc :: barrel:doc()} |
                     {post, Doc :: barrel:doc(), IsUpsert :: boolean()} |
                     {delete, DocId :: barrel:docid(), Rev :: barrel:revid()} |
@@ -49,11 +50,19 @@ new(Async) ->
   Rev :: barrel:revid(),
   BatchIn :: batch(),
   BatchOut :: batch().
-put(Obj, Rev, Batch) ->
+put(Obj, Rev, Batch) -> put(Obj, false, Rev, Batch).
+
+-spec put(Obj, CreateIfMissing, Rev, BatchIn) -> BatchOut when
+  Obj :: barrel:doc(),
+  CreateIfMissing :: boolean(),
+  Rev :: barrel:revid(),
+  BatchIn :: batch(),
+  BatchOut :: batch().
+put(Obj, CreateIfMissing, Rev, Batch) ->
   ok = validate_docid(Obj),
   Doc = barrel_doc:make_doc(Obj, [Rev], false),
   Req = make_req(Batch),
-  Op = make_op(Doc, Req, false, false, false),
+  Op = make_op(Doc, Req, false, CreateIfMissing, false),
   update_batch(Doc#doc.id, Op, Batch).
 
 -spec post(Obj, IsUpsert, BatchIn) -> BatchOut when
@@ -133,6 +142,8 @@ add_op(Op, Batch) ->
   case parse_op(Op) of
     {put, Obj, Rev} ->
       barrel_write_batch:put(Obj, Rev, Batch);
+    {put, Obj, CreateIfMissing, Rev} ->
+      barrel_write_batch:put(Obj, CreateIfMissing, Rev, Batch);
     {post, Obj, IsUpsert} ->
       barrel_write_batch:post(Obj, IsUpsert, Batch);
     {delete, Id, Rev} ->
@@ -148,7 +159,8 @@ is_batch(_) -> false.
 %% expected ops coming from the API
 parse_op(#{ <<"op">> := <<"put">>, <<"doc">> := Doc} = OP) ->
   Rev = maps:get(<<"rev">>, OP, <<>>),
-  {put, Doc, Rev};
+  CreateIfMissing = maps:get(<<"create_if_missing">>, OP, false),
+  {put, Doc, CreateIfMissing, Rev};
 parse_op(#{ <<"op">> := <<"post">>, <<"doc">> := Doc} = OP) ->
   IsUpsert = maps:get(<<"is_upsert">>, OP, false),
   {post, Doc, IsUpsert};
@@ -162,6 +174,7 @@ parse_op(#{ <<"op">> := <<"put_rev">>, <<"doc">> := Doc, <<"history">> := Histor
 %% internal batch
 parse_op({put, Doc}) when is_map(Doc) -> {put, Doc, <<>>};
 parse_op({put, Doc, Rev} = OP) when is_map(Doc), is_binary(Rev) -> OP;
+parse_op({put, Doc, CreateIfMissing, Rev} = OP) when is_map(Doc), is_boolean(CreateIfMissing), is_binary(Rev) -> OP;
 parse_op({post, Doc}) when is_map(Doc) -> {post, Doc, false};
 parse_op({post, Doc, IsUpsert} = OP) when is_map(Doc), is_boolean(IsUpsert) -> OP;
 parse_op({delete, Id, Rev} = OP) when is_binary(Id), is_binary(Rev) -> OP;
