@@ -21,7 +21,9 @@
 					deleted = sets:new()
          }).
 
-
+-record(doc, {id :: binary(),
+							value = dict:new() :: dict:dict(binary(), #{})
+						 }).
 
 %% @doc Returns the state in which each test case starts. (Unless a different
 %%      initial state is supplied explicitly to, e.g. commands/2.)
@@ -53,10 +55,25 @@ get_command(_S = #state{keys = Dict , replicate= R, db= DBS =[D|_]}) ->
 						 false -> D
 				 end,
     oneof([
-           {call, barrel, get,       [DB, oneof(dict:fetch_keys(Dict)), #{}]},
-           {call, barrel, get,       [DB, id(), #{}]},
-					 {call, barrel, get,       [DB, oneof(dict:fetch_keys(Dict)), #{history => true }]}
+           {call, ?MODULE, get,       [DB, oneof(dict:fetch_keys(Dict)), oneof([history, 'rev', nothing])]},
+           {call, ?MODULE, get,       [DB, id(), #{}]}
+					 
           ]).
+
+get(DB, {ok, Id, RevId}, 'rev') ->
+		barrel:get(DB, Id, #{'rev' => RevId});
+
+get(DB, {ok, Id, _RevId}, 'history') ->
+		barrel:get(DB, Id, #{ 'history' => true});
+
+get(DB, {ok, Id, _RevId}, nothing) ->
+		barrel:get(DB, Id, #{});
+
+get(DB, Id, _) ->
+		barrel:get(DB, Id, #{}).
+		
+
+
 
 get_adapt(#state{replicate = false}, [<<"test02">>, Key, Meta])->
 		{call, barrel, get, [<<"test01">>, Key, Meta]};
@@ -75,17 +92,25 @@ get_pre(#state{keys = Dict}) ->
 get_next(S=  #state{cmds = C},_,_) ->
     S#state{cmds = C + 1}.
 
-get_post(#state{keys= Dict}, [_DB, Id, #{history := true}], {ok, Doc, Meta}) ->
-		lager:error("Hitory ~p~n~n~n", [barrel_doc:parse_revisions(Meta)]),
-						
-		true; 
 
-get_post(#state{keys= Dict}, [_DB, Id, #{}], {error, not_found}) ->
+get_post(#state{keys= Dict}, [_DB, Id, _], {error, not_found}) ->
+		lager:error("Not Found ~p~n", [Id]),
     not(dict:is_key(Id, Dict));
-get_post(#state{keys= Dict}, [_DB, Id, #{}],
+
+get_post(#state{keys= Dict}, [_DB, Id, history], {ok, _Doc, Meta}) ->
+		Revisions = barrel_doc:parse_revisions(Meta),
+		#doc{value = Revs} = dict:fetch(Id, Dict),
+		lists:all(fun(R) ->
+											dict:is_key(R, Revs)
+							end, Revisions);
+
+
+get_post(#state{keys= Dict}, [_DB, Id, _],
          {ok, Doc = #{<<"id">> := Id, <<"content">> := _Content} ,
-          _rev}) ->
-    {ok, Doc} == dict:find(Id, Dict).
+          #{<<"rev">> := Rev}}) ->
+    {ok, #doc{id = Id, 
+							value = V}} = dict:find(Id, Dict),
+		dict:is_key(Rev, V).
 
 %%********************************************************************************
 
@@ -149,7 +174,7 @@ stop_replication_next(State, _,_) ->
 %%********************************************************************************
 
 
-post_post(#state{keys = Dict} , [_DB, #{<<"id">> := Id}, #{}], {error, {conflict, doc_exists}}) ->
+post_post(#state{keys = Dict} , [_DB, #{<<"id">> := Id}, _], {error, {conflict, doc_exists}}) ->
     dict:is_key(Id, Dict);
 
 post_post(_State, _Args, _Ret) ->
@@ -159,18 +184,27 @@ post_command(S = #state{keys = _Dict}) ->
     oneof([{call, barrel, post,  [db(S), doc(), #{}]}]).
 
 
-post_next(State = #state{keys = Dict,cmds = C},{var, _N}, _Cmd = [_DB, Doc = #{<<"id">> := Id} , _opt]) ->
-    State#state {keys = dict:store(Id, Doc, Dict), cmds= C + 1};
+post_next(State = #state{keys = Dict,
+												 cmds = C},
+					Res = {var, _N}, 
+					_Cmd = [_DB, _Doc = #{<<"id">> := Id} , _opt]) ->
+		
+    State#state {keys = dict:store(Id, Res, Dict), cmds= C + 1};
+
 post_next(State = #state{keys = Dict,cmds = C},
-          _V    = {ok, Id, _Rev},
+          _V    = {ok, Id, Rev},
           _Cmd  = [_DB, Doc = #{<<"id">> := Id}, _opt]) ->
-    State#state{keys = dict:store(Id, Doc, Dict), cmds= C + 1}.
+    State#state{keys = dict:store(Id, 
+																	#doc{id = Id,
+																			 value = dict:from_list([{Rev, Doc}])
+																			},
+																	Dict), cmds= C + 1}.
 
 
 %%********************************************************************************
 
 put_pre(#state{keys = Dict}) ->
-    not(dict:is_empty(Dict)).
+    not(dict:is_empty(Dict)) , false.
 
 put_post(#state{keys = Dict} , [_DB, #{<<"id">> := Id}, #{}], {error, {conflict, doc_exists}}) ->
     dict:is_key(Id, Dict);
@@ -180,8 +214,12 @@ put_post(_State, _Args, _Ret) ->
 
 put_command(S = #state{keys = Dict}) ->
     oneof([
-           {call, barrel, put,   [db(S), update_doc(Dict), #{}]}
+           {call, ?MODULE, put,   [db(S), oneof(dict:fetch_keys(Dict)), Dict, #{}]}
           ]).
+
+put(DB, Doc,Dict, Opts) ->
+		Doc1 = update_doc(Doc),
+		barrel:put(DB, Doc1, Opts).
 
 put_next(State = #state{keys = Dict,cmds = C},
 				 {var,_N},
@@ -230,12 +268,12 @@ delete_next(State = #state{keys = Dict, cmds = C, deleted=D},_V,[_DB, Id|_]) ->
     State#state{keys = dict:erase(Id, Dict), cmds = C + 1, deleted = sets:add_element(Id,D)}.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-update_doc(Dict) -> 
-    ?LET({Key, NewContent, N2 },
-         {oneof(dict:fetch_keys(Dict)), utf8(4), utf8(16)},
+update_doc(Doc) -> 
+    ?LET({ NewContent, N2 },
+         { utf8(4), utf8(16)},
          begin
-             {ok, Doc1} = dict:find(Key, Dict),
-             Doc1#{<<"content">> => NewContent, 
+             
+             Doc#{<<"content">> => NewContent, 
                    <<"new">> => N2}
          end).
 
