@@ -1,7 +1,8 @@
 %%% @author Zachary Kessin <>
 %%% @copyright (C) 2017, Zachary Kessin
 %%% @doc
-%%%
+%%% This is the main quickcheck property for barrel. It creats a sequence of events that is then
+%%% run and compaired vs a model of what should happen.
 %%% @end
 %%% Created :  6 Jul 2017 by Zachary Kessin <>
 
@@ -38,13 +39,14 @@ doc()->
      <<"content">> => utf8(8)
     }.
 
-%%********************************************************************************                                                
-
-
 
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-
+%% Get Commands
+%% 
+%% This section tests getting data from the database. Each get will make a request 
+%% From the server than compare the resulting document to a store kept by the test
+%%
 
 
 get_command(_S = #state{keys = Dict , replicate= R, db= DBS =[D|_]}) ->
@@ -58,8 +60,11 @@ get_command(_S = #state{keys = Dict , replicate= R, db= DBS =[D|_]}) ->
 					 {call, barrel, get,       [DB, oneof(dict:fetch_keys(Dict)), #{history => true }]}
           ]).
 
-get_adapt(#state{replicate = false}, [<<"test02">>, Key, Meta])->
-		{call, barrel, get, [<<"test01">>, Key, Meta]};
+%% This function adapts tests so that replication state does not get screwed up
+%% By shrinking and that we only look at the 2nd database if replication is active
+
+get_adapt(#state{replicate = false, db = [D1,D2]}, [D2, Key, Meta])->
+		{call, barrel, get, [D1, Key, Meta]};
 get_adapt(_S,_C) ->
 		false.
 
@@ -76,8 +81,6 @@ get_next(S=  #state{cmds = C},_,_) ->
     S#state{cmds = C + 1}.
 
 get_post(#state{keys= Dict}, [_DB, Id, #{history := true}], {ok, Doc, Meta}) ->
-		lager:error("Hitory ~p~n~n~n", [barrel_doc:parse_revisions(Meta)]),
-						
 		true; 
 
 get_post(#state{keys= Dict}, [_DB, Id, #{}], {error, not_found}) ->
@@ -88,7 +91,9 @@ get_post(#state{keys= Dict}, [_DB, Id, #{}],
     {ok, Doc} == dict:find(Id, Dict).
 
 %%********************************************************************************
-
+%% This group turns on replication
+%% In the case that replication is already on #state{replicate != false} it will not run
+%%
 start_replication_pre(#state{replicate = R, db=_DBS}) ->
  		R == false.
 
@@ -118,10 +123,11 @@ start_replication_post(_,_,_R) ->
 
 
 %%********************************************************************************
+%% Stop replication if it is turned on.
+
 stop_replication_pre(#state{replicate = false}) ->
 		false;
 stop_replication_pre(#state{replicate = _S}) ->
-
 		true.
 
 
@@ -147,7 +153,8 @@ stop_replication_next(State, _,_) ->
 		State.
 
 %%********************************************************************************
-
+%% Post documents to the server
+%% Documents are crated randomly as are keys in the doc/0 function
 
 post_post(#state{keys = Dict} , [_DB, #{<<"id">> := Id}, #{}], {error, {conflict, doc_exists}}) ->
     dict:is_key(Id, Dict);
@@ -168,7 +175,9 @@ post_next(State = #state{keys = Dict,cmds = C},
 
 
 %%********************************************************************************
-
+%% Update documents on the server
+%% It will take an existing doc and udpate it
+%%
 put_pre(#state{keys = Dict}) ->
     not(dict:is_empty(Dict)).
 
@@ -198,7 +207,7 @@ put_next(State, _,_) ->
 
 
 %%********************************************************************************
-
+%% Delete documents from the server
 
 delete_pre(#state{keys = Dict}) ->
     not(dict:is_empty(Dict)).
@@ -230,6 +239,8 @@ delete_next(State = #state{keys = Dict, cmds = C, deleted=D},_V,[_DB, Id|_]) ->
     State#state{keys = dict:erase(Id, Dict), cmds = C + 1, deleted = sets:add_element(Id,D)}.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% Generator to update a document
+
 update_doc(Dict) -> 
     ?LET({Key, NewContent, N2 },
          {oneof(dict:fetch_keys(Dict)), utf8(4), utf8(16)},
@@ -250,7 +261,7 @@ update_doc(Dict) ->
 command_precondition_common(_S, _Cmd) ->
     true.
 
-%%@doc General precondition, applied *before* specialized preconditions.
+%% Ensure that the number of documents is always posititve
 -spec precondition_common(S, Call) -> boolean()
                                           when S    :: eqc_statem:symbolic_state(),
                                                Call :: eqc_statem:call().
@@ -258,7 +269,6 @@ precondition_common(#state{db = [DB|_], cmds = _N}, _Call) ->
     case barrel:database_infos(DB) of
         {error,not_found} -> true;
         {ok, _A = #{docs_count := DocCount}} ->
-						
 						DocCount >= 0
     end.
 
@@ -273,15 +283,12 @@ precondition_common(#state{db = [DB|_], cmds = _N}, _Call) ->
                                                 when S    :: eqc_statem:dynamic_state(),
                                                      Call :: eqc_statem:call(),
                                                      Res  :: term().
-postcondition_common(_S= #state{keys = _Dict, db = [DB|_]}, _Call, _Res) ->
-
+postcondition_common(_S= #state{keys = Dict, db = [DB|_]}, _Call, _Res) ->
     case  barrel:database_infos(DB) of
         {error, not_found } -> 
-						io:format("Database Not found ~p~n", [DB]),
 						false;
-        {ok, _A = #{docs_count := _DocCount}} ->
-            true
-						%%DocCount >= dict:size(Dict)
+        {ok, _A = #{docs_count :=DocCount}} ->
+						DocCount >= dict:size(Dict)
     end;
 
 postcondition_common(_,_,_) ->
