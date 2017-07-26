@@ -16,26 +16,20 @@
           db :: [binary()],
           cmds = 0:: integer(),
           keys:: dict:dict(binary(), term()),
-          online = true :: boolean()
-
+          online = true :: boolean(),
+					replicate = false :: false| binary()
          }).
 
 
 
 %% @doc Returns the state in which each test case starts. (Unless a different
 %%      initial state is supplied explicitly to, e.g. commands/2.)
--spec initial_state() -> eqc_statem:symbolic_state().
-initial_state() ->
-    #state{keys = dict:new() , db = uuid:get_v4_urandom()}.
-
 
 db(#state{db= [DB|_]}) ->
 		DB.
 
-
 id() ->
     utf8(16).
-
 
 doc()->
     #{
@@ -43,18 +37,8 @@ doc()->
      <<"content">> => utf8(8)
     }.
 
-
-
 %%********************************************************************************                                                
 %% Validate the results of a call
-
-
-create_database(DB) ->
-    case barrel:database_infos(DB) of
-        {ok, _} -> barrel:delete_database(DB);
-        _ -> ok
-    end,
-    barrel:create_database(#{<<"database_id">> => DB}).
 
 
 
@@ -81,7 +65,64 @@ get_post(#state{keys= Dict}, [_DB, Id, #{}],
           _rev}) ->
     {ok, Doc} == dict:find(Id, Dict).
 
+%%********************************************************************************
 
+start_replication_pre(#state{replicate = R, db=_DBS}) ->
+ 		R == false.
+
+start_replication_command(#state{db = [DB1, DB2]}) ->
+		oneof([{call, barrel, start_replication,
+						[#{source => DB1,
+							 target=> DB2,
+							 options => #{ metrics_freq => 100 }}]}]).
+
+start_replication_next(State, _v = {ok, #{id := RepId}},_) -> 
+		State#state{replicate = RepId};
+start_replication_next(State,N = {var,_} ,_) ->
+
+		State#state{replicate = N};
+start_replication_next(S,_,_) ->
+		S.
+
+
+start_replication_post(_,_,{ok, #{id := Id}}) when is_binary(Id)->
+
+		true;
+start_replication_post(_,_,_R) ->
+
+		true.
+
+
+
+
+%%********************************************************************************
+stop_replication_pre(#state{replicate = false}) ->
+		false;
+stop_replication_pre(#state{replicate = _S}) ->
+
+		true.
+
+
+stop_replication({ok, #{id := Id}}) -> 
+
+		barrel:stop_replication(Id).
+
+stop_replication_command(#state{replicate = RepId}) ->
+		oneof([{call, ?MODULE, stop_replication, [RepId]}]).
+
+stop_replication_post(_,_,ok) ->
+		true;
+stop_replication_post(_,_,_Error) ->
+		false.
+
+stop_replication_next(State= #state{replicate = {var,_}}, {var,_}, _) ->
+		State#state{replicate = false};
+stop_replication_next(State, ok,_) ->
+
+ 		State#state{replicate = false};
+stop_replication_next(State, _,_) ->
+
+		State.
 
 %%********************************************************************************
 
@@ -120,12 +161,16 @@ put_command(S = #state{keys = Dict}) ->
            {call, barrel, put,   [db(S), update_doc(Dict), #{}]}
           ]).
 
-put_next(State = #state{keys = Dict,cmds = C},{var, N},_Cmd = [_DB, Doc = #{<<"id">> := Id} , _opt]) ->
+put_next(State = #state{keys = Dict,cmds = C},
+				 {var,_N},
+				 _Cmd = [_DB, Doc = #{<<"id">> := Id} , _opt]) ->
     State#state {keys = dict:store(Id, Doc, Dict), cmds= C + 1};
 put_next(State = #state{keys = Dict,cmds = C},
          _V   = {ok, Id, _Rev},
          _Cmd = [_DB, Doc = #{<<"id">> := Id}, _opt]) ->
-    State#state{keys = dict:store(Id, Doc, Dict), cmds= C + 1}.
+    State#state{keys = dict:store(Id, Doc, Dict), cmds= C + 1};
+put_next(State, _,_) ->
+		State.
 
 
 
@@ -173,15 +218,16 @@ command_precondition_common(_S, _Cmd) ->
     true.
 
 %% @doc General precondition, applied *before* specialized preconditions.
--spec precondition_common(S, Call) -> boolean()
-                                          when S    :: eqc_statem:symbolic_state(),
-                                               Call :: eqc_statem:call().
-precondition_common(#state{db = DB, cmds = _N}, _Call) ->
-    case barrel:database_infos(DB) of
-        {error,not_found} -> true;
-        {ok, _A = #{docs_count := DocCount}} ->
-            DocCount >= 0
-    end.
+%% -spec precondition_common(S, Call) -> boolean()
+%%                                           when S    :: eqc_statem:symbolic_state(),
+%%                                                Call :: eqc_statem:call().
+%% precondition_common(#state{db = DB, cmds = _N}, _Call) ->
+%%     case barrel:database_infos(DB) of
+%%         {error,not_found} -> true;
+%%         {ok, _A = #{docs_count := DocCount}} ->
+%% 						DocCount >= 0
+%%     end.
+
 
 
 
@@ -218,8 +264,18 @@ postcondition_common(_,_,_) ->
 
 
 
+create_database(DB) ->
+    case barrel:database_infos(DB) of
+        {ok, _} -> barrel:delete_database(DB);
+        _ -> ok
+    end,
+    barrel:create_database(#{<<"database_id">> => DB}).
+
+
+
 cleanup() ->
     common_eqc:cleanup().
+
 uuid() ->
     list_to_binary(uuid:uuid_to_string(uuid:get_v4_urandom())).
 
@@ -229,16 +285,21 @@ prop_barrel_rpc_events_eqc() ->
            ?FORALL( Cmds,
                     commands(?MODULE,
                              #state{keys = dict:new(),
-                                    db =  [uuid(),uuid()]
+                                    db =  [<<"test01">>,<<"test02">>]
                                    }),
                     begin
                         [{model, ?MODULE},
-                         {init, #state{db= [DB1,DB2]}}|_] = Cmds,
-                        {ok,#{<<"database_id">> := DB1}} = create_database(DB1),
-                        {ok,#{<<"database_id">> := DB2}} = create_database(DB2),
+                         {init, #state{db= DBS}}
+												 |_ ] 
+														= Cmds,
+												[begin
+														 {ok,#{<<"database_id">> := D}} = create_database(D)
+												 end
+												 || D <-DBS],
+
+												
                         {H, S, Res} = run_commands(Cmds),
-												barrel:delete_database(DB1),
-												barrel:delete_database(DB2),
+												[ok = barrel:delete_database(D)|| D <-DBS],
                         ?WHENFAIL(begin
                                       cleanup(),
                                       ok
