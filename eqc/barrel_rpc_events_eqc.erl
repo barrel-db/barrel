@@ -17,7 +17,8 @@
           cmds = 0:: integer(),
           keys:: dict:dict(binary(), term()),
           online = true :: boolean(),
-					replicate = false :: false| binary()
+					replicate = false :: false| binary(),
+					deleted = sets:new()
          }).
 
 
@@ -25,7 +26,7 @@
 %% @doc Returns the state in which each test case starts. (Unless a different
 %%      initial state is supplied explicitly to, e.g. commands/2.)
 
-db(#state{db= [DB|_]}) ->
+db(#state{db = [DB|_]}) ->
 		DB.
 
 id() ->
@@ -38,24 +39,26 @@ doc()->
     }.
 
 %%********************************************************************************                                                
-%% Validate the results of a call
+
 
 
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-get_command(S= #state{keys = Dict, replicate={var,_}, db= DBS}) ->
-		oneof([
-					 {call, barrel, get,       [oneof(DBS), oneof(dict:fetch_keys(Dict)), #{}]},
-           {call, barrel, get,       [oneof(DBS), id(), #{}]}
-					]);
-get_command(S= #state{keys = Dict}) ->
+
+
+
+get_command(_S = #state{keys = Dict , replicate= R, db= DBS =[D|_]}) ->
+		DB = case R of
+						 {var, _} -> oneof(DBS);
+						 false -> D
+				 end,
     oneof([
-           {call, barrel, get,       [db(S), oneof(dict:fetch_keys(Dict)), #{}]},
-           {call, barrel, get,       [db(S), id(), #{}]}
+           {call, barrel, get,       [DB, oneof(dict:fetch_keys(Dict)), #{}]},
+           {call, barrel, get,       [DB, id(), #{}]},
+					 {call, barrel, get,       [DB, oneof(dict:fetch_keys(Dict)), #{history => true }]}
           ]).
 
 get_adapt(#state{replicate = false}, [<<"test02">>, Key, Meta])->
- 		lager:error("+++++New Command ~p~n",[		{call, barrel, get, [<<"test01">>, Key, Meta]}]),
 		{call, barrel, get, [<<"test01">>, Key, Meta]};
 get_adapt(_S,_C) ->
 		false.
@@ -72,6 +75,10 @@ get_pre(#state{keys = Dict}) ->
 get_next(S=  #state{cmds = C},_,_) ->
     S#state{cmds = C + 1}.
 
+get_post(#state{keys= Dict}, [_DB, Id, #{history := true}], {ok, Doc, Meta}) ->
+		lager:error("Hitory ~p~n~n~n", [barrel_doc:parse_revisions(Meta)]),
+						
+		true; 
 
 get_post(#state{keys= Dict}, [_DB, Id, #{}], {error, not_found}) ->
     not(dict:is_key(Id, Dict));
@@ -148,11 +155,11 @@ post_post(#state{keys = Dict} , [_DB, #{<<"id">> := Id}, #{}], {error, {conflict
 post_post(_State, _Args, _Ret) ->
     true.
 
-post_command(S = #state{keys = Dict}) ->
+post_command(S = #state{keys = _Dict}) ->
     oneof([{call, barrel, post,  [db(S), doc(), #{}]}]).
 
 
-post_next(State = #state{keys = Dict,cmds = C},{var, N},_Cmd = [_DB, Doc = #{<<"id">> := Id} , _opt]) ->
+post_next(State = #state{keys = Dict,cmds = C},{var, _N}, _Cmd = [_DB, Doc = #{<<"id">> := Id} , _opt]) ->
     State#state {keys = dict:store(Id, Doc, Dict), cmds= C + 1};
 post_next(State = #state{keys = Dict,cmds = C},
           _V    = {ok, Id, _Rev},
@@ -198,20 +205,31 @@ delete_pre(#state{keys = Dict}) ->
 
 delete_post(#state{keys= Dict},[_DB, Id,_] , {error,not_found}) ->
     not(dict:is_key(Id, Dict));
-delete_post(#state{keys= Dict}, [_DB, Id, #{}], {ok, Id, _rev}) ->
-    dict:is_key(Id, Dict).
+delete_post(#state{keys= Dict, deleted =D}, [_DB, Id, #{}], {ok, Id, _rev}) ->
+		case {   dict:is_key(Id, Dict), sets:is_element(Id,D)} of
+				{true, true} ->
+						true;
+				{true, false} ->
+						true;
+				{false, false} ->
+						false;
+				{false, true}->
+						true
+		end.
 
-delete_command(S = #state{keys = Dict}) ->
+
+delete_command(S = #state{keys = Dict,deleted = D}) ->
     oneof([
            {call, barrel, delete,    [db(S), oneof(dict:fetch_keys(Dict)), #{}]},
-           {call, barrel, delete,    [db(S), id(), #{}]}
+           {call, barrel, delete,    [db(S), id(), #{}]},
+					 {call, barrel, delete,    [db(S), oneof([<<"a">>|sets:to_list(D)]), #{}]}
           ]).
 
 
-delete_next(State = #state{keys = Dict, cmds = C},_V,[_DB, Id|_]) ->
-    State#state{keys = dict:erase(Id, Dict), cmds = C + 1}.
+delete_next(State = #state{keys = Dict, cmds = C, deleted=D},_V,[_DB, Id|_]) ->
+    State#state{keys = dict:erase(Id, Dict), cmds = C + 1, deleted = sets:add_element(Id,D)}.
 
-
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 update_doc(Dict) -> 
     ?LET({Key, NewContent, N2 },
          {oneof(dict:fetch_keys(Dict)), utf8(4), utf8(16)},
@@ -240,6 +258,7 @@ precondition_common(#state{db = [DB|_], cmds = _N}, _Call) ->
     case barrel:database_infos(DB) of
         {error,not_found} -> true;
         {ok, _A = #{docs_count := DocCount}} ->
+						
 						DocCount >= 0
     end.
 

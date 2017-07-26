@@ -45,7 +45,7 @@ eqc:
 eqcshell:
 		@$(REBAR) as eqc shell --sname barreleqc@localhost
 shell:
-		@$(REBAR) as eqc shell --sname barreleqc2@localhost
+	@$(REBAR) as eqc shell --sname barrel@localhost
 
 
 help: ## This documentation
