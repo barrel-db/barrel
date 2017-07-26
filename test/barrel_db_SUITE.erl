@@ -31,6 +31,7 @@
   update_doc/1,
   multi_get/1,
   put_is_not_create/1,
+  create_if_missing/1,
   deletet_is_not_create/1,
   last_write_win/1,
   async_update/1,
@@ -59,6 +60,7 @@ all() ->
     update_doc,
     multi_get,
     put_is_not_create,
+    create_if_missing,
     deletet_is_not_create,
     last_write_win,
     async_update,
@@ -152,6 +154,11 @@ multi_get(_Config) ->
 put_is_not_create(_Config) ->
   Doc = #{ <<"id">> => <<"a">>, <<"v">> => 1},
   {error, not_found} = barrel:put(<<"testdb">>, Doc, #{}).
+
+create_if_missing(_Config) ->
+  Doc = #{ <<"id">> => <<"a">>, <<"v">> => 1},
+  {error, not_found} = barrel:put(<<"testdb">>, Doc, #{}),
+  {ok, <<"a">>, _RevId} = barrel:put(<<"testdb">>, Doc,  #{ create_if_missing => true}).
 
 deletet_is_not_create(_Config) ->
   {error, not_found} = barrel:delete(<<"testdb">>, <<"a">>, #{}).

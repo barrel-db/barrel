@@ -89,11 +89,11 @@ multi_get(Db, Fun, AccIn, DocIds, Options) ->
 put(Db, Doc, Options) when is_map(Doc) ->
   Rev = maps:get(rev, Options, <<>>),
   Async = maps:get(async, Options, false),
-  Batch = barrel_write_batch:put(Doc, Rev, barrel_write_batch:new(Async)),
+  CreateIfMissing = maps:get(create_if_missing, Options, false),
+  Batch = barrel_write_batch:put(Doc, CreateIfMissing, Rev, barrel_write_batch:new(Async)),
   update_doc(Db, Batch);
 put(_,  _, _) ->
   erlang:error(badarg).
-
 
 put_rev(Db, Doc, History, Deleted, Options) when is_map(Doc) ->
   Async = maps:get(async, Options, false),
