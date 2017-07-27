@@ -18,12 +18,52 @@ eqc() ->
 
 eqc(N) ->
     lager:set_loglevel(lager_console_backend, notice),
+    [] = eqc:module({numtests,N}, barrel_rpc_events_eqc),
     [] = eqc:module({numtests,N}, create_delete_database_eqc),
     [] = eqc:module({numtests,N}, barrel_rpc_eqc),
-    [] = eqc:module({numtests,N}, barrel_rpc_events_eqc),
+
  
     ok.
-
+lt() ->
+    eqc:check(barrel_rpc_events_eqc:prop_barrel_rpc_events_eqc(), 
+              [[{model,barrel_rpc_events_eqc},
+               {init,
+                {state,
+                 [<<"test01">>,<<"test02">>],
+                 0,
+                 {dict,0,16,16,8,80,48,
+                  {[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[]},
+                  {{[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[]}}},
+                 true,false,
+                 {set,0,16,16,8,80,48,
+                  {[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[]},
+                  {{[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[]}}}}},
+               {set,
+                {var,1},
+                {call,barrel,post,
+                 [<<"test01">>,
+                  #{<<"content">> => <<0,0,0,0,0,0,0,0>>,
+                    <<"id">> => <<217,161,199,187,195,190,2,217,154,198,154>>},
+                  #{}]}},
+               {set,
+                {var,2},
+                {call,barrel_rpc_events_eqc,put,
+                 [<<"test01">>,
+                  <<217,161,199,187,195,190,2,217,154,198,154>>,
+                  #{<<"content">> => <<0,0,0,0>>,
+                    <<"newcontent">> => <<0,0,0,0,0,0,0,0,0,0,0,0,0,0>>},
+                  #{}]}},
+               {set,
+                {var,3},
+                {call,barrel_rpc_events_eqc,get,
+                 [<<"test01">>,
+                  <<217,161,199,187,195,190,2,217,154,198,154>>,
+                  {dict,1,16,16,8,80,48,
+                   {[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[]},
+                   {{[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],
+                     [[<<217,161,199,187,195,190,2,217,154,198,154>>|{var,1}]]}}},
+                  history]}}]]
+             ).
 
 create_delete() ->
     DB     = uuid:get_v4_urandom(),
