@@ -73,8 +73,8 @@ get(DB, {ok, Id, _RevId}, _Dict, 'history') ->
 
 get(DB, {ok, Id, _RevId}, _Dict, nothing) ->
     barrel:get(DB, Id, #{});
-get(DB, Id , Dict, 'rev') ->
-    
+
+get(DB, Id , _Dict, 'rev') ->    
     barrel:get(DB, Id, #{ });
 get(DB, Id , _Dict, 'history') ->
     barrel:get(DB, Id, #{ 'history' => true});
@@ -107,14 +107,15 @@ get_post(#state{keys= Dict}, [_DB, Id,_, _], {error, not_found}) ->
 
 get_post(#state{keys= Dict}, [_DB, Id,_, history], {ok, _Doc, Meta}) ->
     Revisions = barrel_doc:parse_revisions(Meta),
-    #doc{value = Revs} = dict:fetch(Id, Dict),
+    lager:error("---- Dict ~p~n", [dict:find(Id, Dict)]),
+    {ok,#doc{value = Revs}} = dict:find(Id, Dict),
     lists:all(fun(R) ->
                       dict:is_key(R, Revs)
               end, Revisions);
 
 
 get_post(#state{keys= Dict}, [_DB, Id, _, _],
-         {ok, Doc = #{<<"id">> := Id, <<"content">> := _Content} ,
+         {ok, _Doc = #{<<"id">> := Id, <<"content">> := _Content} ,
           #{<<"rev">> := Rev}}) ->
     
 
@@ -251,7 +252,7 @@ put(DB, Id, Doc, Opts) ->
     barrel:put(DB, Doc#{<<"id">> => Id}, Opts).
 
 put_next(State = #state{keys = Dict,cmds = C},
-         Res = {ok, Id, RevId}   ,
+         _Res = {ok, Id, RevId}   ,
          _Cmd = [_DB, Id, Doc  , _opt]) ->
     
     
@@ -267,6 +268,74 @@ put_next(State = #state{keys = Dict,cmds = C},
     State#state{keys = dict:store(Id, Doc, Dict), cmds= C + 1};
 put_next(State, _R,_C) ->
     
+    State.
+
+
+
+%%********************************************************************************
+
+put_rev_pre(#state{keys = Dict}) ->
+    not(dict:is_empty(Dict)) .
+   
+
+put_rev_post(#state{keys = Dict} , [_DB, #{<<"id">> := Id}, #{}], {error, {conflict, doc_exists}}) ->
+    dict:is_key(Id, Dict);
+
+put_rev_post(_State, _Args, _Ret) ->
+    true.
+
+put_rev_command(S = #state{keys = Dict}) ->
+    oneof([
+           {call, ?MODULE, put_rev,   [db(S), 
+                                       oneof(dict:fetch_keys(Dict)),
+                                       doc1(),
+                                       Dict,
+                                       #{}]}
+          ]).
+
+put_rev(DB, Id, Doc, Dict, Opts) ->
+    {ok,{ok, OId, RevId}} = dict:find(Id, Dict),
+        
+    {Pos, _}             = barrel_doc:parse_revision(RevId),
+    NewRev = barrel_doc:revid(Pos + 1, RevId, barrel_doc:make_doc(
+                                                #{value => Doc, id => Id},
+                                                RevId, 
+                                                false)),
+    lager:error("++++ New Rev ~p", [NewRev]),
+    History = [NewRev,RevId],
+
+
+    barrel:put_rev(DB, Doc#{<<"id">> => Id}, History, false, Opts).
+
+put_rev_next(State = #state{cmds =C},
+         Res = {ok, _NewId, RevId}   ,
+         _Cmd = [_DB, Id, Doc, Dict , _opt]) ->
+    
+    case dict:find(Id, Dict) of
+        {ok, _Id, _RevId} ->
+            ok;
+        {ok,NewDoc = #doc{value = RevDict}} ->
+            {NewDoc, RevDict}
+    end,
+        
+    {Pos, _}             = barrel_doc:parse_revision(RevId),
+    NewDictVal = dict:store(RevId, Doc, RevDict),
+    NewRev     = barrel_doc:revid(Pos + 1, RevId, barrel_doc:make_doc(
+                                                    NewDoc#doc{value = NewDictVal},
+                                                    RevId, 
+                                                    false)),
+    lager:error("***** New Rev ~p", [NewRev]),
+    History = [NewRev,RevId],
+    NewDictVal = dict:store(RevId, NewRev, RevDict),
+
+    State#state{keys = dict:store(Id, NewDoc#doc{value = NewDictVal}, Dict), cmds= C + 1};
+
+put_rev_next(State = #state{keys = Dict,cmds = C},
+         _V   ,
+         _Cmd = [_DB,Id, Doc = #{<<"id">> := Id} , _opt]) ->
+    State#state{keys = dict:store(Id, Doc, Dict), cmds= C + 1};
+put_rev_next(State, _R,_C) ->
+    lager:error("put_rev_next ~p~n~p", [_R,_C]),
     State.
 
 
