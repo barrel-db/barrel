@@ -60,7 +60,6 @@ get_command(_S = #state{keys = Dict , replicate= R, db= DBS =[D|_]}) ->
              {var, _} -> oneof(DBS);
              false -> D
          end,
-%    lager:error("++++ Keys ~p~n", [dict:fetch_keys(Dict)]),
     oneof([
            {call, ?MODULE, get,       [DB, oneof(dict:fetch_keys(Dict)), Dict, oneof(['history', 'nothing'])]},
            {call, ?MODULE, get,       [DB, id(), Dict, 'nothing']}
@@ -75,7 +74,7 @@ get(DB, {ok, Id, _RevId}, _Dict, 'history') ->
 get(DB, {ok, Id, _RevId}, _Dict, nothing) ->
     barrel:get(DB, Id, #{});
 get(DB, Id , Dict, 'rev') ->
-    lager:error("@@@@ Id ~p Data ~p~n", [Id, dict:find(Id, Dict)]),
+    
     barrel:get(DB, Id, #{ });
 get(DB, Id , _Dict, 'history') ->
     barrel:get(DB, Id, #{ 'history' => true});
@@ -109,7 +108,6 @@ get_post(#state{keys= Dict}, [_DB, Id,_, _], {error, not_found}) ->
 get_post(#state{keys= Dict}, [_DB, Id,_, history], {ok, _Doc, Meta}) ->
     Revisions = barrel_doc:parse_revisions(Meta),
     #doc{value = Revs} = dict:fetch(Id, Dict),
-   % lager:error("++++ REVS ~p~n~n", [Revs]),
     lists:all(fun(R) ->
                       dict:is_key(R, Revs)
               end, Revisions);
@@ -119,11 +117,9 @@ get_post(#state{keys= Dict}, [_DB, Id, _, _],
          {ok, Doc = #{<<"id">> := Id, <<"content">> := _Content} ,
           #{<<"rev">> := Rev}}) ->
     
-    lager:error("%%%% Doc ~p~n", [Doc]),
-    lager:error("%+++  Rev ~s~n", [Rev]),
+
     {ok, #doc{id = Id,
               value = V}} = dict:find(Id, Dict),
-    lager:error("DB ~p ~p", [dict:is_key(Rev, V),V]),
     dict:is_key(Rev, V).
 
 %%********************************************************************************
@@ -205,7 +201,8 @@ post_next(State = #state{keys = Dict,
     case dict:is_key(Id, Dict) of
         true -> State#state{cmds = C+1};
         false ->
-            State#state {keys = dict:store(Id, Res, Dict), cmds= C + 1}
+            State#state {keys = dict:store(Id, Res, Dict),
+                         cmds= C + 1}
     end;
 post_next(State, {error, {conflict, doc_exists}}, _Cmd) ->
     State;
@@ -253,12 +250,23 @@ put_command(S = #state{keys = Dict}) ->
 put(DB, Id, Doc, Opts) ->
     barrel:put(DB, Doc#{<<"id">> => Id}, Opts).
 
+put_next(State = #state{keys = Dict,cmds = C},
+         Res = {ok, Id, RevId}   ,
+         _Cmd = [_DB, Id, Doc  , _opt]) ->
+    
+    
+    {ok,NewDoc = #doc{value = RevDict}} = dict:find(Id, Dict),
+
+    NewDictVal = dict:store(RevId, Doc, RevDict),
+
+    State#state{keys = dict:store(Id, NewDoc#doc{value = NewDictVal}, Dict), cmds= C + 1};
 
 put_next(State = #state{keys = Dict,cmds = C},
-         _V   = _,
+         _V   ,
          _Cmd = [_DB,Id, Doc = #{<<"id">> := Id} , _opt]) ->
     State#state{keys = dict:store(Id, Doc, Dict), cmds= C + 1};
-put_next(State, _,_) ->
+put_next(State, _R,_C) ->
+    
     State.
 
 
@@ -337,8 +345,6 @@ precondition_common(#state{db = [DB|_], cmds = _N}, _Call) ->
 postcondition_common(_S= #state{keys = Dict, db = [DB|_]}, _Call, _Res) ->
 
     case  barrel:database_infos(DB) of
-        {error, not_found } ->
-            false;
         {ok, _A = #{docs_count := DocCount}} ->
             DocCount >= dict:size(Dict),
             true
