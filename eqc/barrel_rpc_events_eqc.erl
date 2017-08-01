@@ -22,7 +22,7 @@
          }).
 
 -record(doc, {id :: binary(),
-              value = dict:new() :: dict:dict(binary(), #{})
+              value = []
              }).
 
 %% @doc Returns the state in which each test case starts. (Unless a different
@@ -104,36 +104,28 @@ get_next(S=  #state{cmds = C},_,_) ->
 
 get_post(#state{keys= Dict}, [_DB, Id,_, _], {error, not_found}) ->
     not(dict:is_key(Id, Dict)), true; %% CHECK THIS
-get_post(#state{keys= Dict}, [_DB, Id,_, _], {ok, Doc,#{<<"rev">> := RevId }}) ->
+get_post(#state{keys= Dict}, [_DB, Id,_, _],  {ok, Doc ,#{<<"rev">> := RevId}}) ->
+    
     case dict:find(Id, Dict) of
         {ok,#doc{value = Revs}} ->
-            F = dict:fetch_keys(Revs),
-            lager:error("----- ~p~n", [dict:to_list(Revs)]),
-            lager:error("~n~n+++++ RevId ~p ~p", [{ok, Id, RevId}, F]),
-            lists:member({ok, Id, RevId}, F);
-
+            lists:keymember(RevId,1, Revs);
         error->
             false
     end;
 
-get_post(#state{keys= Dict}, [_DB, Id,_, history], {ok, _Doc, Meta}) ->
+get_post(#state{keys= Dict}, [_DB, Id,_, history], {ok,_Doc, Meta}) ->
     Revisions = barrel_doc:parse_revisions(Meta),
-    lager:info("---- Revs ~n~p~n", [Revisions]),
-    lager:info("---- Dict ~p~n", [dict:find(Id, Dict)]),
     case dict:find(Id, Dict) of
         {ok,#doc{value = Revs}} ->
  
             lists:all(
-              fun({ok,_,R} ) ->
-                      lists:member(R, Revisions);
-                 (R) ->
+              fun({R,_} ) ->
                       lists:member(R, Revisions)
-              end, dict:fetch_keys(Revs));
+
+              end, Revs);
         error->
             true
     end;
-
-
 
 
 get_post(#state{keys= Dict}, [_DB, Id, _, history],
@@ -143,12 +135,7 @@ get_post(#state{keys= Dict}, [_DB, Id, _, history],
     
     {ok, #doc{id = Id,
               value = V}} = dict:find(Id, Dict),
-    Ks = [case K of 
-              {ok, _, Key} -> Key;
-              K -> K 
-          end
-          ||K <- dict:fetch_keys(V)],
-    lists:member(Rev,Ks).
+    lists:keymember(Rev,1,V).
     
 
 
@@ -158,24 +145,27 @@ start_replication_pre(#state{replicate = R, db=_DBS}) ->
     R == false.
 
 start_replication_command(#state{db = [DB1, DB2]}) ->
-    oneof([{call, barrel, start_replication,
-            [#{source => DB1,
-               target=> DB2,
-               options => #{ metrics_freq => 100 }}]}]).
+    oneof([{call, ?MODULE, start_replication,
+            [DB1, DB2]}]).
 
-start_replication_next(State, _v = {ok, #{id := RepId}},_) ->
-    State#state{replicate = RepId};
-start_replication_next(State,N = {var,_} ,_) ->
+start_replication(DB1, DB2) ->
+    case barrel:start_replication(#{source => DB1,
+                                    target=> DB2,
+                                    options => #{ metrics_freq => 100 }}) of
+        {ok, #{id := RepId}} ->
+            RepId;
+        _ ->
+            {error, no_replication}
+    end.
+            
+start_replication_next(State, _v = RepId,_) ->
+    State#state{replicate = RepId}.
 
-    State#state{replicate = N};
-start_replication_next(S,_,_) ->
-    S.
 
-
-start_replication_post(_,_,{ok, #{id := Id}}) when is_binary(Id)->
+start_replication_post(_,_,Id) when is_binary(Id)->
     true;
 start_replication_post(_,_,_R) ->
-    true.
+    false.
 
 
 
@@ -184,13 +174,22 @@ start_replication_post(_,_,_R) ->
 stop_replication_pre(#state{replicate = false}) ->
     false;
 stop_replication_pre(#state{replicate = _S}) ->
-
     true.
 
 
-stop_replication({ok, #{id := Id}}) ->
-                                                %timer:sleep(100),
-    barrel:stop_replication(Id).
+
+stop_replication( ok) ->
+    ok;
+stop_replication( Id) ->
+    
+    case barrel:stop_replication(Id) of 
+        ok ->
+            ok;
+        E ->
+    
+            E
+    end.
+
 
 stop_replication_command(#state{replicate = RepId}) ->
     oneof([{call, ?MODULE, stop_replication, [RepId]}]).
@@ -198,58 +197,50 @@ stop_replication_command(#state{replicate = RepId}) ->
 stop_replication_post(_,_,ok) ->
     true;
 stop_replication_post(_,_,_Error) ->
+    
     false.
 
-stop_replication_next(State= #state{replicate = {var,_}}, {var,_}, _) ->
-    State#state{replicate = false};
-stop_replication_next(State, ok,_) ->
-
-    State#state{replicate = false};
-stop_replication_next(State, _,_) ->
-
-    State.
+stop_replication_next(State, R, _) ->
+    State#state{replicate = R}.
 
 %%********************************************************************************
 
 
 post_post(#state{keys = Dict} , [_DB, #{<<"id">> := Id}, _], 
-          {error, {conflict, doc_exists}}) ->
+          {conflict, doc_exists}) ->
     
     dict:is_key(Id, Dict);
 
-post_post(_State, _Args, _Ret) ->
+post_post(_State, _Args,  {RevId,Doc} ) when is_binary(RevId) ->
     true.
 
-post_command(S = #state{keys = _Dict}) ->
-    oneof([{call, barrel, post,  [db(S), doc(), #{}]}]).
 
+post_command(S = #state{keys = _Dict}) ->
+    oneof([{call, ?MODULE, post,  [db(S), doc(), #{}]}]).
+
+post (DB, Doc = #{<<"id">> := Id}, Opts) ->
+    case barrel:post(DB, Doc, Opts) of
+        {ok, Id, RevId} -> 
+            {RevId,Doc};
+        {error, {conflict, doc_exists}} ->
+            {conflict, doc_exists}
+    end.
 
 post_next(State = #state{keys = Dict,
                          cmds = C},
-          Res = {var, _N},
+          Res ,
           _Cmd = [_DB, Doc = #{<<"id">> := Id} , _opt]) ->
-    lager:info("++++ ~p~n", [Res,_Cmd]),
+    
     case dict:is_key(Id, Dict) of
         true ->
             State#state{cmds = C+1};
         false ->            
-            lager:info("****** Update ~p ~p~n",[Res,Doc]),
             State#state{keys = dict:store(Id,#doc{id = Id,
-                                                  value = dict:from_list([{Res,Doc}])}, Dict),
+                                                  value = [Res] 
+                                                  }
+                                         ,Dict),
                         cmds= C + 1}
-    end;
-post_next(State, {error, {conflict, doc_exists}}, _Cmd) ->
-    lager:info("doc_exists @@@@@ ~p~n", [_Cmd]),
-    State;
-post_next(State = #state{keys = Dict,cmds = C},
-          _V    = {ok, Id, Rev},
-          _Cmd  = [_DB, Doc = #{<<"id">> := Id}, _opt]) ->
-    lager:info(")))))~n ~p ~p~n ~p~n",[Rev, Doc, _Cmd]),
-    State#state{keys = dict:store(Id,
-                                  #doc{id = Id,
-                                       value = dict:from_list([{Rev, Doc}])
-                                      },
-                                  Dict), cmds= C + 1}.
+    end.
 
 
 %%********************************************************************************
@@ -284,26 +275,21 @@ put_command(S = #state{keys = Dict}) ->
           ]).
 
 put(DB, Id, Doc, Opts) ->
-    barrel:put(DB, Doc#{<<"id">> => Id}, Opts).
+    {ok, Id, RevId} = barrel:put(DB, Doc#{<<"id">> => Id}, Opts),
+    {RevId, Doc#{<<"id">> => Id}}.
+
 
 put_next(State = #state{keys = Dict,cmds = C},
-         _Res = {ok, Id, RevId}   ,
+         Res ,
          _Cmd = [_DB, Id, Doc  , _opt]) ->
     
     
     {ok,NewDoc = #doc{value = RevDict}} = dict:find(Id, Dict),
 
-    NewDictVal = dict:store(RevId, Doc, RevDict),
+    NewDictVal = [ Res|RevDict ],
 
-    State#state{keys = dict:store(Id, NewDoc#doc{value = NewDictVal}, Dict), cmds= C + 1};
+    State#state{keys = dict:store(Id, NewDoc#doc{value = NewDictVal}, Dict), cmds= C + 1}.
 
-put_next(State = #state{keys = Dict,cmds = C},
-         _V   ,
-         _Cmd = [_DB,Id, Doc = #{<<"id">> := Id} , _opt]) ->
-    State#state{keys = dict:store(Id, Doc, Dict), cmds= C + 1};
-put_next(State, _R,_C) ->
-    
-    State.
 
 
 
@@ -329,22 +315,13 @@ put_rev_command(S = #state{keys = Dict}) ->
           ]).
 
 put_rev(DB, Id, Doc, Dict, Opts) ->
-    lager:info("Dict ~p", [dict:to_list(Dict)]),
-    RevId = case dict:find(Id, Dict) of
-                {ok,#doc{value = {ok, _,  R}}} ->
-                    R;
-                
-                {ok, #doc{value = Dict1}} ->
-                    case dict:fetch_keys(Dict1) of
-                        [{ok, _,K}|_] -> 
-                            K;
-                        [] -> 
-                            throw({error, no_revisions});
-                        [{error,E= {conflict, doc_exists}}|_] =X  ->
-                            lager:info("++++++ Content ~p", [X]),
-                            throw({error, E})
-                    end
 
+    RevId = case dict:find(Id, Dict) of
+                error -> 
+                    throw({error, document_not_found, Id});
+                {ok,#doc{value = L}} ->
+                    [{RevId1,_ }|_] = lists:reverse(L),
+                    RevId1
             end,
         
     {Pos, _}   = barrel_doc:parse_revision(RevId),
@@ -357,46 +334,24 @@ put_rev(DB, Id, Doc, Dict, Opts) ->
     History = [NewRev,RevId],
 
     {ok,Id, NewRev1} =  barrel:put_rev(DB, Doc#{<<"id">> => Id}, History, false, Opts),
-    {ok, NewRev1,NewDoc}.
+    {NewRev1, Doc#{<<"id">> => Id}}.
+    
 
 put_rev_next(State = #state{cmds =C},
-         _Res = {ok,NewRev, NewContent}   ,
-         _Cmd = [_DB, Id, Doc, Dict , _opt]) ->
-    
+             Res,
+             _Cmd = [_DB, Id, Doc, Dict , _opt]) ->
     case dict:find(Id, Dict) of
-        {ok, {ok, _DocId, _Rev}} ->
-            State;
         {ok, NewDoc= #doc{value = RevDict}} ->
-        %    lager:info("**** RevDict~n ~s ~n~p", [RevId, RevDict]),
-            RevDict1 = case RevDict of
-                           {ok, _, DictId} ->
-                               dict:from_list([{NewRev, NewContent}]);
-                           R -> R
-                       end,
-            {Pos, _}   = barrel_doc:parse_revision(NewRev),
-           
-                                                %   lager:info("***** New Rev ~p", [NewRev]),
-            
-            NewDictVal = dict:store(NewRev, NewDoc, RevDict1),
-            
+            NewDictVal = lists:append([Res], RevDict),
             State#state{keys = dict:store(Id, NewDoc#doc{value = NewDictVal}, Dict), cmds= C + 1}
-
-    end;
-
-put_rev_next(State = #state{keys = Dict,cmds = C},
-         _V   ,
-         _Cmd = [_DB,Id, Doc = #{<<"id">> := Id} , _opt]) ->
-    State#state{keys = dict:store(Id, Doc, Dict), cmds= C + 1};
-put_rev_next(State, _R,_C) ->
-%    lager:info("put_rev_next ~p~n~p", [_R,_C]),
-    State.
-
+    end.
 
 %%********************************************************************************
 
 
 delete_pre(#state{keys = Dict}) ->
     not(dict:is_empty(Dict)).
+
 
 delete_post(#state{keys= Dict},[_DB, Id,_] , {error,not_found}) ->
     not(dict:is_key(Id, Dict));
@@ -438,20 +393,22 @@ command_precondition_common(_S, _Cmd) ->
     true.
 
 %%@doc General precondition, applied *before* specialized preconditions.
--spec precondition_common(S, Call) -> boolean()
-                                          when S    :: eqc_statem:symbolic_state(),
-                                               Call :: eqc_statem:call().
-precondition_common(#state{db = [DB|_], cmds = _N}, _Call) ->
-    case barrel:database_infos(DB) of
-        {error,not_found} -> true;
-        {ok, _A = #{docs_count := DocCount}} ->
-            case DocCount >= 0 of
-                true -> true;
-                false ->
-                    lager:info("Negative Doc Count ~p", [DocCount]),
-                    true
-            end
-    end.
+%% -spec precondition_common(S, Call) -> boolean()
+%%                                           when S    :: eqc_statem:symbolic_state(),
+%%                                                Call :: eqc_statem:call().
+%% precondition_common(#state{db = [DB|_], cmds = _N}, _Call) ->
+%%     case barrel:database_infos(DB) of
+%%         {error,not_found} -> 
+%%             lager:error("DB NOT FOUND ~s ~p", [DB, _Call]),
+%%             true;
+%%         {ok, _A = #{docs_count := DocCount}} ->
+%%             case DocCount >= 0 of
+%%                 true -> true;
+%%                 false ->
+%%                     lager:error("Negative Doc Count ~p", [DocCount]),
+%%                     true
+%%             end
+%%     end.
 
 
 
@@ -467,6 +424,8 @@ precondition_common(#state{db = [DB|_], cmds = _N}, _Call) ->
 postcondition_common(_S= #state{keys = Dict, db = [DB|_]}, _Call, _Res) ->
 
     case  barrel:database_infos(DB) of
+        {error,not_found} ->
+            false;
         {ok, _A = #{docs_count := DocCount}} ->
             DocCount >= dict:size(Dict),
             true
@@ -487,9 +446,12 @@ postcondition_common(_,_,_) ->
 
 
 create_database(DB) ->
+    %% Delete database if it already exists
     case barrel:database_infos(DB) of
-        {ok, _} -> barrel:delete_database(DB);
-        _ -> ok
+        {ok, _} -> barrel:delete_database(DB),
+                   timer:sleep(250),
+                   ok  ;
+        {error, not_found} -> ok
     end,
     barrel:create_database(#{<<"database_id">> => DB}).
 
@@ -503,36 +465,34 @@ stop(#state{}) ->
 
 -spec prop_barrel_rpc_events_eqc() -> eqc:property().
 prop_barrel_rpc_events_eqc() ->
+    DBS = [<<"test01">>,<<"test02">>],
     ?SETUP(fun common_eqc:init_db/0,
            ?FORALL( Cmds,
                     commands(?MODULE,
                              #state{keys = dict:new(),
-                                    db =  [<<"test01">>,<<"test02">>]
+                                    db =  DBS
                                    }),
                     begin
-                        [{model, ?MODULE},
-                         {init, #state{db= DBS}}
-                         |_ ]
-                            = Cmds,
                         [begin
                              {ok,#{<<"database_id">> := D}} = create_database(D)
                          end
                          || D <-DBS],
                                                 %	timer:sleep(250),
-
-                        {H, S, Res} = run_commands(Cmds),
-                        stop(S),
-
-                        [ok = barrel:delete_database(D)|| D <-DBS],
                         ?WHENFAIL(begin
+                                      [ok = barrel:delete_database(D)|| D <-DBS],
                                       io:format("~n~n~n********************************************************************************~n~n~n"),
                                       cleanup(),
                                       ok
                                   end,
-                                  check_command_names(Cmds,
-                                                      measure(length, commands_length(Cmds),
-                                                              pretty_commands(?MODULE, Cmds, {H, S, Res},
-                                                                              Res == ok))))
+                                  begin
+                                      {H, S, Res} = run_commands(Cmds),
+                                      stop(S),
+                                      [ok = barrel:delete_database(D)|| D <-DBS],
+                                      check_command_names(Cmds,
+                                                          measure(length, commands_length(Cmds),
+                                                                  pretty_commands(?MODULE, Cmds, {H, S, Res},
+                                                                                  Res == ok)))
+                                  end)
                     end)).
 
 %% @doc Run property repeatedly to find as many different bugs as
