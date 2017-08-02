@@ -578,6 +578,10 @@ handle_call(get_db, _From, Db) ->
   {reply, {ok, Db}, Db};
 
 handle_call(delete_db, _From, Db = #db{ id = Id, store = Store }) ->
+  _ = lager:info(
+    "~s, delete db ~p~n",
+    [?MODULE_STRING, Id]
+  ),
   ok = (catch rocksdb:close(Store)),
   ok = delete_db_dir(Id),
   {stop, normal, ok, Db#db{ store=nil}};
@@ -595,7 +599,7 @@ handle_info(_Info, State) -> {noreply, State}.
 
 
 terminate(Reason, #db{ id = Id, store = nil }) ->
-  _ = lager:info("terminate db ~p: ~p~n", [Id, Reason]),
+  _ = lager:info("~s, terminate closed db ~p: ~p~n", [?MODULE_STRING, Id, Reason]),
   ok;
 
 terminate(Reason, #db{ id = Id, store = Store }) ->
@@ -612,20 +616,8 @@ code_change(_OldVsn, State, _Extra) ->
   {ok, State}.
 
 delete_db_dir(Id) ->
-  TempName = db_path(barrel_lib:uniqid()),
-  case file:rename(db_path(Id), TempName) of
-    ok ->
-      %% deletion of the database happen asynchronously
-      spawn(
-        fun() ->
-            ok = rocksdb:destroy(TempName, []),
-            _ = lager:info("~p: old db files deleleted  in ~p~n", [Id, TempName])
-        end
-       ),
-      ok;
-    _ ->
-      ok
-  end.
+  ok = rocksdb:destroy(Id, []),
+  ok.
 
 empty_doc_info(DocId, Rid) ->
   #{ id => DocId,
