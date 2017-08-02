@@ -44,7 +44,9 @@ start_channel(Params) ->
     {error, {already_started, _}} ->
       ChannelName = maps:get(channel, Params),
       Channel = gproc:where({n, l, {channel_by_name, ChannelName}}),
-      {ok, Channel}
+      {ok, Channel};
+    Error ->
+      Error
   end.
 
 
