@@ -31,6 +31,11 @@
 db(#state{db = [DB|_]}) ->
     DB.
 
+dbr(#state{db = [DB|_], replicate = _}) ->
+    DB;
+dbr(#state{db = DBS, replicate = _R}) ->
+    oneof(DBS).
+
 id() ->
     utf8(6).
 
@@ -158,7 +163,8 @@ start_replication(DB1, DB2) ->
             {error, no_replication}
     end.
             
-start_replication_next(State, _v = RepId,_) ->
+start_replication_next(State,  RepId,_) ->
+%    lager:error("RepId ~p", [RepId]),
     State#state{replicate = RepId}.
 
 
@@ -201,7 +207,7 @@ stop_replication_post(_,_,_Error) ->
     false.
 
 stop_replication_next(State, R, _) ->
-    State#state{replicate = R}.
+    State#state{replicate = false}.
 
 %%********************************************************************************
 
@@ -216,11 +222,20 @@ post_post(_State, _Args,  {RevId,Doc} ) when is_binary(RevId) ->
 
 
 post_command(S = #state{keys = _Dict}) ->
-    oneof([{call, ?MODULE, post,  [db(S), doc(), #{}]}]).
+%    lager:error("Replication Status ~p", [S#state.replicate]),
+    oneof([
+           {call, ?MODULE, post,  [dbr(S), doc(), #{}]}
+          ]).
+
+post_pre(#state{replicate = false}, [<<"test02">>, _Doc, _Meta])->
+    false;
+post_pre(_,_) ->
+    true.
 
 post (DB, Doc = #{<<"id">> := Id}, Opts) ->
     case barrel:post(DB, Doc, Opts) of
         {ok, Id, RevId} -> 
+            
             {RevId,Doc};
         {error, {conflict, doc_exists}} ->
             {conflict, doc_exists}
@@ -233,13 +248,13 @@ post_next(State = #state{keys = Dict,
     
     case dict:is_key(Id, Dict) of
         true ->
-            State#state{cmds = C+1};
-        false ->            
+            State;
+        false ->
             State#state{keys = dict:store(Id,#doc{id = Id,
                                                   value = [Res] 
                                                   }
-                                         ,Dict),
-                        cmds= C + 1}
+                                         ,Dict)
+                        }
     end.
 
 
@@ -299,7 +314,7 @@ put_rev_pre(#state{keys = Dict}) ->
     not(dict:is_empty(Dict)).
    
 
-put_rev_post(#state{keys = Dict} , [_DB, #{<<"id">> := Id}, #{}], {error, {conflict, doc_exists}}) ->
+put_rev_post(#state{keys = Dict} , [_DB, #{<<"id">> := Id}, #{},_], {error, {conflict, doc_exists}}) ->
     dict:is_key(Id, Dict);
 
 put_rev_post(_State, _Args, _Ret) ->
@@ -311,16 +326,23 @@ put_rev_command(S = #state{keys = Dict}) ->
                                        oneof(dict:fetch_keys(Dict)),
                                        doc1(),
                                        Dict,
-                                       #{}]}
+                                       #{},
+                                       choose(1,5)]}
           ]).
 
-put_rev(DB, Id, Doc, Dict, Opts) ->
 
+getByPos(Pos, L= [A|_]) ->
+    Length = length(L),
+    Arr = array:from_list(L, A),
+    array:get(Pos, Arr).
+
+
+put_rev(DB, Id, Doc, Dict, Opts, NPos) ->
     RevId = case dict:find(Id, Dict) of
                 error -> 
                     throw({error, document_not_found, Id});
                 {ok,#doc{value = L}} ->
-                    [{RevId1,_ }|_] = lists:reverse(L),
+                    {RevId1,_ } = getByPos(NPos,L),
                     RevId1
             end,
         
@@ -339,7 +361,7 @@ put_rev(DB, Id, Doc, Dict, Opts) ->
 
 put_rev_next(State = #state{cmds =C},
              Res,
-             _Cmd = [_DB, Id, Doc, Dict , _opt]) ->
+             _Cmd = [_DB, Id, Doc, Dict , _opt,_]) ->
     case dict:find(Id, Dict) of
         {ok, NewDoc= #doc{value = RevDict}} ->
             NewDictVal = lists:append([Res], RevDict),
@@ -427,8 +449,15 @@ postcondition_common(_S= #state{keys = Dict, db = [DB|_]}, _Call, _Res) ->
         {error,not_found} ->
             false;
         {ok, _A = #{docs_count := DocCount}} ->
-            DocCount >= dict:size(Dict),
-            true
+            
+            case DocCount < 0
+                of
+                true ->
+                    throw({error, negative_doc_count, DocCount});
+                false ->
+                    true
+            end
+ 
     end;
 
 postcondition_common(_,_,_) ->
