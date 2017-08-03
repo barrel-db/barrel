@@ -582,7 +582,7 @@ handle_call(delete_db, _From, Db = #db{ id = Id, store = Store }) ->
     "~s, delete db ~p~n",
     [?MODULE_STRING, Id]
   ),
-  ok = (catch rocksdb:close(Store)),
+  ok =rocksdb:close(Store),
   ok = delete_db_dir(Id),
   {stop, normal, ok, Db#db{ store=nil}};
 
@@ -610,7 +610,7 @@ terminate(Reason, #db{ id = Id, store = Store }) ->
 
 close_store(Id, Store) ->
   Result = (catch rocksdb:close(Store)),
-  _ = lager:info("~s: ~p closed: ~p",[?MODULE_STRING, Id, Result]),
+  _ = lager:error("~s: ~p closed: ~p",[?MODULE_STRING, Id, Result]),
   ok.
 code_change(_OldVsn, State, _Extra) ->
   {ok, State}.
@@ -635,9 +635,13 @@ send_result(_, _) ->
 
 
 do_update_docs(DocBuckets, Db =  #db{id=DbId, store=Store }) ->
+  lager:info("doc buckets ~p~n", [DocBuckets]),
+  
   %% try to collect a maximum of updates at once
   DocBuckets2 = collect_updates(DbId, DocBuckets),
   erlang:put(num_docs_updated, maps:size(DocBuckets2)),
+  
+  lager:info("doc buckets 2 ~p~n", [DocBuckets2]),
 
   {Updates, NewRid, _, OldDocs} = merge_revtrees(DocBuckets2, Db),
 
