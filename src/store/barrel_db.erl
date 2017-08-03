@@ -616,7 +616,7 @@ code_change(_OldVsn, State, _Extra) ->
   {ok, State}.
 
 delete_db_dir(Id) ->
-  ok = rocksdb:destroy(Id, []),
+  ok = rocksdb:destroy(db_path(Id), []),
   ok.
 
 empty_doc_info(DocId, Rid) ->
