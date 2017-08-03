@@ -154,7 +154,11 @@ await_change(Channel, StreamRef, Timeout) ->
       _ = erlang:put({StreamRef, last_seq}, erlang:max(OldSeq, Seq)),
       Change;
     end_stream ->
-      {end_stream, erlang:erase({StreamRef, last_seq})}
+      {end_stream, erlang:erase({StreamRef, last_seq})};
+    {error, {server_down,shutdown}} ->
+      {end_stream, erlang:erase({StreamRef, last_seq})};
+    Error ->
+      Error
   end.
 
 unsubscribe_changes(Channel, StreamRef) ->

@@ -52,6 +52,8 @@ connect(Params, _TypeSup, _State) ->
 
 terminate(_Reason, #{ node := Node, channel_pid := ChannelPid }) ->
   _ = rpc:call(Node, barrel_direct, disconnect, [ChannelPid]),
+  ok;
+terminate(_Reason, _State) ->
   ok.
 
 handle_message({'DOWN', _MRef, process, ChPid, Reason}, #{ node := Node, channel_pid := ChPid } = State) ->
