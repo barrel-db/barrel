@@ -15,10 +15,11 @@
 -record(state,{
           db :: [binary()],
           cmds = 0:: integer(),
-          keys:: dict:dict(binary(), term()),
+          keys = dict:new() :: dict:dict(binary(), term()),
           online = true :: boolean(),
           replicate = false :: false| binary(),
-          deleted = sets:new()
+          deleted = sets:new(),
+          replicate_push  = []
          }).
 
 -record(doc, {id :: binary(),
@@ -320,6 +321,7 @@ put_rev_post(#state{keys = Dict} , [_DB, #{<<"id">> := Id}, #{},_], {error, {con
 put_rev_post(_State, _Args, _Ret) ->
     true.
 
+<<<<<<< HEAD
 put_rev_command(S = #state{keys = Dict}) ->
     oneof([
            {call, ?MODULE, put_rev,   [db(S),
@@ -329,7 +331,35 @@ put_rev_command(S = #state{keys = Dict}) ->
                                        #{},
                                        choose(1,5)]}
           ]).
+=======
+put_rev_command(S = #state{keys = Dict, 
+                           replicate_push = Ps,
+                           db= DBS}) ->
+    NewPutRev =            
+        {call, ?MODULE, put_rev,   [db(S), 
+                                    oneof(dict:fetch_keys(Dict)),
+                                    doc1(),
+                                    Dict,
+                                    #{},
+                                    choose(1,5)]},
+    case Ps of
+        [] ->
+            NewPutRev;
+        _ ->
+            lager:error("P ~p", [Ps]),
+            oneof([NewPutRev,
+                   {call, ?MODULE, put_rev, oneof([swapDB(DBS, Cmd) || Cmd <- Ps])}])
 
+>>>>>>> cce1083a4638eeb717a47830114de9602235165c
+
+
+    end.
+
+swapDB([DB1,DB2], Cmd = [DB1|Rest]) ->
+    [DB2|Rest];
+swapDB([DB1,DB2], Cmd = [DB2|Rest]) ->
+    [DB1|Rest].
+        
 
 getByPos(Pos, L= [A|_]) ->
     Length = length(L),
@@ -359,13 +389,15 @@ put_rev(DB, Id, Doc, Dict, Opts, NPos) ->
     {NewRev1, Doc#{<<"id">> => Id}}.
 
 
-put_rev_next(State = #state{cmds =C},
+put_rev_next(State = #state{cmds =C, replicate_push = P},
              Res,
-             _Cmd = [_DB, Id, Doc, Dict , _opt,_]) ->
+             Cmd = [_DB, Id, Doc, Dict , _opt,_]) ->
     case dict:find(Id, Dict) of
         {ok, NewDoc= #doc{value = RevDict}} ->
             NewDictVal = lists:append([Res], RevDict),
-            State#state{keys = dict:store(Id, NewDoc#doc{value = NewDictVal}, Dict), cmds= C + 1}
+            State#state{keys = dict:store(Id, NewDoc#doc{value = NewDictVal}, Dict),
+                        replicate_push  = [Cmd|P],
+                        cmds= C + 1}
     end.
 
 %%********************************************************************************
@@ -498,7 +530,7 @@ prop_barrel_rpc_events_eqc() ->
     ?SETUP(fun common_eqc:init_db/0,
            ?FORALL( Cmds,
                     commands(?MODULE,
-                             #state{keys = dict:new(),
+                             #state{
                                     db =  DBS
                                    }),
                     begin
