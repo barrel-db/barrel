@@ -297,7 +297,7 @@ changes_since(DbName, Since, Fun, AccIn, Opts) when is_binary(DbName), is_intege
     fun(Db) -> changes_since_int(Db, Since, Fun, AccIn, Opts) end
   ).
 
-changes_since_int(Db = #db{ store=Store}, Since0, Fun, AccIn, Opts) ->
+changes_since_int(#db{ store=Store}, Since0, Fun, AccIn, Opts) ->
   Since = if
             Since0 > 0 -> Since0 + 1;
             true -> Since0
@@ -335,7 +335,7 @@ changes_since_int(Db = #db{ store=Store}, Since0, Fun, AccIn, Opts) ->
             <<"rid">> => encode_rid(Rid) },
           Deleted
         ),
-        Rid, Db, ReadOptions, IncludeDoc
+        DocInfo, IncludeDoc
       ),
       Fun(Change, Acc)
     end,
@@ -344,19 +344,9 @@ changes_since_int(Db = #db{ store=Store}, Since0, Fun, AccIn, Opts) ->
   after rocksdb:release_snapshot(Snapshot)
   end.
 
-change_with_doc(Change, Rid, #db{store=Store}, ReadOptions, true) ->
-  case rocksdb:get(Store, barrel_keys:res_key(Rid), ReadOptions) of
-    {ok, Bin} ->
-      DocInfo = binary_to_term(Bin),
-      case get_current_revision(DocInfo) of
-        {ok, Doc, _Meta} -> Change#{ <<"doc">> => Doc };
-        error ->
-          Change#{ <<"doc">> => #{ <<"error">> => <<"missing">> } }
-      end;
-    not_found ->
-      Change#{ <<"doc">> => #{ <<"error">> => <<"missing">> } }
-  end;
-change_with_doc(Change, _Rid, _Db, _ReadOptions, false) ->
+change_with_doc(Change, DocInfo, true) ->
+  Change#{ <<"doc">> => current_body(DocInfo) };
+change_with_doc(Change, _DocInfo, false) ->
   Change.
 
 changes_with_deleted(Change, true) -> Change#{<<"deleted">> => true};
@@ -663,11 +653,6 @@ do_update_docs(DocBuckets, Db =  #db{id=DbId, store=Store }) ->
 
         %% revision has changed put the ancestor outside the value
         {DocInfo3, Ancestor} = backup_ancestor(DocInfo2),
-
-
-        %% Create the changes index metadata
-        SeqMeta = maps:remove(body_map, DocInfo3),
-
         %% create update index events.
         %% TODO: move that code in a cleaner place
         NewDoc = current_body(DocInfo3),
@@ -686,7 +671,7 @@ do_update_docs(DocBuckets, Db =  #db{id=DbId, store=Store }) ->
                 DocInfo3,
                 [
                   {put, barrel_keys:res_key(Rid), term_to_binary(DocInfo3)},
-                  {put, barrel_keys:seq_key(Db2#db.updated_seq), term_to_binary(SeqMeta)},
+                  {put, barrel_keys:seq_key(Db2#db.updated_seq), term_to_binary(DocInfo3)},
                   {put, barrel_keys:db_meta_key(<<"docs_count">>), term_to_binary(Db2#db.docs_count)}
                 ]
               )
