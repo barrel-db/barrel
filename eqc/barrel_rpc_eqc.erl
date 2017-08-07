@@ -24,7 +24,7 @@ prop_rpc_crud() ->
                    begin
                        Doc1         = maps:put(<<"id">>, Id, Doc),
                        {ok, Id,_r}  = barrel:post(?DB, Doc1, #{}),
-                       
+
                        {ok, Doc1,_} = barrel:get(?DB, Id, #{}),
                        {ok, _,_}    = barrel:delete(?DB, Id, #{}),
                        true
