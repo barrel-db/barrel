@@ -29,7 +29,8 @@
   range/1,
   limit_at/1,
   range_with_limit/1,
-  equal_to/1
+  equal_to/1,
+  fix_range_test/1
 ]).
 
 all() ->
@@ -39,7 +40,8 @@ all() ->
     range,
     limit_at,
     range_with_limit,
-    equal_to
+    equal_to,
+    fix_range_test
   ].
 
 init_per_suite(Config) ->
@@ -407,4 +409,46 @@ equal_to(_Config) ->
   1 = length(Q3),
   [<<"f">>] = Q3,
   ok.
+
+
+fix_range_test(_Config) ->
+  Ids = [
+    <<"9NGOZFVYl83mhUc8g2">>,<<"9NGOZFVYl83mhUc8g1">>,<<"9NGOZFVYl83mhUc8g0">>,<<"9NGOZFVYl83mhUc8fz">>,
+    <<"9NGOZFVYl83mhUc8fy">>,<<"9NGOZFVYl83mhUc8fx">>,<<"9NGOZFVYl83mhUc8fw">>,<<"9NGOZFVYl83mhUc8fv">>,
+    <<"9NGOZFVYl83mhUc8fu">>,<<"9NGOZFVYl83mhUc8ft">>,<<"9NGOZFVYl83mhUc8fs">>,<<"9NGOZFVYl83mhUc8fr">>,
+    <<"9NGOZFVYl83mhUc8fq">>,<<"9NGOZFVYl83mhUc8fp">>,<<"9NGOZFVYl83mhUc8fo">>
+  ],
+  
+  Batch = lists:foldl(
+    fun(Id, Acc) ->
+      [{post, #{ <<"id">> => <<"doc-", Id/binary>>, <<"docId">> => Id }} | Acc]
+    end,
+    [],
+    Ids
+  ),
+  
+  _ = barrel:write_batch(<<"testdb">>, Batch, #{}),
+  Fun = fun(#{ <<"docId">> := Id }, _, Acc) -> {ok, Acc ++ [Id]} end,
+  
+  All = barrel:walk(<<"testdb">>, <<"docId">>, Fun, [], #{ limit_to_last => 15 }),
+  Ids = All,
+  Nth = lists:nth(10, Ids),
+  ExpectBefore = lists:reverse(lists:sublist(Ids, 11, 5)),
+  Before = barrel:walk(
+    <<"testdb">>, <<"docId">>, Fun, [], #{ previous_to => Nth, limit_to_first => 10 }
+  ),
+  Before = ExpectBefore,
+  ExpectAfter = lists:reverse(lists:sublist(Ids, 1, 9)),
+  After = barrel:walk(
+    <<"testdb">>, <<"docId">>, Fun, [], #{ next_to => Nth, limit_to_first => 10 }
+  ),
+  After = ExpectAfter.
+  
+  
+
+  
+  
+  
+  
+
 
