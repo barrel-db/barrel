@@ -18,10 +18,10 @@ eqc() ->
 
 eqc(N) ->
     lager:set_loglevel(lager_console_backend, notice),
-
-    [] = eqc:module({numtests,N}, barrel_rpc_events_eqc),
-    [] = eqc:module({numtests,N}, create_delete_database_eqc),
-    [] = eqc:module({numtests,N}, barrel_rpc_eqc),
+    [] = eqc:module({numtests,N}, barrel_change_since_eqc),
+%    [] = eqc:module({numtests,N}, barrel_rpc_events_eqc),
+%    [] = eqc:module({numtests,N}, create_delete_database_eqc),
+%    [] = eqc:module({numtests,N}, barrel_rpc_eqc),
 
 
     ok.
@@ -51,7 +51,7 @@ names() ->
 
 
 cleanup() ->
-    [barrel:create_database(#{<<"database_id">> => uuid:get_v4()}) 
+    [barrel:create_database(#{<<"database_id">> => uuid:get_v4()})
      || _ <-  lists:seq(1,100)],
     Dbs = barrel:database_names(),
     [begin
@@ -59,4 +59,3 @@ cleanup() ->
      end|| D<- Dbs],
     [] = barrel:database_names(),
     ok.
-
