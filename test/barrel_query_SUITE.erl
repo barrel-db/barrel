@@ -433,9 +433,9 @@ fix_range_test(_Config) ->
   All = barrel:walk(<<"testdb">>, <<"docId">>, Fun, [], #{ limit_to_last => 15 }),
   Ids = All,
   Nth = lists:nth(10, Ids),
-  ExpectBefore = lists:reverse(lists:sublist(Ids, 11, 5)),
+  ExpectBefore = lists:sublist(Ids, 11, 5),
   Before = barrel:walk(
-    <<"testdb">>, <<"docId">>, Fun, [], #{ previous_to => Nth, limit_to_first => 10 }
+    <<"testdb">>, <<"docId">>, Fun, [], #{ previous_to => Nth, limit_to_last => 10 }
   ),
   Before = ExpectBefore,
   ExpectAfter = lists:reverse(lists:sublist(Ids, 1, 9)),
