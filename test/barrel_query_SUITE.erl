@@ -302,7 +302,7 @@ range_with_limit(_Config) ->
     #{ next_to => <<"test3">>, limit_to_first => 2 }
   ),
   C1 = QC1,
-  C3 = [<<"h">>, <<"g">>],
+  C3 = [<<"g">>, <<"h">>],
   QC3 = barrel:walk(
     <<"testdb">>,
     <<"o">>,
@@ -312,7 +312,7 @@ range_with_limit(_Config) ->
   ),
   C3 = QC3,
   
-  C4 = [<<"g">>, <<"f">>],
+  C4 = [<<"g">>, <<"h">>],
   QC4 = barrel:walk(
     <<"testdb">>,
     <<"o">>,
@@ -342,7 +342,7 @@ range_with_limit(_Config) ->
   ),
   F1 = QF1,
   
-  F2 = [ <<"f">>, <<"e">> ],
+  F2 = [ <<"e">>, <<"f">>],
   QF2 = barrel:walk(
     <<"testdb">>,
     <<"o">>,
@@ -352,7 +352,7 @@ range_with_limit(_Config) ->
   ),
   F2 = QF2,
   
-  F3 = [<<"e">>, <<"d">>],
+  F3 = [<<"d">>, <<"e">>],
   QF3 = barrel:walk(
     <<"testdb">>,
     <<"o">>,
@@ -443,9 +443,6 @@ fix_range_test(_Config) ->
     <<"testdb">>, <<"docId">>, Fun, [], #{ next_to => Nth, limit_to_first => 10 }
   ),
   After = ExpectAfter.
-  
-  
-
   
   
   

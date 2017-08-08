@@ -25,21 +25,14 @@
 walk(#db{store=Store}, Path, UserFun, AccIn, Options0) ->
   Options1 = validate_options(Options0),
   PathParts = decode_path(Path, []),
-  
-  lager:info("path parts are ~p~n", [PathParts]),
-
   %% set fold options
   {MoveAction, Inclusive, First, InRange} = make_range(PathParts, Options1),
   OrderBy = maps:get(order_by, Options1, order_by_key),
   EqualTo = maps:get(equal_to, Options1, undefined),
   Limit = maps:get(limit, Options1, ?DEFAULT_MAX),
-  
-  
-  lager:info("inclusive are ~p~n", [{MoveAction, Inclusive, First, InRange}]),
   %% rocksdb options
   {ok, Snapshot} = rocksdb:snapshot(Store),
   ReadOptions = [{snapshot, Snapshot}],
-
   %% wrapper function to retrieve the results from the iterator
   WrapperFun =
     fun(KeyBin, _, Acc) ->
@@ -62,7 +55,6 @@ walk(#db{store=Store}, Path, UserFun, AccIn, Options0) ->
           {ok, Acc}
       end
     end,
-
   %% initialize the iterator
   {ok, Itr} = rocksdb:iterator(Store, ReadOptions),
   Next = fun() -> rocksdb:iterator_move(Itr, MoveAction) end,
@@ -70,8 +62,6 @@ walk(#db{store=Store}, Path, UserFun, AccIn, Options0) ->
             next -> rocksdb:iterator_move(Itr, First);
             prev -> rocksdb:iterator_move(Itr, {seek_for_prev, First})
           end,
-  
-
   %% start folding
   try
     fold_loop(
@@ -82,15 +72,12 @@ walk(#db{store=Store}, Path, UserFun, AccIn, Options0) ->
   end.
 
 maybe_next({ok, Key, _V} = Start, Next, MatchNext) when is_function(MatchNext) ->
-  lager:info("maybe ~p~n", [Key]),
   case MatchNext(Key) of
     true -> Start;
     false ->  Next()
   end;
 maybe_next(Start, _Next, _Inclusive) ->
   Start.
-
-
 
 safe_iterator_close(Itr) -> (catch rocksdb:iterator_close(Itr)).
 
@@ -164,9 +151,9 @@ make_range(Path, #{ move := prev }= Options) ->
                  undefined ->
                    {true, encode_key(Path, 16#7FFFFFFFFFFFFFFF, OrderBy)};
                  Prev0 ->
-                   Prev1 = encode_key(Path ++ [Prev0], 16#7FFFFFFFFFFFFFFF, OrderBy),
+                   Prev1 = encode_key(Path ++ [Prev0], OrderBy),
                    {
-                     fun(K) -> (match_prefix(K, Prefix) andalso K =< Prev1) end,
+                     fun(K) -> (match_prefix(K, Prefix) andalso K < Prev1) end,
                      Prev1
                    }
                end
