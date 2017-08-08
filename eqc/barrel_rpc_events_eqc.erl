@@ -67,39 +67,49 @@ get_command(_S = #state{keys = Dict , replicate= R, db= DBS =[D|_]}) ->
              false -> D
          end,
     oneof([
-           {call, ?MODULE, get,       [DB, oneof(dict:fetch_keys(Dict)), Dict, oneof(['history', 'nothing'])]},
-           {call, ?MODULE, get,       [DB, id(), Dict, 'nothing']}
+           {call, ?MODULE, get,  
+            [DB, 
+             oneof(dict:fetch_keys(Dict)), 
+             Dict, oneof(['history', 'nothing'])]},
+           {call, ?MODULE, get,      
+            [DB, id(), Dict, 'nothing']}
           ]).
 
-get(DB, {ok, Id, RevId}, _Dict, 'rev') ->
-    barrel:get(DB, Id, #{'rev' => RevId});
 
-get(DB, {ok, Id, _RevId}, _Dict, 'history') ->
-    barrel:get(DB, Id, #{ 'history' => true});
+%% get(DB, {ok, Id, _RevId}, _Dict, 'history') ->
+%%     barrel:get(DB, Id, #{ 'history' => true});
 
-get(DB, {ok, Id, _RevId}, _Dict, nothing) ->
-    barrel:get(DB, Id, #{});
+%% get(DB, {ok, Id, _RevId}, _Dict, nothing) ->
+%%     barrel:get(DB, Id, #{});
 
-get(DB, Id , _Dict, 'rev') ->    
-    barrel:get(DB, Id, #{ });
 get(DB, Id , _Dict, 'history') ->
-    barrel:get(DB, Id, #{ 'history' => true});
+    case barrel:get(DB, Id, #{ 'history' => true}) of
+        {ok, Doc, Meta} ->
+            {Doc, Meta};
+        {error, not_found} ->
+            {error, not_found}
+    end;
+
 get(DB, Id, _Dict, _) ->
-    barrel:get(DB, Id, #{}).
+    case  barrel:get(DB, Id, #{}) of 
+        {ok, Doc, Meta} ->
+            {Doc, Meta};
+        {error, not_found} ->
+            {error, not_found}
+    end.
 
 
-
-
-get_adapt(#state{replicate = false}, [<<"test02">>, Key, Meta])->
-    {call, barrel, get, [<<"test01">>, Key, Meta]};
+get_adapt(#state{replicate = false}, [<<"test02">>|R])->
+    {call, barrel, get, [<<"test01">>|R]};
 get_adapt(_S,_C) ->
     false.
 
 
-get_pre(#state{replicate={var,_}}, [<<"test02">>, _, _]) ->
+get_pre(#state{replicate={var,_}}, [<<"test02">>|_]) ->
     false;
-get_pre(_,_) ->
-    true.
+get_pre(#state{keys = Dict}, [_DB, Id|_]) ->
+    dict:is_key(Id, Dict).
+
 
 get_pre(#state{keys = Dict}) ->
     not(dict:is_empty(Dict)).
@@ -109,38 +119,33 @@ get_next(S=  #state{cmds = C},_,_) ->
 
 
 get_post(#state{keys= Dict}, [_DB, Id,_, _], {error, not_found}) ->
-    not(dict:is_key(Id, Dict)), true; %% CHECK THIS
-get_post(#state{keys= Dict}, [_DB, Id,_, _],  {ok, Doc ,#{<<"rev">> := RevId}}) ->
-    
-    case dict:find(Id, Dict) of
-        {ok,#doc{value = Revs}} ->
-            lists:keymember(RevId,1, Revs);
-        error->
-            false
-    end;
+    lager:error("Dict Keys ~p ~p", [Id, dict:fetch_keys(Dict)]),
+    not(dict:is_key(Id, Dict));
 
-get_post(#state{keys= Dict}, [_DB, Id,_, history], {ok,_Doc, Meta}) ->
+
+get_post(#state{keys= Dict}, [_DB, Id,_, history], {_Doc, Meta}) ->
     Revisions = barrel_doc:parse_revisions(Meta),
+
     case dict:find(Id, Dict) of
         {ok,#doc{value = Revs}} ->
- 
             lists:all(
               fun({R,_} ) ->
                       lists:member(R, Revisions)
-
               end, Revs);
         error->
             true
     end;
 
 
-get_post(#state{keys= Dict}, [_DB, Id, _, history],
-         {ok, _Doc = #{<<"id">> := Id, <<"content">> := _Content} ,
+get_post(#state{keys= Dict}, [_DB, Id|_ ],
+         {_Doc = #{<<"id">> := Id, <<"content">> := _Content} ,
           #{<<"rev">> := Rev}}) ->
-    
-    
+    lager:notice("Id ~p ",[Id]),
+
     {ok, #doc{id = Id,
               value = V}} = dict:find(Id, Dict),
+    lager:notice("Rev ~s", [Rev]),
+    [lager:notice("Rev Hist ~s", [S])|| {S,_} <- V],
     lists:keymember(Rev,1,V).
     
 
@@ -230,8 +235,9 @@ post_command(S = #state{keys = _Dict}) ->
 
 post_pre(#state{replicate = false}, [<<"test02">>, _Doc, _Meta])->
     false;
-post_pre(_,_) ->
-    true.
+post_pre(#state{keys=Dict},[_, Id|_]) ->
+    not(dict:is_key(Id, Dict)). 
+
 
 post (DB, Doc = #{<<"id">> := Id}, Opts) ->
     case barrel:post(DB, Doc, Opts) of
@@ -254,8 +260,7 @@ post_next(State = #state{keys = Dict,
             State#state{keys = dict:store(Id,#doc{id = Id,
                                                   value = [Res] 
                                                   }
-                                         ,Dict)
-                        }
+                                         ,Dict)}
     end.
 
 
@@ -266,11 +271,17 @@ post_next(State = #state{keys = Dict,
 put_pre(#state{keys = Dict}) ->
     not(dict:is_empty(Dict)) .
    
+put_pre(#state{replicate={var,_}}, [<<"test02">>|_]) ->
+    false;
+put_pre(#state{keys=Dict},[_, Id|_]) ->
+    dict:is_key(Id, Dict). 
+
 
 put_post(#state{keys = Dict} , [_DB, #{<<"id">> := Id}, #{}], {error, {conflict, doc_exists}}) ->
     dict:is_key(Id, Dict);
 
 put_post(_State, _Args, _Ret) ->
+
     true.
 
 update_doc(Dict) ->
@@ -292,6 +303,7 @@ put_command(S = #state{keys = Dict}) ->
 
 put(DB, Id, Doc, Opts) ->
     {ok, Id, RevId} = barrel:put(DB, Doc#{<<"id">> => Id}, Opts),
+    lager:notice("Id ~p RevId ~s", [Id, RevId]),
     {RevId, Doc#{<<"id">> => Id}}.
 
 
@@ -315,6 +327,12 @@ put_rev_pre(#state{keys = Dict}) ->
     not(dict:is_empty(Dict)).
    
 
+put_rev_pre(#state{replicate={var,_}}, [<<"test02">>|_]) ->
+    false;
+put_rev_pre(#state{keys=Dict},[_, Id|_]) ->
+    dict:is_key(Id, Dict). 
+
+
 put_rev_post(#state{keys = Dict} , [_DB, #{<<"id">> := Id}, #{},_], {error, {conflict, doc_exists}}) ->
     dict:is_key(Id, Dict);
 
@@ -335,22 +353,18 @@ put_rev_command(S = #state{keys = Dict,
         [] ->
             NewPutRev;
         _ ->
-            lager:error("P ~p", [Ps]),
             oneof([NewPutRev,
-                   {call, ?MODULE, put_rev, oneof([swapDB(DBS, Cmd) || Cmd <- Ps])}])
-
-
-
+                   {call, ?MODULE, put_rev, oneof(swap(DBS, Ps))}])
     end.
 
-swapDB([DB1,DB2], Cmd = [DB1|Rest]) ->
-    [DB2|Rest];
-swapDB([DB1,DB2], Cmd = [DB2|Rest]) ->
-    [DB1|Rest].
+swap(DBS, Cmds) ->
+    [swapDB(DBS, Cmd) || Cmd <- Cmds].
+ 
+swapDB([DB1,DB2], Cmd = [_|Rest]) ->
+    [DB2|Rest].
         
 
 getByPos(Pos, L= [A|_]) ->
-    Length = length(L),
     Arr = array:from_list(L, A),
     array:get(Pos, Arr).
 
@@ -363,7 +377,7 @@ put_rev(DB, Id, Doc, Dict, Opts, NPos) ->
                     {RevId1,_ } = getByPos(NPos,L),
                     RevId1
             end,
-        
+    lager:notice("Old Rev ~s", [RevId]),
     {Pos, _}   = barrel_doc:parse_revision(RevId),
     NewDoc =  barrel_doc:make_doc(
                 #{value => Doc, id => Id},
@@ -374,6 +388,7 @@ put_rev(DB, Id, Doc, Dict, Opts, NPos) ->
     History = [NewRev,RevId],
 
     {ok,Id, NewRev1} =  barrel:put_rev(DB, Doc#{<<"id">> => Id}, History, false, Opts),
+    lager:notice("Id ~p RevId ~s", [Id, NewRev1]),
     {NewRev1, Doc#{<<"id">> => Id}}.
     
 
@@ -526,7 +541,7 @@ prop_barrel_rpc_events_eqc() ->
                              {ok,#{<<"database_id">> := D}} = create_database(D)
                          end
                          || D <-DBS],
-                                                %	timer:sleep(250),
+                                                %       timer:sleep(250),
                         ?WHENFAIL(begin
                                       [ok = barrel:delete_database(D)|| D <-DBS],
                                       io:format("~n~n~n********************************************************************************~n~n~n"),
