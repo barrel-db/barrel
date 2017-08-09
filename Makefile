@@ -42,8 +42,8 @@ cover:
 eqc:
 		@$(REBAR) as eqc eqc
 
-eqcshell:
-		@$(REBAR) as eqc shell --sname barreleqc@localhost
+shell2:
+		@$(REBAR) as eqc shell --sname barrel2@localhost
 shell:
 	@$(REBAR) as eqc shell --sname barrel@localhost
 

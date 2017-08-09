@@ -24,17 +24,15 @@
 
 walk(#db{store=Store}, Path, UserFun, AccIn, Options0) ->
   Options1 = validate_options(Options0),
-
+  PathParts = decode_path(Path, []),
   %% set fold options
-  {MoveAction, First, InRange} = make_range(Path, Options1),
+  {MoveAction, Inclusive, First, InRange} = make_range(PathParts, Options1),
   OrderBy = maps:get(order_by, Options1, order_by_key),
   EqualTo = maps:get(equal_to, Options1, undefined),
   Limit = maps:get(limit, Options1, ?DEFAULT_MAX),
-
   %% rocksdb options
   {ok, Snapshot} = rocksdb:snapshot(Store),
   ReadOptions = [{snapshot, Snapshot}],
-
   %% wrapper function to retrieve the results from the iterator
   WrapperFun =
     fun(KeyBin, _, Acc) ->
@@ -57,7 +55,6 @@ walk(#db{store=Store}, Path, UserFun, AccIn, Options0) ->
           {ok, Acc}
       end
     end,
-
   %% initialize the iterator
   {ok, Itr} = rocksdb:iterator(Store, ReadOptions),
   Next = fun() -> rocksdb:iterator_move(Itr, MoveAction) end,
@@ -65,14 +62,22 @@ walk(#db{store=Store}, Path, UserFun, AccIn, Options0) ->
             next -> rocksdb:iterator_move(Itr, First);
             prev -> rocksdb:iterator_move(Itr, {seek_for_prev, First})
           end,
-
   %% start folding
   try
     fold_loop(
-      Start, Next, WrapperFun, AccIn, InRange, Limit - 1
+      maybe_next(Start, Next, Inclusive),
+      Next, WrapperFun, AccIn, InRange, Limit - 1
     )
   after safe_iterator_close(Itr)
   end.
+
+maybe_next({ok, Key, _V} = Start, Next, MatchNext) when is_function(MatchNext) ->
+  case MatchNext(Key) of
+    true -> Start;
+    false ->  Next()
+  end;
+maybe_next(Start, _Next, _Inclusive) ->
+  Start.
 
 safe_iterator_close(Itr) -> (catch rocksdb:iterator_close(Itr)).
 
@@ -87,6 +92,10 @@ fold_loop({ok, K, V}, Next, WrapperFun, Acc0, Cmp, Limit) ->
         {ok, Acc1} when Limit > 0 ->
           fold_loop(Next(), Next, WrapperFun, Acc1, Cmp, Limit - 1);
         {ok, Acc1} -> Acc1;
+        {skip, Acc1} ->
+          fold_loop(Next(), Next, WrapperFun, Acc1, Cmp, Limit);
+        skip ->
+          fold_loop(Next(), Next, WrapperFun, Acc0, Cmp, Limit);
         stop -> Acc0;
         {stop, Acc1} -> Acc1;
         Acc1 -> Acc1
@@ -112,53 +121,101 @@ get_value([Key], Obj) ->
 get_value([], Obj) ->
   Obj.
 
+encode_key(Parts, order_by_key) ->
+  barrel_keys:encode_path_forward(
+    barrel_keys:prefix(idx_forward_path),
+    Parts
+  );
+encode_key(Parts, order_by_value) ->
+  barrel_keys:encode_path_reverse(
+    barrel_keys:prefix(idx_reverse_path),
+    Parts
+  ).
+
+encode_key(Parts, Seq, order_by_key) ->
+  barrel_keys:forward_path_key(Parts, Seq);
+encode_key(Parts, Seq, order_by_value) ->
+  barrel_keys:reverse_path_key(Parts, Seq).
+
+
 make_range(Path, #{ move := prev }= Options) ->
   OrderBy = maps:get(order_by, Options, order_by_key),
-  Prefix = make_prefix(normalize_path(Path), OrderBy),
-  First  = case maps:find(end_at, Options) of
+  Prefix = encode_key(Path, OrderBy),
+  {Inclusive, First}  = case maps:find(end_at, Options) of
              {ok, EndAt} ->
-               make_prefix(
-                 << (normalize_path(append_path(Path, EndAt)))/binary, 16#7FFFFFFFFFFFFFFF >>,
-                 OrderBy
-               );
+               {true,
+                 encode_key(Path ++ [EndAt], 16#7FFFFFFFFFFFFFFF, OrderBy)
+               };
              error ->
-               << (make_prefix(normalize_path(Path), OrderBy))/binary, 16#7FFFFFFFFFFFFFFF >>
+               case maps:get(previous_to, Options, undefined) of
+                 undefined ->
+                   {true, encode_key(Path, 16#7FFFFFFFFFFFFFFF, OrderBy)};
+                 Prev0 ->
+                   Prev1 = encode_key(Path ++ [Prev0], OrderBy),
+                   {
+                     fun(K) -> (match_prefix(K, Prefix) andalso K < Prev1) end,
+                     Prev1
+                   }
+               end
            end,
   InRange = case maps:get(start_at, Options, undefined)  of
               undefined ->
-                fun(K) -> match_prefix(K, Prefix) end;
+                case maps:get(next_to, Options, undefined) of
+                  undefined ->
+                    fun(K) -> match_prefix(K, Prefix) end;
+                  Next0 ->
+                    Next1 = encode_key(Path ++ [Next0], 16#7FFFFFFFFFFFFFFF, OrderBy),
+                    fun(K) -> (match_prefix(K, Prefix) andalso K > Next1) end
+                end;
               StartAt0 ->
-                StartAt1 = make_prefix(
-                  normalize_path(append_path(Path, StartAt0)),
-                  OrderBy
-                ),
+                StartAt1 = encode_key(Path ++ [StartAt0], OrderBy),
                 fun(K) -> (match_prefix(K, Prefix) andalso K >= StartAt1) end
             end,
-  {prev, First, InRange};
+  {prev, Inclusive, First, InRange};
 make_range(Path, #{ move := next }= Options) ->
   OrderBy = maps:get(order_by, Options, order_by_key),
-  Prefix = make_prefix(normalize_path(Path), OrderBy),
-  First = case maps:find(start_at, Options) of
-            {ok, StartAt} -> make_prefix(normalize_path(append_path(Path, StartAt)), OrderBy);
-            error -> Prefix
+  Prefix = encode_key(Path, OrderBy),
+  {Inclusive, First} = case maps:find(start_at, Options) of
+            {ok, StartAt} ->
+              {true,
+                encode_key(Path ++ [StartAt], OrderBy)
+              };
+            error ->
+              case maps:get(next_to, Options, undefined) of
+                undefined ->
+                  {true, Prefix};
+                Next0 ->
+                  Next1 = encode_key(Path ++ [Next0], 16#7FFFFFFFFFFFFFFF, OrderBy),
+                  {
+                    fun(K) ->
+                      (match_prefix(K, Prefix) andalso K > Next1)
+                    end,
+                    Next1
+                  }
+              end
           end,
   InRange = case maps:get(end_at, Options, undefined)  of
               undefined ->
-                fun(K) -> match_prefix(K, Prefix) end;
+                case maps:get(previous_to, Options, undefined)  of
+                  undefined ->
+                    fun(K) -> match_prefix(K, Prefix) end;
+                  Prev0 ->
+                    Prev1 = encode_key(Path ++ [Prev0], OrderBy),
+                    fun(K) -> (match_prefix(K, Prefix) andalso K < Prev1) end
+                end;
               EndAt0 ->
-                EndAt1 = make_prefix(
-                  << (normalize_path(append_path(Path, EndAt0)))/binary, 16#7FFFFFFFFFFFFFFF >>,
-                  OrderBy
-                ),
+                EndAt1 = encode_key(Path ++ [EndAt0], 16#7FFFFFFFFFFFFFFF, OrderBy),
                 fun(K) -> (match_prefix(K, Prefix) andalso K =< EndAt1) end
             end,
-  {next, First, InRange}.
+  {next, Inclusive, First, InRange}.
 
 match_prefix(Bin, Prefix) ->
   L = byte_size(Prefix),
   case Bin of
-    << Prefix:L/binary, _/binary >> -> true;
-    _ -> false
+    << Prefix:L/binary, _/binary >> ->
+      true;
+    _ ->
+      false
   end.
 
 validate_options(Opts) ->
@@ -170,6 +227,10 @@ validate_options_fun(start_at, Key, Options) when is_binary(Key) ->
   Options#{ start_at => Key };
 validate_options_fun(end_at, Key, Options) when is_binary(Key) ->
   Options#{ end_at => Key };
+validate_options_fun(previous_to, Key, Options) when is_binary(Key) ->
+  Options#{ previous_to => Key };
+validate_options_fun(next_to, Key, Options) when is_binary(Key) ->
+  Options#{ next_to => Key };
 validate_options_fun(equal_to, Val, Options)  ->
   Options#{ equal_to => Val };
 validate_options_fun(limit_to_last, Limit, Options) when is_integer(Limit), Limit > 0 ->
@@ -182,36 +243,10 @@ validate_options_fun(limit_to_first, Limit, Options) when is_integer(Limit), Lim
     {ok, _} -> erlang:error(badarg);
     error -> Options#{ limit => Limit, move => next }
   end;
-validate_options_fun(include_docs, IncludeDocs, Options) ->
+validate_options_fun(include_docs, IncludeDocs, Options) when is_boolean(IncludeDocs) ->
   Options#{ include_docs => IncludeDocs };
 validate_options_fun(_, _, _) ->
   erlang:error(badarg).
-
-make_prefix(Path, order_by_key) ->
-  Prefix =  barrel_keys:prefix(idx_forward_path),
-  barrel_keys:encode_path_forward(Prefix, partial_path(Path));
-make_prefix(Path, order_by_value) ->
-  Prefix = barrel_keys:prefix(idx_reverse_path),
-  barrel_keys:encode_path_reverse(Prefix, partial_path(Path)).
-
-normalize_path(<< $$, _/binary >>=Path) -> Path;
-normalize_path(<< $/, _/binary >>=Path) -> << $$, Path/binary >>;
-normalize_path(Path) when is_binary(Path)-> << $$, $/, Path/binary >>;
-normalize_path(_) -> erlang:error(badarg).
-
-partial_path(Path0) ->
-  Path1 = normalize_path(Path0),
-  Parts = binary:split(Path1, <<"/">>, [global]),
-  partial_path(Parts, length(Parts)).
-
-append_path(Path, Segment) ->
-  case binary:last(Path) of
-    $/ -> << Path/binary, Segment/binary >>;
-    _ -> << Path/binary, $/, Segment/binary >>
-  end.
-
-partial_path(Parts, Len) when Len =< 3 -> Parts;
-partial_path(Parts, Len) -> lists:sublist(Parts, Len - 2, Len).
 
 parse_rid(Path, OrderBy) ->
   Prefix = case OrderBy of
@@ -223,6 +258,25 @@ parse_rid(Path, OrderBy) ->
   [ Rid | Rest ] = decode_partial_path(Encoded, []),
   [ << "$" >> | Rest1 ] =  lists:reverse(Rest),
   {Rid, Rest1}.
+
+
+decode_path(<<>>, Acc) ->
+  [ << "$" >> | lists:reverse(Acc)];
+decode_path(<< $/, Rest/binary >>, Acc) ->
+  decode_path(Rest, [<<>> |Acc]);
+decode_path(<< $[, Rest/binary >>, Acc) ->
+  decode_path(Rest, [<<>> |Acc]);
+decode_path(<< $], Rest/binary >>, [BinInt | Acc] ) ->
+  case (catch binary_to_integer(BinInt)) of
+    {'EXIT', _} ->
+      erlang:error(bad_path);
+    Int ->
+      decode_path(Rest, [Int | Acc])
+  end;
+decode_path(<<Codepoint/utf8, Rest/binary>>, []) ->
+  decode_path(Rest, [<< Codepoint/utf8 >>]);
+decode_path(<<Codepoint/utf8, Rest/binary>>, [Current|Done]) ->
+  decode_path(Rest, [<< Current/binary, Codepoint/utf8 >> | Done]).
 
 decode_partial_path(<<"">>, Parts) ->
   Parts;

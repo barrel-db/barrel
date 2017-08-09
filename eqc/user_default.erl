@@ -19,11 +19,9 @@ eqc() ->
 eqc(N) ->
     lager:set_loglevel(lager_console_backend, notice),
     [] = eqc:module({numtests,N}, barrel_change_since_eqc),
-%    [] = eqc:module({numtests,N}, barrel_rpc_events_eqc),
-%    [] = eqc:module({numtests,N}, create_delete_database_eqc),
-%    [] = eqc:module({numtests,N}, barrel_rpc_eqc),
-
-
+    [] = eqc:module({numtests,N}, barrel_rpc_events_eqc),
+    [] = eqc:module({numtests,N}, create_delete_database_eqc),
+    [] = eqc:module({numtests,N}, barrel_rpc_eqc),
     ok.
 
 
