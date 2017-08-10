@@ -83,16 +83,16 @@ get_command(_S = #state{keys = Dict , replicate= R, db= DBS =[D|_]}) ->
 %%     barrel:get(DB, Id, #{});
 
 
-get(DB, Id , _Dict, 'history') ->
-    case barrel:get(DB, Id, #{ 'history' => true}) of
+get({DBPid,DB}, Id , _Dict, 'history') ->
+    case barrel:get({DBPid,DB}, Id, #{ 'history' => true}) of
         {ok, Doc, Meta} ->
             {Doc, Meta};
         {error, not_found} ->
             {error, not_found}
     end;
 
-get(DB, Id, _Dict, _) ->
-    case  barrel:get(DB, Id, #{}) of 
+get({DBPid, DB}, Id, _Dict, _) ->
+    case  barrel:get(DBPid, DB, Id, #{}) of 
         {ok, Doc, Meta} ->
             {Doc, Meta};
         {error, not_found} ->
@@ -100,13 +100,13 @@ get(DB, Id, _Dict, _) ->
     end.
 
 
-get_adapt(#state{replicate = false}, [<<"test02">>|R])->
-    {call, barrel, get, [<<"test01">>|R]};
+get_adapt(#state{replicate = false, db = [DB,_]}, [{_,<<"test02">>}|R])->
+    {call, barrel, get, [DB|R]};
 get_adapt(_S,_C) ->
     false.
 
 
-get_pre(#state{replicate={var,_}}, [<<"test02">>|_]) ->
+get_pre(#state{replicate={var,_}}, [{_,<<"test02">>}|_]) ->
     false;
 get_pre(#state{keys = Dict}, [_DB, Id|_]) ->
     dict:is_key(Id, Dict).
@@ -156,7 +156,7 @@ get_post(#state{keys= Dict}, [_DB, Id|_ ],
 %%********************************************************************************
 
 start_replication_pre(#state{replicate = R, db=_DBS}) ->
-    R == false.
+    R == false, false.
 
 start_replication_command(#state{db = [DB1, DB2]}) ->
     oneof([{call, ?MODULE, start_replication,
@@ -242,8 +242,9 @@ post_pre(#state{keys=Dict},[_, Id|_]) ->
     not(dict:is_key(Id, Dict)). 
 
 
-post (DB, Doc = #{<<"id">> := Id}, Opts) ->
-    case barrel:post(DB, Doc, Opts) of
+post ({DBPid, DB}, Doc = #{<<"id">> := Id}, Opts) ->
+    lager:error("DBPid ~p DB ~p", [DBPid, DB]),
+    case barrel:post(DBPid, DB, Doc, Opts) of
         {ok, Id, RevId} ->
 
             {RevId,Doc};
@@ -306,8 +307,8 @@ put_command(S = #state{keys = Dict}) ->
                                    #{}]}
           ]).
 
-put(DB, Id, Doc, Opts) ->
-    {ok, Id, RevId} = barrel:put(DB, Doc#{<<"id">> => Id}, Opts),
+put({DBPid, DB}, Id, Doc, Opts) ->
+    {ok, Id, RevId} = barrel:put(DBPid, DB, Doc#{<<"id">> => Id}, Opts),
     lager:notice("Id ~p RevId ~s", [Id, RevId]),
     {RevId, Doc#{<<"id">> => Id}}.
 
@@ -368,7 +369,7 @@ getByPos(Pos, L= [A|_]) ->
     array:get(Pos, Arr).
 
 
-put_rev(DB, Id, Doc, Dict, Opts, NPos) ->
+put_rev({DBPid, DB}, Id, Doc, Dict, Opts, NPos) ->
     RevId = case dict:find(Id, Dict) of
                 error ->
                     throw({error, document_not_found, Id});
@@ -386,7 +387,7 @@ put_rev(DB, Id, Doc, Dict, Opts, NPos) ->
 
     History = [NewRev,RevId],
 
-    {ok,Id, NewRev1} =  barrel:put_rev(DB, Doc#{<<"id">> => Id}, History, false, Opts),
+    {ok,Id, NewRev1} =  barrel:put_rev(DBPid, DB, Doc#{<<"id">> => Id}, History, false, Opts),
     lager:notice("Id ~p RevId ~s", [Id, NewRev1]),
     {NewRev1, Doc#{<<"id">> => Id}}.
 
@@ -426,11 +427,13 @@ delete_post(#state{keys= Dict, deleted =D}, [_DB, Id, #{}], {ok, Id, _rev}) ->
 
 delete_command(S = #state{keys = Dict,deleted = D}) ->
     oneof([
-           {call, barrel, delete,    [db(S), oneof(dict:fetch_keys(Dict)), #{}]},
-           {call, barrel, delete,    [db(S), id(), #{}]},
-           {call, barrel, delete,    [db(S), oneof([<<"a">>|sets:to_list(D)]), #{}]}
+           {call, ?MODULE, delete,    [db(S), oneof(dict:fetch_keys(Dict)), #{}]},
+           {call, ?MODULE, delete,    [db(S), id(), #{}]},
+           {call, ?MODULE, delete,    [db(S), oneof([<<"a">>|sets:to_list(D)]), #{}]}
           ]).
 
+delete({DBPid, DB}, Key) ->
+    barrel:delete(DBPid, DB, Key).
 
 delete_next(State = #state{keys = Dict, cmds = C, deleted=D},_V,[_DB, Id|_]) ->
     State#state{keys = dict:erase(Id, Dict), cmds = C + 1, deleted = sets:add_element(Id,D)}.
@@ -477,9 +480,9 @@ command_precondition_common(_S, _Cmd) ->
                                                 when S    :: eqc_statem:dynamic_state(),
                                                      Call :: eqc_statem:call(),
                                                      Res  :: term().
-postcondition_common(_S= #state{keys = Dict, db = [DB|_]}, _Call, _Res) ->
+postcondition_common(_S= #state{keys = Dict, db = [{DBPid, DB}|_]}, _Call, _Res) ->
 
-    case  barrel:database_infos(DB) of
+    case  barrel:database_infos(DBPid,DB) of
         {error,not_found} ->
             false;
         {ok, _A = #{docs_count := DocCount}} ->
@@ -508,15 +511,24 @@ postcondition_common(_,_,_) ->
 
 
 
-create_database(DB) ->
-    %% Delete database if it already exists
-    case barrel:database_infos(DB) of
-        {ok, _} -> barrel:delete_database(DB),
-                   timer:sleep(250),
-                   ok  ;
-        {error, not_found} -> ok
+create_database({DB,RemoteNode}) ->
+    lager:error("DB ~p ChPid ~p", [DB, RemoteNode]),
+    {ok, ChPid} = 
+        barrel:connect(#{ type => direct, endpoint => RemoteNode }),
+    lager:error("DB ~p ChPid ~p", [DB, ChPid]),
+    case  barrel_remote:database_names(ChPid) of
+        [] ->
+            {ok, _} = barrel_remote:create_database(ChPid, #{ <<"database_id">> => DB }),
+
+            ok;
+        [DB] -> ok;
+        Ds ->
+            lager:error("DBs ~p", [Ds]),
+            [ok = barrel_remote:delete_database(ChPid,D) || D <- Ds]
     end,
-    barrel:create_database(#{<<"database_id">> => DB}).
+    
+
+    {ChPid, DB}.
 
 cleanup() ->
     common_eqc:cleanup().
@@ -528,29 +540,29 @@ stop(#state{}) ->
 
 -spec prop_barrel_rpc_events_eqc() -> eqc:property().
 prop_barrel_rpc_events_eqc() ->
-    DBS = [<<"test01">>,<<"test02">>],
+    DBS = lists:zip([<<"test01">>,<<"test02">>], 
+                    [node()|nodes()]),
     ?SETUP(fun common_eqc:init_db/0,
            ?FORALL( Cmds,
                     commands(?MODULE,
                              #state{
-                                    db =  DBS
-                                   }),
+                                    db =
+                                    [ create_database(D)
+                                      || D <-DBS]
+                               }),
                     begin
-                        [begin
-                             {ok,#{<<"database_id">> := D}} = create_database(D)
-                         end
-                         || D <-DBS],
+
                                                 %       timer:sleep(250),
                         ?WHENFAIL(begin
                                       [ok = barrel:delete_database(D)|| D <-DBS],
                                       io:format("~n~n~n********************************************************************************~n~n~n"),
-                                      cleanup(),
                                       ok
                                   end,
                                   begin
                                       {H, S, Res} = run_commands(Cmds),
                                       stop(S),
-                                      [ok = barrel:delete_database(D)|| D <-DBS],
+                                      lager:error("DBS ~p", [DBS]),
+                                      %[ok = barrel:delete_database(Conn,D)|| {D,Conn} <-DBS],
                                       check_command_names(Cmds,
                                                           measure(length, commands_length(Cmds),
                                                                   pretty_commands(?MODULE, Cmds, {H, S, Res},

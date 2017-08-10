@@ -14,14 +14,14 @@
 
 init_db()->
     lager:set_loglevel(lager_console_backend, error),
+
     {ok, _} = application:ensure_all_started(barrel),
     fun delete_db/0.
 
 cleanup() ->
     Dbs = barrel:database_names(),
     [ok = barrel:delete_database(D)|| D<- Dbs],
-
-   % [] = barrel:database_names(),
+    application:stop(barrel),
     ok.
 
 
