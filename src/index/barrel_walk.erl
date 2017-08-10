@@ -83,8 +83,6 @@ fold_loop({error, iterator_closed}, _Next, _WrapperFun, Acc, _Cmp, _Limit) ->
   throw({iterator_closed, Acc});
 fold_loop({error, invalid_iterator}, _Next, _WrapperFun, Acc, _Cmp, _Limit) ->
   Acc;
-fold_loop(stop, _Next, _WrapperFun, Acc, _Cmp, _Limit) ->
-  Acc;
 fold_loop({ok, K, V}, Next, WrapperFun, Acc0, Cmp, Limit) ->
   case Cmp(K) of
     true ->
