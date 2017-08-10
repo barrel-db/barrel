@@ -23,6 +23,7 @@
   analyze/1
 ]).
 
+-export([short/1]).
 
 -define(STRING_PRECISION, 100).
 

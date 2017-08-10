@@ -708,16 +708,18 @@ do_update_docs(DocBuckets, Db =  #db{id=DbId, store=Store }) ->
   ).
 
 update_index([Path | Rest], Rid, Seq, index, Batch0) ->
-  Batch1 = lists:foldl(fun(P, Acc) ->
-                          [ {put, barrel_keys:forward_path_key(P, Rid), <<>>},
-                            {put, barrel_keys:reverse_path_key(P, Rid), <<>>} | Acc ]
-                      end, Batch0, barrel_index:split_path(Path)),
+  Batch1 = [
+    {put, barrel_keys:forward_path_key(Path, Rid), <<>>},
+    {put, barrel_keys:reverse_path_key(Path, Rid), <<>>}
+    | Batch0
+  ],
   update_index(Rest, Rid, Seq, index, Batch1);
 update_index([Path | Rest], Rid, Seq, unindex, Batch0) ->
-  Batch1 = lists:foldl(fun(P, Acc) ->
-                          [ {delete, barrel_keys:forward_path_key(P, Rid)},
-                            {delete, barrel_keys:reverse_path_key(P, Rid)} | Acc ]
-                      end, Batch0, barrel_index:split_path(Path)),
+  Batch1 = [
+    {delete, barrel_keys:forward_path_key(Path, Rid)},
+    {delete, barrel_keys:reverse_path_key(Path, Rid)}
+    | Batch0
+  ],
   update_index(Rest, Rid, Seq, unindex, Batch1);
 update_index([], _Rid, _Seq, _Op, Batch) ->
   Batch.
