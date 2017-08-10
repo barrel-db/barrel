@@ -9,6 +9,7 @@
 
 -include_lib("eqc/include/eqc.hrl").
 -include_lib("eqc/include/eqc_statem.hrl").
+-define(IDField, <<"id">>).
 
 -compile(export_all).
 %% -- State and state functions ----------------------------------------------
@@ -42,8 +43,8 @@ id() ->
 
 doc()->
     #{
-     <<"id">> => id(),
-     <<"content">> => utf8(8)
+     ?IDField => id(),
+     <<"doc">>  =>non_empty(map(non_empty(binary()),binary())) 
     }.
 
 doc1() ->
@@ -120,14 +121,14 @@ get_next(S=  #state{cmds = C},_,_) ->
 
 
 get_post(#state{keys= Dict}, [_DB, Id,_, _], {error, not_found}) ->
-    lager:error("Dict Keys ~p ~p", [Id, dict:fetch_keys(Dict)]),
+    lager:error("Keys ~p  ~p", [Id, dict:fetch_keys(Dict)]),
     not(dict:is_key(Id, Dict));
 
 
 
 get_post(#state{keys= Dict}, [_DB, Id,_, history], {_Doc, Meta}) ->
     Revisions = barrel_doc:parse_revisions(Meta),
-
+    lager:error("--- revisions ~p", [Revisions]),
     case dict:find(Id, Dict) of
         {ok,#doc{value = Revs}} ->
 
@@ -141,7 +142,7 @@ get_post(#state{keys= Dict}, [_DB, Id,_, history], {_Doc, Meta}) ->
 
 
 get_post(#state{keys= Dict}, [_DB, Id|_ ],
-         {_Doc = #{<<"id">> := Id, <<"content">> := _Content} ,
+         {_Doc = #{?IDField := Id, <<"content">> := _Content} ,
           #{<<"rev">> := Rev}}) ->
 
 
@@ -221,19 +222,20 @@ stop_replication_next(State, R, _) ->
 %%********************************************************************************
 
 
-post_post(#state{keys = Dict} , [_DB, #{<<"id">> := Id}, _],
+post_post(#state{keys = Dict} , [_DB, #{?IDField := Id}, _],
           {conflict, doc_exists}) ->
-
-    dict:is_key(Id, Dict);
+    
+    dict:is_key(Id, Dict),true;
 
 post_post(_State, _Args,  {RevId,Doc} ) when is_binary(RevId) ->
     true.
 
 
 post_command(S = #state{keys = _Dict}) ->
-%    lager:error("Replication Status ~p", [S#state.replicate]),
     oneof([
-           {call, ?MODULE, post,  [dbr(S), doc(), #{}]}
+           {call, ?MODULE, post,  [dbr(S), doc(),  #{
+                                                
+                                               }]}
           ]).
 
 post_pre(#state{replicate = false}, [<<"test02">>, _Doc, _Meta])->
@@ -242,21 +244,21 @@ post_pre(#state{keys=Dict},[_, Id|_]) ->
     not(dict:is_key(Id, Dict)). 
 
 
-post ({DBPid, DB}, Doc = #{<<"id">> := Id}, Opts) ->
-    lager:error("DBPid ~p DB ~p", [DBPid, DB]),
+post ({DBPid, DB}, Doc = #{?IDField := Id}, Opts) ->
+    lager:error("barrel:post(~p, ~p, ~p , ~p).~n", [DBPid, DB, Doc , Opts]),
     case barrel:post(DBPid, DB, Doc, Opts) of
-        {ok, Id, RevId} ->
-
+        {ok, DocId, RevId} = R ->
+            lager:error("Idx ~p", [R]),
             {RevId,Doc};
-        {error, {conflict, doc_exists}} ->
-            {conflict, doc_exists}
+        {error, E} ->
+            E
     end.
 
 post_next(State = #state{keys = Dict,
                          cmds = C},
           Res ,
-          _Cmd = [_DB, Doc = #{<<"id">> := Id} , _opt]) ->
-
+          _Cmd = [_DB, Doc = #{?IDField := Id} , _opt]) ->
+    lager:error("++++ post next ~p", [Res]),
     case dict:is_key(Id, Dict) of
         true ->
             State;
@@ -283,7 +285,7 @@ put_pre(#state{keys=Dict},[_, Id|_]) ->
 
 
 
-put_post(#state{keys = Dict} , [_DB, #{<<"id">> := Id}, #{}], {error, {conflict, doc_exists}}) ->
+put_post(#state{keys = Dict} , [_DB, #{?IDField := Id}, #{}], {error, {conflict, doc_exists}}) ->
     dict:is_key(Id, Dict);
 
 put_post(_State, _Args, _Ret) ->
@@ -308,9 +310,9 @@ put_command(S = #state{keys = Dict}) ->
           ]).
 
 put({DBPid, DB}, Id, Doc, Opts) ->
-    {ok, Id, RevId} = barrel:put(DBPid, DB, Doc#{<<"id">> => Id}, Opts),
+    {ok, Id, RevId} = barrel:put(DBPid, DB, Doc#{?IDField => Id}, Opts),
     lager:notice("Id ~p RevId ~s", [Id, RevId]),
-    {RevId, Doc#{<<"id">> => Id}}.
+    {RevId, Doc#{?IDField => Id}}.
 
 
 put_next(State = #state{keys = Dict,cmds = C},
@@ -339,7 +341,7 @@ put_rev_pre(#state{keys=Dict},[_, Id|_]) ->
     dict:is_key(Id, Dict). 
 
 
-put_rev_post(#state{keys = Dict} , [_DB, #{<<"id">> := Id}, #{},_], {error, {conflict, doc_exists}}) ->
+put_rev_post(#state{keys = Dict} , [_DB, #{?IDField := Id}, #{},_], {error, {conflict, doc_exists}}) ->
     dict:is_key(Id, Dict);
 
 put_rev_post(_State, _Args, _Ret) ->
@@ -387,9 +389,9 @@ put_rev({DBPid, DB}, Id, Doc, Dict, Opts, NPos) ->
 
     History = [NewRev,RevId],
 
-    {ok,Id, NewRev1} =  barrel:put_rev(DBPid, DB, Doc#{<<"id">> => Id}, History, false, Opts),
+    {ok,Id, NewRev1} =  barrel:put_rev(DBPid, DB, Doc#{?IDField => Id}, History, false, Opts),
     lager:notice("Id ~p RevId ~s", [Id, NewRev1]),
-    {NewRev1, Doc#{<<"id">> => Id}}.
+    {NewRev1, Doc#{?IDField => Id}}.
 
 
 put_rev_next(State = #state{cmds =C, replicate_push = P},
@@ -432,8 +434,8 @@ delete_command(S = #state{keys = Dict,deleted = D}) ->
            {call, ?MODULE, delete,    [db(S), oneof([<<"a">>|sets:to_list(D)]), #{}]}
           ]).
 
-delete({DBPid, DB}, Key) ->
-    barrel:delete(DBPid, DB, Key).
+delete({DBPid, DB}, Key, Opts) ->
+    barrel:delete(DBPid, DB, Key, Opts).
 
 delete_next(State = #state{keys = Dict, cmds = C, deleted=D},_V,[_DB, Id|_]) ->
     State#state{keys = dict:erase(Id, Dict), cmds = C + 1, deleted = sets:add_element(Id,D)}.
@@ -511,11 +513,11 @@ postcondition_common(_,_,_) ->
 
 
 
-create_database({DB,RemoteNode}) ->
-    lager:error("DB ~p ChPid ~p", [DB, RemoteNode]),
+create_database(DB,RemoteNode) ->
+    
     {ok, ChPid} = 
         barrel:connect(#{ type => direct, endpoint => RemoteNode }),
-    lager:error("DB ~p ChPid ~p", [DB, ChPid]),
+    
     case  barrel_remote:database_names(ChPid) of
         [] ->
             {ok, _} = barrel_remote:create_database(ChPid, #{ <<"database_id">> => DB }),
@@ -523,8 +525,13 @@ create_database({DB,RemoteNode}) ->
             ok;
         [DB] -> ok;
         Ds ->
-            lager:error("DBs ~p", [Ds]),
-            [ok = barrel_remote:delete_database(ChPid,D) || D <- Ds]
+            
+            [begin 
+                 ok = barrel_remote:delete_database(ChPid,D),
+                 {ok, _} = barrel_remote:create_database(ChPid, #{ <<"database_id">> => DB }),
+                 ok
+             end
+                 || D <- Ds]
     end,
     
 
@@ -546,22 +553,24 @@ prop_barrel_rpc_events_eqc() ->
            ?FORALL( Cmds,
                     commands(?MODULE,
                              #state{
-                                    db =
-                                    [ create_database(D)
-                                      || D <-DBS]
+                                    db =[{var, db1},
+                                         {var, db2}]
                                }),
                     begin
-
-                                                %       timer:sleep(250),
                         ?WHENFAIL(begin
                                       [ok = barrel:delete_database(D)|| D <-DBS],
                                       io:format("~n~n~n********************************************************************************~n~n~n"),
                                       ok
                                   end,
                                   begin
-                                      {H, S, Res} = run_commands(Cmds),
+                                      Dbs = lists:zip([db1,db2],
+                                                      [
+                                                       create_database(DB, Node)||
+                                                          {DB,Node} <- DBS]),
+
+                                      {H, S, Res} = run_commands(Cmds,Dbs),
                                       stop(S),
-                                      lager:error("DBS ~p", [DBS]),
+
                                       %[ok = barrel:delete_database(Conn,D)|| {D,Conn} <-DBS],
                                       check_command_names(Cmds,
                                                           measure(length, commands_length(Cmds),

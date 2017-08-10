@@ -3,6 +3,7 @@
 -define(DB, <<"testdb3">>).
 
 setup() ->
+    net_adm:ping('barrel2@localhost'),
     sync:go(),
 
     ok.
