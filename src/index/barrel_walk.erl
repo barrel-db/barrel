@@ -28,7 +28,7 @@ walk(#db{store=Store}, Path, UserFun, AccIn, Options0) ->
   Options1 = validate_options(Options0),
   PathParts = decode_path(Path, []),
   %% set fold options
-  {MoveAction, Inclusive, First, InRange} = make_range(PathParts, Options1),
+  {MoveAction, First, RangeFun} = make_range(PathParts, Options1),
   OrderBy = maps:get(order_by, Options1, order_by_key),
   EqualTo = case maps:get(equal_to, Options1, undefined) of
               undefined -> undefined;
@@ -67,8 +67,8 @@ walk(#db{store=Store}, Path, UserFun, AccIn, Options0) ->
   %% start folding
   try
     fold_loop(
-      maybe_next(Start, Next, Inclusive),
-      Next, WrapperFun, AccIn, InRange, Limit - 1
+      Start,
+      Next, WrapperFun, AccIn, RangeFun, Limit - 1
     )
   after safe_iterator_close(Itr)
   end.
@@ -76,14 +76,6 @@ walk(#db{store=Store}, Path, UserFun, AccIn, Options0) ->
 is_equal(undefined, _) -> true;
 is_equal(Val, Val) -> true;
 is_equal(_, _) -> false.
-
-maybe_next({ok, Key, _V} = Start, Next, MatchNext) when is_function(MatchNext) ->
-  case MatchNext(Key) of
-    true -> Start;
-    false -> Next()
-  end;
-maybe_next(Start, _Next, _Inclusive) ->
-  Start.
 
 safe_iterator_close(Itr) -> (catch rocksdb:iterator_close(Itr)).
 
@@ -123,65 +115,84 @@ encode_key(Parts, order_by_value) ->
     barrel_keys:prefix(idx_reverse_path)
   ).
 
-
 encode_key(Parts, Seq, order_by_key) ->
   barrel_keys:forward_path_key(Parts, Seq);
 encode_key(Parts, Seq, order_by_value) ->
   barrel_keys:reverse_path_key(Parts, Seq).
 
 
+make_range_fun(Prefix, undefined, undefined, _, _) ->
+  fun(K) -> match_prefix(K, Prefix) end;
+make_range_fun(Prefix, undefined, Last, _, true) ->
+  fun(K) -> match_prefix(K, Prefix) andalso K =< Last end;
+make_range_fun(Prefix, undefined, Last, _, false) ->
+  fun(K) -> match_prefix(K, Prefix) andalso K < Last end;
+make_range_fun(Prefix, Start, undefined, true, _) ->
+  fun(K) -> match_prefix(K, Prefix) andalso K >= Start end;
+make_range_fun(Prefix, Start, undefined, false, _) ->
+  fun(K) -> match_prefix(K, Prefix) andalso K > Start end;
+make_range_fun(Prefix, Start, Last, true, true) ->
+  fun(K) -> match_prefix(K, Prefix) andalso (K >= Start andalso K =< Last) end;
+make_range_fun(Prefix, Start, Last, false, true) ->
+  fun(K) -> match_prefix(K, Prefix) andalso (K > Start andalso K =< Last) end;
+make_range_fun(Prefix, Start, Last, true, false) ->
+  fun(K) -> match_prefix(K, Prefix) andalso (K >= Start andalso K < Last) end;
+make_range_fun(Prefix, Start, Last, false, false) ->
+  fun(K) -> match_prefix(K, Prefix) andalso (K > Start andalso K < Last) end.
+
+
 make_range(Path, #{ move := prev }= Options) ->
   OrderBy = maps:get(order_by, Options, order_by_key),
   Prefix = encode_key(Path, OrderBy),
-  {Inclusive, First} = case Options of
-                         #{ end_at := EndAt } ->
-                           {true, encode_key(Path ++ [EndAt], 16#7FFFFFFFFFFFFFFF, OrderBy)};
-                         #{ previous_to := PreviousTo } ->
-                           {false, encode_key(Path ++ [PreviousTo], OrderBy)};
-                         _ ->
-                           {true, encode_key(Path, 16#7FFFFFFFFFFFFFFF, OrderBy)}
-                       end,
-  InRange = case Options of
-              #{ start_at := StartAt } ->
-                Start = encode_key(Path ++ [StartAt], 16#7FFFFFFFFFFFFFFF, OrderBy),
-                fun(K) -> match_prefix(K, Prefix) andalso K >= Start end;
-              #{ next_to := NextTo } ->
-                Start = encode_key(Path ++ [NextTo], 16#7FFFFFFFFFFFFFFF, OrderBy),
-                fun(K) -> match_prefix(K, Prefix) andalso K > Start end;
-              _ ->
-                fun(K) -> match_prefix(K, Prefix) end
-            end,
-  {prev, Inclusive, First, InRange};
+  {StartInclusive, First} = case Options of
+                              #{ end_at := EndAt } ->
+                                {true, encode_key(Path ++ [EndAt], 16#7FFFFFFFFFFFFFFF, OrderBy)};
+                              #{ previous_to := PreviousTo } ->
+                                {false, encode_key(Path ++ [PreviousTo], OrderBy)};
+                              _ ->
+                                {true, encode_key(Path, 16#7FFFFFFFFFFFFFFF, OrderBy)}
+                            end,
+  {LastInclusive, Last} = case Options of
+                          #{ start_at := StartAt } ->
+                            Start = encode_key(Path ++ [StartAt], 16#7FFFFFFFFFFFFFFF, OrderBy),
+                            {true, Start};
+                          #{ next_to := NextTo } ->
+                            Start = encode_key(Path ++ [NextTo], 16#7FFFFFFFFFFFFFFF, OrderBy),
+                            {false, Start};
+                          _ ->
+                            {true, undefined}
+                        end,
+  RangeFun = make_range_fun(Prefix, Last, First, LastInclusive, StartInclusive),
+  {prev, First, RangeFun};
 make_range(Path, #{ move := next }= Options) ->
   OrderBy = maps:get(order_by, Options, order_by_key),
   Prefix = encode_key(Path, OrderBy),
-  {Inclusive, First} = case Options of
-                         #{ start_at := StartAt } ->
-                           {true, encode_key(Path ++ [StartAt], OrderBy)};
-                         #{ next_to := NextTo } ->
-                           {false, encode_key(Path ++ [NextTo], 16#7FFFFFFFFFFFFFF, OrderBy)};
-                         _ ->
-                           {true, Prefix}
-                       end,
-  InRange = case Options of
-              #{ end_at := EndAt } ->
-                End = encode_key(Path ++ [EndAt], 16#7FFFFFFFFFFFFFF, OrderBy),
-                fun(K) -> match_prefix(K, Prefix) andalso K =< End end;
-              #{ previous_to := PreviousTo } ->
-                End = encode_key(Path ++ [PreviousTo], OrderBy),
-                fun(K) -> match_prefix(K, Prefix) andalso K < End end;
-              _ ->
-                fun(K) -> match_prefix(K, Prefix) end
-            end,
-  {next, Inclusive, First, InRange}.
+  {StartInclusive, First} = case Options of
+                              #{ start_at := StartAt } ->
+                                {true, encode_key(Path ++ [StartAt], OrderBy)};
+                              #{ next_to := NextTo } ->
+                                {false, encode_key(Path ++ [NextTo], 16#7FFFFFFFFFFFFFF, OrderBy)};
+                              _ ->
+                                {true, Prefix}
+                            end,
+  {LastInclusive, Last} = case Options of
+                          #{ end_at := EndAt } ->
+                            End = encode_key(Path ++ [EndAt], 16#7FFFFFFFFFFFFFF, OrderBy),
+                            {true, End};
+                          #{ previous_to := PreviousTo } ->
+                            End = encode_key(Path ++ [PreviousTo], OrderBy),
+                            {false, End};
+                          _ ->
+                            {true, undefined}
+                        end,
+  RangeFun = make_range_fun(Prefix, First, Last, StartInclusive, LastInclusive),
+  {next, First, RangeFun}.
 
 match_prefix(Bin, Prefix) ->
   L = byte_size(Prefix),
   case Bin of
-    << Prefix:L/binary, _/binary >> ->
-      true;
-    _ ->
-      false
+    << Prefix:L/binary, _/binary >> -> true;
+    _ -> false
   end.
 
 validate_options(Opts) ->

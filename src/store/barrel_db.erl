@@ -623,13 +623,11 @@ send_result({Client, Ref, Idx, false}, Result) ->
 send_result(_, _) ->
   ok.
 
-
 do_update_docs(DocBuckets, Db =  #db{id=DbId, store=Store }) ->
   %% try to collect a maximum of updates at once
   DocBuckets2 = collect_updates(DbId, DocBuckets),
   erlang:put(num_docs_updated, maps:size(DocBuckets2)),
   {Updates, NewRid, _, OldDocs} = merge_revtrees(DocBuckets2, Db),
-
   lists:foldl(
     fun
       ({#{ local_seq := 0}, []}, Db1) ->
@@ -660,7 +658,6 @@ do_update_docs(DocBuckets, Db =  #db{id=DbId, store=Store }) ->
         {Added, Removed} = barrel_index:diff(NewDoc, OldDoc),
         Batch0 = update_index(Added, Rid, Db2#db.updated_seq, index,
                               update_index(Removed, Rid, Db2#db.updated_seq, unindex, [])),
-
         %% finally write the batch
         Batch =
           maybe_update_changes(
@@ -677,10 +674,7 @@ do_update_docs(DocBuckets, Db =  #db{id=DbId, store=Store }) ->
               )
             )
           ) ++ Batch0,
-
-
         ResWrite =  rocksdb:write(Store, Batch, [{sync, true}]),
-
         case ResWrite of
           ok ->
             ets:insert(barrel_dbs, Db2),
