@@ -26,17 +26,23 @@
 -export([short/1]).
 
 -define(STRING_PRECISION, 100).
+-define(N_SEGMENTS, 3).
 
 
-%% TODO: make split value configurable. For default go for 3 since most docs are flat anyway.
+%% @doc split a path in subitems. used to create partial paths
+-spec split_path(list()) -> [list()].
+split_path(Path) -> split_path_1(Path, ?N_SEGMENTS, []).
 
-split_path(Path) -> split_path(Path, []).
+-spec split_path(list(), non_neg_integer()) -> [list()].
+split_path(Path, N) -> split_path_1(Path, N, []).
 
-split_path([P1, P2, P3 | Rest], Forward0) ->
-  Forward1 = [[P1, P2, P3] | Forward0],
-  split_path([P2, P3 | Rest], Forward1);
-split_path(_, Forward) ->
-  Forward.
+split_path_1(Path, N, Segments0) when length(Path) >= N ->
+  {Segment, Rest} = lists:split(N, Path),
+  [_ | Last ] = Segment,
+  Segments1 = [Segment | Segments0],
+  split_path_1(Last ++ Rest, N, Segments1);
+split_path_1(_, _, Segments) ->
+  Segments.
 
 %% %% @doc get the operations maintenance to do between
 %% 2 instances of a document
@@ -80,7 +86,7 @@ object(Obj, Root, Acc0) ->
       (K, V, Acc) when is_list(V) ->
         array(V, Root ++ [K], Acc);
       (K, V, Acc) ->
-        [Root ++ [K, short(V)] | Acc]
+        [Root ++ [K, V] | Acc]
     end,
     Acc0,
     Obj
@@ -95,7 +101,7 @@ array([Item | Rest], Root, Idx, Acc0) when is_list(Item) ->
   Acc1 = array(Item, Root ++ [Idx], Acc0),
   array(Rest, Root, Idx + 1, Acc1);
 array([Item | Rest], Root, Idx, Acc0) ->
-  Acc1 = [Root ++ [Idx, short(Item)] | Acc0 ],
+  Acc1 = [Root ++ [Idx, Item] | Acc0 ],
   array(Rest, Root, Idx +1, Acc1);
 array([], _Root, _Idx, Acc) ->
   Acc.
@@ -166,13 +172,16 @@ diff_test() ->
 
 split_path_test() ->
   Path = [<<"$">>, <<"c">>, <<"b">>, 0, <<"a">>],
-
   ExpectedForward = [
     [<<"b">>, 0, <<"a">>],
     [<<"c">>, <<"b">>, 0],
     [<<"$">>, <<"c">>, <<"b">>]
   ],
-
-  ?assertEqual(ExpectedForward, split_path(Path)).
+  ?assertEqual(ExpectedForward, split_path(Path)),
+  ExpectedForward1 = [
+    [<<"c">>, <<"b">>, 0, <<"a">>],
+    [<<"$">>, <<"c">>, <<"b">>, 0]
+  ],
+  ?assertEqual(ExpectedForward1, split_path(Path, 4)).
 
 -endif.
