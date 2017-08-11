@@ -23,8 +23,6 @@
   analyze/1
 ]).
 
--export([short/1]).
-
 -define(STRING_PRECISION, 100).
 -define(N_SEGMENTS, 3).
 
@@ -72,7 +70,7 @@ analyze(D) ->
       (K, V, Acc) when is_list(V) ->
         array(V, [<<"$">>, K], Acc);
       (K, V, Acc) ->
-        [[<<"$">>, K, short(V)] | Acc]
+        [[<<"$">>, K, V] | Acc]
     end,
     [],
     D
@@ -105,10 +103,6 @@ array([Item | Rest], Root, Idx, Acc0) ->
   array(Rest, Root, Idx +1, Acc1);
 array([], _Root, _Idx, Acc) ->
   Acc.
-
-short(<< S:100/binary, _/binary >>) -> S;
-short(S) when is_binary(S) -> S;
-short(S) -> S.
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
@@ -149,14 +143,6 @@ analyze_test() ->
     [<<"$">>, <<"e">>, 1, <<"b">>, 2]
   ],
   ?assertEqual(Expected, lists:sort(analyze(?doc))).
-
-analyze_long_text_test() ->
-  A = lists:sort(analyze(?doc2)),
-  [P1, P2] = A,
-  ?assertEqual([<<"$">>, <<"a">>, 1], P1),
-  [<<"$">>, <<"text">>, PartialText] = P2,
-  ?assertEqual(100, byte_size(PartialText)).
-
 
 diff_test() ->
   Old = #{ <<"a">> => 1,

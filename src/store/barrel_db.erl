@@ -702,18 +702,32 @@ do_update_docs(DocBuckets, Db =  #db{id=DbId, store=Store }) ->
   ).
 
 update_index([Path | Rest], Rid, Seq, index, Batch0) ->
-  Batch1 = [
-    {put, barrel_keys:forward_path_key(Path, Rid), <<>>},
-    {put, barrel_keys:reverse_path_key(Path, Rid), <<>>}
-    | Batch0
-  ],
+  Segments = barrel_index:split_path(Path),
+  Batch1 = lists:foldl(
+    fun(Segment, Batch) ->
+      [
+        {put, barrel_keys:forward_path_key(Segment, Rid), <<>>},
+        {put, barrel_keys:reverse_path_key(Segment, Rid), <<>>}
+        | Batch
+      ]
+    end,
+    Batch0,
+    Segments
+  ),
   update_index(Rest, Rid, Seq, index, Batch1);
 update_index([Path | Rest], Rid, Seq, unindex, Batch0) ->
-  Batch1 = [
-    {delete, barrel_keys:forward_path_key(Path, Rid)},
-    {delete, barrel_keys:reverse_path_key(Path, Rid)}
-    | Batch0
-  ],
+  Segments = barrel_index:split_path(Path),
+  Batch1 = lists:foldl(
+    fun(Segment, Batch) ->
+      [
+        {delete, barrel_keys:forward_path_key(Segment, Rid)},
+        {delete, barrel_keys:reverse_path_key(Segment, Rid)}
+        | Batch
+      ]
+    end,
+    Batch0,
+    Segments
+  ),
   update_index(Rest, Rid, Seq, unindex, Batch1);
 update_index([], _Rid, _Seq, _Op, Batch) ->
   Batch.
@@ -744,7 +758,7 @@ maybe_link_rid(#{ id := DocId, rid := Rid, local_seq := 1}, Batch) ->
 maybe_link_rid(_DI, Batch) ->
   Batch.
 
-current_body(#{ current_rev := Rev, body_map := BodyMap }) -> maps:get(Rev, BodyMap).
+current_body(#{ current_rev := Rev, body_map := BodyMap }) -> maps:get(Rev, BodyMap).
 
 %% TODO: cache doc infos
 merge_revtrees(DocBuckets, Db = #db{last_rid=LastRid}) ->

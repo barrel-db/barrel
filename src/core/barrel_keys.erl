@@ -29,7 +29,9 @@
 -export([
   forward_path_key/2,
   reverse_path_key/2,
-  encode_parts/2
+  encode_partial_path/2,
+  forward_key_prefix/1,
+  reverse_key_prefix/1
 ]).
 
 -export([enc/2]).
@@ -62,22 +64,33 @@ res_key(RId) -> << (prefix(res))/binary, RId:64>>.
 
 %% index keys
 
-forward_path_key(Path, Seq) ->
-  barrel_encoding:encode_varint_ascending(
-    encode_parts(Path, prefix(idx_forward_path)),
-    Seq
-   ).
+short(<< S:100/binary, _/binary >>) -> S;
+short(S) when is_binary(S) -> S;
+short(S) -> S.
 
-reverse_path_key(Path, Seq) ->
+forward_path_key(Path, Seq)  ->
   barrel_encoding:encode_varint_ascending(
-    encode_parts(lists:reverse(Path), prefix(idx_reverse_path)),
+    encode_partial_path(Path, prefix(idx_forward_path)),
     Seq
-   ).
+  ).
 
-encode_parts([P | Rest], Prefix) ->
-  encode_parts(Rest, enc(Prefix, P));
-encode_parts([], Encoded) ->
-  Encoded.
+reverse_path_key(Path, Seq)  ->
+  barrel_encoding:encode_varint_ascending(
+    encode_partial_path(lists:reverse(Path), prefix(idx_reverse_path)),
+    Seq
+  ).
+
+encode_partial_path([P], Bin) ->
+  enc(short(P), Bin);
+encode_partial_path([P | Rest], Bin) ->
+  Bin2 = << Bin/binary, (xxhash:hash32(P))/binary >>,
+  encode_partial_path(Rest, Bin2).
+
+forward_key_prefix(Path) ->
+  encode_partial_path(Path, prefix(idx_forward_path)).
+
+reverse_key_prefix(Path) ->
+  encode_partial_path(lists:reverse(Path), prefix(idx_reverse_path)).
 
 enc(B, P) when is_binary(P) ->
   barrel_encoding:encode_binary_ascending(B, P);
