@@ -361,11 +361,7 @@ range_with_limit(_Config) ->
     #{ previous_to => <<"test6">>, limit_to_last => 2 }
   ),
   F3 = QF3,
-  
-  
   ok.
-  
-
 
 equal_to(_Config) ->
   Batch = [
@@ -444,8 +440,3 @@ fix_range_test(_Config) ->
   ),
   After = ExpectAfter.
   
-  
-  
-  
-
-

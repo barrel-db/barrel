@@ -623,13 +623,11 @@ send_result({Client, Ref, Idx, false}, Result) ->
 send_result(_, _) ->
   ok.
 
-
 do_update_docs(DocBuckets, Db =  #db{id=DbId, store=Store }) ->
   %% try to collect a maximum of updates at once
   DocBuckets2 = collect_updates(DbId, DocBuckets),
   erlang:put(num_docs_updated, maps:size(DocBuckets2)),
   {Updates, NewRid, _, OldDocs} = merge_revtrees(DocBuckets2, Db),
-
   lists:foldl(
     fun
       ({#{ local_seq := 0}, []}, Db1) ->
@@ -660,7 +658,6 @@ do_update_docs(DocBuckets, Db =  #db{id=DbId, store=Store }) ->
         {Added, Removed} = barrel_index:diff(NewDoc, OldDoc),
         Batch0 = update_index(Added, Rid, Db2#db.updated_seq, index,
                               update_index(Removed, Rid, Db2#db.updated_seq, unindex, [])),
-
         %% finally write the batch
         Batch =
           maybe_update_changes(
@@ -677,10 +674,7 @@ do_update_docs(DocBuckets, Db =  #db{id=DbId, store=Store }) ->
               )
             )
           ) ++ Batch0,
-
-
         ResWrite =  rocksdb:write(Store, Batch, [{sync, true}]),
-
         case ResWrite of
           ok ->
             ets:insert(barrel_dbs, Db2),
@@ -708,16 +702,18 @@ do_update_docs(DocBuckets, Db =  #db{id=DbId, store=Store }) ->
   ).
 
 update_index([Path | Rest], Rid, Seq, index, Batch0) ->
-  Batch1 = lists:foldl(fun(P, Acc) ->
-                          [ {put, barrel_keys:forward_path_key(P, Rid), <<>>},
-                            {put, barrel_keys:reverse_path_key(P, Rid), <<>>} | Acc ]
-                      end, Batch0, barrel_index:split_path(Path)),
+  Batch1 = [
+    {put, barrel_keys:forward_path_key(Path, Rid), <<>>},
+    {put, barrel_keys:reverse_path_key(Path, Rid), <<>>}
+    | Batch0
+  ],
   update_index(Rest, Rid, Seq, index, Batch1);
 update_index([Path | Rest], Rid, Seq, unindex, Batch0) ->
-  Batch1 = lists:foldl(fun(P, Acc) ->
-                          [ {delete, barrel_keys:forward_path_key(P, Rid)},
-                            {delete, barrel_keys:reverse_path_key(P, Rid)} | Acc ]
-                      end, Batch0, barrel_index:split_path(Path)),
+  Batch1 = [
+    {delete, barrel_keys:forward_path_key(Path, Rid)},
+    {delete, barrel_keys:reverse_path_key(Path, Rid)}
+    | Batch0
+  ],
   update_index(Rest, Rid, Seq, unindex, Batch1);
 update_index([], _Rid, _Seq, _Op, Batch) ->
   Batch.

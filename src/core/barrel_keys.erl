@@ -29,9 +29,10 @@
 -export([
   forward_path_key/2,
   reverse_path_key/2,
-  encode_path_forward/2,
-  encode_path_reverse/2
+  encode_parts/2
 ]).
+
+-export([enc/2]).
 
 prefix(db_meta) ->  << 0, 0, 0 >>;
 prefix(doc) ->  <<  0, 50, 0 >>;
@@ -63,29 +64,20 @@ res_key(RId) -> << (prefix(res))/binary, RId:64>>.
 
 forward_path_key(Path, Seq) ->
   barrel_encoding:encode_varint_ascending(
-    encode_path_forward(prefix(idx_forward_path), Path),
+    encode_parts(Path, prefix(idx_forward_path)),
     Seq
    ).
 
 reverse_path_key(Path, Seq) ->
   barrel_encoding:encode_varint_ascending(
-    encode_path_reverse(prefix(idx_reverse_path), Path),
+    encode_parts(lists:reverse(Path), prefix(idx_reverse_path)),
     Seq
    ).
 
-encode_path_forward(Prefix, [P0]) ->
-  enc(Prefix, P0);
-encode_path_forward(Prefix, [P0, P1]) ->
-  enc(enc(Prefix, P0), P1);
-encode_path_forward(Prefix, [P0, P1, P2]) ->
-  enc(enc(enc(Prefix, P0), P1), P2).
-
-encode_path_reverse(Prefix, [P0]) ->
-  enc(Prefix, P0);
-encode_path_reverse(Prefix, [P0, P1]) ->
-  enc(enc(Prefix, P1), P0);
-encode_path_reverse(Prefix, [P0, P1, P2]) ->
-  enc(enc(enc(Prefix, P2), P1), P0).
+encode_parts([P | Rest], Prefix) ->
+  encode_parts(Rest, enc(Prefix, P));
+encode_parts([], Encoded) ->
+  Encoded.
 
 enc(B, P) when is_binary(P) ->
   barrel_encoding:encode_binary_ascending(B, P);
