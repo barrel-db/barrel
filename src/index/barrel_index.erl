@@ -20,7 +20,9 @@
 -export([
   split_path/1, split_path/2,
   diff/2,
-  analyze/1
+  analyze/1,
+  range_prefix/1, range_prefix/2,
+  is_full_path/1, is_full_path/2
 ]).
 
 -define(STRING_PRECISION, 100).
@@ -41,6 +43,19 @@ split_path_1(Path, N, Segments0) when length(Path) >= N ->
   split_path_1(Last ++ Rest, N, Segments1);
 split_path_1(_, _, Segments) ->
   Segments.
+
+range_prefix(Path) -> range_prefix(Path, ?N_SEGMENTS).
+
+range_prefix(Path, N) when length(Path) < N -> Path;
+range_prefix(Path, N) ->
+  Len = length(Path),
+  lists:sublist(Path, Len - N + 2 , Len).
+
+is_full_path(Path) -> is_full_path(Path, ?N_SEGMENTS).
+
+is_full_path(Path, N) when length(Path) =:= N -> true;
+is_full_path(_, _) -> false.
+
 
 %% %% @doc get the operations maintenance to do between
 %% 2 instances of a document
@@ -169,5 +184,12 @@ split_path_test() ->
     [<<"$">>, <<"c">>, <<"b">>, 0]
   ],
   ?assertEqual(ExpectedForward1, split_path(Path, 4)).
+
+range_prefix_test() ->
+  Path = [<<"$">>, <<"c">>, <<"b">>, 0, <<"a">>],
+  ?assertEqual([0, <<"a">>], range_prefix(Path, 3)),
+  ?assertEqual([<<"b">>, 0, <<"a">>], range_prefix(Path, 4)),
+  Path2 = [<<"$">>, <<"c">>],
+  ?assertEqual(Path2, range_prefix(Path2, 3)).
 
 -endif.

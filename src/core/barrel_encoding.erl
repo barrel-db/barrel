@@ -45,13 +45,13 @@
 -define(FLOAT_NAN_DESC, (?FLOAT_POS + 1)).
 
 
-pick_encoding(<< ?BYTES_MARKER, _/binary >>) -> bytes;
-pick_encoding(<< ?BYTES_MARKER_DESC, _/binary >>) -> bytes_desc;
-pick_encoding(<< ?LITERAL_MARKER, _/binary >>) -> literal;
-pick_encoding(<< ?LITERAL_MARKER_DESC, _/binary >>) -> literal_desc;
-pick_encoding(<< M, _/binary >>) when M >= ?INT_MIN, M =< ?INT_MAX -> int;
-pick_encoding(<< M, _/binary >>) when M >= ?FLOAT_NAN, M =< ?FLOAT_NAN_DESC -> float;
-pick_encoding(_) -> erlang:error(badarg).
+pick_encoding(<< ?BYTES_MARKER, _/binary >>) -> {ok, bytes};
+pick_encoding(<< ?BYTES_MARKER_DESC, _/binary >>) -> {ok, bytes_desc};
+pick_encoding(<< ?LITERAL_MARKER, _/binary >>) -> {ok, literal};
+pick_encoding(<< ?LITERAL_MARKER_DESC, _/binary >>) -> {ok, literal_desc};
+pick_encoding(<< M, _/binary >>) when M >= ?INT_MIN, M =< ?INT_MAX -> {ok, int};
+pick_encoding(<< M, _/binary >>) when M >= ?FLOAT_NAN, M =< ?FLOAT_NAN_DESC -> {ok, float};
+pick_encoding(_) -> error.
 
 
 %% @doc  encodes the uint32 value using a big-endian 8 byte representation.

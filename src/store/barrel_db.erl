@@ -705,6 +705,7 @@ update_index([Path | Rest], Rid, Seq, index, Batch0) ->
   Segments = barrel_index:split_path(Path),
   Batch1 = lists:foldl(
     fun(Segment, Batch) ->
+      lager:info("index ~p~n", [Segment]),
       [
         {put, barrel_keys:forward_path_key(Segment, Rid), <<>>},
         {put, barrel_keys:reverse_path_key(Segment, Rid), <<>>}

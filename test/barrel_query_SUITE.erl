@@ -170,6 +170,7 @@ limit_at(_Config) ->
   E15 = [ << I:32 >> || I <- lists:seq(1, 15)],
   E15 = lists:reverse(Q15),
 
+  lager:info("limit to last", []),
   QL15 = barrel:walk(
     <<"testdb">>,
     <<"id">>,
@@ -366,13 +367,13 @@ range_with_limit(_Config) ->
 equal_to(_Config) ->
   Batch = [
     {post, #{ <<"id">> => <<"a">>, <<"o">> => #{ <<"test1">> => 1 }}},
-    {post, #{ <<"id">> => <<"b">>, <<"o">> => #{ <<"test2">> => 1 }}},
-    {post, #{ <<"id">> => <<"c">>, <<"o">> => #{ <<"test3">> => 2 }}},
-    {post, #{ <<"id">> => <<"d">>, <<"o">> => #{ <<"test4">> => 2 }}},
-    {post, #{ <<"id">> => <<"e">>, <<"o">> => #{ <<"test5">> => 1 }}},
-    {post, #{ <<"id">> => <<"f">>, <<"o">> => #{ <<"test6">> => 3 }}},
-    {post, #{ <<"id">> => <<"g">>, <<"o">> => #{ <<"test7">> => 1 }}},
-    {post, #{ <<"id">> => <<"h">>, <<"o">> => #{ <<"test8">> => 1 }}}
+    {post, #{ <<"id">> => <<"b">>, <<"o">> => #{ <<"test1">> => 1 }}},
+    {post, #{ <<"id">> => <<"c">>, <<"o">> => #{ <<"test2">> => 2 }}},
+    {post, #{ <<"id">> => <<"d">>, <<"o">> => #{ <<"test2">> => 2 }}},
+    {post, #{ <<"id">> => <<"e">>, <<"o">> => #{ <<"test1">> => 1 }}},
+    {post, #{ <<"id">> => <<"f">>, <<"o">> => #{ <<"test3">> => 3 }}},
+    {post, #{ <<"id">> => <<"g">>, <<"o">> => #{ <<"test1">> => 1 }}},
+    {post, #{ <<"id">> => <<"h">>, <<"o">> => #{ <<"test1">> => 1 }}}
   ],
   _ = barrel:write_batch(<<"testdb">>, Batch, #{}),
   
@@ -382,7 +383,7 @@ equal_to(_Config) ->
     <<"o">>,
     Fun,
     [],
-    #{ equal_to => 1}
+    #{ equal_to => <<"test1">>}
   ),
   5 = length(Q1),
   [<<"h">>, <<"g">>,  <<"e">>,  <<"b">>, <<"a">>] = Q1,
@@ -391,7 +392,7 @@ equal_to(_Config) ->
     <<"o">>,
     Fun,
     [],
-    #{ equal_to => 2}
+    #{ equal_to => <<"test2">>}
   ),
    2 = length(Q2),
   [<<"d">>, <<"c">>] = Q2,
@@ -400,7 +401,7 @@ equal_to(_Config) ->
     <<"o">>,
     Fun,
     [],
-    #{ equal_to => 3}
+    #{ equal_to => <<"test3">>}
   ),
   1 = length(Q3),
   [<<"f">>] = Q3,

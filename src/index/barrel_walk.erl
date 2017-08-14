@@ -29,10 +29,9 @@ walk(#db{store=Store}, Path, UserFun, AccIn, Options0) ->
   PathParts = decode_path(Path, []),
   %% set fold options
   {MoveAction, First, RangeFun} = make_range(PathParts, Options1),
-  OrderBy = maps:get(order_by, Options1, order_by_key),
   EqualTo = case maps:get(equal_to, Options1, undefined) of
               undefined -> undefined;
-              Val -> barrel_index:short(Val)
+              Val -> barrel_keys:short(Val)
             end,
   Limit = maps:get(limit, Options1, ?DEFAULT_MAX),
   %% rocksdb options
@@ -41,8 +40,8 @@ walk(#db{store=Store}, Path, UserFun, AccIn, Options0) ->
   %% wrapper function to retrieve the results from the iterator
   WrapperFun =
     fun(KeyBin, _, Acc) ->
-      {Rid, Pattern} = parse_rid(KeyBin, OrderBy),
-      case is_equal(EqualTo, Pattern) of
+      {Rid, Match} = parse_rid(KeyBin),
+      case is_equal(EqualTo, Match) of
         true ->
           Res = rocksdb:get(Store, barrel_keys:res_key(Rid), ReadOptions),
           case Res of
@@ -62,9 +61,10 @@ walk(#db{store=Store}, Path, UserFun, AccIn, Options0) ->
   Next = fun() -> rocksdb:iterator_move(Itr, MoveAction) end,
   Start = case MoveAction of
             next -> rocksdb:iterator_move(Itr, First);
-            prev -> rocksdb:iterator_move(Itr, {seek_for_prev, First})
+            prev -> lager:info("seek for prev ~p~n", [First]), rocksdb:iterator_move(Itr, {seek_for_prev, First})
           end,
   %% start folding
+  lager:info("start at ~p~n", [Start]),
   try
     fold_loop(
       Start,
@@ -84,8 +84,10 @@ fold_loop({error, iterator_closed}, _Next, _WrapperFun, Acc, _Cmp, _Limit) ->
 fold_loop({error, invalid_iterator}, _Next, _WrapperFun, Acc, _Cmp, _Limit) ->
   Acc;
 fold_loop({ok, K, V}, Next, WrapperFun, Acc0, Cmp, Limit) ->
+  lager:info("loop  ~p~n", [K]),
   case Cmp(K) of
     true ->
+      lager:info("process  ~p~n", [K]),
       case WrapperFun(K, V, Acc0) of
         {ok, Acc1} when Limit > 0 ->
           fold_loop(Next(), Next, WrapperFun, Acc1, Cmp, Limit - 1);
@@ -99,25 +101,9 @@ fold_loop({ok, K, V}, Next, WrapperFun, Acc0, Cmp, Limit) ->
         Acc1 -> Acc1
       end;
     false ->
+      lager:info("stop at ~p~n", [K]),
       Acc0
   end.
-
-encode_key(Parts, order_by_key) ->
-  barrel_keys:encode_parts(
-    Parts,
-    barrel_keys:prefix(idx_forward_path)
-  );
-encode_key(Parts, order_by_value) ->
-  barrel_keys:encode_parts(
-    lists:reverse(Parts),
-    barrel_keys:prefix(idx_reverse_path)
-  ).
-
-encode_key(Parts, Seq, order_by_key) ->
-  barrel_keys:forward_path_key(Parts, Seq);
-encode_key(Parts, Seq, order_by_value) ->
-  barrel_keys:reverse_path_key(Parts, Seq).
-
 
 make_range_fun(Prefix, undefined, undefined, _, _) ->
   fun(K) -> match_prefix(K, Prefix) end;
@@ -139,46 +125,92 @@ make_range_fun(Prefix, Start, Last, false, false) ->
   fun(K) -> match_prefix(K, Prefix) andalso (K > Start andalso K < Last) end.
 
 
-make_range(Path, #{ move := prev }= Options) ->
+prefix(Path, #{ start_at := _ }) -> barrel_index:range_prefix(Path);
+prefix(Path, #{ end_at := _ }) -> barrel_index:range_prefix(Path);
+prefix(Path, #{ previous_to := _ }) -> barrel_index:range_prefix(Path);
+prefix(Path, #{ next_to := _ }) -> barrel_index:range_prefix(Path);
+prefix(Path, #{ equal_to := _ }) -> barrel_index:range_prefix(Path);
+prefix(Path, _) -> Path.
+
+encode_prefix(Prefix, order_by_key) ->
+  barrel_keys:forward_key_prefix(Prefix);
+encode_prefix(Prefix, order_by_value) ->
+  barrel_keys:reverse_key_prefix(Prefix).
+
+encode_range_key(Path, order_by_key) ->
+  barrel_keys:forward_path_key(Path, 0);
+encode_range_key(Path, order_by_value) ->
+  barrel_keys:reverse_path_key(Path, 0).
+
+encode_upper_range_key(Path, order_by_key) ->
+  barrel_keys:forward_path_key(Path, 16#7FFFFFFFFFFFFFFF);
+encode_upper_range_key(Path, order_by_value) ->
+  barrel_keys:reverse_path_key(Path, 16#7FFFFFFFFFFFFFFF).
+
+
+make_range(Path0, #{ move := Move, equal_to := EqualTo } = Options) ->
   OrderBy = maps:get(order_by, Options, order_by_key),
-  Prefix = encode_key(Path, OrderBy),
+  Path = prefix(Path0, Options),
+  Prefix = encode_prefix(Path, OrderBy),
+
+  {First, End} = case Move of
+                   next ->
+                     {
+                       encode_range_key(Path ++ [EqualTo], OrderBy),
+                       encode_upper_range_key(Path ++ [EqualTo], OrderBy)
+                     };
+                   prev ->
+                     {
+                       encode_upper_range_key(Path ++ [EqualTo], OrderBy),
+                       encode_range_key(Path ++ [EqualTo], OrderBy)
+                     }
+                 end,
+  RangeFun = make_range_fun(Prefix, First, End, true, true),
+  {Move, First, RangeFun};
+make_range(Path0, #{ move := prev }= Options) ->
+  OrderBy = maps:get(order_by, Options, order_by_key),
+  Path = prefix(Path0, Options),
+  Prefix = encode_prefix(Path, OrderBy),
   {StartInclusive, First} = case Options of
                               #{ end_at := EndAt } ->
-                                {true, encode_key(Path ++ [EndAt], 16#7FFFFFFFFFFFFFFF, OrderBy)};
+                                {true, encode_upper_range_key(Path ++ [EndAt], OrderBy)};
                               #{ previous_to := PreviousTo } ->
-                                {false, encode_key(Path ++ [PreviousTo], OrderBy)};
+                                {false, encode_range_key(Path ++ [PreviousTo], OrderBy)};
                               _ ->
-                                {true, encode_key(Path, 16#7FFFFFFFFFFFFFFF, OrderBy)}
+                                {true, encode_prefix(Path ++ [16#7FFFFFFFFFFFFFFF], OrderBy)}
                             end,
   {LastInclusive, Last} = case Options of
                           #{ start_at := StartAt } ->
-                            Start = encode_key(Path ++ [StartAt], 16#7FFFFFFFFFFFFFFF, OrderBy),
+                            Start = encode_upper_range_key(Path ++ [StartAt], OrderBy),
                             {true, Start};
                           #{ next_to := NextTo } ->
-                            Start = encode_key(Path ++ [NextTo], 16#7FFFFFFFFFFFFFFF, OrderBy),
+                            Start = encode_upper_range_key(Path ++ [NextTo], OrderBy),
                             {false, Start};
                           _ ->
                             {true, undefined}
                         end,
+  lager:info("make range ~p~n", [{Prefix, Last, First, LastInclusive, StartInclusive}]),
   RangeFun = make_range_fun(Prefix, Last, First, LastInclusive, StartInclusive),
   {prev, First, RangeFun};
-make_range(Path, #{ move := next }= Options) ->
+make_range(Path0, #{ move := next }= Options) ->
+  Path = prefix(Path0, Options),
+  lager:info("path is ~p~n", [Path]),
   OrderBy = maps:get(order_by, Options, order_by_key),
-  Prefix = encode_key(Path, OrderBy),
+  Prefix = encode_prefix(Path, OrderBy),
   {StartInclusive, First} = case Options of
                               #{ start_at := StartAt } ->
-                                {true, encode_key(Path ++ [StartAt], OrderBy)};
+                                {true, encode_range_key(Path ++ [StartAt], OrderBy)};
                               #{ next_to := NextTo } ->
-                                {false, encode_key(Path ++ [NextTo], 16#7FFFFFFFFFFFFFF, OrderBy)};
+                                {false, encode_upper_range_key(Path ++ [NextTo], OrderBy)};
                               _ ->
                                 {true, Prefix}
                             end,
   {LastInclusive, Last} = case Options of
                           #{ end_at := EndAt } ->
-                            End = encode_key(Path ++ [EndAt], 16#7FFFFFFFFFFFFFF, OrderBy),
+                            End = encode_upper_range_key(Path ++ [EndAt], OrderBy),
                             {true, End};
                           #{ previous_to := PreviousTo } ->
-                            End = encode_key(Path ++ [PreviousTo], OrderBy),
+                            End = encode_range_key(Path ++ [PreviousTo], OrderBy),
                             {false, End};
                           _ ->
                             {true, undefined}
@@ -223,16 +255,10 @@ validate_options_fun(include_docs, IncludeDocs, Options) when is_boolean(Include
 validate_options_fun(_, _, _) ->
   erlang:error(badarg).
 
-parse_rid(Path, OrderBy) ->
-  Prefix = case OrderBy of
-             order_by_key -> barrel_keys:prefix(idx_forward_path);
-             order_by_value -> barrel_keys:prefix(idx_reverse_path)
-           end,
-  Sz = byte_size(Prefix),
-  << Prefix:Sz/binary, Encoded/binary >> = Path,
-  [ Rid | Rest ] = decode_partial_path(Encoded, []),
-  [Match | _] =  Rest,
-  {Rid, Match}.
+parse_rid(<< _P:3/binary, Path/binary >>) ->
+  decode_partial_path(Path, []);
+parse_rid(_) ->
+  erlang:error(bad_key).
 
 
 decode_path(<<>>, Acc) ->
@@ -253,20 +279,22 @@ decode_path(<<Codepoint/utf8, Rest/binary>>, []) ->
 decode_path(<<Codepoint/utf8, Rest/binary>>, [Current|Done]) ->
   decode_path(Rest, [<< Current/binary, Codepoint/utf8 >> | Done]).
 
-decode_partial_path(<<"">>, Parts) ->
-  Parts;
+decode_partial_path(<<>>, [Rid, Match | _] ) ->
+  {Rid, Match};
 decode_partial_path(B, Parts) ->
   case barrel_encoding:pick_encoding(B) of
-    int ->
+    {ok, int} ->
       {P, R} = barrel_encoding:decode_varint_ascending(B),
       decode_partial_path(R, [P | Parts]);
-    float ->
+    {ok, float} ->
       {P, R} = barrel_encoding:decode_float_ascending(B),
       decode_partial_path(R, [P | Parts]);
-    literal ->
+    {ok, literal} ->
       {P, R} = barrel_encoding:decode_literal_ascending(B),
       decode_partial_path(R, [P | Parts]);
-    bytes ->
+    {ok, bytes} ->
       {P, R} = barrel_encoding:decode_binary_ascending(B),
-      decode_partial_path(R, [P | Parts])
+      decode_partial_path(R, [P | Parts]);
+    error ->
+      erlang:error(bad_key)
   end.
