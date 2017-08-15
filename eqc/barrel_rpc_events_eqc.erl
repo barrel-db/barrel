@@ -548,7 +548,7 @@ stop(#state{}) ->
 -spec prop_barrel_rpc_events_eqc() -> eqc:property().
 prop_barrel_rpc_events_eqc() ->
     DBS = lists:zip([<<"test01">>,<<"test02">>], 
-                    [node()|nodes()]),
+                    lists:sublist([node()|nodes()],2)),
     ?SETUP(fun common_eqc:init_db/0,
            ?FORALL( Cmds,
                     commands(?MODULE,
