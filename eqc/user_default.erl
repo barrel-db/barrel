@@ -3,6 +3,7 @@
 -define(DB, <<"testdb3">>).
 
 setup() ->
+    application:ensure_all_started(lager),
     net_adm:ping('barrel2@localhost'),
     sync:go(),
 
@@ -18,12 +19,9 @@ eqc() ->
     eqc(30).
 
 eqc(N) ->
-    lager:set_loglevel(lager_console_backend, notice),
+    %application:ensure_all_started(lager),
+    %lager:set_loglevel(lager_console_backend, notice),
     [] = eqc:module({numtests,N}, barrel_rpc_events_eqc),
-    [] = eqc:module({numtests,N}, barrel_change_since_eqc),
-
-    [] = eqc:module({numtests,N}, create_delete_database_eqc),
-    [] = eqc:module({numtests,N}, barrel_rpc_eqc),
     ok.
 
 

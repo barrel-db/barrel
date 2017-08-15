@@ -121,14 +121,14 @@ get_next(S=  #state{cmds = C},_,_) ->
 
 
 get_post(#state{keys= Dict}, [_DB, Id,_, _], {error, not_found}) ->
-    lager:error("Keys ~p  ~p", [Id, dict:fetch_keys(Dict)]),
+    lager:info("Keys ~p  ~p", [Id, dict:fetch_keys(Dict)]),
     not(dict:is_key(Id, Dict));
 
 
 
 get_post(#state{keys= Dict}, [_DB, Id,_, history], {_Doc, Meta}) ->
     Revisions = barrel_doc:parse_revisions(Meta),
-    lager:error("--- revisions ~p", [Revisions]),
+    lager:info("--- revisions ~p", [Revisions]),
     case dict:find(Id, Dict) of
         {ok,#doc{value = Revs}} ->
 
@@ -174,7 +174,7 @@ start_replication(DB1, DB2) ->
     end.
 
 start_replication_next(State,  RepId,_) ->
-%    lager:error("RepId ~p", [RepId]),
+%    lager:info("RepId ~p", [RepId]),
     State#state{replicate = RepId}.
 
 
@@ -245,10 +245,10 @@ post_pre(#state{keys=Dict},[_, Id|_]) ->
 
 
 post ({DBPid, DB}, Doc = #{?IDField := Id}, Opts) ->
-    lager:error("barrel:post(~p, ~p, ~p , ~p).~n", [DBPid, DB, Doc , Opts]),
+    lager:info("barrel:post(~p, ~p, ~p , ~p).~n", [DBPid, DB, Doc , Opts]),
     case barrel:post(DBPid, DB, Doc, Opts) of
         {ok, DocId, RevId} = R ->
-            lager:error("Idx ~p", [R]),
+            lager:info("Idx ~p", [R]),
             {RevId,Doc};
         {error, E} ->
             E
@@ -258,7 +258,7 @@ post_next(State = #state{keys = Dict,
                          cmds = C},
           Res ,
           _Cmd = [_DB, Doc = #{?IDField := Id} , _opt]) ->
-    lager:error("++++ post next ~p", [Res]),
+    lager:info("++++ post next ~p", [Res]),
     case dict:is_key(Id, Dict) of
         true ->
             State;
@@ -460,13 +460,13 @@ command_precondition_common(_S, _Cmd) ->
 %% precondition_common(#state{db = [DB|_], cmds = _N}, _Call) ->
 %%     case barrel:database_infos(DB) of
 %%         {error,not_found} ->
-%%             lager:error("DB NOT FOUND ~s ~p", [DB, _Call]),
+%%             lager:info("DB NOT FOUND ~s ~p", [DB, _Call]),
 %%             true;
 %%         {ok, _A = #{docs_count := DocCount}} ->
 %%             case DocCount >= 0 of
 %%                 true -> true;
 %%                 false ->
-%%                     lager:error("Negative Doc Count ~p", [DocCount]),
+%%                     lager:info("Negative Doc Count ~p", [DocCount]),
 %%                     true
 %%             end
 %%     end.
