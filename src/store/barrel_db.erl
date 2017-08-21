@@ -297,7 +297,7 @@ changes_since(DbName, Since, Fun, AccIn, Opts) when is_binary(DbName), is_intege
     fun(Db) -> changes_since_int(Db, Since, Fun, AccIn, Opts) end
   ).
 
-changes_since_int(Db = #db{ store=Store}, Since0, Fun, AccIn, Opts) ->
+changes_since_int(#db{ store=Store}, Since0, Fun, AccIn, Opts) ->
   Since = if
             Since0 > 0 -> Since0 + 1;
             true -> Since0
@@ -335,7 +335,7 @@ changes_since_int(Db = #db{ store=Store}, Since0, Fun, AccIn, Opts) ->
             <<"rid">> => encode_rid(Rid) },
           Deleted
         ),
-        Rid, Db, ReadOptions, IncludeDoc
+        DocInfo, IncludeDoc
       ),
       Fun(Change, Acc)
     end,
@@ -344,19 +344,9 @@ changes_since_int(Db = #db{ store=Store}, Since0, Fun, AccIn, Opts) ->
   after rocksdb:release_snapshot(Snapshot)
   end.
 
-change_with_doc(Change, Rid, #db{store=Store}, ReadOptions, true) ->
-  case rocksdb:get(Store, barrel_keys:res_key(Rid), ReadOptions) of
-    {ok, Bin} ->
-      DocInfo = binary_to_term(Bin),
-      case get_current_revision(DocInfo) of
-        {ok, Doc, _Meta} -> Change#{ <<"doc">> => Doc };
-        error ->
-          Change#{ <<"doc">> => #{ <<"error">> => <<"missing">> } }
-      end;
-    not_found ->
-      Change#{ <<"doc">> => #{ <<"error">> => <<"missing">> } }
-  end;
-change_with_doc(Change, _Rid, _Db, _ReadOptions, false) ->
+change_with_doc(Change, DocInfo, true) ->
+  Change#{ <<"doc">> => current_body(DocInfo) };
+change_with_doc(Change, _DocInfo, false) ->
   Change.
 
 changes_with_deleted(Change, true) -> Change#{<<"deleted">> => true};
@@ -582,7 +572,7 @@ handle_call(delete_db, _From, Db = #db{ id = Id, store = Store }) ->
     "~s, delete db ~p~n",
     [?MODULE_STRING, Id]
   ),
-  ok = (catch rocksdb:close(Store)),
+  ok =rocksdb:close(Store),
   ok = delete_db_dir(Id),
   {stop, normal, ok, Db#db{ store=nil}};
 
@@ -610,7 +600,7 @@ terminate(Reason, #db{ id = Id, store = Store }) ->
 
 close_store(Id, Store) ->
   Result = (catch rocksdb:close(Store)),
-  _ = lager:info("~s: ~p closed: ~p",[?MODULE_STRING, Id, Result]),
+  _ = lager:error("~s: ~p closed: ~p",[?MODULE_STRING, Id, Result]),
   ok.
 code_change(_OldVsn, State, _Extra) ->
   {ok, State}.
@@ -633,14 +623,11 @@ send_result({Client, Ref, Idx, false}, Result) ->
 send_result(_, _) ->
   ok.
 
-
 do_update_docs(DocBuckets, Db =  #db{id=DbId, store=Store }) ->
   %% try to collect a maximum of updates at once
   DocBuckets2 = collect_updates(DbId, DocBuckets),
   erlang:put(num_docs_updated, maps:size(DocBuckets2)),
-
   {Updates, NewRid, _, OldDocs} = merge_revtrees(DocBuckets2, Db),
-
   lists:foldl(
     fun
       ({#{ local_seq := 0}, []}, Db1) ->
@@ -664,11 +651,6 @@ do_update_docs(DocBuckets, Db =  #db{id=DbId, store=Store }) ->
 
         %% revision has changed put the ancestor outside the value
         {DocInfo3, Ancestor} = backup_ancestor(DocInfo2),
-
-
-        %% Create the changes index metadata
-        SeqMeta = maps:remove(body_map, DocInfo3),
-
         %% create update index events.
         %% TODO: move that code in a cleaner place
         NewDoc = current_body(DocInfo3),
@@ -676,7 +658,6 @@ do_update_docs(DocBuckets, Db =  #db{id=DbId, store=Store }) ->
         {Added, Removed} = barrel_index:diff(NewDoc, OldDoc),
         Batch0 = update_index(Added, Rid, Db2#db.updated_seq, index,
                               update_index(Removed, Rid, Db2#db.updated_seq, unindex, [])),
-
         %% finally write the batch
         Batch =
           maybe_update_changes(
@@ -687,16 +668,13 @@ do_update_docs(DocBuckets, Db =  #db{id=DbId, store=Store }) ->
                 DocInfo3,
                 [
                   {put, barrel_keys:res_key(Rid), term_to_binary(DocInfo3)},
-                  {put, barrel_keys:seq_key(Db2#db.updated_seq), term_to_binary(SeqMeta)},
+                  {put, barrel_keys:seq_key(Db2#db.updated_seq), term_to_binary(DocInfo3)},
                   {put, barrel_keys:db_meta_key(<<"docs_count">>), term_to_binary(Db2#db.docs_count)}
                 ]
               )
             )
           ) ++ Batch0,
-
-
         ResWrite =  rocksdb:write(Store, Batch, [{sync, true}]),
-
         case ResWrite of
           ok ->
             ets:insert(barrel_dbs, Db2),
@@ -724,16 +702,18 @@ do_update_docs(DocBuckets, Db =  #db{id=DbId, store=Store }) ->
   ).
 
 update_index([Path | Rest], Rid, Seq, index, Batch0) ->
-  Batch1 = lists:foldl(fun(P, Acc) ->
-                          [ {put, barrel_keys:forward_path_key(P, Rid), <<>>},
-                            {put, barrel_keys:reverse_path_key(P, Rid), <<>>} | Acc ]
-                      end, Batch0, barrel_index:split_path(Path)),
+  Batch1 = [
+    {put, barrel_keys:forward_path_key(Path, Rid), <<>>},
+    {put, barrel_keys:reverse_path_key(Path, Rid), <<>>}
+    | Batch0
+  ],
   update_index(Rest, Rid, Seq, index, Batch1);
 update_index([Path | Rest], Rid, Seq, unindex, Batch0) ->
-  Batch1 = lists:foldl(fun(P, Acc) ->
-                          [ {delete, barrel_keys:forward_path_key(P, Rid)},
-                            {delete, barrel_keys:reverse_path_key(P, Rid)} | Acc ]
-                      end, Batch0, barrel_index:split_path(Path)),
+  Batch1 = [
+    {delete, barrel_keys:forward_path_key(Path, Rid)},
+    {delete, barrel_keys:reverse_path_key(Path, Rid)}
+    | Batch0
+  ],
   update_index(Rest, Rid, Seq, unindex, Batch1);
 update_index([], _Rid, _Seq, _Op, Batch) ->
   Batch.

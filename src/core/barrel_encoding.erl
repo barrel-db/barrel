@@ -178,7 +178,7 @@ decode_varint_ascending_1(B, _Len, _Len2) ->
 
 %% @doc decodes a value encoded by encode_varint_ascending
 decode_varint_descending(B) ->
-  {V, LeftOver} = decode_varint_ascending(B),
+  {V, LeftOver} = decode_varint_ascending(B),
   {bnot V, LeftOver}.
 
 

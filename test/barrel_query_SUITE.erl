@@ -28,7 +28,9 @@
   multiple_docs/1,
   range/1,
   limit_at/1,
-  equal_to/1
+  range_with_limit/1,
+  equal_to/1,
+  fix_range_test/1
 ]).
 
 all() ->
@@ -37,7 +39,9 @@ all() ->
     multiple_docs,
     range,
     limit_at,
-    equal_to
+    range_with_limit,
+    equal_to,
+    fix_range_test
   ].
 
 init_per_suite(Config) ->
@@ -213,7 +217,18 @@ range(_Config) ->
     #{ start_at => <<"test3">> }
   ),
   C = QC,
-
+  
+  C1 = [<<"h">>, <<"g">>, <<"f">>, <<"e">>, <<"d">>],
+  QC1 = barrel:walk(
+    <<"testdb">>,
+    <<"o">>,
+    Fun,
+    [],
+    #{ next_to => <<"test3">> }
+  ),
+  C1 = QC1,
+  
+  
   F = [<<"f">>, <<"e">>, <<"d">>, <<"c">>, <<"b">>, <<"a">>],
   QF = barrel:walk(
     <<"testdb">>,
@@ -223,6 +238,16 @@ range(_Config) ->
     #{ end_at => <<"test6">> }
   ),
   F = QF,
+  
+  F1 = [<<"e">>, <<"d">>, <<"c">>, <<"b">>, <<"a">>],
+  QF1 = barrel:walk(
+    <<"testdb">>,
+    <<"o">>,
+    Fun,
+    [],
+    #{ previous_to => <<"test6">> }
+  ),
+  F1 = QF1,
 
   FC = [<<"f">>, <<"e">>, <<"d">>, <<"c">>],
   QFC = barrel:walk(
@@ -233,8 +258,110 @@ range(_Config) ->
     #{ start_at => <<"test3">>, end_at => <<"test6">> }
   ),
   FC = QFC,
+  
+  FC1 = [<<"e">>, <<"d">>],
+  QFC1 = barrel:walk(
+    <<"testdb">>,
+    <<"o">>,
+    Fun,
+    [],
+    #{ next_to => <<"test3">>, previous_to => <<"test6">> }
+  ),
+  FC1 = QFC1,
   ok.
 
+range_with_limit(_Config) ->
+  Batch = [
+    {post, #{ <<"id">> => <<"a">>, <<"o">> => #{ <<"test1">> => 1 }}},
+    {post, #{ <<"id">> => <<"b">>, <<"o">> => #{ <<"test2">> => 1 }}},
+    {post, #{ <<"id">> => <<"c">>, <<"o">> => #{ <<"test3">> => 1 }}},
+    {post, #{ <<"id">> => <<"d">>, <<"o">> => #{ <<"test4">> => 1 }}},
+    {post, #{ <<"id">> => <<"e">>, <<"o">> => #{ <<"test5">> => 1 }}},
+    {post, #{ <<"id">> => <<"f">>, <<"o">> => #{ <<"test6">> => 1 }}},
+    {post, #{ <<"id">> => <<"g">>, <<"o">> => #{ <<"test7">> => 1 }}},
+    {post, #{ <<"id">> => <<"h">>, <<"o">> => #{ <<"test8">> => 1 }}}
+  ],
+  _ = barrel:write_batch(<<"testdb">>, Batch, #{}),
+  Fun = fun(#{ <<"id">> := Id }, _, Acc) -> {ok, [ Id | Acc ]} end,
+  C = [<<"d">>, <<"c">>],
+  QC = barrel:walk(
+    <<"testdb">>,
+    <<"o">>,
+    Fun,
+    [],
+    #{ start_at => <<"test3">>, limit_to_first => 2 }
+  ),
+  C = QC,
+  
+  C1 = [<<"e">>, <<"d">>],
+  QC1 = barrel:walk(
+    <<"testdb">>,
+    <<"o">>,
+    Fun,
+    [],
+    #{ next_to => <<"test3">>, limit_to_first => 2 }
+  ),
+  C1 = QC1,
+  C3 = [<<"g">>, <<"h">>],
+  QC3 = barrel:walk(
+    <<"testdb">>,
+    <<"o">>,
+    Fun,
+    [],
+    #{ start_at => <<"test3">>, limit_to_last => 2 }
+  ),
+  C3 = QC3,
+  
+  C4 = [<<"g">>, <<"h">>],
+  QC4 = barrel:walk(
+    <<"testdb">>,
+    <<"o">>,
+    Fun,
+    [],
+    #{ next_to => <<"test3">>, limit_to_last => 2 }
+  ),
+  C4 = QC4,
+  
+  F = [ <<"b">>, <<"a">> ],
+  QF = barrel:walk(
+    <<"testdb">>,
+    <<"o">>,
+    Fun,
+    [],
+    #{ end_at => <<"test6">>, limit_to_first => 2 }
+  ),
+  F = QF,
+  
+  F1 = [<<"b">>, <<"a">>],
+  QF1 = barrel:walk(
+    <<"testdb">>,
+    <<"o">>,
+    Fun,
+    [],
+    #{ previous_to => <<"test6">>, limit_to_first => 2 }
+  ),
+  F1 = QF1,
+  
+  F2 = [ <<"e">>, <<"f">>],
+  QF2 = barrel:walk(
+    <<"testdb">>,
+    <<"o">>,
+    Fun,
+    [],
+    #{ end_at => <<"test6">>, limit_to_last => 2 }
+  ),
+  F2 = QF2,
+  
+  F3 = [<<"d">>, <<"e">>],
+  QF3 = barrel:walk(
+    <<"testdb">>,
+    <<"o">>,
+    Fun,
+    [],
+    #{ previous_to => <<"test6">>, limit_to_last => 2 }
+  ),
+  F3 = QF3,
+  ok.
 
 equal_to(_Config) ->
   Batch = [
@@ -248,6 +375,7 @@ equal_to(_Config) ->
     {post, #{ <<"id">> => <<"h">>, <<"o">> => #{ <<"test8">> => 1 }}}
   ],
   _ = barrel:write_batch(<<"testdb">>, Batch, #{}),
+  
   Fun = fun(#{ <<"id">> := Id }, _, Acc) -> {ok, [ Id | Acc ]} end,
   Q1 = barrel:walk(
     <<"testdb">>,
@@ -278,3 +406,37 @@ equal_to(_Config) ->
   [<<"f">>] = Q3,
   ok.
 
+
+fix_range_test(_Config) ->
+  Ids = [
+    <<"9NGOZFVYl83mhUc8g2">>,<<"9NGOZFVYl83mhUc8g1">>,<<"9NGOZFVYl83mhUc8g0">>,<<"9NGOZFVYl83mhUc8fz">>,
+    <<"9NGOZFVYl83mhUc8fy">>,<<"9NGOZFVYl83mhUc8fx">>,<<"9NGOZFVYl83mhUc8fw">>,<<"9NGOZFVYl83mhUc8fv">>,
+    <<"9NGOZFVYl83mhUc8fu">>,<<"9NGOZFVYl83mhUc8ft">>,<<"9NGOZFVYl83mhUc8fs">>,<<"9NGOZFVYl83mhUc8fr">>,
+    <<"9NGOZFVYl83mhUc8fq">>,<<"9NGOZFVYl83mhUc8fp">>,<<"9NGOZFVYl83mhUc8fo">>
+  ],
+  
+  Batch = lists:foldl(
+    fun(Id, Acc) ->
+      [{post, #{ <<"id">> => <<"doc-", Id/binary>>, <<"docId">> => Id }} | Acc]
+    end,
+    [],
+    Ids
+  ),
+  
+  _ = barrel:write_batch(<<"testdb">>, Batch, #{}),
+  Fun = fun(#{ <<"docId">> := Id }, _, Acc) -> {ok, Acc ++ [Id]} end,
+  
+  All = barrel:walk(<<"testdb">>, <<"docId">>, Fun, [], #{ limit_to_last => 15 }),
+  Ids = All,
+  Nth = lists:nth(10, Ids),
+  ExpectBefore = lists:sublist(Ids, 11, 5),
+  Before = barrel:walk(
+    <<"testdb">>, <<"docId">>, Fun, [], #{ previous_to => Nth, limit_to_last => 10 }
+  ),
+  Before = ExpectBefore,
+  ExpectAfter = lists:reverse(lists:sublist(Ids, 1, 9)),
+  After = barrel:walk(
+    <<"testdb">>, <<"docId">>, Fun, [], #{ next_to => Nth, limit_to_first => 10 }
+  ),
+  After = ExpectAfter.
+  
