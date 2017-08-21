@@ -120,7 +120,7 @@ get_next(S=  #state{cmds = C},_,_) ->
 
 
 get_post(#state{keys= Dict}, [_DB, Id,_, _], {error, not_found}) ->
-    lager:error("Dict Keys ~p ~p", [Id, dict:fetch_keys(Dict)]),
+   
     not(dict:is_key(Id, Dict));
 
 
@@ -147,8 +147,7 @@ get_post(#state{keys= Dict}, [_DB, Id|_ ],
 
     {ok, #doc{id = Id,
               value = V}} = dict:find(Id, Dict),
-    lager:notice("Rev ~s", [Rev]),
-    [lager:notice("Rev Hist ~s", [S])|| {S,_} <- V],
+  
     lists:keymember(Rev,1,V).
 
 
@@ -173,7 +172,6 @@ start_replication(DB1, DB2) ->
     end.
 
 start_replication_next(State,  RepId,_) ->
-%    lager:error("RepId ~p", [RepId]),
     State#state{replicate = RepId}.
 
 
@@ -231,7 +229,6 @@ post_post(_State, _Args,  {RevId,Doc} ) when is_binary(RevId) ->
 
 
 post_command(S = #state{keys = _Dict}) ->
-%    lager:error("Replication Status ~p", [S#state.replicate]),
     oneof([
            {call, ?MODULE, post,  [dbr(S), doc(), #{}]}
           ]).
@@ -308,7 +305,6 @@ put_command(S = #state{keys = Dict}) ->
 
 put(DB, Id, Doc, Opts) ->
     {ok, Id, RevId} = barrel:put(DB, Doc#{<<"id">> => Id}, Opts),
-    lager:notice("Id ~p RevId ~s", [Id, RevId]),
     {RevId, Doc#{<<"id">> => Id}}.
 
 
@@ -387,7 +383,6 @@ put_rev(DB, Id, Doc, Dict, Opts, NPos) ->
     History = [NewRev,RevId],
 
     {ok,Id, NewRev1} =  barrel:put_rev(DB, Doc#{<<"id">> => Id}, History, false, Opts),
-    lager:notice("Id ~p RevId ~s", [Id, NewRev1]),
     {NewRev1, Doc#{<<"id">> => Id}}.
 
 

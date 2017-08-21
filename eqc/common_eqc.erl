@@ -13,7 +13,6 @@
 
 
 init_db()->
-    lager:set_loglevel(lager_console_backend, error),
     {ok, _} = application:ensure_all_started(barrel),
     fun delete_db/0.
 
