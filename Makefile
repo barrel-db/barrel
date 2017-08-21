@@ -3,7 +3,7 @@ SUPPORTDIR = $(BASEDIR)/support
 REBAR ?= $(SUPPORTDIR)/rebar3
 EPMD ?= $(shell which epmd)
 
-.PHONY: help all rel tar store apply
+.PHONY: help all rel tar store apply eqc
 
 all: compile
 
@@ -39,6 +39,14 @@ test: cleantest dialyzer
 
 cover:
 	@$(REBAR) cover
+eqc:
+	@$(REBAR) as eqc eunit
+
+eqcshell:
+	@$(REBAR) as eqc shell --sname barreleqc@localhost
+
+shell:
+	@$(REBAR) as eqc shell --sname barrel@localhost
 
 
 help: ## This documentation
