@@ -150,15 +150,18 @@ deleted(_) -> false.
     Revs :: [revid()],
     Deleted :: boolean(),
     Doc :: #doc{}.
-make_doc(Obj, Revs, Deleted) when is_map(Obj) ->
-  Id = case maps:find(<<"id">>, Obj) of
-         {ok, Id0} -> Id0;
-         error -> barrel_lib:uniqid()
+make_doc(Obj0, Revs, Deleted) when is_map(Obj0) ->
+  {Id, Obj1} = case maps:find(<<"id">>, Obj0) of
+         {ok, Id0} ->
+           {Id0, Obj0};
+         error ->
+           Id0 = barrel_lib:uniqid(),
+           {Id0, Obj0#{ <<"id">> => Id0 }}
        end,
 
   #doc{ id = Id,
         revs = Revs,
-        body = Obj,
+        body = Obj1,
         deleted = Deleted }.
 
 
