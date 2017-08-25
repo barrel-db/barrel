@@ -192,7 +192,15 @@ get_if_hw(IfName) ->
       {error, if_not_found};
     _ ->
       HwAddr = proplists:get_value(hwaddr, IfProps),
-      {ok, HwAddr}
+      case HwAddr of
+        undefined ->
+          lager:error(
+            "~s: invalid interface name '~p' setup for the object id server",
+            [?MODULE_STRING, IfName]
+          ),
+          {error, invalid_if};
+        _ -> {ok, HwAddr}
+      end
   end.
 
 gen_id(Time, WorkerId, Sequence) ->
