@@ -42,7 +42,7 @@ init([]) ->
     id => barrel_db,
     start => {barrel_db, start_link, []},
     restart => transient,
-    shutdown => 2000,
+    shutdown => 5000,
     type => worker,
     modules => [barrel_db]
   },
