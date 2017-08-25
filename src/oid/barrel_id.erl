@@ -194,7 +194,7 @@ get_if_hw(IfName) ->
       HwAddr = proplists:get_value(hwaddr, IfProps),
       case HwAddr of
         undefined ->
-          lager:error(
+          _ = lager:error(
             "~s: invalid interface name '~p' setup for the object id server",
             [?MODULE_STRING, IfName]
           ),
