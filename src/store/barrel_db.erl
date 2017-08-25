@@ -973,11 +973,11 @@ do_delete(K, Db = #db{ store=Store, system_docs_count = Count}) ->
   end.
 
 last_rid(Store) ->
-  MaxPrefix = << 0, 300, 0>>,
+  MaxRId = barrel_keys:res_key(1 bsl 64 - 1),
   with_iterator(
     Store, [],
     fun(Itr) ->
-      case rocksdb:iterator_move(Itr, {seek_for_prev, MaxPrefix}) of
+      case rocksdb:iterator_move(Itr, {seek_for_prev, MaxRId}) of
         {ok, << 0, 200, 0, RID:64 >>, _} -> RID;
         _ -> 0
       end

@@ -217,7 +217,6 @@ default_rocksdb_options(Cache) ->
     {block_based_table_options, BlockTableOptions}
   ].
 
-
 maybe_create_db(undefined, DbId, Config, State = #{ databases := Dbs }) ->
   case maps:find(DbId, Dbs) of
     {ok, _Config} ->
