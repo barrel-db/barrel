@@ -180,7 +180,6 @@ handle_call({create_db, Config=#{<<"database_id">> := DbId}}, _From, State) ->
 
 handle_call({delete_db, DbId}, _From, State) ->
   {Reply, NState} = maybe_delete_db(db_pid(DbId), DbId, State),
-  lager:info("deleted ~p, now databases are ~p~n", [DbId, maps:get(databases, NState)]),
   {reply, Reply, NState};
 
 handle_call(get_databases, _From, State = #{ databases := Databases}) ->
@@ -299,7 +298,7 @@ maybe_delete_db(DbPid, DbId, State = #{ databases := Dbs }) ->
         ok ->
           {ok, NewState};
         Error ->
-          lager:info(
+          _ = lager:info(
             "~s: error while persisting the db: ~p~n",
             [?MODULE_STRING,Error]
           ),

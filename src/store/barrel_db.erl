@@ -506,7 +506,7 @@ init([DbId, DbPath, DbOpts, Config]) ->
     <<"docs_count">> := DocsCount,
     <<"system_docs_count">> := SystemDocsCount}  = init_meta(Store),
   _ = init_properties(),
-  lager:info(
+  _ = lager:info(
     "~s: db ~p (~p) started~n",
     [?MODULE_STRING, DbId, self()]
   ),
@@ -569,9 +569,10 @@ open_db(Path, DbOpts, RetriesLeft, _LastError) ->
       case lists:prefix("IO error: lock ", OpenErr) of
         true ->
           SleepFor = application:get_env(barrel, db_open_retry_delay, 2000),
-          lager:debug(
+          _ = lager:debug(
             "~s: barrel rocksdb backend retrying ~p in ~p ms after error ~s\n",
-            [?MODULE, Path, SleepFor, OpenErr]),
+            [?MODULE, Path, SleepFor, OpenErr]
+          ),
           timer:sleep(SleepFor),
           open_db(Path, DbOpts, RetriesLeft - 1, Reason);
         false ->
