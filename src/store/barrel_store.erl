@@ -62,7 +62,7 @@ create_db(DbId, Config) ->
 create_db(#{ << "database_id">> := _DbId } = Config) ->
   gen_server:call(?MODULE, {create_db, Config});
 create_db(Config) when is_map(Config) ->
-  DbId = barrel_lib:uniqid(),
+  DbId = << "db-", (barrel_lib:uniqid())/binary >>,
   gen_server:call(?MODULE, {create_db, Config#{ <<"database_id">> => DbId}});
 create_db(_) ->
   erlang:error(badarg).
