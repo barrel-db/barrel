@@ -22,13 +22,14 @@
   create_db/1,
   create_db/2,
   delete_db/1,
+  open_db/1,
   databases/0,
   fold_databases/2
 ]).
 
 -export([
   start_link/0,
-  get_conf/0,
+  get_databases/0,
   whereis_db/1,
   db_pid/1,
   db_properties/1,
@@ -61,13 +62,23 @@ create_db(DbId, Config) ->
 create_db(#{ << "database_id">> := _DbId } = Config) ->
   gen_server:call(?MODULE, {create_db, Config});
 create_db(Config) when is_map(Config) ->
-  DbId = barrel_lib:uniqid(),
+  DbId = << "db-", (barrel_lib:uniqid())/binary >>,
   gen_server:call(?MODULE, {create_db, Config#{ <<"database_id">> => DbId}});
 create_db(_) ->
   erlang:error(badarg).
 
 delete_db(DbId) ->
   gen_server:call(?MODULE, {delete_db, DbId}).
+
+
+open_db(DbId) ->
+  try
+    Db = gproc:lookup_value(barrel_db:db_key(DbId)),
+    {ok, Db}
+  catch
+    error:badarg ->
+      gen_server:call(?MODULE, {open_db, DbId}, infinity)
+  end.
 
 %% TODO: simply return all databases
 databases() ->
@@ -78,8 +89,8 @@ databases() ->
   lists:usort(AllDbs).
 
 fold_databases(Fun, AccIn) ->
-  {ok, Conf} = get_conf(),
-  fold_databases_1(maps:get(<<"databases">>, Conf, []), Fun, AccIn).
+  {ok, Databases} = get_databases(),
+  fold_databases_1(maps:values(Databases), Fun, AccIn).
 
 
 fold_databases_1([Db | Rest], Fun, Acc) ->
@@ -93,20 +104,14 @@ fold_databases_1([], _Fun, Acc) ->
   Acc.
 
 whereis_db(DbId) ->
-  case ets:lookup(barrel_dbs, DbId) of
-    [#db{pid=Pid}=Db] ->
-      case is_process_alive(Pid) of
-        true -> Db;
-        false -> undefined
-      end;
-    [] -> undefined
+  try
+    gproc:lookup_value(barrel_db:db_key(DbId))
+  catch
+    error:badarg -> undefined
   end.
 
 db_pid(DbId) ->
-  case whereis_db(DbId) of
-    #db{pid=DbPid} -> DbPid;
-    undefined -> undefined
-  end.
+  gproc:where(barrel_db:db_key(DbId)).
 
 db_properties(DbId) ->
   case whereis_db(DbId) of
@@ -130,7 +135,7 @@ db_properties(DbId) ->
          num_docs_updated => DocsUpdated }
   end.
 
-get_conf() -> gen_server:call(?MODULE, get_conf).
+get_databases() -> gen_server:call(?MODULE, get_databases).
 
 default_dir() ->
   filename:join([?DATA_DIR, node()]).
@@ -141,13 +146,12 @@ data_dir() ->
   _ = filelib:ensure_dir(filename:join([".", Dir, "dummy"])),
   Dir.
 
-
 start_link() ->
   gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
 init([]) ->
   process_flag(trap_exit, true),
-  
+  {ok, RegExp} = re:compile("^[a-z][a-z0-9\\_\\$()\\+\\-\\/]*$"),
   %% initialize the cache
   %% TODO: make it optionnal for the peer
   BlockCacheSize = case application:get_env(barrel, block_cache_size, 0) of
@@ -162,185 +166,210 @@ init([]) ->
   %% initialize the memory environment
   %% we share one memory environment across all databases
   {ok, MemEnv} = rocksdb:mem_env(),
-  
-  {ok, Conf} = load_config(),
-  self() ! init_dbs,
-  {ok, #{conf => Conf, cache => Cache, mem_env => MemEnv, db_pids => #{}}}.
+  InitState = #{ db_regexp => RegExp, cache => Cache, mem_env => MemEnv },
+  {ok, State} = load_config(InitState),
+  {ok, State}.
+
+handle_call({open_db, DbId}, _From, State) ->
+  Reply = maybe_open_db(db_pid(DbId), DbId, State),
+  {reply, Reply, State};
 
 handle_call({create_db, Config=#{<<"database_id">> := DbId}}, _From, State) ->
-  case whereis_db(DbId) of
-    undefined ->
-      {Reply, NState} = do_create_db(Config, State),
-      {reply, Reply, NState};
-    _Db ->
-      {reply, {error, db_exists}, State}
-  end;
-
-handle_call({delete_db, DbId}, _From, State) ->
-  {Reply, NState} = do_delete_db(DbId, State),
+  {Reply, NState} = maybe_create_db(db_pid(DbId), DbId, Config, State),
   {reply, Reply, NState};
 
-handle_call(get_conf, _From, State = #{ conf := Conf}) ->
-  {reply, {ok, Conf}, State};
+handle_call({delete_db, DbId}, _From, State) ->
+  {Reply, NState} = maybe_delete_db(db_pid(DbId), DbId, State),
+  {reply, Reply, NState};
+
+handle_call(get_databases, _From, State = #{ databases := Databases}) ->
+  {reply, {ok, Databases}, State};
 
 handle_call(_Request, _From, State) ->
   {reply, bad_call, State}.
 
-handle_cast(_Request, State) ->  {noreply, State}.
+handle_cast(_Request, State) ->
+  {noreply, State}.
 
-handle_info({'DOWN', _MRef, process, DbPid, _Reason}, State) ->
-  NState = db_is_down(DbPid, State),
-  {noreply, NState};
-
-handle_info(init_dbs, State) ->
-  %% load databases from config
-  {Loaded, State2} = load_dbs(State),
-  %% get databases from sys.config, we only create dbs not already persisted
-  Dbs0 = application:get_env(barrel, dbs, []),
-  Dbs = lists:filter(
-    fun(#{ <<"database_id">> := Id}) -> lists:member(Id, Loaded) /= true  end,
-    Dbs0
-  ),
-  NState = maybe_create_dbs_from_conf(Dbs, State2),
-  {noreply, NState};
-
-handle_info(_Info, State) ->  {noreply, State}.
+handle_info(_Info, State) ->
+  {noreply, State}.
 
 terminate(_Reason, _State) ->
   ok.
 
-code_change(_OldVsn, State, _Extra) -> {ok, State}.
+code_change(_OldVsn, State, _Extra) ->
+  {ok, State}.
 
-do_create_db(Config, State) ->
-  #{ conf := Conf, cache := Cache, mem_env := MemEnv, db_pids := DbPids } = State,
-  DbId = maps:get(<<"database_id">>, Config),
-  case supervisor:start_child(barrel_db_sup, [Cache, MemEnv, DbId, Config]) of
-    {ok, DbPid} ->
-      #{ <<"databases">> := Dbs } = Conf,
-      {ok, Db} = barrel_db:get_db(DbPid),
-      Conf2 = Conf#{ <<"databases">> => [ Config | Dbs ] },
-      case persist_config(Conf2) of
-        ok ->
-          Ref = erlang:monitor(process, DbPid),
-          _ = ets:insert(barrel_dbs, Db#db{ref=Ref}),
-          {{ok, Config}, State#{ conf => Conf2, db_pids => DbPids#{ DbPid => DbId}}};
+
+db_options(#{ <<"in_memory">> := true }, #{ cache := Cache, mem_env := MemEnv }) ->
+  [{env, MemEnv} | default_rocksdb_options(Cache)];
+db_options(_, #{ cache := Cache }) ->
+  default_rocksdb_options(Cache).
+
+
+default_rocksdb_options(Cache) ->
+  BlockTableOptions = [{block_cache, Cache}],
+  [
+    {max_open_files, 64},
+    {write_buffer_size, 64 * 1024 * 1024}, %% 64MB
+    {allow_concurrent_memtable_write, true},
+    {enable_write_thread_adaptive_yield, true},
+    {block_based_table_options, BlockTableOptions}
+  ].
+
+maybe_create_db(undefined, DbId, Config, State = #{ databases := Dbs }) ->
+  case maps:find(DbId, Dbs) of
+    {ok, _Config} ->
+      {error, db_exists};
+    error ->
+      maybe_create_db_1(DbId, Config, State)
+  end;
+maybe_create_db(_Pid, _DbId, _Config, State) ->
+  {{error, db_exists}, State}.
+
+maybe_create_db_1(DbId, Config0, State =  #{ databases := Dbs }) ->
+  DbOpts =  [
+    {create_if_missing, true}, {error_if_exists, true} | db_options(Config0, State)
+  ],
+  case db_path(DbId, State) of
+    {ok, Path} ->
+      Config1 = Config0#{ <<"_path">> => list_to_binary(Path) },
+      case supervisor:start_child(barrel_db_sup, [DbId, Path, DbOpts, Config1]) of
+        {ok, _Pid} ->
+          Dbs2 = Dbs#{ DbId => Config1 },
+          NewState = State#{ databases => Dbs2 },
+          case persist_config(NewState) of
+            ok ->
+              {{ok, Config1}, NewState};
+            Error ->
+              {Error, State}
+          end;
         Error ->
-          _ = lager:error(
-                "error creating ~p with config ~p: ~p~n",
-                [DbId, Config, Error]
-               ),
           {Error, State}
       end;
     Error ->
-      _ = lager:info(
-            "error creating ~p with config ~p: ~p~n",
-            [DbId, Config, Error]
-           ),
       {Error, State}
-
   end.
 
-do_delete_db(DbId, State = #{ conf := Conf, db_pids := DbPids }) ->
-  _ = lager:info("~s: deleting database ~p ~n", [?MODULE_STRING, DbId]),
-  case ets:take(barrel_dbs, DbId) of
-    [] ->
-      _ = lager:info("no database ~p ~n", [DbId]),
-      {ok, State};
-    [#db{pid=Pid, ref=Ref}] ->
-      _ = (catch erlang:demonitor(Ref, [flush])),
-      ok = barrel_db:delete_db(Pid),
-      _ = lager:info("database ~p deleted ~n", [DbId]),
-      DbPids2 = maps:remove(Pid, DbPids),
-      #{ <<"databases">> := Dbs } = Conf,
-      Dbs2 = lists:filter(
-               fun (#{ <<"database_id">> := Id}) when Id =:= DbId -> false;
-                   (_) -> true
-               end,Dbs),
-      Conf2 = Conf#{ <<"databases">> => Dbs2 },
-      ok = persist_config(Conf2),
-      _ = lager:info("removed database ~p from config~n", [DbId]),
-      {ok, State#{ conf => Conf2, db_pids => DbPids2}}
+maybe_open_db(undefined, DbId, State = #{ databases := Dbs }) ->
+  case maps:find(DbId, Dbs) of
+    {ok, #{ <<"_path">> := DbPath } = Config} ->
+      DbOpts =  db_options(Config, State),
+      case supervisor:start_child(
+        barrel_db_sup, [DbId, binary_to_list(DbPath), DbOpts, Config]
+      ) of
+        {ok, Pid} ->
+          barrel_db:get_db(Pid);
+        Error ->
+          Error
+      end;
+    error ->
+      {error, db_not_found}
   end.
 
-db_is_down(Pid, State = #{ db_pids := DbPids }) ->
-  case maps:take(Pid, DbPids) of
-    error -> State;
-    {DbId, DbPids2 } ->
-      case ets:take(barrel_dbs, DbId) of
-        [] -> State;
-        [_Db] ->
-          _ = lager:warning("~s: database ~p is down~n", [?MODULE_STRING, DbId]),
-          ets:delete(barrel_dbs, DbId),
-          State#{db_pids => DbPids2}
-      end
-  end.
-
-load_dbs(State) ->
-  #{ conf := Conf, cache := Cache, mem_env := MemEnv, db_pids := DbPids} = State,
-  #{ <<"databases">> := Dbs } = Conf,
-  {Loaded, Dbs2, State2} = lists:foldl(
-    fun(#{ <<"database_id">> := DbId} = Config, {Acc, Dbs1, State1}) ->
-      case barrel_db:exists(DbId, Config) of
-        true ->
-          case supervisor:start_child(barrel_db_sup, [Cache, MemEnv, DbId, Config]) of
-            {ok, DbPid} ->
-              link(DbPid),
-              #{ <<"databases">> := Dbs } = Conf,
-              {ok, Db} = barrel_db:get_db(DbPid),
-              ets:insert(barrel_dbs, Db),
-              _ = lager:info("load database ~p from config~n", [DbId]),
-              {[DbId | Acc], [Config | Dbs1], State1#{ db_pids => DbPids#{ DbPid => DbId }}};
-            Error ->
-              _ = lager:error(
-                "error loading database ~p with config ~p: ~p~n",
-                [DbId, Config, Error]
-              ),
-              {Acc, [Config | Dbs1], State1}
-          end;
-        false ->
+maybe_delete_db(undefined, DbId,  State = #{ databases := Dbs }) ->
+  case maps:take(DbId, Dbs) of
+    {#{ <<"_path">> := DbPath }, Dbs2} ->
+      _ = spawn(
+        fun() ->
+          _ = barrel_db:delete_db_dir(binary_to_list(DbPath))
+        end
+      ),
+      NewState = State#{ databases => Dbs2 },
+      case persist_config(NewState) of
+        ok ->
+          {ok, NewState};
+        Error ->
+          {Error, State}
+      end;
+    error ->
+      {ok, State}
+  end;
+maybe_delete_db(DbPid, DbId, State = #{ databases := Dbs }) ->
+  DbKey = barrel_db:db_key(DbPid),
+  MRef = gproc:monitor(DbKey),
+  ok = barrel_db:delete_db(DbPid),
+  receive
+    {gproc, unreg, MRef, DbKey} ->
+      Dbs2 = maps:remove(DbId, Dbs),
+      NewState = State#{ databases => Dbs2 },
+      case persist_config(NewState) of
+        ok ->
+          {ok, NewState};
+        Error ->
           _ = lager:info(
-            "cleanup: remove database ~p from config~n",
-            [DbId]
+            "~s: error while persisting the db: ~p~n",
+            [?MODULE_STRING,Error]
           ),
-          {Acc, Dbs1, State1}
+          {Error, State}
       end
-    end,
-    {[], [], State},
-    Dbs
-  ),
-
-  case Dbs -- Dbs2 of
-    [] -> {Loaded, State2};
-    NDbs ->
-      Conf2 = Conf#{ databases => NDbs },
-      ok = persist_config(Conf2),
-      {Loaded, State2#{ config => Conf2}}
   end.
-
-maybe_create_dbs_from_conf([Config | Rest], State) ->
-  {_, State2} = do_create_db(Config, State),
-  maybe_create_dbs_from_conf(Rest, State2);
-maybe_create_dbs_from_conf([], State) ->
-  State.
 
 conf_path() ->
   Path = filename:join(data_dir(), "barrel_config"),
   ok = filelib:ensure_dir(Path),
   Path.
 
-persist_config(Conf) ->
+persist_config(State) ->
+  Conf = conf_from_state(State),
   file:write_file(conf_path(), jsx:encode(Conf)).
 
-load_config() ->
+load_config(State) ->
   case filelib:is_regular(conf_path()) of
     true ->
       {ok, ConfBin} = file:read_file(conf_path()),
       Conf = jsx:decode(ConfBin, [return_maps]),
-      {ok, Conf};
+      {ok, conf_to_state(Conf, State)};
     false ->
-      Conf = #{<<"version">> => ?CONF_VERSION,
-               <<"node_id">> => barrel_lib:uniqid(),
-               <<"databases">> => []},
-      ok = persist_config(Conf),
-      {ok, Conf}
+      NewState = conf_to_state(empty_conf(), State),
+      ok = persist_config(NewState),
+      {ok, NewState}
+  end.
+
+empty_conf() ->
+  #{
+    <<"version">> => ?CONF_VERSION,
+    <<"node_id">> => barrel_lib:uniqid(),
+    <<"databases">> => []
+  }.
+
+conf_from_state(#{ databases := Dbs, node_id := NodeId }) ->
+  #{
+    <<"version">> => ?CONF_VERSION,
+    <<"node_id">> => NodeId,
+    <<"databases">> => maps:values(Dbs)
+  }.
+
+conf_to_state(#{ <<"databases">> := Dbs, <<"node_id">> := NodeId }, State) ->
+  Databases = lists:foldl(
+    fun(#{ <<"database_id">> := DbId} = Config, DbMap) ->
+      DbMap#{ DbId => Config }
+    end,
+    #{},
+    Dbs
+  ),
+  State#{ databases => Databases, node_id => NodeId }.
+
+db_dir() ->
+  Dir = filename:join(barrel_store:data_dir(), "dbs"),
+  ok = filelib:ensure_dir([Dir, "dummy"]),
+  Dir.
+
+check_dbid(DbId, #{ db_regexp := RegExp}) ->
+  case re:run(DbId, RegExp, [{capture, none}]) of
+    nomatch ->
+      {error, {invalid_database_id, DbId}};
+    match ->
+      ok
+  end.
+
+db_path(DbId, State) ->
+  case check_dbid(DbId, State) of
+    ok ->
+      DbName = << DbId/binary, "-", (barrel_lib:uniqid())/binary >>,
+      Path = binary_to_list(filename:join(db_dir(), DbName)),
+      ok = filelib:ensure_dir(Path),
+      {ok, Path};
+    Error ->
+      Error
   end.

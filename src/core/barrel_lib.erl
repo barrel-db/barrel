@@ -13,6 +13,7 @@
 %% the License.
 
 -module(barrel_lib).
+-include_lib("syntax_tools/include/merl.hrl").
 
 -export([
   to_atom/1,
@@ -21,6 +22,7 @@
   hex_to_binary/1,
   uniqid/0, uniqid/1,
   binary_join/2,
+  load_config/2,
   pmap/2, pmap/3, pmap/4
 ]).
 
@@ -70,6 +72,41 @@ binary_join([Head|Tail], Sep) ->
     to_binary(Head),
     Tail
   ).
+
+%% @doc Utility that converts a given property list into a module that provides
+%% constant time access to the various key/value pairs.
+%%
+%% Example:
+%%
+%%   load_config(store_config, [{backends, [{rocksdb_ram, barrel_rocksdb},
+%%                                          {rocksdb_disk, barrel_rocksdb}]},
+%%                              {data_dir, "/path/to_datadir"}]).
+%%
+%% creates the module store_config:
+%%   store_config:backends(). => [{rocksdb_ram,barrel_rocksdb},{rocksdb_disk,barrel_rocksdb}]
+%%   store_config:data_dir => "/path/to_datadir"
+%%
+-spec load_config(atom(), [{atom(), any()}]) -> ok.
+load_config(Resource, Config) when is_atom(Resource), is_list(Config) ->
+  Module = ?Q("-module(" ++ atom_to_list(Resource) ++ ")."),
+  Functions = lists:foldl(fun({K, V}, Acc) ->
+    [make_function(K,
+      V)
+      | Acc]
+                          end,
+    [], Config),
+  Exported = [?Q("-export([" ++ atom_to_list(K) ++ "/0]).") || {K, _V} <-
+    Config],
+  Forms = lists:flatten([Module, Exported, Functions]),
+  merl:compile_and_load(Forms, [verbose]),
+  ok.
+
+make_function(K, V) ->
+  Cs = [?Q("() -> _@V@")],
+  F = erl_syntax:function(merl:term(K), Cs),
+  ?Q("'@_F'() -> [].").
+
+
 
 %% @doc parallel map implementation
 -spec pmap(F, List1) -> List2 when
