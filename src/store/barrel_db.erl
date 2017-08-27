@@ -46,6 +46,10 @@
   delete_db/1
 ]).
 
+-export([db_key/1]).
+
+-export([delete_db_dir/1]).
+
 %% gen_server callbacks
 -export([
   init/1,
@@ -69,10 +73,15 @@
 %%% API
 %%%===================================================================
 
-exists(_DbId, #{ <<"in_memory">> := true }) -> true;
-exists(DbId, _Config) -> filelib:is_dir(db_path(DbId)).
 
-exists(DbId) -> filelib:is_dir(db_path(DbId)).
+exists(DbId, _) ->
+  exists(DbId).
+
+exists(DbId) ->
+  case barrel_store:open_db(DbId) of
+    {ok, _Db} -> true;
+    _ -> false
+  end.
 
 infos(DbName) ->
   with_db(
@@ -437,29 +446,36 @@ walk(DbName, Path, Fun, AccIn, Options) ->
   ).
 
 with_db(DbName, Fun) ->
-  case barrel_store:whereis_db(DbName) of
-    undefined ->
+  case barrel_store:open_db(DbName) of
+    {ok, Db} ->
+      Fun(Db);
+    Error ->
       _ = lager:debug(
-        "~s: db ~p not found",
-        [?MODULE_STRING, DbName]
+        "~s: error opening db ~p: ~p~n",
+        [?MODULE_STRING, DbName, Error]
       ),
-      {error, not_found};
-    Db ->
-      Fun(Db)
+      Error
   end.
 
 transact(Trans, DbName, Fun) ->
-  case barrel_store:whereis_db(DbName) of
-    undefined -> {error, not_found};
-    Db ->
+  case barrel_store:open_db(DbName) of
+    {ok, Db} ->
       hooks:run(barrel_start_transaction, [Trans, DbName]),
       try Fun(Db)
       after hooks:run(barrel_end_transaction, [Trans, DbName])
-      end
+      end;
+    Error ->
+      _ = lager:debug(
+        "~s: error opening db ~p: ~p~n",
+        [?MODULE_STRING, DbName, Error]
+      ),
+      Error
   end.
 
-start_link(Cache, MemEnv, DbId, Config) ->
-  gen_server:start_link(?MODULE, [Cache, MemEnv, DbId, Config], []).
+start_link(DbId, DbPath, DbOpts, Config) ->
+  gen_server:start_link(
+    {via, gproc, db_key(DbId)}, ?MODULE, [DbId, DbPath, DbOpts, Config], []
+  ).
 
 get_db(DbPid) when is_pid(DbPid) ->
   gen_server:call(DbPid, get_db).
@@ -473,16 +489,7 @@ delete_db(DbPid) ->
     exit:{normal, _} -> ok
   end.
 
-
-db_dir() ->
-  Dir = filename:join(barrel_store:data_dir(), "dbs"),
-  ok = filelib:ensure_dir([Dir, "dummy"]),
-  Dir.
-
-db_path(DbId) ->
-  Path = binary_to_list(filename:join(db_dir(), DbId)),
-  ok = filelib:ensure_dir(Path),
-  Path.
+db_key(DbId) -> {n, l, {?MODULE, DbId}}.
 
 encode_rid(Rid) -> base64:encode(<< Rid:64 >>).
 
@@ -491,25 +498,32 @@ decode_rid(Bin) ->
   Rid.
 
 %% TODO: put dbinfo in a template
-init([Cache, MemEnv, DbId, Config]) ->
+init([DbId, DbPath, DbOpts, Config]) ->
   process_flag(trap_exit, true),
-  {ok, Store} = open_db(Cache, MemEnv, DbId, Config),
+  {ok, Store} = open_db(DbPath, DbOpts),
   #{<<"last_rid">> := LastRid,
     <<"updated_seq">> := Updated,
     <<"docs_count">> := DocsCount,
     <<"system_docs_count">> := SystemDocsCount}  = init_meta(Store),
-
   _ = init_properties(),
-
+  _ = lager:info(
+    "~s: db ~p (~p) started~n",
+    [?MODULE_STRING, DbId, self()]
+  ),
   Db =
     #db{id=DbId,
         store=Store,
         pid=self(),
+        path=DbPath,
+        db_opts=DbOpts,
         conf = Config,
         last_rid = LastRid,
         updated_seq = Updated,
         docs_count = DocsCount,
         system_docs_count = SystemDocsCount},
+
+  _ = set_db(Db),
+
   {ok, Db}.
 
 %% TODO: use a specific column to store the counters
@@ -531,49 +545,62 @@ init_meta(Store) ->
 
 init_properties() ->
   Props = [{num_docs_updated, 0}],
+
   lists:foreach(fun({K, V}) ->
                     erlang:put(K, V)
                 end, Props).
 
-open_db(Cache, MemEnv, DbId, Config) ->
-  Path = db_path(DbId),
-  InMemory = maps:get(<<"in_memory">>, Config, false),
-  DbOpts = default_rocksdb_options(Cache, MemEnv, InMemory),
-  rocksdb:open(Path, DbOpts).
+open_db(Path, DbOpts) ->
+  RetriesLeft = application:get_env(barrel, db_open_retries, 30),
+  open_db(Path, DbOpts, RetriesLeft, undefined).
 
-default_rocksdb_options(Cache, _MemEnv, false) ->
-  BlockTableOptions = [{block_cache, Cache}],
-  
-  [{create_if_missing, true},
-    {max_open_files, 64},
-    {write_buffer_size, 64 * 1024 * 1024}, %% 64MB
-    {allow_concurrent_memtable_write, true},
-    {enable_write_thread_adaptive_yield, true},
-    {block_based_table_options, BlockTableOptions}];
-default_rocksdb_options(_Cache, MemEnv, true) ->
-  [{create_if_missing, true},
-    {env, MemEnv},
-    {max_open_files, 64},
-    {write_buffer_size, 64 * 1024 * 1024}, %% 64MB
-    {allow_concurrent_memtable_write, true},
-    {enable_write_thread_adaptive_yield, true}].
+
+open_db(_Path, _DbOpts, 0, LastError) ->
+  {error, LastError};
+open_db(Path, DbOpts, RetriesLeft, _LastError) ->
+  case rocksdb:open(Path, DbOpts) of
+    {ok, Db} ->
+      {ok, Db};
+    %% Check specifically for lock error, this can be caused if
+    %% a crashed instance takes some time to flush leveldb information
+    %% out to disk.  The process is gone, but the NIF resource cleanup
+    %% may not have completed.
+    {error, {db_open, OpenErr}=Reason} ->
+      case lists:prefix("IO error: lock ", OpenErr) of
+        true ->
+          SleepFor = application:get_env(barrel, db_open_retry_delay, 2000),
+          _ = lager:debug(
+            "~s: barrel rocksdb backend retrying ~p in ~p ms after error ~s\n",
+            [?MODULE, Path, SleepFor, OpenErr]
+          ),
+          timer:sleep(SleepFor),
+          open_db(Path, DbOpts, RetriesLeft - 1, Reason);
+        false ->
+          {error, Reason}
+        end;
+    {error, _} = Error ->
+      Error
+  end.
+
 
 handle_call({put, K, V}, _From, Db) ->
-  Reply = (catch do_put(K, V, Db)),
-  {reply, Reply, Db};
+  {Reply, NewDb} = do_put(K, V, Db),
+  {reply, Reply, NewDb};
 handle_call({delete, K}, _From, Db) ->
-  Reply = (catch do_delete(K, Db)),
-  {reply, Reply, Db};
+  {Reply, NewDb} = do_delete(K, Db),
+  {reply, Reply, NewDb};
 handle_call(get_db, _From, Db) ->
   {reply, {ok, Db}, Db};
 
-handle_call(delete_db, _From, Db = #db{ id = Id, store = Store }) ->
+handle_call(delete_db, _From, Db = #db{ id = Id, path = Path, store = Store }) ->
   _ = lager:info(
     "~s, delete db ~p~n",
     [?MODULE_STRING, Id]
   ),
-  ok =rocksdb:close(Store),
-  ok = delete_db_dir(Id),
+  ok = rocksdb:close(Store),
+
+
+  ok = delete_db_dir(Path),
   {stop, normal, ok, Db#db{ store=nil}};
 
 handle_call(_Request, _From, State) ->
@@ -585,7 +612,8 @@ handle_info({update_docs, DocBuckets}, Db) ->
   NewDb = do_update_docs(DocBuckets, Db),
   {noreply, NewDb};
 
-handle_info(_Info, State) -> {noreply, State}.
+handle_info(_Info, State) ->
+  {noreply, State}.
 
 
 terminate(Reason, #db{ id = Id, store = nil }) ->
@@ -594,19 +622,19 @@ terminate(Reason, #db{ id = Id, store = nil }) ->
 
 terminate(Reason, #db{ id = Id, store = Store }) ->
   %% finally close the database and return its result
-  ok = close_store(Id, Store),
+  ok = rocksdb:close(Store),
   _ = lager:info("terminate db ~p: ~p~n", [Id, Reason]),
   ok.
 
-close_store(Id, Store) ->
-  Result = (catch rocksdb:close(Store)),
-  _ = lager:error("~s: ~p closed: ~p",[?MODULE_STRING, Id, Result]),
-  ok.
 code_change(_OldVsn, State, _Extra) ->
   {ok, State}.
 
-delete_db_dir(Id) ->
-  ok = rocksdb:destroy(db_path(Id), []),
+delete_db_dir(Path) ->
+  _ = spawn(
+    fun() ->
+      _ = rocksdb:destroy(Path, [])
+    end
+  ),
   ok.
 
 empty_doc_info(DocId, Rid) ->
@@ -675,9 +703,9 @@ do_update_docs(DocBuckets, Db =  #db{id=DbId, store=Store }) ->
             )
           ) ++ Batch0,
         ResWrite =  rocksdb:write(Store, Batch, [{sync, true}]),
+        _ = set_db(Db2),
         case ResWrite of
           ok ->
-            ets:insert(barrel_dbs, Db2),
             barrel_event:notify(Db2#db.id, db_updated),
             lists:foreach(
               fun(Req) -> send_result(Req, {ok, DocId, WinningRev}) end,
@@ -689,7 +717,6 @@ do_update_docs(DocBuckets, Db =  #db{id=DbId, store=Store }) ->
               "~s: error writing ~p: ~p",
               [?MODULE_STRING, DocId, Error]
             ),
-
             lists:foreach(
               fun(Req) -> send_result(Req, Error) end,
               Reqs
@@ -841,7 +868,6 @@ merge_revtree(Doc = #doc{ revs = [Rev|_]}, DocInfo, ErrorIfExists) ->
       Conflict
   end.
 
-
 merge_revtree_with_conflict(Doc = #doc{revs=[NewRev |_]=Revs, body=Body}, DocInfo) ->
   #{current_rev := CurrentRev, local_seq := Seq, revtree := RevTree, body_map := BodyMap} = DocInfo,
   {OldPos, _}  = barrel_doc:parse_revision(CurrentRev),
@@ -918,38 +944,40 @@ collect_updates(DbId, DocBuckets0) ->
     DocBuckets0
   end.
 
-do_put(K, V, #db{ id=DbId, store=Store, system_docs_count = Count}) ->
+do_put(K, V, Db = #db{ store=Store, system_docs_count = Count}) ->
   Batch = [
     {put, K, V},
     {put, barrel_keys:db_meta_key(<<"system_docs_count">>), term_to_binary(Count + 1)}
   ],
   case rocksdb:write(Store, Batch, [{sync, true}]) of
     ok ->
-      ets:update_counter(barrel_dbs, DbId, {#db.system_docs_count, 1}),
-      ok;
+      Db2 = Db#db{system_docs_count = Count +1},
+      set_db(Db2),
+      {ok, Db2};
     Error ->
-      Error
+      {Error, Db}
   end.
 
-do_delete(K, #db{ id=DbId, store=Store, system_docs_count = Count}) ->
+do_delete(K, Db = #db{ store=Store, system_docs_count = Count}) ->
   Batch = [
     {delete, K},
     {put, barrel_keys:db_meta_key(<<"system_docs_count">>), term_to_binary(Count - 1)}
   ],
   case rocksdb:write(Store, Batch, [{sync, true}]) of
     ok ->
-      ets:update_counter(barrel_dbs, DbId, {#db.system_docs_count, -1}),
-      ok;
+      Db2 = Db#db{system_docs_count = Count - 1},
+      set_db(Db2),
+      {ok, Db2};
     Error ->
-      Error
+      {Error, Db}
   end.
 
 last_rid(Store) ->
-  MaxPrefix = << 0, 300, 0>>,
+  MaxRId = barrel_keys:res_key(1 bsl 64 - 1),
   with_iterator(
     Store, [],
     fun(Itr) ->
-      case rocksdb:iterator_move(Itr, {seek_for_prev, MaxPrefix}) of
+      case rocksdb:iterator_move(Itr, {seek_for_prev, MaxRId}) of
         {ok, << 0, 200, 0, RID:64 >>, _} -> RID;
         _ -> 0
       end
@@ -971,3 +999,7 @@ with_iterator(Store, ReadOptions, Fun) ->
   try Fun(Itr)
   after rocksdb:iterator_close(Itr)
   end.
+
+
+set_db(Db = #db{id=DbId}) ->
+  gproc:set_value(db_key(DbId), Db).
