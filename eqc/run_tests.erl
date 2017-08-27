@@ -16,8 +16,9 @@ run_quickcheck_test_() ->
            barrel_change_since_eqc,
            barrel_rpc_events_eqc,
            create_delete_database_eqc,
-           barrel_rpc_eqc],
-    
+           barrel_rpc_eqc
+          ],
+
     {timeout, 36000,
-     [?_assertEqual([], eqc:module({numtests,30} , M)) || M <-Mods
+     [?_assertEqual([], eqc:module({numtests,100} , M)) || M <-Mods
      ]}.
