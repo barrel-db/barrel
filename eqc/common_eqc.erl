@@ -34,9 +34,11 @@ delete_db() ->
 
 
 ascii_string() ->
-    ?LET(S,
-         non_empty(list(oneof([choose($0,$9),
-                               choose($A,$Z),
-                               choose($a,$z)]))),
-         list_to_binary(S)
+    ?LET({S,Ss},
+         {choose($a,$z),
+          non_empty(list(oneof([choose($a,$z),
+                                choose($0,$9)
+                               ]
+                               )))},
+         list_to_binary([S|Ss] )
         ).

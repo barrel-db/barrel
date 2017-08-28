@@ -20,7 +20,6 @@ prop_create_delete_database() ->
             begin
                 L = length( barrel:database_names()),
                 [begin
-                     io:format("Id ~p~n", [Id]),
                      {ok, #{<<"database_id">> := Id}} =
                          barrel:create_database(#{<<"database_id">> => Id}),
                      barrel:post(Id, #{<<"id">> => <<"1234">>,<<"content">> => <<"A">>}, #{}),
