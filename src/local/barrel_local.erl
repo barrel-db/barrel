@@ -118,7 +118,8 @@ update_doc(Db, Batch) ->
   Result = barrel_db:update_docs(Db, Batch),
   case Result of
     ok -> ok;
-    [Res] -> Res
+    [Res] -> Res;
+    Error -> Error
   end.
 
 write_batch(Db, Updates, Options) when is_map(Options) ->
