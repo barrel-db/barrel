@@ -512,6 +512,7 @@ create_database(DB) ->
     end,
     barrel:create_database(#{<<"database_id">> => DB}).
 
+
 cleanup() ->
     common_eqc:cleanup().
 
