@@ -67,11 +67,11 @@ get_command(_S = #state{keys = Dict , replicate= R, db= DBS =[D|_]}) ->
              false -> D
          end,
     oneof([
-           {call, ?MODULE, get,  
-            [DB, 
-             oneof(dict:fetch_keys(Dict)), 
+           {call, ?MODULE, get,
+            [DB,
+             oneof(dict:fetch_keys(Dict)),
              Dict, oneof(['history', 'nothing'])]},
-           {call, ?MODULE, get,      
+           {call, ?MODULE, get,
             [DB, id(), Dict, 'nothing']}
           ]).
 
@@ -92,7 +92,7 @@ get(DB, Id , _Dict, 'history') ->
     end;
 
 get(DB, Id, _Dict, _) ->
-    case  barrel:get(DB, Id, #{}) of 
+    case  barrel:get(DB, Id, #{}) of
         {ok, Doc, Meta} ->
             {Doc, Meta};
         {error, not_found} ->
@@ -120,7 +120,7 @@ get_next(S=  #state{cmds = C},_,_) ->
 
 
 get_post(#state{keys= Dict}, [_DB, Id,_, _], {error, not_found}) ->
-   
+
     not(dict:is_key(Id, Dict));
 
 
@@ -147,7 +147,7 @@ get_post(#state{keys= Dict}, [_DB, Id|_ ],
 
     {ok, #doc{id = Id,
               value = V}} = dict:find(Id, Dict),
-  
+
     lists:keymember(Rev,1,V).
 
 
@@ -236,7 +236,7 @@ post_command(S = #state{keys = _Dict}) ->
 post_pre(#state{replicate = false}, [<<"test02">>, _Doc, _Meta])->
     false;
 post_pre(#state{keys=Dict},[_, Id|_]) ->
-    not(dict:is_key(Id, Dict)). 
+    not(dict:is_key(Id, Dict)).
 
 
 post (DB, Doc = #{<<"id">> := Id}, Opts) ->
@@ -271,11 +271,11 @@ post_next(State = #state{keys = Dict,
 put_pre(#state{keys = Dict}) ->
     not(dict:is_empty(Dict)) .
 
-   
+
 put_pre(#state{replicate={var,_}}, [<<"test02">>|_]) ->
     false;
 put_pre(#state{keys=Dict},[_, Id|_]) ->
-    dict:is_key(Id, Dict). 
+    dict:is_key(Id, Dict).
 
 
 
@@ -331,7 +331,7 @@ put_rev_pre(#state{keys = Dict}) ->
 put_rev_pre(#state{replicate={var,_}}, [<<"test02">>|_]) ->
     false;
 put_rev_pre(#state{keys=Dict},[_, Id|_]) ->
-    dict:is_key(Id, Dict). 
+    dict:is_key(Id, Dict).
 
 
 put_rev_post(#state{keys = Dict} , [_DB, #{<<"id">> := Id}, #{},_], {error, {conflict, doc_exists}}) ->
@@ -354,10 +354,10 @@ put_rev_command(S = #state{keys = Dict}) ->
 
 swap(DBS, Cmds) ->
     [swapDB(DBS, Cmd) || Cmd <- Cmds].
- 
+
 swapDB([DB1,DB2], Cmd = [_|Rest]) ->
     [DB2|Rest].
-        
+
 
 getByPos(Pos, L= [A|_]) ->
     Arr = array:from_list(L, A),
@@ -472,13 +472,12 @@ command_precondition_common(_S, _Cmd) ->
                                                 when S    :: eqc_statem:dynamic_state(),
                                                      Call :: eqc_statem:call(),
                                                      Res  :: term().
-postcondition_common(_S= #state{keys = Dict, db = [DB|_]}, _Call, _Res) ->
+postcondition_common(_S= #state{keys = _Dict, db = [DB|_]}, _Call, _Res) ->
 
     case  barrel:database_infos(DB) of
         {error,not_found} ->
             false;
         {ok, _A = #{docs_count := DocCount}} ->
-
             case DocCount < 0
                 of
                 true ->
@@ -509,7 +508,7 @@ create_database(DB) ->
         {ok, _} -> barrel:delete_database(DB),
                    timer:sleep(250),
                    ok  ;
-        {error, not_found} -> ok
+        {error, db_not_found} -> ok
     end,
     barrel:create_database(#{<<"database_id">> => DB}).
 

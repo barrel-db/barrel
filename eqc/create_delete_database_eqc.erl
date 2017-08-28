@@ -20,14 +20,13 @@ prop_create_delete_database() ->
             begin
                 L = length( barrel:database_names()),
                 [begin
-                     Id = I,
-                     {ok, #{<<"database_id">> := Id}} = 
+
+                     {ok, #{<<"database_id">> := Id}} =
                          barrel:create_database(#{<<"database_id">> => Id}),
                      barrel:post(Id, #{<<"id">> => <<"1234">>,<<"content">> => <<"A">>}, #{}),
-                     ok = barrel:delete_database(Id)
-                 end|| I <- DBS],
+                     ok = barrel:delete_database(Id),
+                     {error, db_not_found} = barrel:post(Id, #{<<"id">> => <<"1234">>,<<"content">> => <<"A">>}, #{})
+                 end|| Id <- DBS],
                 L1 =  length( barrel:database_names()),
                 L == L1
             end)).
-
-
