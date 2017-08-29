@@ -44,6 +44,25 @@ start_link() ->
 
 %% Child :: {Id,StartFunc,Restart,Shutdown,Type,Modules}
 init([]) ->
+
+  _ = ets:new(barrel_dbs, [ordered_set, named_table, public, {keypos, #db.id}]),
+
+  DbSup = #{id => barrel_db_sup,
+    start => {barrel_db_sup, start_link, []},
+    restart => permanent,
+    shutdown => infinity,
+    type => supervisor,
+    modules => [barrel_db_sup]},
+
+  Store =
+    #{
+      id => barrel_store,
+      start => {barrel_store, start_link, []},
+      restart => permanent,
+      shutdown => 2000,
+      type => worker,
+      modules => [barrel_store]
+    },
   
   OID =
     #{id => barrel_id_sup,
@@ -71,14 +90,6 @@ init([]) ->
       type => supervisor,
       modules => [barrel_local_changes_sup]},
 
-  StoreSup =
-    #{id => barrel_store_sup,
-      start => {barrel_store_sup, start_link, []},
-      restart => permanent,
-      shutdown => infinity,
-      type => supervisor,
-      modules => [barrel_store_sup]},
-
   Event = #{id => barrel_event,
             start => {barrel_event, start_link, []},
             restart => permanent,
@@ -98,7 +109,8 @@ init([]) ->
     OID,
     Rpc,
     LocalChangesSup,
-    StoreSup,
+    Store,
+    DbSup,
     Event,
     ReplicateSup
   ],
