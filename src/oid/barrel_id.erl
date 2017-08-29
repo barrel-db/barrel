@@ -107,7 +107,7 @@ get_id(Ts, State =  #{ max_time := Max }) when Max > Ts ->
 %% worker id is based on the UUID library from okeuday
 %% https://github.com/okeuday/uuid/
 worker_id() ->
-  If = application:get_env(barrel, ts_inteface, get_default_if()),
+  If = application:get_env(barrel, ts_interface, get_default_if()),
   {ok, Hw} = get_if_hw(If),
   <<NodeD01, NodeD02, NodeD03, NodeD04, NodeD05,
     NodeD06, NodeD07, NodeD08, NodeD09, NodeD10,
