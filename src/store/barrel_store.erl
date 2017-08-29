@@ -168,7 +168,6 @@ init([]) ->
   {ok, MemEnv} = rocksdb:mem_env(),
   InitState = #{ db_regexp => RegExp, cache => Cache, mem_env => MemEnv },
   {ok, State} = load_config(InitState),
-  lager:info("~s loaded state is ~p~n", [?MODULE_STRING, State]),
   {ok, State}.
 
 handle_call({open_db, DbId}, _From, State) ->
