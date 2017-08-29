@@ -90,7 +90,7 @@ persist_ephemeral_db(_Config) ->
   ok = application:stop(barrel),
   timer:sleep(200),
   ok = application:start(barrel),
-  [<<"testdb">>] = barrel_store:databases(),
+  [<<"testmemdb">>] = barrel_store:databases(),
   ok = barrel_store:delete_db(<<"testmemdb">>),
   [] = barrel_store:databases(),
   ok = application:stop(barrel),
