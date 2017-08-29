@@ -26,7 +26,8 @@
 
 -export([
   create_db/1,
-  persist_db/1
+  persist_db/1,
+  persist_ephemeral_db/1
 ]).
 
 -include("barrel.hrl").
@@ -34,7 +35,8 @@
 all() ->
   [
     create_db,
-    persist_db
+    persist_db,
+    persist_ephemeral_db
   ].
 
 init_per_suite(Config) ->
@@ -74,6 +76,22 @@ persist_db(_Config) ->
   ok = application:start(barrel),
   [<<"testdb">>] = barrel_store:databases(),
   ok = barrel_store:delete_db(<<"testdb">>),
+  [] = barrel_store:databases(),
+  ok = application:stop(barrel),
+  timer:sleep(100),
+  {ok, _} = application:ensure_all_started(barrel),
+  [] = barrel_store:databases().
+
+
+persist_ephemeral_db(_Config) ->
+  DbConfig = #{ <<"database_id">> => <<"testmemdb">>, <<"in_memory">> => true},
+  {ok, #{ <<"database_id">> := <<"testmemdb">>}} = barrel_store:create_db(DbConfig),
+  [<<"testmemdb">>] = barrel_store:databases(),
+  ok = application:stop(barrel),
+  timer:sleep(200),
+  ok = application:start(barrel),
+  [<<"testmemdb">>] = barrel_store:databases(),
+  ok = barrel_store:delete_db(<<"testmemdb">>),
   [] = barrel_store:databases(),
   ok = application:stop(barrel),
   timer:sleep(100),
