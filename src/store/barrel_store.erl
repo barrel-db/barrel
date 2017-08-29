@@ -200,12 +200,10 @@ terminate(_Reason, _State) ->
 code_change(_OldVsn, State, _Extra) ->
   {ok, State}.
 
-
 db_options(#{ <<"in_memory">> := true }, #{ cache := Cache, mem_env := MemEnv }) ->
   [{env, MemEnv} | default_rocksdb_options(Cache)];
 db_options(_, #{ cache := Cache }) ->
   default_rocksdb_options(Cache).
-
 
 default_rocksdb_options(Cache) ->
   BlockTableOptions = [{block_cache, Cache}],
@@ -216,6 +214,11 @@ default_rocksdb_options(Cache) ->
     {enable_write_thread_adaptive_yield, true},
     {block_based_table_options, BlockTableOptions}
   ].
+
+open_db_options(#{ <<"in_memory">> := true } = Config, State) ->
+  [{create_if_misssing, true} | db_options(Config, State)];
+open_db_options(Config, State) ->
+  db_options(Config, State).
 
 maybe_create_db(undefined, DbId, Config, State = #{ databases := Dbs }) ->
   case maps:find(DbId, Dbs) of
@@ -254,7 +257,7 @@ maybe_create_db_1(DbId, Config0, State =  #{ databases := Dbs }) ->
 maybe_open_db(undefined, DbId, State = #{ databases := Dbs }) ->
   case maps:find(DbId, Dbs) of
     {ok, #{ <<"_path">> := DbPath } = Config} ->
-      DbOpts =  db_options(Config, State),
+      DbOpts =  open_db_options(Config, State),
       case supervisor:start_child(
         barrel_db_sup, [DbId, binary_to_list(DbPath), DbOpts, Config]
       ) of
