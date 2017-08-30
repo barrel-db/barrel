@@ -325,6 +325,10 @@ maybe_drop_db(undefined, DbId,  State = #{ databases := Dbs }) ->
         ok ->
           {{ok, OldConf}, NewState};
         Error ->
+          _ = lager:info(
+            "~s: error while persisting the db configuration: ~p~n",
+            [?MODULE_STRING,Error]
+          ),
           {Error, State}
       end;
     error ->
