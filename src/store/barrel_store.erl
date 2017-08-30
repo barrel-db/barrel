@@ -319,16 +319,16 @@ maybe_delete_db(DbPid, DbId, State = #{ databases := Dbs }) ->
 
 maybe_drop_db(undefined, DbId,  State = #{ databases := Dbs }) ->
   case maps:take(DbId, Dbs) of
-    {#{ <<"_path">> := DbPath }, Dbs2} ->
+    {OldConf, Dbs2} ->
       NewState = State#{ databases => Dbs2 },
       case persist_config(NewState) of
         ok ->
-          {{ok, DbPath}, NewState};
+          {{ok, OldConf}, NewState};
         Error ->
           {Error, State}
       end;
     error ->
-      {ok, State}
+      {{ok, undefined}, State}
   end;
 maybe_drop_db(DbPid, DbId, State = #{ databases := Dbs }) ->
   DbKey = barrel_db:db_key(DbPid),
@@ -336,11 +336,11 @@ maybe_drop_db(DbPid, DbId, State = #{ databases := Dbs }) ->
   ok = barrel_db:close_db(DbPid),
   receive
     {gproc, unreg, MRef, DbKey} ->
-      {#{ <<"_path">> := DbPath}, Dbs2} = maps:take(DbId, Dbs),
+      {OldConf, Dbs2} = maps:take(DbId, Dbs),
       NewState = State#{ databases => Dbs2 },
       case persist_config(NewState) of
         ok ->
-          {{ok, DbPath}, NewState};
+          {{ok, OldConf}, NewState};
         Error ->
           _ = lager:info(
             "~s: error while persisting the db configuration: ~p~n",
