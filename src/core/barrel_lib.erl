@@ -18,6 +18,7 @@
 -export([
   to_atom/1,
   to_binary/1,
+  to_list/1,
   to_hex/1,
   hex_to_binary/1,
   uniqid/0, uniqid/1,
@@ -40,6 +41,11 @@ to_binary(V) when is_list(V) -> list_to_binary(V);
 to_binary(V) when is_atom(V) -> atom_to_binary(V, utf8);
 to_binary(V) when is_integer(V) -> integer_to_binary(V);
 to_binary(_) -> error(badarg).
+
+to_list(V) when is_list(V) -> V;
+to_list(V) when is_binary(V) -> V;
+to_list(V) when is_atom(V) -> atom_to_list(V);
+to_list(_) -> error(badarg).
 
 to_hex([]) -> [];
 to_hex(Bin) when is_binary(Bin) ->

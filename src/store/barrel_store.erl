@@ -24,6 +24,7 @@
   delete_db/1,
   open_db/1,
   drop_db/1,
+  load_db/1,
   databases/0,
   fold_databases/2
 ]).
@@ -71,9 +72,11 @@ create_db(_) ->
 delete_db(DbId) ->
   gen_server:call(?MODULE, {delete_db, DbId}).
 
-
 drop_db(DbId) ->
   gen_server:call(?MODULE, {drop_db, DbId}).
+
+load_db(Config) ->
+  gen_server:call(?MODULE, {load_db, Config}).
 
 
 open_db(DbId) ->
@@ -191,6 +194,10 @@ handle_call({drop_db, DbId}, _From, State) ->
   {Reply, NState} = maybe_drop_db(db_pid(DbId), DbId, State),
   {reply, Reply, NState};
 
+handle_call({load_db, Config}, _From, State) ->
+  {Reply, NState} = do_load_db(Config, State),
+  {reply, Reply, NState};
+
 handle_call(get_databases, _From, State = #{ databases := Databases}) ->
   {reply, {ok, Databases}, State};
 
@@ -263,6 +270,7 @@ maybe_create_db_1(DbId, Config0, State =  #{ databases := Dbs }) ->
       {Error, State}
   end.
 
+
 maybe_open_db(undefined, DbId, State = #{ databases := Dbs }) ->
   case maps:find(DbId, Dbs) of
     {ok, #{ <<"_path">> := DbPath } = Config} ->
@@ -277,7 +285,9 @@ maybe_open_db(undefined, DbId, State = #{ databases := Dbs }) ->
       end;
     error ->
       {error, db_not_found}
-  end.
+  end;
+maybe_open_db(_Pid, _DbId, State) ->
+  {ok, State}.
 
 maybe_delete_db(undefined, DbId,  State = #{ databases := Dbs }) ->
   case maps:take(DbId, Dbs) of
@@ -355,7 +365,17 @@ maybe_drop_db(DbPid, DbId, State = #{ databases := Dbs }) ->
   end.
 
 
-
+do_load_db(#{ <<"database_id">>:= DbId} = Config, State = #{ databases := Dbs }) ->
+  Dbs2 = Dbs#{ DbId => Config },
+  NewState = State#{ databases => Dbs2 },
+  case persist_config(NewState) of
+    ok ->
+      {{ok, Config}, NewState};
+    Error ->
+      {Error, State}
+  end;
+do_load_db(_, State) ->
+  {{error, invalid_config}, State}.
 
 conf_path() ->
   Path = filename:join(data_dir(), "barrel_config"),
@@ -415,6 +435,7 @@ check_dbid(DbId, #{ db_regexp := RegExp}) ->
       ok
   end.
 
+
 db_path(DbId, State) ->
   case check_dbid(DbId, State) of
     ok ->
@@ -425,3 +446,5 @@ db_path(DbId, State) ->
     Error ->
       Error
   end.
+
+
