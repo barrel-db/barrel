@@ -446,5 +446,3 @@ db_path(DbId, State) ->
     Error ->
       Error
   end.
-
-

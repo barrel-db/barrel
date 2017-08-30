@@ -71,7 +71,7 @@ delete_each([File | Rest]) ->
     {error, enoent} ->
       delete_each(Rest);
     {error, Reason}=Error ->
-      lager:error("Failed to delete file ~ts: ~p\n", [File, Reason]),
+      _ = lager:error("Failed to delete file ~ts: ~p\n", [File, Reason]),
       Error
   end.
 
