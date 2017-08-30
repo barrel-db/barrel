@@ -43,7 +43,8 @@
   encode_rid/1,
   decode_rid/1,
   get_current_revision/1,
-  delete_db/1
+  delete_db/1,
+  close_db/1
 ]).
 
 -export([db_key/1]).
@@ -489,6 +490,15 @@ delete_db(DbPid) ->
     exit:{normal, _} -> ok
   end.
 
+close_db(DbPid) ->
+  try gen_server:call(DbPid, close_db)
+  catch
+    exit:{noproc,_} -> ok;
+    exit:noproc -> ok;
+    %% Handle the case where the monitor triggers
+    exit:{normal, _} -> ok
+  end.
+
 db_key(DbId) -> {n, l, {?MODULE, DbId}}.
 
 encode_rid(Rid) -> base64:encode(<< Rid:64 >>).
@@ -598,9 +608,15 @@ handle_call(delete_db, _From, Db = #db{ id = Id, path = Path, store = Store }) -
     [?MODULE_STRING, Id]
   ),
   ok = rocksdb:close(Store),
-
-
   ok = delete_db_dir(Path),
+  {stop, normal, ok, Db#db{ store=nil}};
+
+handle_call(close_db, _From, Db = #db{ id = Id, store = Store }) ->
+  _ = lager:info(
+    "~s, close db ~p~n",
+    [?MODULE_STRING, Id]
+  ),
+  ok = rocksdb:close(Store),
   {stop, normal, ok, Db#db{ store=nil}};
 
 handle_call(_Request, _From, State) ->

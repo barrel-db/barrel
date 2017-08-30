@@ -23,6 +23,7 @@
   create_db/2,
   delete_db/1,
   open_db/1,
+  drop_db/1,
   databases/0,
   fold_databases/2
 ]).
@@ -69,6 +70,10 @@ create_db(_) ->
 
 delete_db(DbId) ->
   gen_server:call(?MODULE, {delete_db, DbId}).
+
+
+drop_db(DbId) ->
+  gen_server:call(?MODULE, {drop_db, DbId}).
 
 
 open_db(DbId) ->
@@ -180,6 +185,10 @@ handle_call({create_db, Config=#{<<"database_id">> := DbId}}, _From, State) ->
 
 handle_call({delete_db, DbId}, _From, State) ->
   {Reply, NState} = maybe_delete_db(db_pid(DbId), DbId, State),
+  {reply, Reply, NState};
+
+handle_call({drop_db, DbId}, _From, State) ->
+  {Reply, NState} = maybe_drop_db(db_pid(DbId), DbId, State),
   {reply, Reply, NState};
 
 handle_call(get_databases, _From, State = #{ databases := Databases}) ->
@@ -307,6 +316,42 @@ maybe_delete_db(DbPid, DbId, State = #{ databases := Dbs }) ->
           {Error, State}
       end
   end.
+
+maybe_drop_db(undefined, DbId,  State = #{ databases := Dbs }) ->
+  case maps:take(DbId, Dbs) of
+    {#{ <<"_path">> := DbPath }, Dbs2} ->
+      NewState = State#{ databases => Dbs2 },
+      case persist_config(NewState) of
+        ok ->
+          {{ok, DbPath}, NewState};
+        Error ->
+          {Error, State}
+      end;
+    error ->
+      {ok, State}
+  end;
+maybe_drop_db(DbPid, DbId, State = #{ databases := Dbs }) ->
+  DbKey = barrel_db:db_key(DbPid),
+  MRef = gproc:monitor(DbKey),
+  ok = barrel_db:close_db(DbPid),
+  receive
+    {gproc, unreg, MRef, DbKey} ->
+      {#{ <<"_path">> := DbPath}, Dbs2} = maps:take(DbId, Dbs),
+      NewState = State#{ databases => Dbs2 },
+      case persist_config(NewState) of
+        ok ->
+          {{ok, DbPath}, NewState};
+        Error ->
+          _ = lager:info(
+            "~s: error while persisting the db configuration: ~p~n",
+            [?MODULE_STRING,Error]
+          ),
+          {Error, State}
+      end
+  end.
+
+
+
 
 conf_path() ->
   Path = filename:join(data_dir(), "barrel_config"),
