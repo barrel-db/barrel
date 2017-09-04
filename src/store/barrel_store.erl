@@ -232,7 +232,7 @@ default_rocksdb_options(Cache) ->
   ].
 
 open_db_options(#{ <<"in_memory">> := true } = Config, State) ->
-  [{create_if_misssing, true} | db_options(Config, State)];
+  [{create_if_missing, true} | db_options(Config, State)];
 open_db_options(Config, State) ->
   db_options(Config, State).
 
@@ -390,7 +390,10 @@ load_config(State) ->
   case filelib:is_regular(conf_path()) of
     true ->
       {ok, ConfBin} = file:read_file(conf_path()),
-      Conf = jsx:decode(ConfBin, [return_maps]),
+      Conf = maps:merge(
+        empty_conf(),
+        jsx:decode(ConfBin, [return_maps])
+      ),
       {ok, conf_to_state(Conf, State)};
     false ->
       NewState = conf_to_state(empty_conf(), State),
