@@ -170,8 +170,9 @@ init([]) ->
                      Sz ->
                        Sz * 1024 * 1024 * 1024
                    end,
-  ok = rocksdb:block_cache_capacity(trunc(BlockCacheSize)),
-  InitState = #{ db_regexp => RegExp },
+
+  {ok, Cache} = rocksdb:new_lru_cache(trunc(BlockCacheSize)),
+  InitState = #{ db_regexp => RegExp, cache => Cache },
   {ok, State} = load_config(InitState),
   {ok, State}.
 
@@ -208,9 +209,6 @@ handle_info(_Info, State) ->
   {noreply, State}.
 
 terminate(_Reason, _State) ->
-  WriteBufferSize = 64 * 1024 * 1024, %% 64MB
-  Capacity = rocksdb:block_cache_capacity(),
-  rocksdb:block_cache_capacity(Capacity + WriteBufferSize),
   ok.
 
 code_change(_OldVsn, State, _Extra) ->
@@ -218,18 +216,17 @@ code_change(_OldVsn, State, _Extra) ->
 
 db_options(#{ <<"in_memory">> := true }, _State) ->
   [{env, memenv} | default_rocksdb_options()];
-db_options(_, _) ->
-  default_rocksdb_options().
+db_options(_, #{ cache := Cache }) ->
+  BlockOptions = [{block_cache, Cache}],
+  [{block_based_table_options, BlockOptions} | default_rocksdb_options()].
 
 default_rocksdb_options() ->
   WriteBufferSize = 64 * 1024 * 1024, %% 64MB
-  Capacity = rocksdb:block_cache_capacity(),
   [
     {max_open_files, 64},
     {write_buffer_size, WriteBufferSize}, %% 64MB
     {allow_concurrent_memtable_write, true},
-    {enable_write_thread_adaptive_yield, true},
-    {table_factory_block_cache_size, Capacity - WriteBufferSize}
+    {enable_write_thread_adaptive_yield, true}
   ].
 
 maybe_create_db(undefined, DbId, Config, State = #{ databases := Dbs }) ->
