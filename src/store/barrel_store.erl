@@ -199,6 +199,9 @@ handle_call({load_db, Config}, _From, State) ->
 handle_call(get_databases, _From, State = #{ databases := Databases}) ->
   {reply, {ok, Databases}, State};
 
+handle_call(get_state, _From, State) ->
+  {reply, State, State};
+
 handle_call(_Request, _From, State) ->
   {reply, bad_call, State}.
 
