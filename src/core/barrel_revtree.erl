@@ -133,17 +133,18 @@ is_leaf(RevId, Tree) ->
 is_deleted(#{deleted := Del}) -> Del;
 is_deleted(_) -> false.
 
+is_exists(#{ deleted := true }) -> false;
+is_exists(_) -> true.
+
 winning_revision(Tree) ->
   {Winner, _WinnerExists, LeafCount, ActiveLeafCount} =
   fold_leafs(fun(#{id := Id} = RevInfo, {W, WE, LC, ALC}) ->
-                 Deleted = is_deleted(RevInfo),
-                 Exists = Deleted =:= false,
+                 Exists = is_exists(RevInfo),
                  LC2 = LC + 1,
                  ALC2 = case Exists of
                           true -> ALC + 1;
                           false -> ALC
                         end,
-
                  {W2, WE2} = case {Exists, WE} of
                                {true, false} -> {Id, Exists};
                                {WE, _} ->
@@ -153,7 +154,6 @@ winning_revision(Tree) ->
                                  end;
                                _ -> {W, WE}
                              end,
-
                  {W2, WE2, LC2, ALC2}
              end, {<<"">>, false, 0, 0}, Tree),
   Branched = (LeafCount > 1),
