@@ -24,7 +24,13 @@
 -export([decode_path/2]).
 
 
-walk(#db{store=Store}, Path, UserFun, AccIn, Options0) ->
+walk(#db{store=Store}, Path, UserFun, AccIn, Options) ->
+  {ok, Snapshot} = rocksdb:snapshot(Store),
+  try walk_1(Store, Snapshot, Path, UserFun, AccIn, Options)
+  after rocksdb:release_snapshot(Snapshot)
+  end.
+
+walk_1(Store, Snapshot, Path, UserFun, AccIn, Options0) ->
   Options1 = validate_options(Options0),
   PathParts = decode_path(Path, []),
   %% set fold options
@@ -36,7 +42,6 @@ walk(#db{store=Store}, Path, UserFun, AccIn, Options0) ->
             end,
   Limit = maps:get(limit, Options1, ?DEFAULT_MAX),
   %% rocksdb options
-  {ok, Snapshot} = rocksdb:snapshot(Store),
   ReadOptions = [{snapshot, Snapshot}],
   %% wrapper function to retrieve the results from the iterator
   WrapperFun =
