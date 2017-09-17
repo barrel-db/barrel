@@ -6,7 +6,7 @@
  {<<"jsx">>,{pkg,<<"jsx">>,<<"2.8.1">>},0},
  {<<"lager">>,{pkg,<<"lager">>,<<"3.2.4">>},0},
  {<<"quickrand">>,{pkg,<<"quickrand">>,<<"1.7.1">>},1},
- {<<"rocksdb">>,{pkg,<<"rocksdb">>,<<"0.13.0">>},0},
+ {<<"rocksdb">>,{pkg,<<"rocksdb">>,<<"0.13.1">>},0},
  {<<"uuid">>,{pkg,<<"uuid_erl">>,<<"1.7.1">>},0}]}.
 [
 {pkg_hash,[
@@ -17,6 +17,6 @@
  {<<"jsx">>, <<"1453B4EB3615ACB3E2CD0A105D27E6761E2ED2E501AC0B390F5BBEC497669846">>},
  {<<"lager">>, <<"A6DEB74DAE7927F46BD13255268308EF03EB206EC784A94EAF7C1C0F3B811615">>},
  {<<"quickrand">>, <<"B0C2A41D08C955F055C44BED357660DE443CD9068A33ABA530076910B7333659">>},
- {<<"rocksdb">>, <<"46D3AFFE0859AA5805BA481126A28E63DFA00BC91ADA08D4D31EDA4CE525E697">>},
+ {<<"rocksdb">>, <<"14BAF1C240F4A678FA4CB0BF624016D5D12A4A0E3F09B8F52924ABDCE31FBD66">>},
  {<<"uuid">>, <<"252D12D1154BC75C40BC03E2E67714BD843DDFAD40FD3BC1541F65F622C9E7FC">>}]}
 ].
