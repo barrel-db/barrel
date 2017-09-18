@@ -51,7 +51,8 @@
   write_json_batch/1,
   change_deleted/1,
   resource_id/1,
-  await_change/1
+  await_change/1,
+  basic_metrics/1
 ]).
 
 all() ->
@@ -80,7 +81,8 @@ all() ->
     write_json_batch,
     change_deleted,
     resource_id,
-    await_change
+    await_change,
+    basic_metrics
   ].
 
 init_per_suite(Config) ->
@@ -485,3 +487,23 @@ collect_changes(Pid, Acc, N) ->
   after 5000 ->
     exit(changes_timeout)
   end.
+
+
+basic_metrics(_Config) ->
+  barrel_statistics:reset_tickers(),
+  Batch = [
+    {post, #{ <<"id">> => <<"a">> }},
+    {post, #{ <<"id">> => <<"b">> }}
+  ],
+
+  0 = barrel_statistics:get_ticker_count(num_transactions_started),
+  0 = barrel_statistics:get_ticker_count(num_transactions_ended),
+  _ = barrel:write_batch(<<"testdb">>, Batch, #{}),
+  1 = barrel_statistics:get_ticker_count(num_transactions_started),
+  1 = barrel_statistics:get_ticker_count(num_transactions_ended),
+  2 = barrel_statistics:get_ticker_count(num_changes),
+  {ok, _, _} = barrel:get(<<"testdb">>, <<"a">>, #{}),
+
+  2 = barrel_statistics:get_ticker_count(num_transactions_started),
+  2 = barrel_statistics:get_ticker_count(num_transactions_ended),
+  ok.

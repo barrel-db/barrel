@@ -72,6 +72,8 @@ init(Parent, Config) ->
   process_flag(trap_exit, true),
   proc_lib:init_ack(Parent, {ok, self()}),
 
+  barrel_statistics:record_tick(num_replications_started, 1),
+
   #{ id := RepId,
      source := Source0,
      target := Target0 } = Config,
@@ -130,6 +132,7 @@ loop(State = #st{parent=Parent, stream=Stream}) ->
     stop ->
       exit(normal);
     {'EXIT', Stream, Reason} ->
+      barrel_statistics:record_tick(num_replications_errors, 1),
       NewState = handle_stream_exit(Reason, State),
       loop(NewState);
     {'EXIT', Parent, Reason} ->
@@ -213,6 +216,7 @@ system_code_change(Misc, _, _, _) ->
 
 -spec terminate(_, _) -> no_return().
 terminate(Reason, State) ->
+  barrel_statistics:record_tick(num_replications_stopped, 1),
   #st{
     id = RepId,
     metrics = Metrics,
