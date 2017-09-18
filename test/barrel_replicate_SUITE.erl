@@ -77,6 +77,7 @@ one_doc(_Config) ->
                 options => #{ metrics_freq => 100 }},
 
   {ok, #{ id := RepId}} = barrel_replicate:start_replication(RepConfig),
+  1 = barrel_statistics:get_ticker_count(num_replications_started),
   %% Info = barrel_replicate:info(Pid),
   Doc = #{ <<"id">> => <<"a">>, <<"v">> => 1},
   {ok, <<"a">>, _RevId} = barrel:post(<<"source">>, Doc, #{}),
@@ -84,6 +85,8 @@ one_doc(_Config) ->
   {ok, Doc2, _} = barrel:get(<<"source">>, <<"a">>, #{}),
   {ok, Doc2, _} = barrel:get(<<"testdb">>, <<"a">>, #{}),
   ok = barrel_replicate:stop_replication(RepId),
+  timer:sleep(0),
+  1 = barrel_statistics:get_ticker_count(num_replications_stopped),
   ok = delete_doc("a", <<"source">>),
   ok = delete_doc("a", <<"testdb">>),
   ok.

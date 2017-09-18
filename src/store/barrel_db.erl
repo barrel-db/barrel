@@ -461,15 +461,22 @@ with_db(DbName, Fun) ->
 transact(Trans, DbName, Fun) ->
   case barrel_store:open_db(DbName) of
     {ok, Db} ->
+      barrel_statistics:record_tick(num_transactions, 1),
+      barrel_statistics:record_tick(num_transactions_started, 1),
       hooks:run(barrel_start_transaction, [Trans, DbName]),
       try Fun(Db)
-      after hooks:run(barrel_end_transaction, [Trans, DbName])
+      after
+        barrel_statistics:record_tick(num_transactions, -1),
+        barrel_statistics:record_tick(num_transactions_ended, 1),
+        hooks:run(barrel_end_transaction, [Trans, DbName])
       end;
     Error ->
       _ = lager:debug(
         "~s: error opening db ~p: ~p~n",
         [?MODULE_STRING, DbName, Error]
       ),
+      barrel_statistics:record_tick(num_transactions_ended, 1),
+      hooks:run(num_transactions_errors, [Trans, DbName, Error]),
       Error
   end.
 

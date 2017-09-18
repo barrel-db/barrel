@@ -47,6 +47,16 @@ init([]) ->
 
   _ = ets:new(barrel_dbs, [ordered_set, named_table, public, {keypos, #db.id}]),
 
+  Statistics =
+    #{
+      id => statistics,
+      start => {barrel_statistics, start_link, []},
+      restart => permanent,
+      shutdown => infinity,
+      type => worker,
+      module => [barrel_statistics]
+    },
+
   DbSup = #{id => barrel_db_sup,
     start => {barrel_db_sup, start_link, []},
     restart => permanent,
@@ -106,6 +116,7 @@ init([]) ->
       modules => [barrel_replicate_sup]},
   
   Specs = [
+    Statistics,
     OID,
     Rpc,
     LocalChangesSup,
