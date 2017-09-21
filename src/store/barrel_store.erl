@@ -160,18 +160,7 @@ start_link() ->
 init([]) ->
   process_flag(trap_exit, true),
   {ok, RegExp} = re:compile("^[a-z][a-z0-9\\_\\$()\\+\\-\\/]*$"),
-  %% initialize the cache
-  %% TODO: make it optionnal for the peer
-  BlockCacheSize = case application:get_env(barrel, block_cache_size, 0) of
-                     0 ->
-                       MaxSize = barrel_memory_monitor:get_total_memory(),
-                       %% reserve 1GB for system and binaries, and use 30% of the rest
-                       ((MaxSize - 1024 * 1024) * 0.3);
-                     Sz ->
-                       Sz * 1024 * 1024 * 1024
-                   end,
-
-  {ok, Cache} = rocksdb:new_lru_cache(trunc(BlockCacheSize)),
+  Cache = barrel_cache:get_cache(),
   InitState = #{ db_regexp => RegExp, cache => Cache },
   {ok, State} = load_config(InitState),
   {ok, State}.
@@ -226,7 +215,7 @@ db_options(_, #{ cache := Cache }) ->
 default_rocksdb_options() ->
   WriteBufferSize = 64 * 1024 * 1024, %% 64MB
   [
-    {max_open_files, 64},
+    {max_open_files, 1000},
     {write_buffer_size, WriteBufferSize}, %% 64MB
     {allow_concurrent_memtable_write, true},
     {enable_write_thread_adaptive_yield, true}

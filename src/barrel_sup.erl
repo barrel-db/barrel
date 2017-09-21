@@ -57,6 +57,8 @@ init([]) ->
       module => [barrel_statistics]
     },
 
+  Cache = setup_cache(),
+
   DbSup = #{id => barrel_db_sup,
     start => {barrel_db_sup, start_link, []},
     restart => permanent,
@@ -117,6 +119,7 @@ init([]) ->
   
   Specs = [
     Statistics,
+    Cache,
     OID,
     Rpc,
     LocalChangesSup,
@@ -127,3 +130,24 @@ init([]) ->
   ],
   
   {ok, { {one_for_one, 4, 3600}, Specs} }.
+
+
+
+setup_cache() ->
+  BlockCacheSize = case application:get_env(barrel, block_cache_size, 0) of
+                     0 ->
+                       MaxSize = barrel_memory_monitor:get_total_memory(),
+                       %% reserve 1GB for system and binaries, and use 30% of the rest
+                       ((MaxSize - 1024 * 1024) * 0.3);
+                     Sz ->
+                       Sz * 1024 * 1024 * 1024
+                   end,
+
+  #{
+    id => cache,
+    start => {barrel_cache, start_link, [trunc(BlockCacheSize)]},
+    restart => permanent,
+    shutdown => infinity,
+    type => supervisor,
+    modules => [barrel_cache]
+  }.
