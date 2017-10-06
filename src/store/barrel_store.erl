@@ -224,12 +224,35 @@ db_options(_, #{ cache := Cache }) ->
   [{block_based_table_options, BlockOptions} | default_rocksdb_options()].
 
 default_rocksdb_options() ->
-  WriteBufferSize = 64 * 1024 * 1024, %% 64MB
   [
-    {max_open_files, 64},
-    {write_buffer_size, WriteBufferSize}, %% 64MB
+    {max_open_files, 10000},
+    {write_buffer_size, 64 bsl 20}, %% 64MB
     {allow_concurrent_memtable_write, true},
-    {enable_write_thread_adaptive_yield, true}
+    {enable_write_thread_adaptive_yield, true},
+    {bytes_per_sync, 4 bsl 20},
+
+    {max_write_buffer_number, 4},
+    {min_write_buffer_number_to_merge, 1},
+    {level0_file_num_compaction_trigger, 2},
+    {level0_slowdown_writes_trigger, 20},
+    {level0_stop_writes_trigger, 32},
+
+    {min_write_buffer_number_to_merge, 1},
+
+
+    %%       level-size  file-size  max-files
+    %% L1:      64 MB       4 MB         16
+    %% L2:     640 MB       8 MB         80
+    %% L3:    6.25 GB      16 MB        400
+    %% L4:    62.5 GB      32 MB       2000
+    %% L5:     625 GB      64 MB      10000
+    %% L6:     6.1 TB     128 MB      50000
+    %%
+    {max_bytes_for_level_base, 64 bsl 20},
+    {max_bytes_for_level_multiplier, 10},
+
+    {target_file_size_base, 4 bsl 20}, %% 4MB
+    {target_file_size_multiplier, 2}
   ].
 
 maybe_create_db(undefined, DbId, Config, State = #{ databases := Dbs }) ->
