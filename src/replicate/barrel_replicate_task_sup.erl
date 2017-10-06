@@ -20,4 +20,4 @@ init([]) ->
       type => worker,
       modules => [barrel_replicate_task]},
 
-  {ok, {{simple_one_for_one, 5, 10}, [Spec]}}.
+  {ok, {{simple_one_for_one, 10000, 1}, [Spec]}}.

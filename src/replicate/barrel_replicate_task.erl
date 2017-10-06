@@ -115,10 +115,14 @@ stream_worker(Parent, Source, StartSeq) ->
 stream_loop(Parent, Source, Stream) ->
   case  barrel_replicate_api_wrapper:await_change(Source, Stream, infinity) of
     Change when is_map(Change) ->
+      #{ <<"seq">> := Seq } = Change,
+      _ = put(last_seq, Seq),
       Parent ! {change, self(), Change},
       stream_loop(Parent, Source, Stream);
     {end_stream, Error, LastSeq} ->
-      exit({Error, LastSeq})
+      exit({Error, LastSeq});
+    Else ->
+      exit({Else, get(last_seq)})
   end.
 
 loop(State = #st{parent=Parent, stream=Stream}) ->
