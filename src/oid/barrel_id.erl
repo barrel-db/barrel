@@ -21,14 +21,6 @@
   seq/0
 ]).
 
-
-
--define(THROW_ERROR(Res), case Res of
-                                  {ok, R} -> R;
-                                  E -> throw(E)
-                                end).
-
-
 id() ->
   gen_id(barrel_ts:curr_time_millis(), worker_id(), seq()).
 
@@ -48,7 +40,6 @@ timestamp(_) -> erlang:error(badarg).
 
 gen_id(Time, WorkerId, Sequence) ->
   <<Time:64/integer, WorkerId:48/integer, Sequence:16/integer>>.
-
 
 worker_id() ->
   barrel_ts_config:worker_id().
