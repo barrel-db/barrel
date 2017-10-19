@@ -10,7 +10,7 @@
 -behaviouur(gen_server).
 %% API
 -export([
-  start_link/0,
+  start_link/1,
   get_last_ts/0
 ]).
 
@@ -36,31 +36,43 @@
 %% ==============================
 %% PUBLIC API
 
-start_link() ->
-  gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
+start_link(LastTs) ->
+  gen_server:start_link({local, ?MODULE}, ?MODULE, [LastTs], []).
 
 get_last_ts() ->
   gen_server:call(?MODULE, get_ts).
 
-
 %% ==============================
 %% gen server API
 
-init([]) ->
+init([LastTs]) ->
   Interval = get_interval(),
   {ok, TRef} = timer:send_interval(Interval, persist),
-  {ok, #{ tref => TRef}}.
+  {ok, #{ tref => TRef, ts => LastTs}}.
 
 
 handle_call(get_ts, _From, State) ->
-  {Ts, State} = read_ts(State),
-  {reply, {ok, Ts}, State};
+  {Ts, NewState} = read_ts(State),
+  {reply, {ok, Ts}, NewState};
+
 handle_call(Msg, _From, State) ->
   {reply, {bad_call, Msg}, State}.
 
-handle_info(persist, State) ->
-  _ = persist_ts(State),
-  {noreply, State};
+handle_info(persist, State = #{ ts := OldTs } ) ->
+  Ts = curr_time_millis(),
+  case (Ts >= OldTs) of
+    true ->
+      NewState = State#{ ts => Ts },
+      ok = persist_ts(Ts),
+      {noreply, NewState};
+    false ->
+      _ = lager:error(
+            "~s: system running backwards, failing storing timestamp~n",
+            [?MODULE_STRING]
+           ),
+      {stop, clock_running_backwards, State}
+  end;
+
 handle_info(_Msg, State) -> {noreply, State}.
 
 handle_cast(_Msg, State) -> {noreply, State}.
@@ -82,12 +94,14 @@ read_timestamp() ->
   end.
 
 write_timestamp() ->
-  Ts = curr_time_millis(),
+  write_timestamp(curr_time_millis()).
+
+write_timestamp(Ts) ->
   ok = file:write_file(persist_file(), term_to_binary(Ts)),
   {ok, Ts}.
 
 curr_time_millis() -> erlang:system_time(millisecond).
-  
+
 
 read_ts(#{ ts := Ts} = State) -> {Ts, State};
 read_ts(State) ->
@@ -96,9 +110,9 @@ read_ts(State) ->
     Error -> Error
   end.
 
-persist_ts(State) ->
-  {ok, Ts} = write_timestamp(),
-  {Ts, State#{ ts => Ts}}.
+persist_ts(Ts) ->
+  {ok, _Ts} = write_timestamp(Ts),
+  ok.
 
 
 persist_file() ->
@@ -122,7 +136,7 @@ read_file(Name) ->
     Error ->
       Error
   end.
- 
+
 
 get_interval() ->
   application:get_env(barrel, persist_ts_interval, ?DEFAULT_INTERVAL).

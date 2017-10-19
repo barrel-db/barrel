@@ -41,10 +41,10 @@ timed_generate(N, Base) ->
 generate_ids(0, _Base, Acc) ->
   Acc;
 generate_ids(N, Base, Acc) ->
-  {ok, Flake} = case Base of
-                  undefined ->
-                    barrel_id:id();
-                  _ ->
-                    barrel_id:id(Base)
-                end,
-  generate_ids(N-1, Base, [Flake|Acc]).
+  Id = case Base of
+         undefined ->
+           barrel_id:id();
+         _ ->
+           barrel_id:id(Base)
+       end,
+  generate_ids(N-1, Base, [Id|Acc]).
