@@ -74,15 +74,6 @@ init([]) ->
       modules => [barrel_store]
     },
   
-  OID =
-    #{id => barrel_id_sup,
-      start => {barrel_id_sup, start_link, [] },
-      restart => permanent,
-      shutdown => infinity,
-      type => supervisor,
-      modules => [barrel_id_sup]
-    },
-  
   ChangesSup =
     #{id => changes_sup,
       start => {barrel_changes_sup, start_link, []},
@@ -106,9 +97,18 @@ init([]) ->
       type => supervisor,
       modules => [barrel_replicate_sup]},
   
+  PersistTimeServer = #{
+    id => persist_time_server,
+    start => {barrel_ts, start_link, []},
+    restart => permanent,
+    shutdown => 5000,
+    type => worker,
+    modules => [barrel_flake_ts]
+  },
+  
   Specs = [
     Statistics,
-    OID,
+    PersistTimeServer,
     ChangesSup,
     Store,
     DbSup,
