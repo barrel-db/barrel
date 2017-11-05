@@ -32,7 +32,7 @@
 
 
 setup_channel(DbId) when is_binary(DbId) ->
-  #{ mod => barrel_local, init_args => [], db => DbId };
+  #{ mod => barrel, init_args => [], db => DbId };
 setup_channel(#{ mod := Mod, db := DbId } = Config) ->
   Channel = Mod:connect(Config),
   #{ mod => Mod, init_args => [Channel], db => DbId };

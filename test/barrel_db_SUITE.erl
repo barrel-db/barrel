@@ -457,7 +457,7 @@ await_change(_Config) ->
   Parent = self(),
   Pid = spawn(
     fun() ->
-      Stream = barrel_local:subscribe_changes(<<"testdb">>, 0, #{}),
+      Stream = barrel:subscribe_changes(<<"testdb">>, 0, #{}),
       change_loop(Parent, Stream)
     end
   ),
@@ -471,7 +471,7 @@ await_change(_Config) ->
 
 
 change_loop(Parent, Stream) ->
-  Change = barrel_local:await_change(Stream),
+  Change = barrel:await_change(Stream),
   Parent ! {change, self(), Change},
   change_loop(Parent, Stream).
 
@@ -499,6 +499,7 @@ basic_metrics(_Config) ->
   0 = barrel_statistics:get_ticker_count(num_transactions_started),
   0 = barrel_statistics:get_ticker_count(num_transactions_ended),
   _ = barrel:write_batch(<<"testdb">>, Batch, #{}),
+  timer:sleep(100),
   1 = barrel_statistics:get_ticker_count(num_transactions_started),
   1 = barrel_statistics:get_ticker_count(num_transactions_ended),
   2 = barrel_statistics:get_ticker_count(num_changes),

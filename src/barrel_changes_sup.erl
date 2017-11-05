@@ -6,7 +6,7 @@
 %%% @end
 %%% Created : 30. Jun 2017 15:32
 %%%-------------------------------------------------------------------
--module(barrel_local_changes_sup).
+-module(barrel_changes_sup).
 -author("benoitc").
 
 %% API
@@ -32,12 +32,12 @@ stop_consumer(Pid) ->
 
 init(_) ->
   Child = #{
-    id => local_changes_consumer,
-    start => {barrel_local_changes, start_link, []},
+    id => changes_consumer,
+    start => {barrel_changes, start_link, []},
     restart => temporary,
     shutdown => infinity,
     type => worker,
-    modules => [barrel_local_changes]
+    modules => [barrel_changes]
   },
   SupFlags = #{strategy => simple_one_for_one, intensity => 0, period => 1},
   {ok, {SupFlags, [Child]}}.

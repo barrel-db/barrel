@@ -19,46 +19,41 @@
 %% Database API
 
 -export([
-  connect/1,
-  disconnect/1, disconnect/2
-]).
-
--export([
-  database_names/0, database_names/1,
-  create_database/1, create_database/2,
-  delete_database/1, delete_database/2,
-  database_infos/1, database_infos/2
+  database_names/0,
+  create_database/1,
+  delete_database/1,
+  database_infos/1
 ]).
 
 %% DOC API
 
 -export([
-  put/3, put/4,
-  put_rev/5, put_rev/6,
-  get/3, get/4,
-  multi_get/5, multi_get/6,
-  delete/3, delete/4,
-  post/3, post/4,
-  fold_by_id/4, fold_by_id/5,
-  revsdiff/3, revsdiff/4,
-  write_batch/3, write_batch/4
+  put/3,
+  put_rev/5,
+  get/3,
+  multi_get/5,
+  delete/3,
+  post/3,
+  fold_by_id/4,
+  revsdiff/3,
+  write_batch/3
 ]).
 
 -export([object_id/0, object_id/1]).
 
 -export([
-  put_system_doc/3, put_system_doc/4,
-  get_system_doc/2, get_system_doc/3,
-  delete_system_doc/2, delete_system_doc/3
+  put_system_doc/3,
+  get_system_doc/2,
+  delete_system_doc/2
 ]).
 
 %% CHANGE API
 
 -export([
-  changes_since/4, changes_since/5, changes_since/6,
-  subscribe_changes/3, subscribe_changes/4,
-  await_change/1, await_change/2, await_change/3,
-  unsubscribe_changes/1, unsubscribe_changes/2
+  changes_since/4, changes_since/5,
+  subscribe_changes/3,
+  await_change/1, await_change/2,
+  unsubscribe_changes/1
 ]).
 
 -export([
@@ -177,43 +172,19 @@
 
 -include("barrel.hrl").
 
-connect(Params) ->
-  barrel_remote:connect(Params).
-
-disconnect(Channel) ->
-  barrel_remote:disconnect(Channel).
-
-disconnect(Channel, Timeout) ->
-  barrel_remote:disconnect(Channel, Timeout).
-
-%% ==============================
-%% database operations
 
 database_names() ->
-  barrel_local:database_names().
-
-database_names(Channel) ->
-  barrel_remote:database_names(Channel).
+  barrel_store:databases().
 
 create_database(Config) ->
-  barrel_local:create_database(Config).
-
-create_database(Channel, Config) ->
-  barrel_remote:create_database(Channel, Config).
+  barrel_store:create_db(Config).
 
 delete_database(DbId) ->
-  barrel_local:delete_database(DbId).
-
-delete_database(Channel, DbId) ->
-  barrel_remote:delete_database(Channel, DbId).
+  barrel_store:delete_db(DbId).
 
 -spec database_infos(Db::db()) ->  {ok, DbInfos::db_infos()} | {error, term()}.
 database_infos(Db) ->
-  barrel_local:database_infos(Db).
-
-database_infos(Channel, DbId) ->
-  barrel_remote:database_infos(Channel, DbId).
-
+  barrel_db:infos(Db).
 
 %% @doc retrieve a document by its key
 -spec get(Db, DocId, Options) -> Res when
@@ -226,8 +197,6 @@ database_infos(Channel, DbId) ->
 get(Db, DocId, Options) ->
   barrel_db:get(Db, DocId, Options).
 
-get(Channel, DbId, DocId, Options) ->
-  barrel_remote:get(Channel, DbId, DocId, Options).
 
 %% @doc retrieve several documents
 -spec multi_get(Db, Fun, AccIn, DocIds, Options) -> Res when
@@ -240,9 +209,6 @@ get(Channel, DbId, DocId, Options) ->
 multi_get(Db, Fun, AccIn, DocIds, Options) ->
   barrel_db:multi_get(Db, Fun, AccIn, DocIds, Options).
 
-multi_get(Channel, DbId, Fun, Acc, DocIds, Options) ->
-  barrel_remote:multi_get(Channel, DbId, Fun, Acc, DocIds, Options).
-
 %% @doc create or update a document. Return the new created revision
 %% with the docid or a conflict.
 -spec put(Db, Doc, Options) -> Res when
@@ -250,11 +216,14 @@ multi_get(Channel, DbId, Fun, Acc, DocIds, Options) ->
   Doc :: doc(),
   Options :: write_options(),
   Res :: {ok, docid(), rev()} | {error, conflict()} | {error, any()}.
-put(Db, Doc, Options) ->
-  barrel_local:put(Db, Doc, Options).
-
-put(Channel, DbId, Doc, Options) ->
-  barrel_remote:put(Channel, DbId, Doc, Options).
+put(Db, Doc, Options) when is_map(Doc) ->
+  Rev = maps:get(rev, Options, <<>>),
+  Async = maps:get(async, Options, false),
+  CreateIfMissing = maps:get(create_if_missing, Options, false),
+  Batch = barrel_write_batch:put(Doc, CreateIfMissing, Rev, barrel_write_batch:new(Async)),
+  update_doc(Db, Batch);
+put(_,  _, _) ->
+  erlang:error(badarg).
 
 %% @doc insert a specific revision to a a document. Useful for the replication.
 %% It takes the document id, the doc to edit and the revision history (list of ancestors).
@@ -265,11 +234,12 @@ put(Channel, DbId, Doc, Options) ->
   Deleted :: boolean(),
   Options :: write_options(),
   Res ::  {ok, docid(), rev()} | {error, conflict()} | {error, any()}.
-put_rev(Db, Doc, History, Deleted, Options) ->
-  barrel_local:put_rev(Db, Doc, History, Deleted, Options).
-
-put_rev(Channel, DbId, Doc, History, Deleted, Options) ->
-  barrel_remote:put_rev(Channel, DbId, Doc, History, Deleted, Options).
+put_rev(Db, Doc, History, Deleted, Options) when is_map(Doc) ->
+  Async = maps:get(async, Options, false),
+  Batch = barrel_write_batch:put_rev(Doc, History, Deleted, barrel_write_batch:new(Async)),
+  update_doc(Db, Batch);
+put_rev(_, _, _, _, _) ->
+  erlang:error(badarg).
 
 %% @doc delete a document
 -spec delete(Db, DocId, Options) -> Res when
@@ -278,10 +248,10 @@ put_rev(Channel, DbId, Doc, History, Deleted, Options) ->
   Options :: write_options(),
   Res :: {ok, docid(), rev()} | {error, conflict()} | {error, any()}.
 delete(Db, DocId, Options) ->
-  barrel_local:delete(Db, DocId, Options).
-
-delete(Channel, DbId, DocId, Options) ->
-  barrel_remote:delete(Channel, DbId, DocId, Options).
+  Async = maps:get(async, Options, false),
+  Rev = maps:get(rev, Options, <<>>),
+  Batch = barrel_write_batch:delete(DocId, Rev, barrel_write_batch:new(Async)),
+  update_doc(Db, Batch).
 
 %% @doc create a document . Like put but only create a document without updating the old one.
 %% Optionally the document ID can be set in the doc.
@@ -291,10 +261,18 @@ delete(Channel, DbId, DocId, Options) ->
   Options :: write_options(),
   Res :: ok | {ok, docid(), rev()} | {error, conflict()} | {error, any()}.
 post(Db, Doc, Options) ->
-  barrel_local:post(Db, Doc, Options).
+  Async = maps:get(async, Options, false),
+  IsUpsert = maps:get(is_upsert, Options, false),
+  Batch = barrel_write_batch:post(Doc, IsUpsert, barrel_write_batch:new(Async)),
+  update_doc(Db, Batch).
 
-post(Channel, DbId, Doc, Options) ->
-  barrel_remote:post(Channel, DbId, Doc, Options).
+update_doc(Db, Batch) ->
+  Result = barrel_db:update_docs(Db, Batch),
+  case Result of
+    ok -> ok;
+    [Res] -> Res;
+    Error -> Error
+  end.
 
 %% @doc Apply the specified updates to the database.
 %% Note: The batch is not guaranteed to be atomic, atomicity is only guaranteed at the doc level.
@@ -303,11 +281,11 @@ post(Channel, DbId, Doc, Options) ->
   Updates :: [barrel_write_batch:batch_op()],
   Options :: batch_options(),
   Results :: batch_results() | ok.
-write_batch(Db, Updates, Options) ->
-  barrel_local:write_batch(Db, Updates, Options).
-
-write_batch(Channel, DbId, Updates, Options) ->
-  barrel_remote:write_batch(Channel, DbId, Updates, Options).
+write_batch(Db, Updates, Options) when is_map(Options) ->
+  Async = maps:get(async, Options, false),
+  Batch = barrel_write_batch:from_list(Updates, Async),
+  barrel_db:update_docs(Db, Batch);
+write_batch(_, _, _) -> erlang:error(badarg).
 
 %% @doc fold all docs by Id
 -spec fold_by_id(Db, Fun, AccIn, Options) -> AccOut | Error when
@@ -319,10 +297,7 @@ write_batch(Channel, DbId, Updates, Options) ->
   AccOut :: any(),
   Error :: {error, term()}.
 fold_by_id(Db, Fun, Acc, Options) ->
-  barrel_local:fold_by_id(Db, Fun, Acc, Options).
-
-fold_by_id(Channel, DbId, Fun, Acc, Options) ->
-  barrel_remote:fold_by_id(Channel, DbId, Fun, Acc, Options).
+  barrel_db:fold_by_id(Db, Fun, Acc, Options).
 
 %% @doc get all revisions ids that differ in a doc from the list given
 -spec revsdiff(Db, DocId, RevIds) -> Res when
@@ -332,9 +307,6 @@ fold_by_id(Channel, DbId, Fun, Acc, Options) ->
   Res:: {ok, Missing :: [revid()], PossibleAncestors :: [revid()]}.
 revsdiff(Db, DocId, RevIds) ->
   barrel_db:revsdiff(Db, DocId, RevIds).
-
-revsdiff(Channel, DbId, DocId, RevIds) ->
-  barrel_remote:revsdiff(Channel, DbId, DocId, RevIds).
 
 
 %% @doc return a new 16-bytes object ID. an Object ID value consist of:
@@ -353,23 +325,13 @@ object_id(Base) -> barrel_id:binary_id(Base).
 %% system docs operations
 
 put_system_doc(Db, DocId, Doc) ->
-  barrel_local:put_system_doc(Db, DocId, Doc).
-
-put_system_doc(Channel, DbId, DocId, Doc) ->
-  barrel_remote:put_system_doc(Channel, DbId, DocId, Doc).
+  barrel_db:put_system_doc(Db, DocId, Doc).
 
 get_system_doc(Db, DocId) ->
-  barrel_local:get_system_doc(Db, DocId).
-
-get_system_doc(Channel, DbId, DocId) ->
-  barrel_remote:get_system_doc(Channel, DbId, DocId).
+  barrel_db:get_system_doc(Db, DocId).
 
 delete_system_doc(Db, DocId) ->
-  barrel_local:delete_system_doc(Db, DocId).
-
-delete_system_doc(Channel, DbId, DocId) ->
-  barrel_remote:delete_system_doc(Channel, DbId, DocId).
-
+  barrel_db:delete_system_doc(Db, DocId).
 %% ==============================
 %% changes operations
 
@@ -394,32 +356,37 @@ changes_since(Db, Since, Fun, Acc) ->
   AccOut :: any(),
   Opts :: map().
 changes_since(Db, Since, Fun, Acc, Opts) ->
-  barrel_local:changes_since(Db, Since, Fun, Acc, Opts).
-
-changes_since(Channel, DbId, Since, Fun, Acc, Options) ->
-  barrel_remote:changes_since(Channel, DbId, Since, Fun, Acc, Options).
+  barrel_db:changes_since(Db, Since, Fun, Acc, Opts).
 
 subscribe_changes(DbId, Since, Options) ->
-  barrel_local:subscribe_changes(DbId, Since, Options).
+  {ok, Pid} = barrel_changes_sup:start_consumer(self(), DbId, Since, Options),
+  _ = erlang:put({Pid, last_seq},  Since),
+  Pid.
 
-subscribe_changes(Channel, DbId, Since, Options) ->
-  barrel_remote:subscribe_changes(Channel, DbId, Since, Options).
+await_change(Pid) -> await_change(Pid, infinity).
 
-await_change(Stream) ->
-  barrel_local:await_change(Stream).
+await_change(Pid, Timeout) ->
+  MRef = erlang:monitor(process, Pid),
+  receive
+    {change, Pid, Change} ->
+      Seq = maps:get(<<"seq">>, Change),
+      OldSeq = erlang:get({Pid, last_seq}),
+      _ = erlang:put({Pid, last_seq}, erlang:max(OldSeq, Seq)),
+      Change;
+    {'DOWN', MRef, process, _, normal} ->
+      LastSeq = erlang:erase({Pid, last_seq}),
+      {end_stream, normal, LastSeq};
+    {'DOWN', MRef, process, _, Reason} ->
+      LastSeq = erlang:erase({Pid, last_seq}),
+      {end_stream, {error, Reason}, LastSeq}
+  after Timeout ->
+    {end_stream, timeout}
+  end.
 
-await_change(Stream, Timeout) ->
-  barrel_local:await_change(Stream, Timeout).
-
-await_change(Channel, StreamRef, Timeout) ->
-  barrel_remote:await_change(Channel, StreamRef, Timeout).
-
-unsubscribe_changes(Stream) ->
-  barrel_local:unsubscribe_changes(Stream).
-
-unsubscribe_changes(Channel, StreamRef) ->
-  barrel_remote:unsubscribe_changes(Channel, StreamRef).
-
+unsubscribe_changes(Pid) ->
+  _ = barrel_changes_sup:stop_consumer(Pid),
+  LastSeq = erlang:erase({Pid, last_seq}),
+  {ok, LastSeq}.
 
 %% ==============================
 %% index operations

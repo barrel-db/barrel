@@ -10,7 +10,7 @@
 %% @doc local changes consumer working just like the remote one
 
 
--module(barrel_local_changes).
+-module(barrel_changes).
 -author("benoitc").
 
 %% API
