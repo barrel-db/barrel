@@ -164,7 +164,7 @@ init([]) ->
   %% TODO: make it optionnal for the peer
   BlockCacheSize = case application:get_env(barrel, block_cache_size, 0) of
                      0 ->
-                       MaxSize = barrel_memory_monitor:get_total_memory(),
+                       MaxSize = barrel_memory:get_total_memory(),
                        %% reserve 1GB for system and binaries, and use 30% of the rest
                        ((MaxSize - 1024 * 1024) * 0.3);
                      Sz ->

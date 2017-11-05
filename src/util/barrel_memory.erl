@@ -1,4 +1,4 @@
--module(barrel_memory_monitor).
+-module(barrel_memory).
 
 -export([get_total_memory/0, get_vm_limit/0]).
 
