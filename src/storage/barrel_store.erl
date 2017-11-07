@@ -235,7 +235,7 @@ default_rocksdb_options() ->
 maybe_create_db(undefined, DbId, Config, State = #{ databases := Dbs }) ->
   case maps:find(DbId, Dbs) of
     {ok, _Config} ->
-      {error, db_exists};
+      {{error, db_exists}, State};
     error ->
       maybe_create_db_1(DbId, Config, State)
   end;
