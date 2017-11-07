@@ -312,12 +312,14 @@ changes_since_int(#db{ store=Store}, Since0, Fun, AccIn, Opts) ->
             Since0 > 0 -> Since0 + 1;
             true -> Since0
           end,
+  Max = maps:get(max, Opts, 10000),
   %% setup fold options
   Prefix = barrel_keys:prefix(seq),
   {ok, Snapshot} = rocksdb:snapshot(Store),
   ReadOptions = [{snapshot, Snapshot}],
   FoldOpts = #{
     start_key => <<Since:64>>,
+    max => Max,
     read_options => ReadOptions
   },
   IncludeDoc = maps:get(include_doc, Opts, false),

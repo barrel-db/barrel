@@ -88,6 +88,13 @@ init([]) ->
             shutdown => infinity,
             type => worker,
             modules => [barrel_event]},
+  
+  Rpc = #{id => barrel_rpc,
+          start => {barrel_rpc, start_link, []},
+          restart => permanent,
+          shutdown => infinity,
+          type => worker,
+          modules => [barrel_rpc]},
 
   ReplicateSup =
     #{id => barrel_replicate_sup,
@@ -106,6 +113,7 @@ init([]) ->
     modules => [barrel_flake_ts]
   },
   
+  
   Specs = [
     Statistics,
     PersistTimeServer,
@@ -113,6 +121,7 @@ init([]) ->
     Store,
     DbSup,
     Event,
+    Rpc,
     ReplicateSup
   ],
   
