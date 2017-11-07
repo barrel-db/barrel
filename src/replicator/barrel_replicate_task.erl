@@ -73,22 +73,17 @@ init(Parent, Config) ->
   proc_lib:init_ack(Parent, {ok, self()}),
 
   barrel_statistics:record_tick(num_replications_started, 1),
-
+  %% extract config
   #{ id := RepId,
      source := Source,
      target := Target } = Config,
-
   Options = maps:get(options, Config, #{}),
-  
-
-  Config1 = Config#{ source => Source, target => Target },
-
   %% init_metrics
   Metrics = barrel_replicate_metrics:new(),
   ok = barrel_replicate_metrics:create_task(Metrics, Options),
   barrel_replicate_metrics:update_task(Metrics),
   %% initialize the changes feed
-  Checkpoint = barrel_replicate_checkpoint:new(Config1),
+  Checkpoint = barrel_replicate_checkpoint:new(Config),
   _ = lager:info("checkpoint is ~p~n", [Checkpoint]),
   StartSeq = barrel_replicate_checkpoint:get_start_seq(Checkpoint),
   Stream = spawn_stream_worker(Source, StartSeq),
