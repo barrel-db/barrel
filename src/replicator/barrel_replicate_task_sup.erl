@@ -1,5 +1,6 @@
 -module(barrel_replicate_task_sup).
 -author("Benoit Chesneau").
+-behaviour(supervisor).
 
 %% API
 -export([start_link/0]).
