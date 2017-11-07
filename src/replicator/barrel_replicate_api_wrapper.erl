@@ -12,15 +12,11 @@
 %% API
 
 -export([
-  setup_channel/1
-]).
-
--export([
   get/3,
   put_rev/5,
   revsdiff/3,
   subscribe_changes/3,
-  await_change/3,
+  await_change/2,
   unsubscribe_changes/2
 ]).
 
@@ -31,64 +27,69 @@
 ]).
 
 
-setup_channel(DbId) when is_binary(DbId) ->
-  #{ mod => barrel, init_args => [], db => DbId };
-setup_channel(#{ mod := Mod, db := DbId } = Config) ->
-  Channel = Mod:connect(Config),
-  #{ mod => Mod, init_args => [Channel], db => DbId };
-setup_channel(#{ proto := Proto , db := DbId} = Config) ->
-  Mod = proto_mod(Proto),
-  {ok, Channel} = Mod:connect(Config),
-  #{ mod => Mod, init_args => [Channel], db => DbId }.
-
-proto_mod(rpc) -> barrel_remote;
-proto_mod(Proto) ->
-  Supported = application:get_env(barrel, proto_replication, #{}),
-  case maps:find(Proto, Supported) of
-    {ok, Mod} -> Mod;
-    error -> erlang:error(badarg)
-  end.
 
 %% ==============================‡
 %% barrel_replicate_alg
 
-get(Ctx, DocId, Opts) ->
-  db_exec(Ctx, get, [DocId, Opts]).
+get({Node, DbName}, DocId, Opts) when is_atom(Node), is_binary(DbName) ->
+  F = fun(Doc, Meta, Acc) -> [{Doc, Meta} | Acc] end,
+  case barrel_rpc:fetch_docs(Node, DbName, F, [], [DocId], Opts) of
+    [] -> {error, not_found};
+    [{Doc, Meta}] -> {ok, Doc, Meta}
+  end;
+get(DbName, DocId, Opts) ->
+  barrel:get(DbName, DocId, Opts).
 
-put_rev(Ctx, Doc, History, Deleted, Opts) ->
-  db_exec(Ctx, put_rev, [Doc, History, Deleted, Opts]).
 
-revsdiff(Ctx, DocId, History) ->
-  db_exec(Ctx, revsdiff, [DocId, History]).
+put_rev({Node, DbName}, Doc, History, Deleted, Opts) ->
+  Batch = [{put_rev, Doc, History, Deleted}],
+  [Result] = barrel_rpc:update_docs(Node, DbName, Batch, Opts),
+  Result;
+put_rev(DbName, Doc, History, Deleted, Opts) ->
+  barrel:put_rev(DbName, Doc, History, Deleted, Opts).
 
-subscribe_changes(Ctx, Since, Options) ->
-  db_exec(Ctx, subscribe_changes, [Since, Options]).
 
-await_change(Ctx, Stream, Timeout) ->
-  stream_exec(Ctx, await_change, [Stream, Timeout]).
+revsdiff({Node, DbName}, DocId, History) ->
+  barrel_rpc:revsdiff(Node, DbName, DocId, History);
+revsdiff(DbName, DocId, History) ->
+  barrel:revsdiff(DbName, DocId, History).
 
-unsubscribe_changes(Ctx, Stream) ->
-  stream_exec(Ctx, unsubscribe_changes, [Stream]).
+subscribe_changes({Node, DbName}, Since, Options) ->
+  barrel_rpc:subscribe_changes(Node, DbName, Options#{ since => Since });
+subscribe_changes(DbName, Since, Options) ->
+  barrel:subscribe_changes(DbName, Since, Options).
+
+await_change({_, _}=Stream, Timeout) ->
+  barrel_rpc:await_changes(Stream, Timeout);
+await_change(Stream, Timeout) when is_pid(Stream)->
+  case barrel:await_change(Stream, Timeout) of
+    {end_stream, normal, LastSeq} -> {done, LastSeq};
+    {end_stream, _, LastSeq} -> {done, LastSeq};
+    Change -> Change
+  end.
+
+
+unsubscribe_changes({Node, _}, Stream) ->
+  barrel_rpc:unsubscribe_changes(Node, Stream);
+unsubscribe_changes(_DbName, Stream) ->
+  barrel:unsubscribe_changes(Stream).
 
 
 %% ==============================
 %% barrel_replicate_checkpoint
 
-put_system_doc(Ctx, Id, Doc) ->
-  db_exec(Ctx, put_system_doc, [Id, Doc]).
-
-get_system_doc(Ctx, Id) ->
-  db_exec(Ctx, get_system_doc, [Id]).
-
-delete_system_doc(Ctx, Id) ->
-  db_exec(Ctx, delete_system_doc, [Id]).
+put_system_doc({Node, DbName}, Id, Doc) ->
+  barrel_rpc:put_system_doc(Node, DbName, Id, Doc);
+put_system_doc(DbName, Id, Doc) ->
+  barrel:put_system_doc(DbName, Id, Doc).
 
 
-%% ==============================
-%% internal helpers
+get_system_doc({Node, DbName}, Id) ->
+  barrel_rpc:get_system_doc(Node, DbName, Id);
+get_system_doc(DbName, Id) ->
+  barrel:get_system_doc(DbName, Id).
 
-db_exec(#{ mod := Mod, init_args := InitArgs, db := Db}, Method, Args) ->
-  erlang:apply(Mod, Method, InitArgs ++ [Db | Args]).
-
-stream_exec(#{ mod := Mod, init_args := InitArgs}, Method, Args) ->
-  erlang:apply(Mod, Method, InitArgs ++ Args).
+delete_system_doc({Node, DbName}, Id) ->
+  barrel_rpc:delete_system_doc(Node, DbName, Id);
+delete_system_doc(DbName, Id) ->
+  barrel:delete_system_doc(DbName, Id).

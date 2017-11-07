@@ -15,7 +15,7 @@
   
   update_docs/4,
   subscribe_changes/3,
-  unsubscribe/2,
+  unsubscribe_changes/2,
   await_changes/2,
   put_system_doc/4,
   get_system_doc/3,
@@ -112,7 +112,7 @@ await_changes({Ref, Pid}, Timeout) ->
   end.
 
 
-unsubscribe(Node, {StreamRef, _Pid}) ->
+unsubscribe_changes(Node, {StreamRef, _Pid}) ->
   call(Node, self(),  {unsubscribe, StreamRef}, 5000).
 
 

@@ -38,9 +38,6 @@ all() ->
   , random_activity
   ].
 
--define(CH(DbId), barrel_replicate_api_wrapper:setup_channel(DbId)).
-
-
 init_per_suite(Config) ->
   {ok, _} = application:ensure_all_started(barrel),
   Config.
@@ -84,8 +81,8 @@ one_doc(_Config) ->
   Metrics = barrel_replicate_metrics:new(),
   Changes = changes(),
   {ok, _} = barrel_replicate_alg:replicate(
-    ?CH(<<"source">>),
-    ?CH(<<"testdb">>),
+    <<"source">>,
+    <<"testdb">>,
     Changes,
     Metrics
   ),
@@ -103,8 +100,8 @@ source_not_empty(_Config) ->
   Metrics = barrel_replicate_metrics:new(),
   Changes = changes(),
   {ok, _} = barrel_replicate_alg:replicate(
-    ?CH(<<"source">>),
-    ?CH(<<"testdb">>),
+    <<"source">>,
+    <<"testdb">>,
     Changes,
     Metrics
   ),
@@ -119,8 +116,8 @@ deleted_doc(_Config) ->
   Metrics = barrel_replicate_metrics:new(),
   Changes = changes(),
   {ok, _} = barrel_replicate_alg:replicate(
-    ?CH(<<"source">>),
-    ?CH(<<"testdb">>),
+    <<"source">>,
+    <<"testdb">>,
     Changes,
     Metrics
   ),
@@ -137,8 +134,8 @@ random_activity(_Config) ->
   Metrics = barrel_replicate_metrics:new(),
   Changes = changes(),
   {ok, _} = barrel_replicate_alg:replicate(
-    ?CH(<<"source">>),
-    ?CH(<<"testdb">>),
+    <<"source">>,
+    <<"testdb">>,
     Changes,
     Metrics
   ),

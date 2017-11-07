@@ -75,14 +75,11 @@ init(Parent, Config) ->
   barrel_statistics:record_tick(num_replications_started, 1),
 
   #{ id := RepId,
-     source := Source0,
-     target := Target0 } = Config,
+     source := Source,
+     target := Target } = Config,
 
   Options = maps:get(options, Config, #{}),
-
-  %% source and target should be connected before we start a replication
-  Source = barrel_replicate_api_wrapper:setup_channel(Source0),
-  Target = barrel_replicate_api_wrapper:setup_channel(Target0),
+  
 
   Config1 = Config#{ source => Source, target => Target },
 
@@ -113,12 +110,12 @@ stream_worker(Parent, Source, StartSeq) ->
   stream_loop(Parent, Source, Stream).
 
 stream_loop(Parent, Source, Stream) ->
-  case  barrel_replicate_api_wrapper:await_change(Source, Stream, infinity) of
+  case  barrel_replicate_api_wrapper:await_change(Stream, infinity) of
     Change when is_map(Change) ->
       Parent ! {change, self(), Change},
       stream_loop(Parent, Source, Stream);
-    {end_stream, Error, LastSeq} ->
-      exit({Error, LastSeq})
+    {done, _LastSeq} ->
+      exit(normal)
   end.
 
 loop(State = #st{parent=Parent, stream=Stream}) ->
@@ -197,10 +194,10 @@ handle_stream_exit({normal, _}, _State) ->
   exit(normal);
 handle_stream_exit(normal, _State) ->
   exit(normal);
-handle_stream_exit({Reason, _LastSeq}, _State) ->
+handle_stream_exit({done, _LastSeq}, _State) ->
   %% we do not try to recover the changes stream. It should normally not hang.
   %% So let the task supervisor recover it eventually.
-  exit({changes_stream_exit, Reason}).
+  exit(normal).
 
 
 system_continue(_, _, {loop, State}) ->

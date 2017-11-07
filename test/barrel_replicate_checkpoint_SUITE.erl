@@ -14,8 +14,6 @@
 
 -module(barrel_replicate_checkpoint_SUITE).
 
--define(CH(DbId), barrel_replicate_api_wrapper:setup_channel(DbId)).
-
 %% API
 -export(
    [ all/0
@@ -57,8 +55,8 @@ end_per_suite(Config) ->
 
 checkpoints(_Config) ->
   RepId = <<"repid">>,
-  Source = ?CH(<<"source">>),
-  Target = ?CH(<<"testdb">>),
+  Source = <<"source">>,
+  Target = <<"testdb">>,
 
   RepConfig = #{id => RepId,
                 source => Source,
@@ -93,8 +91,8 @@ checkpoints(_Config) ->
 
 history_size(_Config) ->
   RepId = <<"repid">>,
-  Source = ?CH(<<"source">>),
-  Target = ?CH(<<"testdb">>),
+  Source = <<"source">>,
+  Target = <<"testdb">>,
 
   RepConfig = #{id => RepId,
                 source => Source,
