@@ -29,6 +29,7 @@
 -export([
   basic_op/1,
   update_doc/1,
+  purge_doc/1,
   multi_get/1,
   put_is_not_create/1,
   create_if_missing/1,
@@ -59,6 +60,7 @@ all() ->
   [
     basic_op,
     update_doc,
+    purge_doc,
     multi_get,
     put_is_not_create,
     create_if_missing,
@@ -121,6 +123,13 @@ update_doc(_Config) ->
   {ok, <<"a">>, _RevId2} = barrel:delete(<<"testdb">>, <<"a">>, #{rev => RevId2}),
   {error, not_found} = barrel:get(<<"testdb">>, <<"a">>, #{}),
   {ok, <<"a">>, _RevId3} = barrel:post(<<"testdb">>, Doc,  #{}).
+
+purge_doc(_Config) ->
+  Doc = #{ <<"id">> => <<"a">>, <<"v">> => 1},
+  {ok, <<"a">>, _RevId} = barrel:post(<<"testdb">>, Doc,  #{}),
+  {ok, Doc, _Meta2} = barrel:get(<<"testdb">>, <<"a">>, #{}),
+  ok = barrel:purge_doc(<<"testdb">>, <<"a">>),
+  {error, not_found} = barrel:get(<<"testdb">>, <<"a">>, #{}).
 
 
 multi_get(_Config) ->

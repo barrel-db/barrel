@@ -32,7 +32,8 @@
   delete_system_doc/2,
   walk/5,
   get_doc1/7,
-  update_docs/2
+  update_docs/2,
+  purge_doc/2
 ]).
 
 -export([
@@ -408,6 +409,15 @@ revsdiff1(RevTree, RevIds) ->
   {ok, lists:reverse(Missing), lists:usort(PossibleAncestors)}.
 
 
+purge_doc(DbName, DocId) ->
+  with_db(
+    DbName,
+    fun(#db{pid=Pid}) ->
+      gen_server:call(Pid, {purge_doc, DocId})
+    end
+  ).
+
+
 put_system_doc(DbName, DocId, Doc) ->
   with_db(
     DbName,
@@ -601,6 +611,10 @@ open_db(Path, DbOpts, RetriesLeft, _LastError) ->
       Error
   end.
 
+handle_call({purge_doc, DocId}, From, Db) ->
+  _  = spawn(fun() -> do_purge_doc(DocId, From, Db) end),
+  {noreply, Db};
+  
 
 handle_call({put, K, V}, _From, Db) ->
   {Reply, NewDb} = do_put(K, V, Db),
@@ -633,6 +647,17 @@ handle_call(_Request, _From, State) ->
 
 handle_cast(_Msg, State) -> {noreply, State}.
 
+handle_info({purged, _DocId}, Db) ->
+  Db2 = Db#db{docs_count = Db#db.docs_count - 1 },
+  _ = rocksdb:put(
+    Db#db.store,
+    barrel_keys:db_meta_key(<<"docs_count">>),
+    term_to_binary(Db2#db.docs_count),
+    []
+  ),
+  {noreply, Db2};
+  
+  
 handle_info({update_docs, DocBuckets}, Db) ->
   NewDb = do_update_docs(DocBuckets, Db),
   {noreply, NewDb};
@@ -968,6 +993,26 @@ collect_updates(DbId, DocBuckets0) ->
   after 0 ->
     DocBuckets0
   end.
+
+do_purge_doc(DocId, From, Db = #db{store=Store, pid=DbPid}) ->
+  case get_doc_info_int(Db, DocId, []) of
+    {ok, #{revtree := RevTree, rid := RID, update_seq := Seq }} ->
+      Batch = [
+          {delete, barrel_keys:seq_key(Seq)},
+          {delete, barrel_keys:res_key(RID)},
+          {delete, barrel_keys:doc_key(DocId)}
+        | [{delete, barrel_keys:rev_key(DocId, RevId)} || RevId <- maps:keys(RevTree)]],
+      case rocksdb:write(Store, Batch, []) of
+        ok ->
+          DbPid ! { purged, DocId},
+          gen_server:reply(From, ok);
+        Error ->
+          gen_server:reply(From, Error)
+      end;
+    {error, not_found} ->
+      gen_server:reply(From, ok)
+  end.
+  
 
 do_put(K, V, Db = #db{ store=Store, system_docs_count = Count}) ->
   Batch = [

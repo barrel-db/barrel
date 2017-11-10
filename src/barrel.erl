@@ -36,7 +36,8 @@
   post/3,
   fold_by_id/4,
   revsdiff/3,
-  write_batch/3
+  write_batch/3,
+  purge_doc/2
 ]).
 
 -export([object_id/0, object_id/1]).
@@ -286,6 +287,12 @@ write_batch(Db, Updates, Options) when is_map(Options) ->
   Batch = barrel_write_batch:from_list(Updates, Async),
   barrel_db:update_docs(Db, Batch);
 write_batch(_, _, _) -> erlang:error(badarg).
+
+
+%% @doc completely remove a doc from the database
+-spec purge_doc(Db :: db(), DocId :: docid()) -> ok | {error, any()}.
+purge_doc(Db, DocId) ->
+  barrel_db:purge_doc(Db, DocId).
 
 %% @doc fold all docs by Id
 -spec fold_by_id(Db, Fun, AccIn, Options) -> AccOut | Error when
