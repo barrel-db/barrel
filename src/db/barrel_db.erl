@@ -45,7 +45,8 @@
   decode_rid/1,
   get_current_revision/1,
   delete_db/1,
-  close_db/1
+  close_db/1,
+  with_db/2
 ]).
 
 -export([db_key/1]).
@@ -59,7 +60,7 @@
   handle_cast/2,
   handle_info/2,
   terminate/2,
-  code_change/3
+  code_change/3<
 ]).
 
 -include("barrel.hrl").
@@ -86,6 +87,7 @@ exists(DbId) ->
   end.
 
 infos(DbName) ->
+  _ = erlang:erase({barrel_db, DbName}),
   with_db(
     DbName,
     fun(Db) ->
@@ -459,16 +461,29 @@ walk(DbName, Path, Fun, AccIn, Options) ->
   ).
 
 with_db(DbName, Fun) ->
-  case barrel_store:open_db(DbName) of
-    {ok, Db} ->
-      Fun(Db);
-    Error ->
-      _ = lager:debug(
-        "~s: error opening db ~p: ~p~n",
-        [?MODULE_STRING, DbName, Error]
-      ),
-      Error
+  case erlang:get({barrel_db, DbName}) of
+    undefined ->
+      case barrel_store:open_db(DbName) of
+        {ok, Db} ->
+          _ = erlang:put({barrel_db, DbName}, Db),
+          Fun(Db);
+        Error ->
+          _ = lager:debug(
+            "~s: error opening db ~p: ~p~n",
+            [?MODULE_STRING, DbName, Error]
+          ),
+          Error
+      end;
+    #db{pid=Pid} = Db ->
+      case erlang:is_process_alive(Pid) of
+        true ->
+          Fun(Db);
+        false ->
+          _ = erlang:erase({barrel_db, DbName}),
+          with_db(DbName, Fun)
+      end
   end.
+
 
 transact(Trans, DbName, Fun) ->
   case barrel_store:open_db(DbName) of
