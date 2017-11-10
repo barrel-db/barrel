@@ -350,8 +350,8 @@ handle_subscription(DbName, Options, {_Pid, Ref} = To, S) ->
     ),
   
   Streams2 = maps:put(Ref, Handler, Streams),
-  Handlers = maps:put(Handler, To, Handlers),
-  loop(S#{ handlers => Handlers, streams => Streams2 }).
+  Handlers2 = maps:put(Handler, To, Handlers),
+  loop(S#{ handlers => Handlers2, streams => Streams2 }).
 
 
 wait_changes(Stream, Limit, Deadline, Timeout, To) ->
