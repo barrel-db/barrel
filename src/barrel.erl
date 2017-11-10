@@ -311,7 +311,7 @@ fold_by_id(Db, Fun, Acc, Options) ->
   Db::dbname(),
   DocId :: docid(),
   RevIds :: [revid()],
-  Res:: {ok, Missing :: [revid()], PossibleAncestors :: [revid()]}.
+  Res:: {ok, Missing :: [revid()], PossibleAncestors :: [revid()]} | {error, any()}.
 revsdiff(Db, DocId, RevIds) ->
   barrel_db:revsdiff(Db, DocId, RevIds).
 

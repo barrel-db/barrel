@@ -12,7 +12,7 @@
 %% API
 -export([
   fetch_docs/6,
-  
+  revsdiffs/6,
   update_docs/4,
   subscribe_changes/3,
   unsubscribe_changes/2,
@@ -60,6 +60,31 @@ fetch_loop(Pid, Ref, Deadline, Fun, Acc) ->
       Acc;
     timeout ->
       erlang:error(timeout)
+  end.
+
+revsdiffs(Node, DbName, Fun, Acc, ToDiff, Options) ->
+  Ref = cast(Node, self(), {revdiffs, DbName, ToDiff, Options}),
+  Deadline = maps:get(deadline, Options, 5000),
+  case recv(Ref, Deadline) of
+    {start_stream, Pid} ->
+      revsdiffs_loop(Pid, Ref, Deadline, Fun, Acc);
+    timeout ->
+      erlang:error(timeout)
+  end.
+
+
+revsdiffs_loop(Pid, Ref, Deadline, Fun, Acc) ->
+  case recv(Ref, Deadline) of
+    {revsdiff, DocId, Missing, Ancestors} ->
+      Acc2 = Fun(DocId, Missing, Ancestors, Acc),
+      _ = send_ack(Pid),
+      fetch_loop(Pid, Ref, Deadline, Fun, Acc2);
+    done ->
+      Acc;
+    timeout ->
+      erlang:error(timeout);
+    Error ->
+      erlang:error(Error)
   end.
 
 %% TODO: stream docs sending completely ?
@@ -180,6 +205,8 @@ handle_call({update_docs, DbName, Timeout}, From, S) ->
   handle_update_docs(DbName, Timeout, From, S);
 handle_call({fetch_docs, DbName, DocIds, Options}, From, S) ->
   handle_fetch_docs(DbName, DocIds, Options, From, S);
+handle_call({revsdiffs, DbName, ToDiff, Options}, From, S) ->
+  handle_revsdiffs(DbName, ToDiff, Options, From, S);
 handle_call({subscribe, DbName, Options}, From, S) ->
   handle_subscription(DbName, Options, From, S);
 handle_call({unsubscribe, Ref}, From, S = #{ streams := Streams }) ->
@@ -271,6 +298,40 @@ do_fetch_docs(To, DbName, DocIds, Options) ->
     DocIds,
     Options
   ).
+
+handle_revsdiffs(DbName, ToDiff, Options, {_Pid, Ref} = To, State) ->
+  #{ handlers := Handlers, streams := Streams } = State,
+  {Stream, _} =
+  erlang:spawn_monitor(
+    fun() ->
+      reply(To, {start_stream, self()}),
+      Limit = maps:get(limit, Options, 1),
+      Deadline = maps:get(deadline, Options, 5000),
+      _ = do_revsdiffs(ToDiff, DbName, To, Limit, Deadline),
+      reply(To, done)
+    end
+  ),
+  Handlers2 = maps:put(Stream, To, Handlers),
+  Streams2 = maps:put(Ref, Stream, Streams),
+  NewState = State#{ stream => Streams2, handlers => Handlers2 },
+  loop(NewState).
+
+do_revsdiffs([{DocId, History} | Rest], DbName, To, Limit, Deadline) ->
+  case maybe_wait(Limit, Deadline) of
+    ok ->
+      case barrel:revsdiff(DbName, DocId, History) of
+        {ok, Missing, Ancestors} ->
+          reply(To, {revsdiff, DocId, Missing, Ancestors});
+        Error ->
+          reply(To, Error)
+      end,
+      do_revsdiffs(Rest, DbName, To, Limit, Deadline);
+    timeout ->
+      reply(To, {'EXIT', deadline}),
+      exit(normal)
+  end;
+do_revsdiffs([], _, _, _, _) ->
+  ok.
 
 handle_subscription(DbName, Options, {_Pid, Ref} = To, S) ->
   #{ handlers := Handlers, streams := Streams } = S,
