@@ -406,7 +406,7 @@ maybe_wait(Limit, Deadline) ->
 wait_for_ack(Count, Deadline) ->
   receive
     {rpc_ack, N} ->
-      drain_acks(Count -N)
+      drain_acks(Count - N)
   after Deadline ->
     timeout
   end.
@@ -418,7 +418,7 @@ drain_acks(Count) ->
     {rpc_ack, N} ->
       drain_acks(Count - N)
   after 0 ->
-    _ = put(rpc_unacked, Count),
+    _ = put(rpc_unacked, Count + 1),
     ok
   end.
 
