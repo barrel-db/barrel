@@ -132,7 +132,8 @@ await_changes({Ref, Pid}, Timeout) ->
       Change;
     {done, LastSeq} ->
       {done, LastSeq};
-    _ ->
+    Error ->
+      lager:error("~s: remote chnages feed timeout~n", [Error]),
       erlang:error(timeout)
   end.
 

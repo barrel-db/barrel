@@ -84,7 +84,6 @@ init(Parent, Config) ->
   barrel_replicate_metrics:update_task(Metrics),
   %% initialize the changes feed
   Checkpoint = barrel_replicate_checkpoint:new(Config),
-  _ = lager:info("checkpoint is ~p~n", [Checkpoint]),
   StartSeq = barrel_replicate_checkpoint:get_start_seq(Checkpoint),
   Stream = spawn_stream_worker(Source, StartSeq),
   %% start loop

@@ -202,7 +202,6 @@ register_replication(Pid, Config = #{ id := RepId }, #{ config := All} = State) 
            end,
   {ok, State2}.
 
-
 do_stop_replication(RepId) ->
   case ets:take(replication_ids, RepId) of
     [] ->
