@@ -75,9 +75,8 @@ changes_feed(Config) ->
   #{ <<"id">> := <<"a">>, <<"seq">> := 1 } = barrel_rpc:await_changes(Stream, 5000),
   [{ok, <<"b">>, _RevB}] = barrel_rpc:update_docs(Remote, <<"testdb">>, [{post, D2}], #{}),
   #{ <<"id">> := <<"b">>, <<"seq">> := 2 } = barrel_rpc:await_changes(Stream, 5000),
-  ok = barrel_rpc:unsubscribe_changes(Remote, Stream),
+  ok = barrel_rpc:unsubscribe_changes(Stream),
   ok.
-
 
 write_and_get_system_docs(Config) ->
   Remote = remote(Config),
@@ -96,7 +95,6 @@ revsdiff(Config) ->
   [{ok, <<"revsdiff">>, _RevId3}] = barrel_rpc:update_docs(Remote, <<"testdb">>, [{put, Doc2, RevId}], #{}),
   {ok, [<<"1-missing">>], []} = barrel_rpc:revsdiff(Remote, <<"testdb">>, <<"revsdiff">>, [<<"1-missing">>]),
   ok.
-
 
 %% ==============================
 %% internal helpers

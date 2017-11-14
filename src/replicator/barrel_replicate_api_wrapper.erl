@@ -17,7 +17,7 @@
   revsdiff/3,
   subscribe_changes/3,
   await_change/2,
-  unsubscribe_changes/2
+  unsubscribe_changes/1
 ]).
 
 -export([
@@ -59,7 +59,7 @@ subscribe_changes({Node, DbName}, Since, Options) ->
 subscribe_changes(DbName, Since, Options) ->
   barrel:subscribe_changes(DbName, Since, Options).
 
-await_change({_, _}=Stream, Timeout) ->
+await_change({_, _, _}=Stream, Timeout) ->
   barrel_rpc:await_changes(Stream, Timeout);
 await_change(Stream, Timeout) when is_pid(Stream)->
   case barrel:await_change(Stream, Timeout) of
@@ -69,9 +69,9 @@ await_change(Stream, Timeout) when is_pid(Stream)->
   end.
 
 
-unsubscribe_changes({Node, _}, Stream) ->
-  barrel_rpc:unsubscribe_changes(Node, Stream);
-unsubscribe_changes(_DbName, Stream) ->
+unsubscribe_changes({_, _, _} = Stream) ->
+  barrel_rpc:unsubscribe_changes(Stream);
+unsubscribe_changes(Stream) ->
   barrel:unsubscribe_changes(Stream).
 
 

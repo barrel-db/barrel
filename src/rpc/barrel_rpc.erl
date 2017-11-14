@@ -15,7 +15,7 @@
   revsdiffs/6,
   update_docs/4,
   subscribe_changes/3,
-  unsubscribe_changes/2,
+  unsubscribe_changes/1,
   await_changes/2,
   put_system_doc/4,
   get_system_doc/3,
@@ -120,25 +120,28 @@ subscribe_changes(Node, DbName, Options) ->
   Deadline = maps:get(deadline, Options, 5000),
   case recv(Ref, Deadline) of
     {start_stream, Pid} ->
-      {Ref, Pid};
+      {Ref, Node, Pid};
     timeout ->
       erlang:error(timeout)
   end.
 
-await_changes({Ref, Pid}, Timeout) ->
+await_changes({Ref, _Node, Pid}=Stream, Timeout) ->
   case recv(Ref, Timeout) of
     {change, Change}  ->
       _ = send_ack(Pid),
       Change;
     {done, LastSeq} ->
       {done, LastSeq};
+    local_timeout ->
+      unsubscribe_changes(Stream),
+      erlang:error(timeout);
     Error ->
-      lager:error("~s: remote chnages feed timeout~n", [Error]),
+      _ = lager:error("~s: remote chnages feed timeout~n", [Error]),
       erlang:error(timeout)
   end.
 
 
-unsubscribe_changes(Node, {StreamRef, _Pid}) ->
+unsubscribe_changes({StreamRef, Node, _Pid}) ->
   call(Node, self(),  {unsubscribe, StreamRef}, 5000).
 
 
@@ -338,7 +341,6 @@ handle_subscription(DbName, Options, {_Pid, Ref} = To, S) ->
   #{ handlers := Handlers, streams := Streams } = S,
   Since = maps:get(since, Options, 0),
   Limit = maps:get(limit, Options, 1),
-  Timeout = maps:get(timeout, Options, 5000),
   Deadline = maps:get(deadline, Options, 5000),
   {Handler, _} =
     erlang:spawn_monitor(
@@ -346,7 +348,7 @@ handle_subscription(DbName, Options, {_Pid, Ref} = To, S) ->
         _ = lager:info("subscribe ~p~n", [{DbName, Since}]),
         ChangesStream = barrel:subscribe_changes(DbName, Since, #{}),
         reply(To, {start_stream, self()}),
-        wait_changes(ChangesStream, Limit, Deadline, Timeout, To)
+        wait_changes(ChangesStream, Limit, Deadline, To)
       end
     ),
   
@@ -355,8 +357,8 @@ handle_subscription(DbName, Options, {_Pid, Ref} = To, S) ->
   loop(S#{ handlers => Handlers2, streams => Streams2 }).
 
 
-wait_changes(Stream, Limit, Deadline, Timeout, To) ->
-  case barrel:await_change(Stream, Timeout) of
+wait_changes(Stream, Limit, Deadline, To) ->
+  case barrel:await_change(Stream, infinity) of
     {end_stream, _, LastSeq} ->
       reply(To, {done, LastSeq}),
       exit(normal);
@@ -367,7 +369,7 @@ wait_changes(Stream, Limit, Deadline, Timeout, To) ->
       case maybe_wait(Limit, Deadline) of
         ok ->
           reply(To, {change, Change}),
-          wait_changes(Stream, Limit, Deadline, Timeout, To);
+          wait_changes(Stream, Limit, Deadline, To);
         timeout ->
           reply(To, {'EXIT', deadline}),
           exit(normal)
@@ -443,9 +445,8 @@ recv(Ref, Timeout) ->
   receive
     {Ref, Reply} -> Reply
   after Timeout ->
-    erlang:error(timeout)
+    local_timeout
   end.
-  
 
 call(Node, FromPid, Msg, Timeout) ->
   Ref = make_ref(),
