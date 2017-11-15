@@ -97,7 +97,8 @@ update_docs(Node, DbName, Batch, Options) ->
     {start_stream, Pid} ->
       [begin
          case maybe_wait(Limit, Deadline) of
-           ok ->
+           {ok, Count} ->
+             erlang:put(rpc_unacked, Count + 1),
              (catch Pid ! {op, Op}),
              ok;
            timeout ->
@@ -290,7 +291,8 @@ do_fetch_docs(To, DbName, DocIds, Options) ->
     DbName,
     fun(Doc, Meta, _Acc) ->
       case maybe_wait(Limit, Deadline) of
-        ok ->
+        {ok, Count} ->
+          erlang:put(rpc_unacked, Count + 1),
           reply(To, {doc, Doc, Meta}),
           ok;
         timeout ->
@@ -322,7 +324,8 @@ handle_revsdiffs(DbName, ToDiff, Options, {_Pid, Ref} = To, State) ->
 
 do_revsdiffs([{DocId, History} | Rest], DbName, To, Limit, Deadline) ->
   case maybe_wait(Limit, Deadline) of
-    ok ->
+    {ok, Count} ->
+      erlang:put(rpc_unacked, Count + 1),
       case barrel:revsdiff(DbName, DocId, History) of
         {ok, Missing, Ancestors} ->
           reply(To, {revsdiff, DocId, Missing, Ancestors});
@@ -367,7 +370,8 @@ wait_changes(Stream, Limit, Deadline, To) ->
       exit(normal);
     Change ->
       case maybe_wait(Limit, Deadline) of
-        ok ->
+        {ok, Count} ->
+          erlang:put(rpc_unacked, Count + 1),
           reply(To, {change, Change}),
           wait_changes(Stream, Limit, Deadline, To);
         timeout ->
@@ -398,8 +402,7 @@ handle_call_call(Mod, Fun, Args, To, S = #{ handlers := Handlers }) ->
 maybe_wait(Limit, Deadline) ->
   case get(rpc_unacked) of
     undefined ->
-      _ = put(rpc_unacked, 1),
-      ok;
+      {ok, 0};
     Count when Count >= Limit ->
       wait_for_ack(Count, Deadline);
     Count ->
@@ -422,7 +425,7 @@ drain_acks(Count) ->
       drain_acks(Count - N)
   after 0 ->
     _ = put(rpc_unacked, Count + 1),
-    ok
+    {ok, Count}
   end.
 
 
