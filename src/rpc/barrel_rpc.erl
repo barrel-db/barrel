@@ -147,17 +147,17 @@ unsubscribe_changes({StreamRef, Node, _Pid}) ->
 
 
 put_system_doc(Node, DbName, DocId, Doc) ->
-  call(Node, self(),  {put_system_doc, DbName, DocId, Doc}, 5000).
+  call(Node, self(),  {put_system_doc, DbName, DocId, Doc}, infinity).
 
 get_system_doc(Node, DbName, DocId) ->
-  call(Node, self(),  {get_system_doc, DbName, DocId}, 5000).
+  call(Node, self(),  {get_system_doc, DbName, DocId}, infinity).
 
 delete_system_doc(Node, DbName, DocId) ->
-  call(Node, self(),  {delete_system_doc, DbName, DocId}, 5000).
+  call(Node, self(),  {delete_system_doc, DbName, DocId}, infinity).
 
 
 revsdiff(Node,  DbName, DocId, RevIds) ->
-  call(Node, self(), {revsdiff, DbName, DocId, RevIds}, 5000).
+  call(Node, self(), {revsdiff, DbName, DocId, RevIds}, infinity).
 
 start_link() ->
   proc_lib:start_link(?MODULE, init, [self()]).
