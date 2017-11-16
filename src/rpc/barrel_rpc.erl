@@ -360,24 +360,26 @@ handle_subscription(DbName, Options, {_Pid, Ref} = To, S) ->
   loop(S#{ handlers => Handlers2, streams => Streams2 }).
 
 
-wait_changes(Stream, Limit, Deadline, To) ->
-  case barrel:await_change(Stream, infinity) of
-    {end_stream, _, LastSeq} ->
-      reply(To, {done, LastSeq}),
-      exit(normal);
-    {end_stream, timeout} ->
-      reply(To, {'EXIT', timeout}),
-      exit(normal);
-    Change ->
+wait_changes(StreamPid, Limit, Deadline, To) ->
+  MRef = erlang:monitor(process, StreamPid),
+  receive
+    {change, Pid, Change} ->
+      Seq = maps:get(<<"seq">>, Change),
+      OldSeq = erlang:get({StreamPid, last_seq}),
+      _ = erlang:put({Pid, last_seq}, erlang:max(OldSeq, Seq)),
       case maybe_wait(Limit, Deadline) of
         {ok, Count} ->
-          erlang:put(rpc_unacked, Count + 1),
+          _ = erlang:put(rpc_unacked, Count + 1),
           reply(To, {change, Change}),
-          wait_changes(Stream, Limit, Deadline, To);
+          wait_changes(StreamPid, Limit, Deadline, To);
         timeout ->
           reply(To, {'EXIT', deadline}),
           exit(normal)
-      end
+      end;
+    {'DOWN', MRef, process, _, _Reason} ->
+      LastSeq = erlang:erase({StreamPid, last_seq}),
+      reply(To, {done, LastSeq}),
+      exit(normal)
   end.
 
 handle_call_call(Mod, Fun, Args, To, S = #{ handlers := Handlers }) ->
@@ -424,7 +426,6 @@ drain_acks(Count) ->
     {rpc_ack, N} ->
       drain_acks(Count - N)
   after 0 ->
-    _ = put(rpc_unacked, Count + 1),
     {ok, Count}
   end.
 
@@ -456,7 +457,7 @@ call(Node, FromPid, Msg, Timeout) ->
   CastMsg = {call, {FromPid, Ref}, Msg},
   _ = erlang:send({barrel_rpc, Node}, CastMsg,  [noconnect, nosuspend]),
   recv(Ref, Timeout).
-  
+
 
 %% -------------------------
 %% system callbacks
