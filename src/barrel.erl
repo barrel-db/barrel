@@ -81,11 +81,11 @@
 ]).
 
 -type dbname() :: binary().
--type db() :: atom().
+-type db() :: binary().
 
 %% TODO: to define
 -type db_infos() :: #{
-  name := db(),
+  name := binary(),
   id := binary(),
   docs_count := non_neg_integer(),
   last_update_seq := non_neg_integer(),
