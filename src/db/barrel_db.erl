@@ -463,7 +463,7 @@ with_db(DbName, Fun) ->
     {ok, Db} ->
       Fun(Db);
     Error ->
-      _ = lager:debug(
+      _ = lager:error(
         "~s: error opening db ~p: ~p~n",
         [?MODULE_STRING, DbName, Error]
       ),
@@ -483,7 +483,7 @@ transact(Trans, DbName, Fun) ->
         hooks:run(barrel_end_transaction, [Trans, DbName])
       end;
     Error ->
-      _ = lager:debug(
+      _ = lager:error(
         "~s: error opening db ~p: ~p~n",
         [?MODULE_STRING, DbName, Error]
       ),
