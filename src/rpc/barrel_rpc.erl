@@ -41,76 +41,76 @@
 
 fetch_docs(Node, DbName, Fun, Acc, DocIds, Options) ->
   Ref = cast(Node, self(), {fetch_docs, DbName, DocIds, Options}),
-  Deadline = maps:get(deadline, Options, 5000),
+  Deadline = maps:get(deadline, Options, infinity),
   case recv(Ref, Deadline) of
     {start_stream, Pid} ->
-      fetch_loop(Pid, Ref, Deadline, Fun, Acc);
+      MRef = erlang:monitor(process, Pid),
+      fetch_loop(Pid, Ref, MRef, Deadline, Fun, Acc);
     timeout ->
       erlang:error(timeout)
   end.
 
 
-fetch_loop(Pid, Ref, Deadline, Fun, Acc) ->
-  case recv(Ref, Deadline) of
-    {doc, Doc, Meta} ->
+fetch_loop(Pid, Ref, MRef, Deadline, Fun, Acc) ->
+  receive
+    {Ref, {doc, Doc, Meta}} ->
       Acc2 = Fun(Doc, Meta, Acc),
-      _ = send_ack(Pid),
-      fetch_loop(Pid, Ref, Deadline, Fun, Acc2);
-    done ->
+      fetch_loop(Pid, Ref, MRef, Deadline, Fun, Acc2);
+    {Ref, done} ->
+      erlang:demonitor(MRef, [flush]),
       Acc;
-    timeout ->
+    {'DOWN', MRef, process, _, _} ->
       erlang:error(timeout)
+  after Deadline ->
+    erlang:error(timeout)
   end.
 
 revsdiffs(Node, DbName, Fun, Acc, ToDiff, Options) ->
-  Ref = cast(Node, self(), {revdiffs, DbName, ToDiff, Options}),
+  Ref = cast(Node, self(), {revdiffs, DbName, ToDiff}),
   Deadline = maps:get(deadline, Options, 5000),
   case recv(Ref, Deadline) of
     {start_stream, Pid} ->
-      revsdiffs_loop(Pid, Ref, Deadline, Fun, Acc);
+      MRef = erlang:monitor(process, Pid),
+      revsdiffs_loop(Pid, Ref, MRef, Deadline, Fun, Acc);
     timeout ->
       erlang:error(timeout)
   end.
 
 
-revsdiffs_loop(Pid, Ref, Deadline, Fun, Acc) ->
-  case recv(Ref, Deadline) of
-    {revsdiff, DocId, Missing, Ancestors} ->
+revsdiffs_loop(Pid, Ref, MRef, Deadline, Fun, Acc) ->
+  receive
+    {Ref, {revsdiff, DocId, Missing, Ancestors}} ->
       Acc2 = Fun(DocId, Missing, Ancestors, Acc),
-      _ = send_ack(Pid),
-      fetch_loop(Pid, Ref, Deadline, Fun, Acc2);
-    done ->
+      fetch_loop(Pid, Ref, MRef, Deadline, Fun, Acc2);
+    {Ref, done} ->
+      erlang:demonitor(MRef, [flush]),
       Acc;
-    timeout ->
-      erlang:error(timeout);
-    Error ->
-      erlang:error(Error)
+    {'DOWN', MRef, process, _, _} ->
+      erlang:error(timeout)
+  after Deadline ->
+    erlang:error(timeout)
   end.
 
 %% TODO: stream docs sending completely ?
 update_docs(Node, DbName, Batch, Options) ->
-  Timeout = maps:get(timeout, Options, 5000),
-  Deadline = maps:get(deadline, Options, 5000),
-  Limit = maps:get(limit, Options, 1),
-  Ref = cast(Node, self(), {update_docs, DbName, Timeout}),
+  Timeout = maps:get(timeout, Options, infinity),
+  Ref = cast(Node, self(), {update_docs, DbName}),
   case recv(Ref, Timeout) of
     {start_stream, Pid} ->
-      [begin
-         case maybe_wait(Limit, Deadline) of
-           {ok, Count} ->
-             erlang:put(rpc_unacked, Count + 1),
-             (catch Pid ! {op, Op}),
-             ok;
-           timeout ->
-             %% remote is probably dead but let's
-             %% try to send the cancel action still
-             (catch Pid ! cancel),
-             erlang:error(timeout)
-         end
-       end || Op <- Batch],
-      _ = (catch drain_acks(1)),
+      _ = [Pid ! {op, Op} || Op <- Batch],
       Pid ! commit,
-      recv(Ref, Timeout);
+      MRef = erlang:monitor(process, Pid),
+      receive
+        {Ref, Reply} -> Reply;
+        {'DOWN', MRef, process, _, Error} ->
+          _ = lager:error(
+            "~s: remote update task on ~p with ~p down: ~p~n",
+            [?MODULE_STRING, Node, DbName, Error]
+          ),
+          erlang:error(timeout)
+      after Timeout ->
+        erlang:error(timeout)
+      end;
     timeout ->
       erlang:error(timeout)
   end.
@@ -127,12 +127,16 @@ subscribe_changes(Node, DbName, Options) ->
   end.
 
 await_changes({Ref, _Node, Pid}=Stream, Timeout) ->
-  case recv(Ref, Timeout) of
+  MRef = erlang:monitor(process, Pid),
+  case recv(Ref, Pid, Timeout) of
     {change, Change}  ->
-      _ = send_ack(Pid),
+      erlang:demonitor(MRef, [flush]),
       Change;
     {done, LastSeq} ->
+      erlang:demonitor(MRef, [flush]),
       {done, LastSeq};
+    remote_timeout ->
+      erlang:error(timeout);
     local_timeout ->
       unsubscribe_changes(Stream),
       erlang:error(timeout);
@@ -206,12 +210,12 @@ loop(S = #{ parent := Parent, handlers := Handlers, streams := Streams}) ->
       exit({unexpected_message, Other})
   end.
 
-handle_call({update_docs, DbName, Timeout}, From, S) ->
-  handle_update_docs(DbName, Timeout, From, S);
+handle_call({update_docs, DbName}, From, S) ->
+  handle_update_docs(DbName, From, S);
 handle_call({fetch_docs, DbName, DocIds, Options}, From, S) ->
   handle_fetch_docs(DbName, DocIds, Options, From, S);
-handle_call({revsdiffs, DbName, ToDiff, Options}, From, S) ->
-  handle_revsdiffs(DbName, ToDiff, Options, From, S);
+handle_call({revsdiffs, DbName, ToDiff}, From, S) ->
+  handle_revsdiffs(DbName, ToDiff, From, S);
 handle_call({subscribe, DbName, Options}, From, S) ->
   handle_subscription(DbName, Options, From, S);
 handle_call({unsubscribe, Ref}, From, S = #{ streams := Streams }) ->
@@ -235,13 +239,14 @@ handle_call(_, From, S) ->
   reply(From, {badrpc, {'EXIT', bad_call}}),
   loop(S).
 
-handle_update_docs(DbName, Timeout, {_Pid, Ref} = To, State) ->
+handle_update_docs(DbName, {Pid, Ref} = To, State) ->
   #{ handlers := Handlers, streams := Streams } = State,
   {Stream, _} =
     erlang:spawn_monitor(
       fun() ->
         reply(To, {start_stream, self()}),
-        do_update_docs(To, DbName, Timeout, [])
+        MRef = erlang:monitor(process, Pid),
+        do_update_docs(To, DbName, MRef, [])
       end
     ),
   Handlers2 = maps:put(Stream, To, Handlers),
@@ -249,11 +254,10 @@ handle_update_docs(DbName, Timeout, {_Pid, Ref} = To, State) ->
   NewState = State#{ stream => Streams2, handlers => Handlers2 },
   loop(NewState).
 
-do_update_docs({Pid, _} = To, DbName, Timeout, Batch) ->
+do_update_docs(To, DbName, MRef, Batch) ->
   receive
     {op, OP} ->
-      _ = send_ack(Pid),
-      do_update_docs(To, DbName, Timeout, [OP | Batch]);
+      do_update_docs(To, DbName, MRef, [OP | Batch]);
     cancel ->
       exit(normal);
     commit ->
@@ -263,19 +267,20 @@ do_update_docs({Pid, _} = To, DbName, Timeout, Batch) ->
                  _:Error ->
                    {error, Error}
                end,
-      reply(To, Result)
-  after Timeout ->
-    erlang:error(normal)
+      reply(To, Result);
+    {'DOWN', MRef, _, _, _} ->
+      exit(normal)
   end.
 
 
-handle_fetch_docs(DbName, DocIds, Options, {_Pid, Ref} = To, State) ->
+handle_fetch_docs(DbName, DocIds, Options, {Pid, Ref} = To, State) ->
   #{ handlers := Handlers, streams := Streams } = State,
   {Stream, _} =
     erlang:spawn_monitor(
       fun() ->
         reply(To, {start_stream, self()}),
-        _ = do_fetch_docs(To, DbName, DocIds, Options),
+        MRef = erlang:monitor(process, Pid),
+        _ = do_fetch_docs(To, MRef, DbName, DocIds, Options),
         reply(To, done)
       end
     ),
@@ -284,36 +289,26 @@ handle_fetch_docs(DbName, DocIds, Options, {_Pid, Ref} = To, State) ->
   NewState = State#{ stream => Streams2, handlers => Handlers2 },
   loop(NewState).
 
-do_fetch_docs(To, DbName, DocIds, Options) ->
-  Limit = maps:get(limit, Options, 1),
-  Deadline = maps:get(deadline, Options, 5000),
+do_fetch_docs(To, MRef, DbName, DocIds, Options) ->
   barrel:multi_get(
     DbName,
     fun(Doc, Meta, _Acc) ->
-      case maybe_wait(Limit, Deadline) of
-        {ok, Count} ->
-          erlang:put(rpc_unacked, Count + 1),
-          reply(To, {doc, Doc, Meta}),
-          ok;
-        timeout ->
-          reply(To, {'EXIT', deadline}),
-          exit(normal)
-      end
+      ok = maybe_down(MRef),
+      reply(To, {doc, Doc, Meta})
     end,
     ok,
     DocIds,
     Options
   ).
 
-handle_revsdiffs(DbName, ToDiff, Options, {_Pid, Ref} = To, State) ->
+handle_revsdiffs(DbName, ToDiff, {Pid, Ref} = To, State) ->
   #{ handlers := Handlers, streams := Streams } = State,
   {Stream, _} =
   erlang:spawn_monitor(
     fun() ->
       reply(To, {start_stream, self()}),
-      Limit = maps:get(limit, Options, 1),
-      Deadline = maps:get(deadline, Options, 5000),
-      _ = do_revsdiffs(ToDiff, DbName, To, Limit, Deadline),
+      MRef = erlang:monitor(process, Pid),
+      _ = do_revsdiffs(ToDiff, DbName, To, MRef),
       reply(To, done)
     end
   ),
@@ -322,36 +317,29 @@ handle_revsdiffs(DbName, ToDiff, Options, {_Pid, Ref} = To, State) ->
   NewState = State#{ stream => Streams2, handlers => Handlers2 },
   loop(NewState).
 
-do_revsdiffs([{DocId, History} | Rest], DbName, To, Limit, Deadline) ->
-  case maybe_wait(Limit, Deadline) of
-    {ok, Count} ->
-      erlang:put(rpc_unacked, Count + 1),
-      case barrel:revsdiff(DbName, DocId, History) of
-        {ok, Missing, Ancestors} ->
-          reply(To, {revsdiff, DocId, Missing, Ancestors});
-        Error ->
-          reply(To, Error)
-      end,
-      do_revsdiffs(Rest, DbName, To, Limit, Deadline);
-    timeout ->
-      reply(To, {'EXIT', deadline}),
-      exit(normal)
-  end;
-do_revsdiffs([], _, _, _, _) ->
+do_revsdiffs([{DocId, History} | Rest], DbName, To, MRef) ->
+  ok = maybe_down(MRef),
+  case barrel:revsdiff(DbName, DocId, History) of
+    {ok, Missing, Ancestors} ->
+      reply(To, {revsdiff, DocId, Missing, Ancestors});
+    Error ->
+      reply(To, Error)
+  end,
+  do_revsdiffs(Rest, DbName, To, MRef);
+do_revsdiffs([], _, _, _) ->
   ok.
 
-handle_subscription(DbName, Options, {_Pid, Ref} = To, S) ->
+handle_subscription(DbName, Options, {Pid, Ref} = To, S) ->
   #{ handlers := Handlers, streams := Streams } = S,
   Since = maps:get(since, Options, 0),
-  Limit = maps:get(limit, Options, 1),
-  Deadline = maps:get(deadline, Options, 5000),
   {Handler, _} =
     erlang:spawn_monitor(
       fun() ->
-        _ = lager:info("subscribe ~p~n", [{DbName, Since}]),
         ChangesStream = barrel:subscribe_changes(DbName, Since, #{}),
+        _ = erlang:monitor(process, ChangesStream),
+        _ = erlang:monitor(process, Pid),
         reply(To, {start_stream, self()}),
-        wait_changes(ChangesStream, Limit, Deadline, To)
+        wait_changes(ChangesStream, To)
       end
     ),
   
@@ -360,25 +348,19 @@ handle_subscription(DbName, Options, {_Pid, Ref} = To, S) ->
   loop(S#{ handlers => Handlers2, streams => Streams2 }).
 
 
-wait_changes(StreamPid, Limit, Deadline, To) ->
-  MRef = erlang:monitor(process, StreamPid),
+wait_changes(StreamPid,  To = {Pid, _Tag}) ->
   receive
-    {change, Pid, Change} ->
+    {change, StreamPid, Change} ->
       Seq = maps:get(<<"seq">>, Change),
       OldSeq = erlang:get({StreamPid, last_seq}),
       _ = erlang:put({Pid, last_seq}, erlang:max(OldSeq, Seq)),
-      case maybe_wait(Limit, Deadline) of
-        {ok, Count} ->
-          _ = erlang:put(rpc_unacked, Count + 1),
-          reply(To, {change, Change}),
-          wait_changes(StreamPid, Limit, Deadline, To);
-        timeout ->
-          reply(To, {'EXIT', deadline}),
-          exit(normal)
-      end;
-    {'DOWN', MRef, process, _, _Reason} ->
+      reply(To, {change, Change}),
+      wait_changes(StreamPid, To);
+    {'DOWN', _, process, StreamPid, _Reason} ->
       LastSeq = erlang:erase({StreamPid, last_seq}),
       reply(To, {done, LastSeq}),
+      exit(normal);
+    {'DOWN', _, process, Pid, _} ->
       exit(normal)
   end.
 
@@ -400,43 +382,9 @@ handle_call_call(Mod, Fun, Args, To, S = #{ handlers := Handlers }) ->
     ),
   loop(S#{ handlers => maps:put(Handler, {call, To}, Handlers) }).
 
-
-maybe_wait(Limit, Deadline) ->
-  case get(rpc_unacked) of
-    undefined ->
-      {ok, 0};
-    Count when Count >= Limit ->
-      wait_for_ack(Count, Deadline);
-    Count ->
-      drain_acks(Count)
-  end.
-
-wait_for_ack(Count, Deadline) ->
-  receive
-    {rpc_ack, N} ->
-      drain_acks(Count - N)
-  after Deadline ->
-    timeout
-  end.
-
-drain_acks(Count) when Count < 0 ->
-  erlang:error(negative_ack);
-drain_acks(Count) ->
-  receive
-    {rpc_ack, N} ->
-      drain_acks(Count - N)
-  after 0 ->
-    {ok, Count}
-  end.
-
-
 reply({To, Tag}, Reply) ->
   Msg = {Tag, Reply},
   catch To ! Msg.
-
-send_ack(Pid) -> send_ack(Pid, 1).
-
-send_ack(Pid, N) -> Pid ! {rpc_ack, N}.
 
 %% TODO: we should buffer calls instead of ignoring the return
 cast(Node, FromPid, Msg) ->
@@ -452,11 +400,30 @@ recv(Ref, Timeout) ->
     local_timeout
   end.
 
+recv(Ref, Pid, Timeout) ->
+  receive
+    {Ref, Reply} ->
+      Reply;
+    {'DOWN', _, Pid, _} ->
+      remote_timeout
+  after Timeout ->
+    local_timeout
+  end.
+
 call(Node, FromPid, Msg, Timeout) ->
   Ref = make_ref(),
   CastMsg = {call, {FromPid, Ref}, Msg},
   _ = erlang:send({barrel_rpc, Node}, CastMsg,  [noconnect, nosuspend]),
   recv(Ref, Timeout).
+
+
+maybe_down(MRef) ->
+  receive
+    {'DOWN', MRef, process, _, _} ->
+      exit(normal)
+  after 0 ->
+    ok
+  end.
 
 
 %% -------------------------
