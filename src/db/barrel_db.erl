@@ -884,14 +884,25 @@ merge_revtree(Doc = #doc{ revs = [Rev|_]}, DocInfo, ErrorIfExists) ->
                     {conflict, doc_exists}
                 end;
               CurrentRev /= <<>> ->
-                {CurrentGen, _} = barrel_doc:parse_revision(CurrentRev),
-                {ok, CurrentGen + 1, CurrentRev};
+                case {maps:get(CurrentRev, RevTree), Doc#doc.deleted} of
+                  {#{ deleted := true}, true} ->
+                    not_found;
+                  _ ->
+                    {CurrentGen, _} = barrel_doc:parse_revision(CurrentRev),
+                    {ok, CurrentGen + 1, CurrentRev}
+                end;
               true ->
                 {ok, Gen + 1, <<>>}
             end;
           _ ->
             case barrel_revtree:is_leaf(Rev, RevTree) of
-              true -> {ok, Gen + 1, Rev};
+              true ->
+                case {maps:get(Rev, RevTree), Doc#doc.deleted} of
+                  {#{ deleted := true}, true} ->
+                    not_found;
+                  _ ->
+                    {ok, Gen + 1, Rev}
+                end;
               false -> {conflict, revision_conflict}
             end
         end,
