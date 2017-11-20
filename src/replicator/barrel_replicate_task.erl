@@ -68,6 +68,22 @@ info(Pid) when is_pid(Pid)->
 
 replication_key(RepId) -> {n, l, {barrel_replicate, RepId}}.
 
+spawn_stream_worker(Source, StartSeq) ->
+  spawn_link(?MODULE, stream_worker, [self(), Source, StartSeq]).
+
+stream_worker(Parent, Source, StartSeq) ->
+  Stream = barrel_replicate_api_wrapper:subscribe_changes(Source, StartSeq, #{}),
+  stream_loop(Parent, Source, Stream).
+
+stream_loop(Parent, Source, Stream) ->
+  case  barrel_replicate_api_wrapper:await_change(Stream, infinity) of
+    Change when is_map(Change) ->
+      Parent ! {change, self(), Change},
+      stream_loop(Parent, Source, Stream);
+    {done, _LastSeq} ->
+      exit(normal)
+  end.
+
 init(Parent, Config) ->
   process_flag(trap_exit, true),
   proc_lib:init_ack(Parent, {ok, self()}),
@@ -95,22 +111,6 @@ init(Parent, Config) ->
                stream = Stream,
                metrics = Metrics },
   loop(State).
-
-spawn_stream_worker(Source, StartSeq) ->
-  spawn_link(?MODULE, stream_worker, [self(), Source, StartSeq]).
-
-stream_worker(Parent, Source, StartSeq) ->
-  Stream = barrel_replicate_api_wrapper:subscribe_changes(Source, StartSeq, #{}),
-  stream_loop(Parent, Source, Stream).
-
-stream_loop(Parent, Source, Stream) ->
-  case  barrel_replicate_api_wrapper:await_change(Stream, infinity) of
-    Change when is_map(Change) ->
-      Parent ! {change, self(), Change},
-      stream_loop(Parent, Source, Stream);
-    {done, _LastSeq} ->
-      exit(normal)
-  end.
 
 loop(State = #st{parent=Parent, stream=Stream}) ->
   receive

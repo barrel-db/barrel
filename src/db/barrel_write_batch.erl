@@ -178,6 +178,7 @@ parse_op({put, Doc, CreateIfMissing, Rev} = OP) when is_map(Doc), is_boolean(Cre
 parse_op({post, Doc}) when is_map(Doc) -> {post, Doc, false};
 parse_op({post, Doc, IsUpsert} = OP) when is_map(Doc), is_boolean(IsUpsert) -> OP;
 parse_op({delete, Id, Rev} = OP) when is_binary(Id), is_binary(Rev) -> OP;
+parse_op({delete, Id}) when is_binary(Id) -> {delete, Id, <<>>};
 parse_op({put_rev, Doc, History, Deleted} = OP)  when is_map(Doc), is_list(History), is_boolean(Deleted) -> OP;
 
 parse_op(_Op) -> erlang:error(badarg).

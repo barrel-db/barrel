@@ -62,6 +62,7 @@ fetch_loop(Pid, Ref, MRef, Deadline, Fun, Acc) ->
     {'DOWN', MRef, process, _, _} ->
       erlang:error(timeout)
   after Deadline ->
+    erlang:demonitor(MRef, [flush]),
     erlang:error(timeout)
   end.
 
@@ -88,6 +89,7 @@ revsdiffs_loop(Pid, Ref, MRef, Deadline, Fun, Acc) ->
     {'DOWN', MRef, process, _, _} ->
       erlang:error(timeout)
   after Deadline ->
+    erlang:demonitor(MRef, [flush]),
     erlang:error(timeout)
   end.
 
@@ -101,7 +103,9 @@ update_docs(Node, DbName, Batch, Options) ->
       Pid ! commit,
       MRef = erlang:monitor(process, Pid),
       receive
-        {Ref, Reply} -> Reply;
+        {Ref, Reply} ->
+          erlang:demonitor(MRef, [flush]),
+          Reply;
         {'DOWN', MRef, process, _, Error} ->
           _ = lager:error(
             "~s: remote update task on ~p with ~p down: ~p~n",
@@ -109,6 +113,7 @@ update_docs(Node, DbName, Batch, Options) ->
           ),
           erlang:error(timeout)
       after Timeout ->
+        erlang:demonitor(MRef, [flush]),
         erlang:error(timeout)
       end;
     timeout ->
@@ -138,6 +143,7 @@ await_changes({Ref, _Node, Pid}=Stream, Timeout) ->
     remote_timeout ->
       erlang:error(timeout);
     local_timeout ->
+      erlang:demonitor(MRef, [flush]),
       unsubscribe_changes(Stream),
       erlang:error(timeout);
     Error ->

@@ -61,9 +61,9 @@ one_doc(Config) ->
   {ok, Doc2, _} = barrel:get(<<"sourcedb">>, <<"a">>, #{}),
   {ok, Doc2, _} = barrel_replicate_api_wrapper:get(TargetDb, <<"a">>, #{}),
   ok = barrel_replicate:stop_replication(RepId),
-  ok = delete_doc(<<"sourcedb">>, <<"a">>),
+  {ok, <<"a">>, _RevId_1} = delete_doc(<<"sourcedb">>, <<"a">>),
   
-  ok = delete_doc(TargetDb, <<"b">>),
+  {error, not_found} = delete_doc(TargetDb, <<"b">>),
   ok.
 
 
@@ -118,8 +118,7 @@ filter_rebar_path(CodePath) ->
   ).
 
 delete_doc({Node, DbName}, DocId) ->
-  _ = barrel_rpc:update_docs(Node, DbName, [{delete, DocId}], #{}),
-  ok;
+  [Res] = barrel_rpc:update_docs(Node, DbName, [{delete, DocId}], #{}),
+  Res;
 delete_doc(Db, DocId) ->
-  _ = barrel:delete(Db, DocId, #{}),
-  ok.
+  barrel:delete(Db, DocId, #{}).
