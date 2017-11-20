@@ -87,13 +87,13 @@ stream_loop(Parent, Source, Stream) ->
 init(Parent, Config) ->
   process_flag(trap_exit, true),
   proc_lib:init_ack(Parent, {ok, self()}),
-
   barrel_statistics:record_tick(num_replications_started, 1),
   %% extract config
   #{ id := RepId,
      source := Source,
      target := Target } = Config,
   Options = maps:get(options, Config, #{}),
+  _ = gproc:reg(replication_key(RepId)),
   %% init_metrics
   Metrics = barrel_replicate_metrics:new(),
   ok = barrel_replicate_metrics:create_task(Metrics, Options),
