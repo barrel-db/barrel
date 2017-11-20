@@ -32,11 +32,7 @@
 %% barrel_replicate_alg
 
 get({Node, DbName}, DocId, Opts) when is_atom(Node), is_binary(DbName) ->
-  F = fun(Doc, Meta, Acc) -> [{Doc, Meta} | Acc] end,
-  case barrel_rpc:fetch_docs(Node, DbName, F, [], [DocId], Opts) of
-    [] -> {error, not_found};
-    [{Doc, Meta}] -> {ok, Doc, Meta}
-  end;
+  barrel_rpc:get_doc(Node, DbName, DocId, Opts);
 get(DbName, DocId, Opts) ->
   barrel:get(DbName, DocId, Opts).
 

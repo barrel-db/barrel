@@ -20,7 +20,8 @@
   put_system_doc/4,
   get_system_doc/3,
   delete_system_doc/3,
-  revsdiff/4
+  revsdiff/4,
+  get_doc/4
 ]).
 
 
@@ -156,6 +157,9 @@ unsubscribe_changes({StreamRef, Node, _Pid}) ->
   call(Node, self(),  {unsubscribe, StreamRef}, 5000).
 
 
+get_doc(Node, DbName, DocId, Options) ->
+  call(Node, self(),  {get_doc, DbName, DocId, Options}, infinity).
+
 put_system_doc(Node, DbName, DocId, Doc) ->
   call(Node, self(),  {put_system_doc, DbName, DocId, Doc}, infinity).
 
@@ -235,6 +239,8 @@ handle_call({unsubscribe, Ref}, From, S = #{ streams := Streams }) ->
   end;
 handle_call({revsdiff, DbName, DocId, RevIds}, From, S) ->
   handle_call_call(barrel, revsdiff, [DbName, DocId, RevIds], From, S);
+handle_call({get_doc, DbName, DocId, Options}, From, S) ->
+  handle_call_call(barrel, get, [DbName, DocId, Options], From, S);
 handle_call({put_system_doc, DbName, DocId, Doc}, From, S) ->
   handle_call_call(barrel, put_system_doc, [DbName, DocId, Doc], From, S);
 handle_call({get_system_doc, DbName, DocId}, From, S) ->
