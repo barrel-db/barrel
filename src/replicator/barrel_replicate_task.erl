@@ -183,14 +183,13 @@ handle_get_state({FromPid, FromTag}, State) ->
 -spec handle_stream_exit(_, _) -> no_return().
 handle_stream_exit({{error, {shutdown ,db_down}}, _}, _State) ->
   %% TODO: is this a normal condition ? We should probably retry there?
+  _ = lager:debug("~s, db shutdown:~n~p~n~n", [?MODULE_STRING, _State]),
   exit(normal);
-handle_stream_exit({normal, _}, _State) ->
-  exit(normal);
-handle_stream_exit(normal, _State) ->
-  exit(normal);
-handle_stream_exit({done, _LastSeq}, _State) ->
-  %% we do not try to recover the changes stream. It should normally not hang.
-  %% So let the task supervisor recover it eventually.
+handle_stream_exit(Reason, #{ id := RepId} = State) ->
+  _ = lager:debug(
+    "~s, ~p change stream exited:~p~n~p~n~n",
+    [?MODULE_STRING, RepId, Reason, State]
+  ),
   exit(normal).
 
 
