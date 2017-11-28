@@ -19,7 +19,7 @@
 -include("barrel.hrl").
 
 
--define(DEFAULT_MAX, 1000).
+-define(DEFAULT_MAX, 10000).
 
 -export([decode_path/2]).
 
@@ -40,7 +40,7 @@ walk_1(Store, Snapshot, Path, UserFun, AccIn, Options0) ->
               undefined -> undefined;
               Val -> barrel_index:short(Val)
             end,
-  Limit = maps:get(limit, Options1, ?DEFAULT_MAX),
+  Limit = maps:get(limit, Options1, query_limit()),
   %% rocksdb options
   ReadOptions = [{snapshot, Snapshot}],
   %% wrapper function to retrieve the results from the iterator
@@ -275,3 +275,7 @@ decode_partial_path(B, Parts) ->
       {P, R} = barrel_encoding:decode_binary_ascending(B),
       decode_partial_path(R, [P | Parts])
   end.
+
+
+query_limit() ->
+  application:get_env(barrel, query_limit, ?DEFAULT_MAX).
