@@ -38,36 +38,32 @@ new(#{ id := Id } = RevInfo) -> #{ Id => RevInfo }.
 
 add(RevInfo, Tree) ->
   #{id := Id, parent := Parent} = RevInfo,
-
   case maps:is_key(Id, Tree) of
     true -> error({badrev, already_exists});
     false -> ok
   end,
-
   case maps:is_key(Parent, Tree) of
     true -> ok;
     false when Parent =:= <<"">> -> ok;
     false -> error({badrev, missing_parent})
   end,
-
   Tree#{ Id => RevInfo }.
 
 
 contains(RevId, Tree) ->
   maps:is_key(RevId, Tree).
 
-
 info(RevId, Tree) ->
   case maps:find(RevId, Tree) of
-    error -> {error, not_found};
-    {ok, RevInfo} -> {ok, RevInfo}
+    {ok, RevInfo} -> {ok, RevInfo};
+    error -> {error, not_found}
   end.
 
 
 parent(RevId, Tree) ->
   case maps:find(RevId, Tree) of
-    error -> <<"">>;
-    {ok, RevInfo} -> maps:get(parent, RevInfo, <<"">>)
+    {ok, RevInfo} -> maps:get(parent, RevInfo, <<"">>);
+    error -> <<"">>
   end.
 
 history(RevId, Tree) ->
@@ -87,19 +83,11 @@ fold_leafs(Fun, AccIn, Tree) ->
                         (_Id, _RevInfo, Acc) ->
                           Acc
                       end, [], Tree),
-
-
-  maps:fold(fun(RevId, RevInfo, Acc) ->
-                case lists:member(RevId, Parents) of
-                  true -> Acc;
-                  false -> Fun(RevInfo, Acc)
-                end
-            end, AccIn, Tree).
+  LeafsMap = maps:without(Parents, Tree),
+  maps:fold(fun(_RevId, RevInfo, Acc) -> Fun(RevInfo, Acc) end, AccIn, LeafsMap).
 
 leaves(Tree) ->
-  fold_leafs(fun(#{id := RevId}, Acc) ->
-                 [ RevId | Acc ]
-             end, [], Tree).
+  fold_leafs(fun(#{id := RevId}, Acc) -> [ RevId | Acc ] end, [], Tree).
 
 missing_revs(Revs, RevTree) ->
   Leaves = barrel_revtree:fold_leafs(
@@ -110,25 +98,18 @@ missing_revs(Revs, RevTree) ->
       end
     end, [], RevTree),
   Revs -- Leaves.
-  
 
 is_leaf(RevId, Tree) ->
   case maps:is_key(RevId, Tree) of
     true ->
-      try
-        maps:fold(fun(_, #{parent := Parent}, _) ->
-                      if
-                        Parent =:= RevId -> throw(has_parent);
-                        true -> true
-                      end
-                  end, true, Tree)
-      catch
-        has_parent -> false
-      end;
+      is_leaf_1(maps:values(Tree), RevId);
     false ->
       false
   end.
 
+is_leaf_1([#{ parent := RevId } | _], RevId) -> false;
+is_leaf_1([_ | Rest], RevId) -> is_leaf_1(Rest, RevId);
+is_leaf_1([], _) -> true.
 
 is_deleted(#{deleted := Del}) -> Del;
 is_deleted(_) -> false.
