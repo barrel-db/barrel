@@ -13,7 +13,6 @@
      ssl,
      rocksdb,
      jsx,
-     jsone,
      uuid,
      gproc,
      hooks
