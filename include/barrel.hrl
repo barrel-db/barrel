@@ -28,15 +28,16 @@
   docs_count = 0,
   system_docs_count = 0,
   deleted_count = 0,
-  deleted = false
-}
-).
+  deleted = false,
+  write_buffer_size = 64 * 1024 * 1024,
+  write_interval = 200
+}).
 
 
 %% db metadata
 -define(DB_INFO, 1).
 
--define(DEFAULT_CHANGES_SIZE, 10).
+-define(DEFAULT_CHANGES_SIZE, 200).
 
 -record(doc, {
   id :: binary(),

@@ -71,6 +71,9 @@
 
 -define(BLK_CACHE_SIZE, 8 bsl 30). % 8 GiB
 
+-define(WRITE_BUFFER_SIZE, 64 * 1024 * 1024).
+-define(WRITE_INTERVAL, 200).
+
 %%%===================================================================
 %%% API
 %%%===================================================================
@@ -244,10 +247,10 @@ update_docs(DbName, Batch) ->
     fun(Db = #db{pid=DbPid}) ->
       {DocBuckets, Ref, Async, N} = barrel_write_batch:to_buckets(Batch),
       MRef = erlang:monitor(process, DbPid),
-      DbPid ! {update_docs, DocBuckets},
+      DbPid ! {update_docs, DocBuckets, erlang:external_size(DocBuckets)},
       Res = case Async of
               false ->
-                collect_updates(Db, Ref, MRef, [], N);
+                wait_update_response(Db, Ref, MRef, [], N);
               true ->
                 ok
             end,
@@ -255,14 +258,14 @@ update_docs(DbName, Batch) ->
     end
   ).
 
-collect_updates(Db = #db{pid=DbPid}, Ref, MRef, Results, N) when N > 0 ->
+wait_update_response(Db = #db{pid=DbPid}, Ref, MRef, Results, N) when N > 0 ->
   receive
     {result, Ref, DbPid, Idx, Result} ->
-      collect_updates(Db, Ref, MRef, [{Idx, Result} | Results], N - 1);
+      wait_update_response(Db, Ref, MRef, [{Idx, Result} | Results], N - 1);
     {'DOWN', MRef, _, _, Reason} ->
       exit(Reason)
   end;
-collect_updates(_Db, _Ref, MRef, Results, 0) ->
+wait_update_response(_Db, _Ref, MRef, Results, 0) ->
   erlang:demonitor(MRef, [flush]),
   %% we return results  ordered by operation index
   lists:map(
@@ -658,8 +661,13 @@ handle_info({purged, _DocId}, Db) ->
   {noreply, Db2};
   
   
-handle_info({update_docs, DocBuckets}, Db) ->
-  NewDb = do_update_docs(DocBuckets, Db),
+handle_info({update_docs, DocBuckets, Size}, Db = #db{write_buffer_size=BufferSize, write_interval=Interval}) ->
+  Updates = collect_updates([DocBuckets],
+                            Size,
+                            BufferSize,
+                            erlang:system_time(millisecond),
+                            erlang:system_time(millisecond) + Interval),
+  NewDb = do_update_docs(Updates, Db),
   {noreply, NewDb};
 
 handle_info(_Info, State) ->
@@ -701,11 +709,40 @@ send_result({Client, Ref, Idx, false}, Result) ->
 send_result(_, _) ->
   ok.
 
-do_update_docs(DocBuckets, Db =  #db{id=DbId, store=Store }) ->
-  %% try to collect a maximum of updates at once
-  DocBuckets2 = collect_updates(DbId, DocBuckets),
-  erlang:put(num_docs_updated, maps:size(DocBuckets2)),
-  {Updates, NewRid, _, OldDocs} = merge_revtrees(DocBuckets2, Db),
+
+collect_updates(Acc, Size, MaxSize, Now, Deadline) when Size < MaxSize; Now < Deadline ->
+  receive
+    {update_docs, Buckets, BucketsSize} ->
+      collect_updates(
+        [Buckets | Acc],
+        Size + BucketsSize,
+        MaxSize,
+        erlang:system_time(millisecond),
+        Deadline)
+    after 0 ->
+      merge_collected_updates(Acc, #{})
+  end;
+collect_updates(Acc, _, _, _, _) ->
+  merge_collected_updates(Acc, #{}).
+
+merge_collected_updates([Batch | Rest], UpdatesMap) ->
+  UpdatesMap2 = maps:fold(
+    fun(Key, Ops, Map) ->
+      case maps:find(Key, Map) of
+        
+        {ok, Ops1} -> Map#{ Key => Ops1 ++ Ops};
+        error -> Map#{ Key => Ops}
+      end
+    end,
+    Batch, UpdatesMap),
+  merge_collected_updates(Rest, UpdatesMap2);
+merge_collected_updates([], UpdatesMap) ->
+  UpdatesMap.
+
+
+do_update_docs(DocBuckets, Db =  #db{store=Store }) ->
+  erlang:put(num_docs_updated, maps:size(DocBuckets)),
+  {Updates, NewRid, _, OldDocs} = merge_revtrees(DocBuckets, Db),
   lists:foldl(
     fun
       ({#{ local_seq := 0}, []}, Db1) ->
@@ -821,7 +858,7 @@ maybe_link_rid(#{ id := DocId, rid := Rid, local_seq := 1}, Batch) ->
 maybe_link_rid(_DI, Batch) ->
   Batch.
 
-current_body(#{ current_rev := Rev, body_map := BodyMap }) -> maps:get(Rev, BodyMap).
+current_body(#{ current_rev := Rev, body_map := BodyMap }) -> maps:get(Rev, BodyMap).
 
 %% TODO: cache doc infos
 merge_revtrees(DocBuckets, Db = #db{last_rid=LastRid}) ->
@@ -983,27 +1020,6 @@ find_parent([RevId | Rest], RevTree, I) ->
   end;
 find_parent([], _RevTree, I) ->
   {I, <<"">>}.
-
-merge_updates(DocBuckets1, DocBuckets2) ->
-  maps:fold(
-    fun(Key, Bucket, M) ->
-      case maps:find(Key, M) of
-        {ok, OldBucket} -> M#{Key => OldBucket ++ Bucket};
-        error -> M#{ Key => Bucket }
-      end
-    end,
-    DocBuckets1,
-    DocBuckets2
-  ).
-
-collect_updates(DbId, DocBuckets0) ->
-  receive
-    {update_docs, DocBuckets1} ->
-      DocBuckets2 = merge_updates(DocBuckets0, DocBuckets1),
-      collect_updates(DbId, DocBuckets2)
-  after 0 ->
-    DocBuckets0
-  end.
 
 do_purge_doc(DocId, From, Db = #db{store=Store, pid=DbPid}) ->
   case get_doc_info_int(Db, DocId, []) of
