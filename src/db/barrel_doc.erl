@@ -56,10 +56,8 @@
   Doc :: #doc{},
   RevId :: binary().
 revid(Pos, Parent, Doc) ->
-  BinPos = jsone:encode(Pos),
-  BinDel = jsone:encode(Doc#doc.deleted),
-  Digest = ehash:hash(sha256, [BinPos, Parent, BinDel, Doc#doc.body]),
-  << BinPos/binary, "-", (barrel_lib:to_hex(Digest))/binary >>.
+  Digest = ehash:hash(sha256, [Pos, Parent, Doc#doc.deleted, Doc#doc.body]),
+  << (integer_to_binary(Pos))/binary, "-", (barrel_lib:to_hex(Digest))/binary >>.
 
 parse_revision(<<"">>) -> {0, <<"">>};
 parse_revision(Rev) when is_binary(Rev) ->
@@ -167,14 +165,14 @@ revid_test() ->
   Doc = make_doc(#{<<"id">> => <<"test">>,
                    <<"hello">> => <<"yo">>}, <<>>, false),
 	Rev = revid(10, <<"9-test">>, Doc),
-	?assertEqual(<<"10-d311aad68e6b328ce490b242a0f3ff5f10bec3611d782ee6a5f7ae82f06ba9b2">>, Rev),
+	?assertEqual(<<"10-2386fbf6ac69c9c96a2e986afd8d06a25c30271ccfc19f8004875e667c886de6">>, Rev),
   Doc1 = make_doc(#{<<"hello">> => <<"yo">>,
                     <<"id">> => <<"test">>}, <<>>, false),
   ?assertEqual(Rev, revid(10, <<"9-test">>, Doc1)),
   Doc2 = make_doc(#{<<"id">> => <<"test">>,
                    <<"hello">> => <<"yo">>}, <<>>, true),
   Rev2 = revid(10, <<"9-test">>, Doc2),
-  ?assertEqual(<<"10-8ab7288493f49acdee7f844419cbab7ae6948821891e5fbd89d468bedbee9f4c">>, Rev2).
+  ?assertEqual(<<"10-5534e037692b5e106cbc1658721d9e4cf9288aafb3363a0894b735f63f8ccef0">>, Rev2).
 
 parse_test() ->
 	Parsed = parse_revision(<<"10-2f25ea96da3fed514795b0ced028d58a">>),
