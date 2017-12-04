@@ -380,7 +380,7 @@ conf_path() ->
 
 persist_config(State) ->
   Conf = conf_from_state(State),
-  file:write_file(conf_path(), jsx:encode(Conf)).
+  file:write_file(conf_path(), term_to_binary(Conf)).
 
 load_config(State) ->
   case filelib:is_regular(conf_path()) of
@@ -388,7 +388,7 @@ load_config(State) ->
       {ok, ConfBin} = file:read_file(conf_path()),
       Conf = maps:merge(
         empty_conf(),
-        jsx:decode(ConfBin, [return_maps])
+        binary_to_term(ConfBin)
       ),
       {ok, conf_to_state(Conf, State)};
     false ->

@@ -3,22 +3,18 @@
  {<<"goldrush">>,{pkg,<<"goldrush">>,<<"0.1.9">>},1},
  {<<"gproc">>,{pkg,<<"gproc">>,<<"0.6.1">>},0},
  {<<"hooks">>,{pkg,<<"hooks">>,<<"2.0.1">>},0},
- {<<"jsone">>,{pkg,<<"jsone">>,<<"1.4.5">>},0},
- {<<"jsx">>,{pkg,<<"jsx">>,<<"2.8.1">>},0},
  {<<"lager">>,{pkg,<<"lager">>,<<"3.2.4">>},0},
- {<<"quickrand">>,{pkg,<<"quickrand">>,<<"1.7.1">>},1},
+ {<<"quickrand">>,{pkg,<<"quickrand">>,<<"1.7.2">>},1},
  {<<"rocksdb">>,{pkg,<<"rocksdb">>,<<"0.13.1">>},0},
- {<<"uuid">>,{pkg,<<"uuid_erl">>,<<"1.7.1">>},0}]}.
+ {<<"uuid">>,{pkg,<<"uuid_erl">>,<<"1.7.2">>},0}]}.
 [
 {pkg_hash,[
  {<<"ehash">>, <<"B3F73406C19FBA8ACE6598DB0B6252B0ECA5D8B3C0606CA7D69FAF6BAF442710">>},
  {<<"goldrush">>, <<"F06E5D5F1277DA5C413E84D5A2924174182FB108DABB39D5EC548B27424CD106">>},
  {<<"gproc">>, <<"4579663E5677970758A05D8F65D13C3E9814EC707AD51D8DCEF7294EDA1A730C">>},
  {<<"hooks">>, <<"1C1FF88BFDA7460D2A4C6894DFF94AD83287B7CC2B5AC0FEF808B189843F0F6B">>},
- {<<"jsone">>, <<"547AEFEC1C67FE3283F77BAC4DAF85F3F593002764F768FAAA423875A51A2320">>},
- {<<"jsx">>, <<"1453B4EB3615ACB3E2CD0A105D27E6761E2ED2E501AC0B390F5BBEC497669846">>},
  {<<"lager">>, <<"A6DEB74DAE7927F46BD13255268308EF03EB206EC784A94EAF7C1C0F3B811615">>},
- {<<"quickrand">>, <<"B0C2A41D08C955F055C44BED357660DE443CD9068A33ABA530076910B7333659">>},
+ {<<"quickrand">>, <<"E856F3C69FEC00D1ACCA8E56CB452B650E838D3A9720811410F439121EFAFE59">>},
  {<<"rocksdb">>, <<"14BAF1C240F4A678FA4CB0BF624016D5D12A4A0E3F09B8F52924ABDCE31FBD66">>},
- {<<"uuid">>, <<"252D12D1154BC75C40BC03E2E67714BD843DDFAD40FD3BC1541F65F622C9E7FC">>}]}
+ {<<"uuid">>, <<"D596C8DD01A4AE48B9D8D51832CCC8F8302BF67ACD01336AEC3FCFAE6B9D2BC2">>}]}
 ].

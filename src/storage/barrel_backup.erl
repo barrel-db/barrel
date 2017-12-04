@@ -110,13 +110,13 @@ new_config(DbName, DbPath, OldConf) ->
 save_config(Path, Config) ->
   ConfPath = filename:join(Path, "BARREL_CONFIG"),
 
-  file:write_file(ConfPath, jsx:encode(Config)).
+  file:write_file(ConfPath, term_to_binary(Config)).
 
 load_config(Path) ->
   ConfPath = filename:join(Path, "BARREL_CONFIG"),
   io:format("confpaths ~p~n", [ConfPath]),
   {ok, ConfBin} = file:read_file(ConfPath),
-  jsx:decode(ConfBin, [return_maps]).
+  binary_to_term(ConfBin).
 
 check_config(#{ <<"in_memory">> := true }) ->
   {error, {unsupported, "snapshot is of an ephemral db is unsupported"}};
