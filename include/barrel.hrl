@@ -46,3 +46,9 @@
   deleted = false :: boolean()
 }).
 
+
+-define(MAX_WAIT, 16#ffffffff).
+-define(SUPERVISOR_WAIT,
+  application:get_env(rabbit, supervisor_shutdown_timeout, infinity)).
+-define(WORKER_WAIT,
+  application:get_env(barrel, worker_shutdown_timeout, 30000)).

@@ -35,8 +35,7 @@
 %% API functions
 %%====================================================================
 
-start_link() ->
-  supervisor:start_link({local, ?SERVER}, ?MODULE, []).
+start_link() -> supervisor:start_link({local, ?SERVER}, ?MODULE, []).
 
 %%====================================================================
 %% Supervisor callbacks
@@ -44,8 +43,16 @@ start_link() ->
 
 %% Child :: {Id,StartFunc,Restart,Shutdown,Type,Modules}
 init([]) ->
-
   _ = ets:new(barrel_dbs, [ordered_set, named_table, public, {keypos, #db.id}]),
+  
+  MonitorSup =
+    #{id => alarm_sup_sup,
+      start => {barrel_monitor_sup, start_link, []},
+      restart => permanent,
+      shutdown => infinity,
+      type => worker,
+      module => [barrel_alarm_sup]
+    },
 
   Statistics =
     #{
@@ -115,6 +122,7 @@ init([]) ->
   
   
   Specs = [
+    MonitorSup,
     Statistics,
     PersistTimeServer,
     ChangesSup,
