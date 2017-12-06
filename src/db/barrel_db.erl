@@ -52,6 +52,8 @@
 
 -export([delete_db_dir/1]).
 
+-export([with_db/2]).
+
 %% gen_server callbacks
 -export([
   init/1,

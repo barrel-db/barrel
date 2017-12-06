@@ -59,7 +59,8 @@
 ]).
 
 -export([
-  walk/5
+  walk/5,
+  pull/3, pull/1
 ]).
 
 -export([
@@ -157,6 +158,17 @@
   | {error, any()}
 ].
 
+-type pull_options() :: #{
+  limit => non_neg_integer(),
+  history => last | all
+}.
+
+
+-type pull_data() :: [any()].
+-type pull_continuation() :: term().
+
+-type pull_result() ::
+  {pull_data(), pull_continuation()}.
 
 -export_type([
   dbname/0,
@@ -435,6 +447,18 @@ find_by_key(Db, Path, Fun, AccIn, Opts) ->
   _ = lager:warning("~s : find_by_key is deprecated", [?MODULE_STRING]),
   barrel:walk(Db, Path, Fun, AccIn, Opts).
 
+-spec pull(Db, Path, Options) -> Result when
+  Db :: db(),
+  Path :: binary(),
+  Options :: pull_options(),
+  Result :: pull_result() | 'end_of_pull'.
+pull(DbName, Path, Options) ->
+   barrel_walk:pull(DbName, Path, Options).
+
+-spec pull(Cont) -> Result when
+  Cont :: pull_continuation(),
+  Result :: pull_result() | 'end_of_pull'.
+pull(Cont) -> barrel_walk:pull(Cont).
 
 %% ==============================
 %% replication

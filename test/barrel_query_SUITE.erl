@@ -30,7 +30,10 @@
   limit_at/1,
   range_with_limit/1,
   equal_to/1,
-  fix_range_test/1
+  fix_range_test/1,
+  pull/1,
+  pull_path/1,
+  pull_reverse/1
 ]).
 
 all() ->
@@ -41,7 +44,10 @@ all() ->
     limit_at,
     range_with_limit,
     equal_to,
-    fix_range_test
+    fix_range_test,
+    pull,
+    pull_path,
+    pull_reverse
   ].
 
 init_per_suite(Config) ->
@@ -439,4 +445,87 @@ fix_range_test(_Config) ->
     <<"testdb">>, <<"docId">>, Fun, [], #{ next_to => Nth, limit_to_first => 10 }
   ),
   After = ExpectAfter.
+
+
+pull(_Config) ->
+  Batch = [
+            {post, #{ <<"id">> => <<"a">>, <<"o">> => #{ <<"test1">> => 1 }}},
+            {post, #{ <<"id">> => <<"b">>, <<"o">> => #{ <<"test2">> => 1 }}},
+            {post, #{ <<"id">> => <<"c">>, <<"o">> => #{ <<"test3">> => 1 }}},
+            {post, #{ <<"id">> => <<"d">>, <<"o">> => #{ <<"test4">> => 1 }}},
+            {post, #{ <<"id">> => <<"e">>, <<"o">> => #{ <<"test5">> => 1 }}},
+            {post, #{ <<"id">> => <<"f">>, <<"o">> => #{ <<"test6">> => 1 }}},
+            {post, #{ <<"id">> => <<"g">>, <<"o">> => #{ <<"test7">> => 1 }}},
+            {post, #{ <<"id">> => <<"h">>, <<"o">> => #{ <<"test8">> => 1 }}}
+          ],
+  _ = barrel:write_batch(<<"testdb">>, Batch, #{}),
+  
+  {[#{ <<"id">> := <<"c">> },
+    #{ <<"id">> := <<"b">> },
+    #{ <<"id">> := <<"a">> }], Cont1} = barrel:pull(<<"testdb">>, <<"/id">>, #{limit => 3}),
+  
+  {[#{ <<"id">> := <<"f">> },
+    #{ <<"id">> := <<"e">> },
+    #{ <<"id">> := <<"d">> }], Cont2} = barrel:pull(Cont1),
+  
+  {[#{ <<"id">> := <<"h">> },
+    #{ <<"id">> := <<"g">> }], Cont3} = barrel:pull(Cont2),
+  'end_of_pull' = barrel:pull(Cont3).
+
+
+pull_path(_Config) ->
+  Batch = [
+            {post, #{ <<"id">> => <<"a">>, <<"o">> => #{ <<"test1">> => 1 }}},
+            {post, #{ <<"id">> => <<"b">>, <<"o">> => #{ <<"test2">> => 1 }}},
+            {post, #{ <<"id">> => <<"c">>, <<"o">> => #{ <<"test3">> => 1 }}},
+            {post, #{ <<"id">> => <<"d">>, <<"o1">> => #{ <<"test4">> => 1 }}},
+            {post, #{ <<"id">> => <<"e">>, <<"o">> => #{ <<"test5">> => 1 }}},
+            {post, #{ <<"id">> => <<"f">>, <<"o">> => #{ <<"test6">> => 1 }}},
+            {post, #{ <<"id">> => <<"g">>, <<"o1">> => #{ <<"test7">> => 1 }}},
+            {post, #{ <<"id">> => <<"h">>, <<"o">> => #{ <<"test8">> => 1 }}}
+          ],
+  _ = barrel:write_batch(<<"testdb">>, Batch, #{}),
+  
+  {[#{ <<"id">> := <<"e">> },
+    #{ <<"id">> := <<"c">> },
+    #{ <<"id">> := <<"b">> },
+    #{ <<"id">> := <<"a">> }], Cont1} = barrel:pull(<<"testdb">>, <<"/o">>, #{limit => 4}),
+  
+  {[#{ <<"id">> := <<"h">> },
+    #{ <<"id">> := <<"f">> }], Cont2} = barrel:pull(Cont1),
+  
+  'end_of_pull' = barrel:pull(Cont2).
+
+pull_reverse(_Config) ->
+  Batch = [
+            {post, #{ <<"id">> => <<"a">>, <<"o">> => #{ <<"test1">> => 1 }}},
+            {post, #{ <<"id">> => <<"b">>, <<"o">> => #{ <<"test2">> => 1 }}},
+            {post, #{ <<"id">> => <<"c">>, <<"o">> => #{ <<"test3">> => 1 }}},
+            {post, #{ <<"id">> => <<"d">>, <<"o">> => #{ <<"test4">> => 1 }}},
+            {post, #{ <<"id">> => <<"e">>, <<"o">> => #{ <<"test5">> => 1 }}},
+            {post, #{ <<"id">> => <<"f">>, <<"o">> => #{ <<"test6">> => 1 }}},
+            {post, #{ <<"id">> => <<"g">>, <<"o">> => #{ <<"test7">> => 1 }}},
+            {post, #{ <<"id">> => <<"h">>, <<"o">> => #{ <<"test8">> => 1 }}}
+          ],
+  _ = barrel:write_batch(<<"testdb">>, Batch, #{}),
+  
+  {[#{ <<"id">> := <<"f">> },
+    #{ <<"id">> := <<"g">> },
+    #{ <<"id">> := <<"h">> }], Cont1} = barrel:pull(<<"testdb">>, <<"/_id">>, #{limit => 3}),
+  
+  {[#{ <<"id">> := <<"c">> },
+    #{ <<"id">> := <<"d">> },
+    #{ <<"id">> := <<"e">> }], Cont2} = barrel:pull(Cont1),
+  
+  {[#{ <<"id">> := <<"a">> },
+    #{ <<"id">> := <<"b">> }], Cont3} = barrel:pull(Cont2),
+  'end_of_pull' = barrel:pull(Cont3).
+  
+
+
+
+
+
+
+  
   

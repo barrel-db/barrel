@@ -16,7 +16,7 @@
 
 -export([
   walk/5,
-  pull/3
+  pull/3, pull/1
 ]).
 
 -include("barrel.hrl").
@@ -28,50 +28,64 @@
 -export([decode_path/2]).
 
 
+pull(#{ db := DbId, path := Path, options := Options, cont := ContKey }) ->
+  barrel_db:with_db(
+    DbId,
+    fun(Db) ->
+      pull(Db, Path, ContKey, Options)
+    end
+  ).
 
+pull(DbId, Path, Options) when is_binary(DbId) ->
+  barrel_db:with_db(
+    DbId,
+    fun(Db) ->
+      pull(Db, Path, undefined, Options)
+    end
+  );
+pull(_, _, _) ->
+  erlang:error(badarg).
 
-pull(#db{store=Store}, Path, Options) ->
+pull(#db{store=Store}=Db, Path, ContKey, Options) ->
   {ok, Snapshot} = rocksdb:snapshot(Store),
-  try pull_1(Store, Path, Options, Snapshot)
+  try pull_1(Db, Path, ContKey, Options, Snapshot)
   after rocksdb:release_snapshot(Snapshot)
   end.
 
 
-pull_1(Store, Path, Options, Snapshot) ->
+pull_1(#db{id=DbId, store=Store}, Path, ContKey, Options, Snapshot) ->
   Limit = maps:get(limit, Options, ?DEFAULT_MAX),
   WithHistory = maps:get(history, Options, last) =:= all,
   PathParts0 = decode_path(Path, []),
   {PathParts, Move} = case lists:last(PathParts0) of
-                        <<"_", Last>> ->
+                        <<"_", Last/binary >> ->
                           PathParts1 = lists:droplast(PathParts0) ++ [Last],
                           {PathParts1, prev};
                         _ ->
                           {PathParts0, next}
                       end,
   Prefix = encode_key(PathParts, order_by_key),
-  {First, RangeFun} = case maps:find(cont, Options) of
-                        {ok, Cont} when Move =:= prev ->
-                          {
-                            Cont,
-                            fun(K) -> match_prefix(K, Prefix) andalso K =< Cont end
-                          };
-                        {ok, Cont} ->
-                          {
-                            Cont,
-                            fun(K) -> match_prefix(K, Prefix) andalso K >= Cont end
-                          };
-    
-                        error when Move =:= prev->
+  {First, RangeFun} = case ContKey of
+                        undefined when Move =:= prev ->
                           {
                             encode_key(PathParts, 16#7FFFFFFFFFFFFFFF, order_by_key),
                             fun(K) -> match_prefix(K, Prefix) end
                           };
-                        error ->
+                        undefined ->
                           {
                             Prefix,
                             fun(K) -> match_prefix(K, Prefix) end
+                          };
+                        _ when Move =:= prev ->
+                          {
+                            ContKey,
+                            fun(K) -> match_prefix(K, Prefix) end
+                          };
+                        _ ->
+                          {
+                            ContKey,
+                            fun(K) -> match_prefix(K, Prefix) end
                           }
-                          
                       end,
   ReadOptions = [{snapshot, Snapshot}],
   Ref = erlang:make_ref(),
@@ -105,7 +119,7 @@ pull_1(Store, Path, Options, Snapshot) ->
           Acc
       end
     end,
-  
+  Cont0 = #{ db => DbId, path => Path, options => Options },
   %% initialize the iterator
   {ok, Itr} = rocksdb:iterator(Store, ReadOptions),
   Next = fun() -> rocksdb:iterator_move(Itr, Move) end,
@@ -113,26 +127,34 @@ pull_1(Store, Path, Options, Snapshot) ->
             next -> rocksdb:iterator_move(Itr, First);
             prev -> rocksdb:iterator_move(Itr, {seek_for_prev, First})
           end,
-  
-  try do_pull(Start, Next, PullFun, [], RangeFun, Ref, Limit - 1)
+  try do_pull(
+    Start, Next, PullFun, [], RangeFun, Cont0, ContKey, Ref, Limit - 1)
   after safe_iterator_close(Itr)
   end.
 
-do_pull(Start, Next, PullFun, Acc, Cmp, Ref, Limit) ->
-  Result = pull_loop(Start, Next, PullFun, Acc, Cmp, Limit),
-  Cont = erlang:erase(Ref),
-  {Result, Cont}.
+do_pull(Start, Next, PullFun, Acc, Cmp, Cont0, ContKey, Ref, Limit) ->
+  Result = pull_loop(Start, Next, PullFun, Acc, ContKey, Cmp, Limit),
+  case Result of
+    [] -> 'end_of_pull';
+    _ ->
+      ContKey2 = erlang:erase(Ref),
+      Cont1 = Cont0#{ cont => ContKey2 },
+      {Result, Cont1}
+  end.
+ 
 
-pull_loop({error, iterator_closed}, _Next, _WrapperFun, Acc, _Cmp, _Limit) ->
+pull_loop({error, iterator_closed}, _Next, _WrapperFun, Acc, _ContKey, _Cmp, _Limit) ->
   Acc;
-pull_loop({error, invalid_iterator}, _Next, _WrapperFun, Acc, _Cmp, _Limit) ->
+pull_loop({error, invalid_iterator}, _Next, _WrapperFun, Acc, _ContKey, _Cmp, _Limit) ->
   Acc;
-pull_loop({ok, K, V}, Next, WrapperFun, Acc0, Cmp, Limit) ->
+pull_loop({ok, ContKey, _V}, Next, WrapperFun, Acc, ContKey, Cmp, Limit) ->
+  pull_loop(Next(), Next, WrapperFun, Acc, ContKey, Cmp, Limit);
+pull_loop({ok, K, V}, Next, WrapperFun, Acc0, ContKey, Cmp, Limit) ->
   case Cmp(K) of
     true ->
       case WrapperFun(K, V, Acc0) of
         Acc1 when Limit > 0 ->
-          pull_loop(Next(), Next, WrapperFun, Acc1, Cmp, Limit - 1);
+          pull_loop(Next(), Next, WrapperFun, Acc1, ContKey, Cmp, Limit - 1);
         Acc1 -> Acc1
       end;
     false ->
