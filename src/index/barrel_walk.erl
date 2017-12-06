@@ -14,23 +14,142 @@
 
 -module(barrel_walk).
 
--export([walk/5]).
+-export([
+  walk/5,
+  pull/3
+]).
 
 -include("barrel.hrl").
 
 
--define(DEFAULT_MAX, 1000).
+-define(DEFAULT_LIMIT, 1000).
+-define(DEFAULT_MAX, 1 bsl 64 - 1).
 
 -export([decode_path/2]).
 
 
-walk(#db{store=Store}, Path, UserFun, AccIn, Options) ->
+
+
+pull(#db{store=Store}, Path, Options) ->
   {ok, Snapshot} = rocksdb:snapshot(Store),
-  try walk_1(Store, Snapshot, Path, UserFun, AccIn, Options)
+  try pull_1(Store, Path, Options, Snapshot)
   after rocksdb:release_snapshot(Snapshot)
   end.
 
-walk_1(Store, Snapshot, Path, UserFun, AccIn, Options0) ->
+
+pull_1(Store, Path, Options, Snapshot) ->
+  Limit = maps:get(limit, Options, ?DEFAULT_MAX),
+  WithHistory = maps:get(history, Options, last) =:= all,
+  PathParts0 = decode_path(Path, []),
+  {PathParts, Move} = case lists:last(PathParts0) of
+                        <<"_", Last>> ->
+                          PathParts1 = lists:droplast(PathParts0) ++ [Last],
+                          {PathParts1, prev};
+                        _ ->
+                          {PathParts0, next}
+                      end,
+  Prefix = encode_key(PathParts, order_by_key),
+  {First, RangeFun} = case maps:find(cont, Options) of
+                        {ok, Cont} when Move =:= prev ->
+                          {
+                            Cont,
+                            fun(K) -> match_prefix(K, Prefix) andalso K =< Cont end
+                          };
+                        {ok, Cont} ->
+                          {
+                            Cont,
+                            fun(K) -> match_prefix(K, Prefix) andalso K >= Cont end
+                          };
+    
+                        error when Move =:= prev->
+                          {
+                            encode_key(PathParts, 16#7FFFFFFFFFFFFFFF, order_by_key),
+                            fun(K) -> match_prefix(K, Prefix) end
+                          };
+                        error ->
+                          {
+                            Prefix,
+                            fun(K) -> match_prefix(K, Prefix) end
+                          }
+                          
+                      end,
+  ReadOptions = [{snapshot, Snapshot}],
+  Ref = erlang:make_ref(),
+  %% wrapper function to retrieve the results from the iterator
+  PullFun =
+    fun(KeyBin, _, Acc) ->
+      erlang:put(Ref, KeyBin),
+      {Rid, _Pattern} = parse_rid(KeyBin, order_by_key),
+      Res = rocksdb:get(Store, barrel_keys:res_key(Rid), ReadOptions),
+      case Res of
+        {ok, Bin} ->
+          DocInfo = binary_to_term(Bin),
+          RevId = maps:get(current_rev, DocInfo),
+          Deleted = maps:get(deleted, DocInfo),
+          DocId = maps:get(id, DocInfo),
+          Rid = maps:get(rid, DocInfo),
+          RevTree = maps:get(revtree, DocInfo),
+          Changes = case WithHistory of
+                      false -> [RevId];
+                      true -> barrel_revtree:history(RevId, RevTree)
+                    end,
+          
+          Row = pull_with_deleted(
+            #{ <<"id">> => DocId,
+               <<"rev">> => RevId,
+               <<"changes">> => Changes },
+            Deleted
+          ),
+          [Row | Acc];
+        _Else ->
+          Acc
+      end
+    end,
+  
+  %% initialize the iterator
+  {ok, Itr} = rocksdb:iterator(Store, ReadOptions),
+  Next = fun() -> rocksdb:iterator_move(Itr, Move) end,
+  Start = case Move of
+            next -> rocksdb:iterator_move(Itr, First);
+            prev -> rocksdb:iterator_move(Itr, {seek_for_prev, First})
+          end,
+  
+  try do_pull(Start, Next, PullFun, [], RangeFun, Ref, Limit - 1)
+  after safe_iterator_close(Itr)
+  end.
+
+do_pull(Start, Next, PullFun, Acc, Cmp, Ref, Limit) ->
+  Result = pull_loop(Start, Next, PullFun, Acc, Cmp, Limit),
+  Cont = erlang:erase(Ref),
+  {Result, Cont}.
+
+pull_loop({error, iterator_closed}, _Next, _WrapperFun, Acc, _Cmp, _Limit) ->
+  Acc;
+pull_loop({error, invalid_iterator}, _Next, _WrapperFun, Acc, _Cmp, _Limit) ->
+  Acc;
+pull_loop({ok, K, V}, Next, WrapperFun, Acc0, Cmp, Limit) ->
+  case Cmp(K) of
+    true ->
+      case WrapperFun(K, V, Acc0) of
+        Acc1 when Limit > 0 ->
+          pull_loop(Next(), Next, WrapperFun, Acc1, Cmp, Limit - 1);
+        Acc1 -> Acc1
+      end;
+    false ->
+      Acc0
+  end.
+
+
+pull_with_deleted(Row, true) -> Row#{<<"deleted">> => true};
+pull_with_deleted(Row, _) -> Row.
+
+walk(#db{store=Store}, Path, UserFun, AccIn, Options) ->
+  {ok, Snapshot} = rocksdb:snapshot(Store),
+  try do_walk(Store, Snapshot, Path, UserFun, AccIn, Options)
+  after rocksdb:release_snapshot(Snapshot)
+  end.
+
+do_walk(Store, Snapshot, Path, UserFun, AccIn, Options0) ->
   Options1 = validate_options(Options0),
   PathParts = decode_path(Path, []),
   %% set fold options
@@ -72,8 +191,7 @@ walk_1(Store, Snapshot, Path, UserFun, AccIn, Options0) ->
   %% start folding
   try
     fold_loop(
-      Start,
-      Next, WrapperFun, AccIn, RangeFun, Limit - 1
+      Start, Next, WrapperFun, AccIn, RangeFun, Limit - 1
     )
   after safe_iterator_close(Itr)
   end.
