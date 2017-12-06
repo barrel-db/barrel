@@ -28,23 +28,31 @@ start_link() ->
 
 %% Child :: {Id,StartFunc,Restart,Shutdown,Type,Modules}
 init([]) ->
-  Manager =
-    #{id => barrel_replicate,
-      start => {barrel_replicate, start_link, []},
-      restart => permanent,
-      shutdown => 2000,
-      type => worker,
-      modules => [barrel_replicate]},
+  Specs = [ %%  replication manager to store replication tasks
+            #{id => barrel_replicate,
+              start => {barrel_replicate, start_link, []},
+              restart => permanent,
+              shutdown => 2000,
+              type => worker,
+              modules => [barrel_replicate]},
+            %% monitor replication nodes to pause the replication if needed
+            #{id => monitor,
+              start => {barrel_replicate_monitor, start_link, []},
+              restart => permanent,
+              shutdown => 2000,
+              type => worker,
+              modules => [barrel_replicator_monitor]
+            },
+            %% tasks supervisor
+            #{id => barrel_replicate_task_sup,
+              start => {barrel_replicate_task_sup, start_link, []},
+              restart => permanent,
+              shutdown => 2000,
+              type => supervisor,
+              modules => [barrel_replicate_task_sup]}
+          ],
 
-  TaskSup =
-    #{id => barrel_replicate_task_sup,
-      start => {barrel_replicate_task_sup, start_link, []},
-      restart => permanent,
-      shutdown => 2000,
-      type => supervisor,
-      modules => [barrel_replicate_task_sup]},
-
-    {ok, {{one_for_all, 0, 1}, [Manager, TaskSup]}}.
+    {ok, {{one_for_all, 0, 1}, Specs}}.
 
 %%====================================================================
 %% Internal functions

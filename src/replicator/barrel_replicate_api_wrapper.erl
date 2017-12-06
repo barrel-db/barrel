@@ -17,7 +17,8 @@
   revsdiff/3,
   subscribe_changes/3,
   await_change/2,
-  unsubscribe_changes/1
+  unsubscribe_changes/1,
+  get_sequences/4
 ]).
 
 -export([
@@ -60,16 +61,20 @@ await_change({_, _, _}=Stream, Timeout) ->
 await_change(Stream, Timeout) when is_pid(Stream)->
   case barrel:await_change(Stream, Timeout) of
     {end_stream, normal, LastSeq} -> {done, LastSeq};
-    {end_stream, _, LastSeq} -> {done, LastSeq};
+    {end_stream, _, LastSeq} -> {error, LastSeq};
     Change -> Change
   end.
-
 
 unsubscribe_changes({_, _, _} = Stream) ->
   barrel_rpc:unsubscribe_changes(Stream);
 unsubscribe_changes(Stream) ->
   barrel:unsubscribe_changes(Stream).
 
+
+get_sequences({Node, DbName}, SeqFrom, SeqTo, Opts) ->
+  rpc:call(Node, barrel, get_sequences, [SeqFrom, SeqTo, Opts]);
+get_sequences(DbName, SeqFrom, SeqTo, Opts) ->
+  barrel:get_sequences(DbName, SeqFrom, SeqTo, Opts)?
 
 %% ==============================
 %% barrel_replicate_checkpoint

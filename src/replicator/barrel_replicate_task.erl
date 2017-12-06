@@ -114,6 +114,10 @@ init(Parent, Config) ->
 
 loop(State = #st{parent=Parent, stream=Stream}) ->
   receive
+    pause ->
+      proc_lib:hibernate(?MODULE, loop, [State]);
+    resume ->
+      loop(State);
     {change, Stream, Change} ->
       NewState = handle_change(Change, State),
       loop(NewState);

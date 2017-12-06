@@ -54,7 +54,8 @@
   changes_since/4, changes_since/5,
   subscribe_changes/3,
   await_change/1, await_change/2,
-  unsubscribe_changes/1
+  unsubscribe_changes/1,
+  get_sequences/4
 ]).
 
 -export([
@@ -364,6 +365,22 @@ changes_since(Db, Since, Fun, Acc) ->
   Opts :: map().
 changes_since(Db, Since, Fun, Acc, Opts) ->
   barrel_db:changes_since(Db, Since, Fun, Acc, Opts).
+
+
+get_sequences(Db, SeqFrom, SeqTo, Opts) ->
+  Res = changes_since(
+    Db,
+    SeqFrom,
+    fun
+      (#{ <<"seq">> := Seq } = Change, Acc) when Seq =< SeqTo ->
+        {ok, [Change | Acc] };
+      (_, Acc) ->
+        {stop, Acc}
+    end,
+    [],
+    Opts
+  ),
+  lists:reverse(Res).
 
 subscribe_changes(DbId, Since, Options) ->
   {ok, Pid} = barrel_changes_sup:start_consumer(self(), DbId, Since, Options),
