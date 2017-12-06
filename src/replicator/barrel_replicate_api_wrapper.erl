@@ -72,9 +72,9 @@ unsubscribe_changes(Stream) ->
 
 
 get_sequences({Node, DbName}, SeqFrom, SeqTo, Opts) ->
-  rpc:call(Node, barrel, get_sequences, [SeqFrom, SeqTo, Opts]);
+  rpc:call(Node, barrel, get_sequences, [DbName, SeqFrom, SeqTo, Opts]);
 get_sequences(DbName, SeqFrom, SeqTo, Opts) ->
-  barrel:get_sequences(DbName, SeqFrom, SeqTo, Opts)?
+  barrel:get_sequences(DbName, SeqFrom, SeqTo, Opts).
 
 %% ==============================
 %% barrel_replicate_checkpoint
