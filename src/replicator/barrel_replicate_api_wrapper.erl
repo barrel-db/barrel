@@ -18,7 +18,8 @@
   subscribe_changes/3,
   await_change/2,
   unsubscribe_changes/1,
-  get_sequences/4
+  get_sequences/4,
+  database_infos/1
 ]).
 
 -export([
@@ -26,8 +27,6 @@
   get_system_doc/2,
   delete_system_doc/2
 ]).
-
-
 
 %% ==============================‡
 %% barrel_replicate_alg
@@ -76,6 +75,12 @@ get_sequences({Node, DbName}, SeqFrom, SeqTo, Opts) ->
 get_sequences(DbName, SeqFrom, SeqTo, Opts) ->
   barrel:get_sequences(DbName, SeqFrom, SeqTo, Opts).
 
+
+database_infos({Node, DbName}) ->
+  rpc:call(Node, barrel, database_infos, [DbName]);
+database_infos(DbName) ->
+  barrel:database_infos(DbName).
+
 %% ==============================
 %% barrel_replicate_checkpoint
 
@@ -94,3 +99,6 @@ delete_system_doc({Node, DbName}, Id) ->
   barrel_rpc:delete_system_doc(Node, DbName, Id);
 delete_system_doc(DbName, Id) ->
   barrel:delete_system_doc(DbName, Id).
+
+
+  

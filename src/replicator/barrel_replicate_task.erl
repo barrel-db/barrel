@@ -20,16 +20,20 @@
   info/1
 ]).
 
-%% gen_server API
+%% states API
 -export([
   init/2,
-  loop/1
+  wait_for_source/1,
+  wait_for_target/1,
+  wait_for_changes/1
 ]).
 
 %% internal api
 -export([
   replication_key/1,
-  stream_worker/3
+  stream_worker/3,
+  wait_for_resume/2,
+  loop_changes/1
 ]).
 
 -export([
@@ -49,6 +53,9 @@
   , stream
   , metrics
   , options
+  , last_seq
+  , keepalive
+  , config
 }).
 
 
@@ -84,6 +91,36 @@ stream_loop(Parent, Source, Stream) ->
       exit(normal)
   end.
 
+stop_stream_worker(Stream) when is_pid(Stream) ->
+  unlink(Stream),
+  MRef = erlang:monitor(process, Stream),
+  exit(Stream, shutdown),
+  receive
+    {'DOWN', MRef, process, Stream, shutdown} ->
+      ok
+  end;
+stop_stream_worker(_) ->
+  ok.
+
+nodes_to_watch(#{ source := {Source, _}, target := {Target, _} }) ->
+  [Source, Target];
+nodes_to_watch(#{ source := {Source, _} }) ->
+  [Source];
+nodes_to_watch(#{ target := {Target, _} }) ->
+  [Target];
+nodes_to_watch(_) ->
+  [].
+
+register_if_keepalive(#{ keepalive := true} = Config) ->
+  barrel_replicate_monitor:register(self(), nodes_to_watch(Config));
+register_if_keepalive(_) ->
+  ok.
+
+unregister_if_keepalive(#st{keepalive=true}) ->
+  barrel_replicate_monitor:unregister(self());
+unregister_if_keepalive(_) ->
+  ok.
+
 init(Parent, Config) ->
   process_flag(trap_exit, true),
   proc_lib:init_ack(Parent, {ok, self()}),
@@ -91,9 +128,102 @@ init(Parent, Config) ->
   %% extract config
   #{ id := RepId,
      source := Source,
-     target := Target } = Config,
-  Options = maps:get(options, Config, #{}),
+     target := Target} = Config,
+  KeepAlive = maps:get(keepalive, Config, false),
   _ = gproc:reg(replication_key(RepId)),
+  %% register if need to be kept alive
+  ok = register_if_keepalive(Config),
+  %% start loop
+  State = #st{ id = RepId,
+               source = Source,
+               target = Target,
+               parent = Parent,
+               keepalive = KeepAlive,
+               config = Config},
+  wait_for_source(State).
+
+
+wait_for_source(#st{ source = Db, keepalive = KeepAlive } = State) ->
+  case barrel_replicate_api_wrapper:database_infos(Db) of
+    {ok, _} ->
+      wait_for_target(State);
+    {bad_rpc, nodedown} ->
+      receive
+        Event -> handle_event(Event, wait_for_source, State)
+      end;
+    Error ->
+      case KeepAlive of
+        true ->
+          B = backoff:init(200, 20000, self(), ping),
+          B2 = backoff:type(B, jitter),
+          TRef = backoff:fire(B2),
+          wait_for_source(State, TRef, B2);
+        false ->
+          erlang:error({source_error, {Db, Error}})
+      end
+  end.
+
+wait_for_source(#st{ source = RemoteDb } = State, TRef, B ) ->
+  receive
+    {timeout, TRef, ping} ->
+      case barrel_replicate_api_wrapper:database_infos(RemoteDb) of
+        {ok, _} ->
+          wait_for_target(State);
+        {bad_rpc, nodedown} ->
+          receive
+            Event -> handle_event(Event, wait_for_source, State)
+          end;
+        _Error ->
+          {_, B2} = backoff:fail(B),
+          NewTref = backoff:fire(B2),
+          wait_for_source(State, NewTref, B2)
+      end;
+    Event ->
+      handle_event(Event, wait_for_source, State)
+  end.
+
+wait_for_target(#st{ target = Db, keepalive = KeepAlive } = State) ->
+  case barrel_replicate_api_wrapper:database_infos(Db) of
+    {ok, _} ->
+      wait_for_changes(State);
+    {bad_rpc, nodedown} ->
+      receive
+        Event -> handle_event(Event, wait_for_source, State)
+      end;
+    Error ->
+      case KeepAlive of
+        true ->
+          B = backoff:init(200, 20000, self(), ping),
+          B2 = backoff:type(B, jitter),
+          TRef = backoff:fire(B2),
+          wait_for_target(State, TRef, B2);
+        false ->
+          erlang:error({source_error, {Db, Error}})
+      end
+  end.
+
+wait_for_target(#st{ target = {_, _} = RemoteDb } = State, TRef, B ) ->
+  receive
+    {timeout, TRef, ping} ->
+      case barrel_replicate_api_wrapper:database_infos(RemoteDb) of
+        {ok, _} ->
+          wait_for_changes(State);
+        {bad_rpc, nodedown} ->
+          receive
+            Event -> handle_event(Event, wait_for_source, State)
+          end;
+        _Error ->
+          {_, B2} = backoff:fail(B),
+          NewTref = backoff:fire(B2),
+          wait_for_target(State, NewTref, B2)
+      end;
+    Event ->
+      handle_event(Event, wait_for_source, State)
+  end.
+
+
+wait_for_changes(#st{ source=Source, config=Config } = State0) ->
+  Options = maps:get(options, Config, #{}),
   %% init_metrics
   Metrics = barrel_replicate_metrics:new(),
   ok = barrel_replicate_metrics:create_task(Metrics, Options),
@@ -102,43 +232,82 @@ init(Parent, Config) ->
   Checkpoint = barrel_replicate_checkpoint:new(Config),
   StartSeq = barrel_replicate_checkpoint:get_start_seq(Checkpoint),
   Stream = spawn_stream_worker(Source, StartSeq),
-  %% start loop
-  State = #st{ id = RepId,
-               source = Source,
-               target = Target,
-               parent = Parent,
-               checkpoint=Checkpoint,
-               stream = Stream,
-               metrics = Metrics },
-  loop(State).
+  %% udpate the state
+  State1 = State0#st{ checkpoint = Checkpoint,
+                      stream = Stream,
+                      metrics = Metrics,
+                      last_seq = StartSeq},
+  loop_changes(State1).
 
-loop(State = #st{parent=Parent, stream=Stream}) ->
+loop_changes(State = #st{stream=Stream, parent=Parent, keepalive=KeepAlive}) ->
   receive
-    pause ->
-      proc_lib:hibernate(?MODULE, loop, [State]);
-    resume ->
-      loop(State);
     {change, Stream, Change} ->
       NewState = handle_change(Change, State),
-      loop(NewState);
-    {get_state, From} ->
-      _ = handle_get_state(From, State),
-      loop(State);
+      loop_changes(NewState);
+    pause ->
+      ok = stop_stream_worker(Stream),
+      proc_lib:hibernate(?MODULE, loop_changes, [State#st{stream=nil}]);
+    resume ->
+      #st{ source = Source, last_seq = LastSeq} = State,
+      Stream = spawn_stream_worker(Source, LastSeq),
+      loop_changes(State#st{ stream = Stream });
     stop ->
+      ok = unregister_if_keepalive(State),
       exit(normal);
+    {get_state, From} ->
+      ok = handle_get_state(From, State),
+      loop_changes(State);
+    {'EXIT', Stream, remote_down} ->
+      case KeepAlive of
+        true ->
+          loop_changes(State#st{stream=nil});
+        fakse ->
+          barrel_statistics:record_tick(num_replications_errors, 1),
+          NewState = handle_stream_exit(remote_down, State),
+          loop_changes(NewState)
+      end;
     {'EXIT', Stream, Reason} ->
       barrel_statistics:record_tick(num_replications_errors, 1),
       NewState = handle_stream_exit(Reason, State),
-      loop(NewState);
+      loop_changes(NewState);
     {'EXIT', Parent, Reason} ->
       terminate(Reason, State);
     {system, From, Request} ->
       sys:handle_system_msg(
         Request, From, Parent, ?MODULE, [],
-        {loop, State});
+        {loop_changes, State});
     Other ->
       _ = lager:error("~s: got unexpected message: ~p~n", [?MODULE_STRING, Other]),
       exit({unexpected_message, Other})
+  end.
+
+handle_event(Event, StateFun, #st{parent=Parent}=State) ->
+  case Event of
+    pause ->
+      proc_lib:hibernate(?MODULE, wait_for_resume, [StateFun, State#st{stream=nil}]);
+    resume ->
+      StateFun(State);
+    stop ->
+      ok = unregister_if_keepalive(State),
+      exit(normal);
+    {get_state, From} ->
+      ok = handle_get_state(From, State),
+      StateFun(State);
+    {'EXIT', Parent, Reason} ->
+      terminate(Reason, State);
+    {system, From, Request} ->
+      sys:handle_system_msg(
+        Request, From, Parent, ?MODULE, [],
+        {StateFun, State});
+    Other ->
+      _ = lager:error("~s: got unexpected message: ~p~n", [?MODULE_STRING, Other]),
+      exit({unexpected_message, Other})
+  end.
+
+wait_for_resume(StateFun, State) ->
+  receive
+    Event ->
+      handle_event(Event, StateFun, State)
   end.
 
 handle_change(Change, State) ->
@@ -148,8 +317,6 @@ handle_change(Change, State) ->
     checkpoint=Checkpoint,
     metrics=Metrics
   } = State,
-
-
   LastSeq = maps:get(<<"seq">>, Change),
   %% TODO: better handling of edge case, asserting is quite bad there
   true = (LastSeq > barrel_replicate_checkpoint:get_last_seq(Checkpoint)),
@@ -159,7 +326,7 @@ handle_change(Change, State) ->
   ),
   %% notify metrics
   barrel_replicate_metrics:update_task(NewMetrics),
-  State#st{ checkpoint=NewCheckpoint, metrics=NewMetrics }.
+  State#st{ checkpoint=NewCheckpoint, metrics=NewMetrics, last_seq=LastSeq }.
 
 handle_get_state({FromPid, FromTag}, State) ->
   #st{
@@ -196,12 +363,11 @@ handle_stream_exit(Reason, #st{ id = RepId} = State) ->
   ),
   exit(normal).
 
-
-system_continue(_, _, {loop, State}) ->
-  loop(State).
+system_continue(_, _, {StateFun, State}) ->
+  StateFun(State).
 
 -spec system_terminate(any(), _, _, _) -> no_return().
-system_terminate(Reason, _, _, {loop, State}) ->
+system_terminate(Reason, _, _, {_, State}) ->
   _ = lager:info("sytem terminate ~p~n", [State]),
   terminate(Reason, State).
 

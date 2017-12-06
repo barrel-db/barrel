@@ -10,7 +10,11 @@
 -author("benoitc").
 
 %% API
--export([start_link/0]).
+-export([
+  start_link/0,
+  register/2,
+  unregister/1
+]).
 
 -export([
   init/1,
@@ -23,11 +27,18 @@
 
 -define(TAB, replicator_by_nodes).
 -define(NODES, replicated_nodes).
+-define(SERVER, ?MODULE).
 
 -include_lib("stdlib/include/ms_transform.hrl").
 
 start_link() ->
-  gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
+  gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
+
+register(Pid, Nodes) ->
+  gen_server:call(?SERVER, {register, Pid, Nodes}).
+
+unregister(Pid) ->
+  gen_server:call(?SERVER, {unregister, Pid}).
 
 init([]) ->
   erlang:process_flag(trap_exit, true),
