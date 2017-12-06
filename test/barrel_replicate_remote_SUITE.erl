@@ -20,12 +20,14 @@
 ]).
 
 -export([
-  one_doc/1
+  one_doc/1,
+  keepalive_one_doc/1
 ]).
 
 all() ->
   [
-    one_doc
+    one_doc,
+    keepalive_one_doc
   ].
 
 init_per_suite(Config) ->
@@ -38,17 +40,16 @@ end_per_suite(Config) ->
   Config.
 
 init_per_testcase(_, Config) ->
-  {ok, _} = barrel:create_database(#{ <<"database_id">> => <<"sourcedb">> }),
-  ok = create_remote_db(Config),
   Config.
 
-end_per_testcase(_, Config) ->
-  ok = barrel:delete_database(<<"sourcedb">>),
-  ok = delete_remote_db(Config),
+end_per_testcase(_, _Config) ->
   ok.
 
 one_doc(Config) ->
+  Remote = remote(Config),
   TargetDb = target(Config),
+  {ok, _} = barrel:create_database(#{ <<"database_id">> => <<"sourcedb">> }),
+  ok = create_remote_db(Remote, #{ <<"database_id">> => <<"targetdb">> }),
   RepConfig = #{
     source => <<"sourcedb">>,
     target => TargetDb,
@@ -64,6 +65,38 @@ one_doc(Config) ->
   {ok, <<"a">>, _RevId_1} = delete_doc(<<"sourcedb">>, <<"a">>),
   
   {error, not_found} = delete_doc(TargetDb, <<"b">>),
+  barrel:delete_database(<<"sourcedb">>),
+  delete_remote_db(Remote, <<"targetdb">>),
+  ok.
+
+
+keepalive_one_doc(Config) ->
+  Remote = remote(Config),
+  TargetDb = target(Config),
+  {ok, _} = barrel:create_database(#{ <<"database_id">> => <<"sourcedb">> }),
+  RepConfig = #{
+                source => <<"sourcedb">>,
+                target => TargetDb,
+                options => #{ metrics_freq => 100 },
+                keepalive => true
+              },
+  {ok, #{ id := RepId }} = barrel_replicate:start_replication(RepConfig),
+  timer:sleep(200),
+  [{{barrel_replication_task, RepId},
+    {target_not_found, TargetDb}}] = alarm_handler:get_alarms(),
+  ok = create_remote_db(Remote, #{ <<"database_id">> => <<"targetdb">> }),
+  Doc = #{ <<"id">> => <<"a">>, <<"v">> => 1},
+  {ok, <<"a">>, _RevId} = barrel:post(<<"sourcedb">>, Doc, #{}),
+  timer:sleep(600),
+  [] = alarm_handler:get_alarms(),
+  {ok, Doc2, _} = barrel:get(<<"sourcedb">>, <<"a">>, #{}),
+  {ok, Doc2, _} = barrel_replicate_api_wrapper:get(TargetDb, <<"a">>, #{}),
+  ok = barrel_replicate:stop_replication(RepId),
+  {ok, <<"a">>, _RevId_1} = delete_doc(<<"sourcedb">>, <<"a">>),
+  
+  {error, not_found} = delete_doc(TargetDb, <<"b">>),
+  barrel:delete_database(<<"sourcedb">>),
+  delete_remote_db(Remote, <<"targetdb">>),
   ok.
 
 
@@ -94,15 +127,12 @@ stop_slave(Node) ->
   {ok, _} = ct_slave:stop(Node),
   ok.
 
-create_remote_db(Config) ->
-  {ok, _} = rpc:call(
-    remote(Config),
-    barrel, create_database, [#{ <<"database_id">> => <<"targetdb">>}]
-  ),
+create_remote_db(Node, Config) ->
+  {ok, _} = rpc:call(Node, barrel, create_database, [Config]),
   ok.
 
-delete_remote_db(Config) ->
-  rpc:call(remote(Config), barrel, delete_database, [<<"targetdb">>] ).
+delete_remote_db(Node, DbName) ->
+  rpc:call(Node, barrel, delete_database, [DbName] ).
 
 %% a hack to filter rebar path
 %% see https://github.com/erlang/rebar3/issues/1182

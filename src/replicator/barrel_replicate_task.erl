@@ -59,6 +59,8 @@
 }).
 
 
+-type state() :: #st{}.
+
 start_link(Config) ->
   proc_lib:start_link(?MODULE, init, [self(), Config]).
 
@@ -143,7 +145,7 @@ init(Parent, Config) ->
   wait_for_source(State).
 
 
-wait_for_source(#st{ source = Db, keepalive = KeepAlive } = State) ->
+wait_for_source(#st{ source = Db, keepalive = KeepAlive, id=Id } = State) ->
   case barrel_replicate_api_wrapper:database_infos(Db) of
     {ok, _} ->
       wait_for_target(State);
@@ -154,6 +156,7 @@ wait_for_source(#st{ source = Db, keepalive = KeepAlive } = State) ->
     Error ->
       case KeepAlive of
         true ->
+          alarm_handler:set_alarm({{barrel_replication_task, Id}, {source_not_found, Db}}),
           B = backoff:init(200, 20000, self(), ping),
           B2 = backoff:type(B, jitter),
           TRef = backoff:fire(B2),
@@ -163,13 +166,15 @@ wait_for_source(#st{ source = Db, keepalive = KeepAlive } = State) ->
       end
   end.
 
-wait_for_source(#st{ source = RemoteDb } = State, TRef, B ) ->
+wait_for_source(#st{ id=Id, source = RemoteDb } = State, TRef, B ) ->
   receive
     {timeout, TRef, ping} ->
       case barrel_replicate_api_wrapper:database_infos(RemoteDb) of
         {ok, _} ->
+          alarm_handler:clear_alarm({barrel_replication_task, Id}),
           wait_for_target(State);
         {bad_rpc, nodedown} ->
+          alarm_handler:clear_alarm({barrel_replication_task, Id}),
           receive
             Event -> handle_event(Event, wait_for_source, State)
           end;
@@ -182,7 +187,7 @@ wait_for_source(#st{ source = RemoteDb } = State, TRef, B ) ->
       handle_event(Event, wait_for_source, State)
   end.
 
-wait_for_target(#st{ target = Db, keepalive = KeepAlive } = State) ->
+wait_for_target(#st{ id=Id, target = Db, keepalive = KeepAlive } = State) ->
   case barrel_replicate_api_wrapper:database_infos(Db) of
     {ok, _} ->
       wait_for_changes(State);
@@ -193,6 +198,7 @@ wait_for_target(#st{ target = Db, keepalive = KeepAlive } = State) ->
     Error ->
       case KeepAlive of
         true ->
+          alarm_handler:set_alarm({{barrel_replication_task, Id}, {target_not_found, Db}}),
           B = backoff:init(200, 20000, self(), ping),
           B2 = backoff:type(B, jitter),
           TRef = backoff:fire(B2),
@@ -202,13 +208,15 @@ wait_for_target(#st{ target = Db, keepalive = KeepAlive } = State) ->
       end
   end.
 
-wait_for_target(#st{ target = {_, _} = RemoteDb } = State, TRef, B ) ->
+wait_for_target(#st{ id=Id, target = {_, _} = RemoteDb } = State, TRef, B ) ->
   receive
     {timeout, TRef, ping} ->
       case barrel_replicate_api_wrapper:database_infos(RemoteDb) of
         {ok, _} ->
+          alarm_handler:clear_alarm({barrel_replication_task, Id}),
           wait_for_changes(State);
         {bad_rpc, nodedown} ->
+          alarm_handler:clear_alarm({barrel_replication_task, Id}),
           receive
             Event -> handle_event(Event, wait_for_source, State)
           end;
@@ -239,21 +247,23 @@ wait_for_changes(#st{ source=Source, config=Config } = State0) ->
                       last_seq = StartSeq},
   loop_changes(State1).
 
-loop_changes(State = #st{stream=Stream, parent=Parent, keepalive=KeepAlive}) ->
+loop_changes(State = #st{id=Id, stream=Stream, parent=Parent, keepalive=KeepAlive}) ->
   receive
     {change, Stream, Change} ->
       NewState = handle_change(Change, State),
       loop_changes(NewState);
     pause ->
+      alarm_handler:set_alarm({{barrel_replication_task, Id}, paused}),
       ok = stop_stream_worker(Stream),
       proc_lib:hibernate(?MODULE, loop_changes, [State#st{stream=nil}]);
     resume ->
+      alarm_handler:clear_alarm({barrel_replication_task, Id}),
       #st{ source = Source, last_seq = LastSeq} = State,
       Stream = spawn_stream_worker(Source, LastSeq),
       loop_changes(State#st{ stream = Stream });
     stop ->
       ok = unregister_if_keepalive(State),
-      exit(normal);
+      cleanup_and_exit(State, normal);
     {get_state, From} ->
       ok = handle_get_state(From, State),
       loop_changes(State);
@@ -278,18 +288,20 @@ loop_changes(State = #st{stream=Stream, parent=Parent, keepalive=KeepAlive}) ->
         {loop_changes, State});
     Other ->
       _ = lager:error("~s: got unexpected message: ~p~n", [?MODULE_STRING, Other]),
-      exit({unexpected_message, Other})
+      cleanup_and_exit(State, {unexpected_message, Other})
   end.
 
-handle_event(Event, StateFun, #st{parent=Parent}=State) ->
+handle_event(Event, StateFun, #st{id=Id, parent=Parent}=State) ->
   case Event of
     pause ->
+      alarm_handler:set_alarm({{barrel_replication_task, Id}, paused}),
       proc_lib:hibernate(?MODULE, wait_for_resume, [StateFun, State#st{stream=nil}]);
     resume ->
+      alarm_handler:clear_alarm({barrel_replication_task, Id}),
       StateFun(State);
     stop ->
       ok = unregister_if_keepalive(State),
-      exit(normal);
+      cleanup_and_exit(State, normal);
     {get_state, From} ->
       ok = handle_get_state(From, State),
       StateFun(State);
@@ -301,7 +313,7 @@ handle_event(Event, StateFun, #st{parent=Parent}=State) ->
         {StateFun, State});
     Other ->
       _ = lager:error("~s: got unexpected message: ~p~n", [?MODULE_STRING, Other]),
-      exit({unexpected_message, Other})
+      cleanup_and_exit(State, {unexpected_message, Other})
   end.
 
 wait_for_resume(StateFun, State) ->
@@ -386,4 +398,9 @@ terminate(Reason, State) ->
   _ = barrel_replicate_metrics:update_task(Metrics),
   %% try to write the checkpoint if we can
   (catch barrel_replicate_checkpoint:write_checkpoint(Checkpoint)),
+  cleanup_and_exit(State, Reason).
+
+-spec cleanup_and_exit(state(), any()) -> no_return().
+cleanup_and_exit(#st{ id = Id}, Reason) ->
+  alarm_handler:clear_alarm({barrel_replication_task, Id}),
   erlang:exit(Reason).
