@@ -14,7 +14,8 @@
     rocksdb,
     uuid,
     gproc,
-    hooks
+    hooks,
+    ehash
    ]},
   {env, [
    {vm_memory_high_watermark, 0.4},

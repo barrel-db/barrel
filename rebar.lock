@@ -6,6 +6,7 @@
  {<<"hooks">>,{pkg,<<"hooks">>,<<"2.0.1">>},0},
  {<<"lager">>,{pkg,<<"lager">>,<<"3.2.4">>},0},
  {<<"quickrand">>,{pkg,<<"quickrand">>,<<"1.7.2">>},1},
+ {<<"recon">>,{pkg,<<"recon">>,<<"2.3.4">>},0},
  {<<"rocksdb">>,{pkg,<<"rocksdb">>,<<"0.13.1">>},0},
  {<<"uuid">>,{pkg,<<"uuid_erl">>,<<"1.7.2">>},0}]}.
 [
@@ -17,6 +18,7 @@
  {<<"hooks">>, <<"1C1FF88BFDA7460D2A4C6894DFF94AD83287B7CC2B5AC0FEF808B189843F0F6B">>},
  {<<"lager">>, <<"A6DEB74DAE7927F46BD13255268308EF03EB206EC784A94EAF7C1C0F3B811615">>},
  {<<"quickrand">>, <<"E856F3C69FEC00D1ACCA8E56CB452B650E838D3A9720811410F439121EFAFE59">>},
+ {<<"recon">>, <<"B406C2FCCDEAA0D94E23B5E30AE3D635A2D461E363A5C9C6316897037CF050D2">>},
  {<<"rocksdb">>, <<"14BAF1C240F4A678FA4CB0BF624016D5D12A4A0E3F09B8F52924ABDCE31FBD66">>},
  {<<"uuid">>, <<"D596C8DD01A4AE48B9D8D51832CCC8F8302BF67ACD01336AEC3FCFAE6B9D2BC2">>}]}
 ].
