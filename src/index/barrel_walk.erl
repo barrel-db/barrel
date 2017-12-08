@@ -66,16 +66,25 @@ pull_1(#db{id=DbId, store=Store}, Path, ContKey, Options, Snapshot) ->
                       end,
   Prefix = encode_key(PathParts, order_by_key),
   {First, RangeFun} = case ContKey of
-                        undefined when Move =:= prev ->
-                          {
-                            encode_key(PathParts, 16#7FFFFFFFFFFFFFFF, order_by_key),
-                            fun(K) -> match_prefix(K, Prefix) end
-                          };
                         undefined ->
-                          {
-                            Prefix,
-                            fun(K) -> match_prefix(K, Prefix) end
-                          };
+                          FirstParts = case maps:find(start_at, Options) of
+                                     {ok, StartAt} ->
+                                       PathParts ++ [StartAt];
+                                     error ->
+                                       PathParts
+                                   end,
+                          case Move of
+                            prev ->
+                              {
+                                encode_key(FirstParts, 16#7FFFFFFFFFFFFFFF, order_by_key),
+                                fun(K) -> match_prefix(K, Prefix) end
+                              };
+                            _ ->
+                              {
+                                encode_key(FirstParts, order_by_key),
+                                fun(K) -> match_prefix(K, Prefix) end
+                              }
+                          end;
                         _ when Move =:= prev ->
                           {
                             ContKey,
