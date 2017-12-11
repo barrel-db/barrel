@@ -139,8 +139,7 @@ do_unregister(Pid, State) ->
              _  = ets:delete(?TAB, {Node, Pid}),
              dec_node_refcount(Node)
            end || Node <- Nodes],
-      ok = stop_watchers(Nodes, State),
-      State
+      stop_watchers(Nodes, State)
   end.
 
 replica_is_down(Node, State = #{ tasks := Tasks, watchers := Watchers}) ->
@@ -176,10 +175,15 @@ stop_watchers([Node | Rest], State) ->
     true ->
       stop_watchers(Rest, State);
     false ->
-      {Watcher, Tasks2} = maps:take(Node, Tasks),
-      ok = stop_watcher(Watcher),
-      Watchers2 = maps:remove(Watcher, Watchers),
-      stop_watchers(Rest, State#{ tasks => Tasks2, watchers => Watchers2 })
+      case maps:take(Node, Tasks) of
+        {Watcher, Tasks2} ->
+          ok = stop_watcher(Watcher),
+          Watchers2 = maps:remove(Watcher, Watchers),
+          stop_watchers(Rest, State#{ tasks => Tasks2, watchers => Watchers2 });
+        error ->
+          %% no watcher for this node
+          stop_watchers(Rest, State)
+      end
   end;
 stop_watchers([], State) ->
   State.

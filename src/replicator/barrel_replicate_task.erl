@@ -54,7 +54,7 @@
   , metrics
   , options
   , last_seq
-  , keepalive
+  , keepalive=false
   , config
 }).
 
@@ -142,8 +142,16 @@ init(Parent, Config) ->
                parent = Parent,
                keepalive = KeepAlive,
                config = Config},
-  wait_for_source(State).
+  wait_registration(State).
 
+
+wait_registration(State) ->
+  receive
+    Event ->
+      handle_event(Event, wait_for_source, State)
+    after 0 ->
+      wait_for_source(State)
+  end.
 
 wait_for_source(#st{ source = Db, keepalive = KeepAlive, id=Id } = State) ->
   case barrel_replicate_api_wrapper:database_infos(Db) of
@@ -367,7 +375,7 @@ handle_stream_exit({{error, {shutdown ,db_down}}, _}, State) ->
   _ = lager:debug("~s, db shutdown:~n~p~n~n", [?MODULE_STRING, State]),
   cleanup_and_exit(State, normal);
 handle_stream_exit(Reason, #st{ id = RepId} = State) ->
-  _ = lager:debug(
+  _ = lager:info(
     "~s, ~p change stream exited:~p~n~p~n~n",
     [?MODULE_STRING, RepId, Reason, State]
   ),

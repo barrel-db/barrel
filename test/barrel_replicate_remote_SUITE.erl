@@ -89,9 +89,12 @@ keepalive_one_doc(Config) ->
   {ok, <<"a">>, _RevId} = barrel:post(<<"sourcedb">>, Doc, #{}),
   timer:sleep(1000),
   [] = alarm_handler:get_alarms(),
+  lager:info("i'm here ~n", []),
   {ok, Doc2, _} = barrel:get(<<"sourcedb">>, <<"a">>, #{}),
   {ok, Doc2, _} = barrel_replicate_api_wrapper:get(TargetDb, <<"a">>, #{}),
   ok = barrel_replicate:stop_replication(RepId),
+  lager:info("i'm here again ~n", []),
+  timer:sleep(100),
   {ok, <<"a">>, _RevId_1} = delete_doc(<<"sourcedb">>, <<"a">>),
   
   {error, not_found} = delete_doc(TargetDb, <<"b">>),
