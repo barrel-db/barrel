@@ -87,7 +87,7 @@ keepalive_one_doc(Config) ->
   ok = create_remote_db(Remote, #{ <<"database_id">> => <<"targetdb">> }),
   Doc = #{ <<"id">> => <<"a">>, <<"v">> => 1},
   {ok, <<"a">>, _RevId} = barrel:post(<<"sourcedb">>, Doc, #{}),
-  timer:sleep(600),
+  timer:sleep(1000),
   [] = alarm_handler:get_alarms(),
   {ok, Doc2, _} = barrel:get(<<"sourcedb">>, <<"a">>, #{}),
   {ok, Doc2, _} = barrel_replicate_api_wrapper:get(TargetDb, <<"a">>, #{}),
