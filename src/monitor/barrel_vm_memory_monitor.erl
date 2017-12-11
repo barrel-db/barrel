@@ -359,7 +359,6 @@ set_mem_limits(State, MemLimit) ->
       _ ->
         TotalMemory
     end,
-  lager:info("memlimit is ~p~n", [MemLimit]),
   MemLim = interpret_limit(parse_mem_limit(MemLimit), UsableMemory),
   _ = lager:info(
     "Memory high watermark set to ~p MiB (~p bytes)"
