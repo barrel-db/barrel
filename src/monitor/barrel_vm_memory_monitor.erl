@@ -359,6 +359,7 @@ set_mem_limits(State, MemLimit) ->
       _ ->
         TotalMemory
     end,
+  lager:info("memlimit is ~p~n", [MemLimit]),
   MemLim = interpret_limit(parse_mem_limit(MemLimit), UsableMemory),
   _ = lager:info(
     "Memory high watermark set to ~p MiB (~p bytes)"
@@ -376,6 +377,13 @@ interpret_limit(MemFraction, UsableMemory) ->
   trunc(MemFraction * UsableMemory).
 
 parse_mem_limit({absolute, Limit}) ->
+  case barrel_resource_monitor_misc:parse_information_unit(Limit) of
+    {ok, ParsedLimit} -> {absolute, ParsedLimit};
+    {error, parse_error} ->
+      _ = lager:error("Unable to parse vm_memory_high_watermark value ~p", [Limit]),
+      ?DEFAULT_VM_MEMORY_HIGH_WATERMARK
+  end;
+parse_mem_limit(Limit) when is_list(Limit) ->
   case barrel_resource_monitor_misc:parse_information_unit(Limit) of
     {ok, ParsedLimit} -> {absolute, ParsedLimit};
     {error, parse_error} ->
