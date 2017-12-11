@@ -21,7 +21,6 @@
   replicate/4
 ]).
 
-
 replicate(Source, Target, Changes, Metrics) ->
   {ok, Metrics2} = lists:foldl(fun(C, {ok, Acc}) ->
                            sync_change(Source, Target, C, Acc)

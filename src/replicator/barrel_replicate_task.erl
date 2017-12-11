@@ -262,7 +262,6 @@ loop_changes(State = #st{id=Id, stream=Stream, parent=Parent, keepalive=KeepAliv
       Stream = spawn_stream_worker(Source, LastSeq),
       loop_changes(State#st{ stream = Stream });
     stop ->
-      ok = unregister_if_keepalive(State),
       cleanup_and_exit(State, normal);
     {get_state, From} ->
       ok = handle_get_state(From, State),
@@ -300,7 +299,6 @@ handle_event(Event, StateFun, #st{id=Id, parent=Parent}=State) ->
       alarm_handler:clear_alarm({barrel_replication_task, Id}),
       StateFun(State);
     stop ->
-      ok = unregister_if_keepalive(State),
       cleanup_and_exit(State, normal);
     {get_state, From} ->
       ok = handle_get_state(From, State),
@@ -364,16 +362,16 @@ handle_get_state({FromPid, FromTag}, State) ->
   ok.
 
 -spec handle_stream_exit(_, _) -> no_return().
-handle_stream_exit({{error, {shutdown ,db_down}}, _}, _State) ->
+handle_stream_exit({{error, {shutdown ,db_down}}, _}, State) ->
   %% TODO: is this a normal condition ? We should probably retry there?
-  _ = lager:debug("~s, db shutdown:~n~p~n~n", [?MODULE_STRING, _State]),
-  exit(normal);
+  _ = lager:debug("~s, db shutdown:~n~p~n~n", [?MODULE_STRING, State]),
+  cleanup_and_exit(State, normal);
 handle_stream_exit(Reason, #st{ id = RepId} = State) ->
   _ = lager:debug(
     "~s, ~p change stream exited:~p~n~p~n~n",
     [?MODULE_STRING, RepId, Reason, State]
   ),
-  exit(normal).
+  cleanup_and_exit(State, normal).
 
 system_continue(_, _, {StateFun, State}) ->
   StateFun(State).
@@ -401,6 +399,7 @@ terminate(Reason, State) ->
   cleanup_and_exit(State, Reason).
 
 -spec cleanup_and_exit(state(), any()) -> no_return().
-cleanup_and_exit(#st{ id = Id}, Reason) ->
-  alarm_handler:clear_alarm({barrel_replication_task, Id}),
+cleanup_and_exit(State, Reason) ->
+  _ = unregister_if_keepalive(State),
+  alarm_handler:clear_alarm({barrel_replication_task, State#st.id}),
   erlang:exit(Reason).
