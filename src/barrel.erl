@@ -422,7 +422,7 @@ await_change(Pid, Timeout) ->
 unsubscribe_changes(Pid) ->
   _ = barrel_changes_sup:stop_consumer(Pid),
   LastSeq = erlang:erase({Pid, last_seq}),
-  {ok, LastSeq}.
+  {ok, LastSeq}.dd
 
 %% ==============================
 %% index operations

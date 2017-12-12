@@ -60,7 +60,7 @@ await_change({_, _, _}=Stream, Timeout) ->
 await_change(Stream, Timeout) when is_pid(Stream)->
   case barrel:await_change(Stream, Timeout) of
     {end_stream, normal, LastSeq} -> {done, LastSeq};
-    {end_stream, _, LastSeq} -> {error, LastSeq};
+    {end_stream, _, LastSeq} -> {done, LastSeq};
     Change -> Change
   end.
 
