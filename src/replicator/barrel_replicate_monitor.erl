@@ -125,7 +125,7 @@ check_connections([], _Pid, _Paused, State) ->
   State.
 
 maybe_pause(Pid, false) ->
-  Pid ! pause,
+  _ = (catch Pid ! pause),
   true = ets:update_element(?TAB, Pid, {3, true}),
   true;
 maybe_pause(_Pid, true) ->
