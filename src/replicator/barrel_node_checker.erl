@@ -20,12 +20,12 @@
   init/1,
   handle_call/3,
   handle_cast/2,
-  handle_info/2
-  
+  handle_info/2,
+  terminate/2
 ]).
 
 
--define(NODES, barrel_checked_nodes).
+-define(TAB, barrel_checked_nodes).
 
 -include_lib("stdlib/include/ms_transform.hrl").
 
@@ -41,23 +41,53 @@ demonitor_node(Node) ->
   gen_server:call(?MODULE, {demonitor_node, Node, self()}).
 
 start_link() ->
-  gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
+  IsNew = init_tab(),
+  gen_server:start_link({local, ?MODULE}, ?MODULE, [IsNew], []).
 
-init([]) ->
+init_tab() ->
+  case ets:info(?TAB, info) of
+    undefined ->
+      _ = ets:new(?TAB, [ordered_set, named_table, public]),
+      true;
+    _ ->
+      false
+  end.
+
+
+init([IsNew]) ->
   erlang:process_flag(trap_exit, true),
   net_kernel:monitor_nodes(true),
-  _ = ets:new(?NODES, [ordered_set, named_table]),
-  {ok, #{ nodes => #{}, workers => #{}}}.
+  InitState = #{ nodes => #{}, workers => #{}},
+  ok = remonitor(IsNew),
+  {ok, restart_checkers(InitState, IsNew)}.
 
+remonitor(true) -> ok;
+remonitor(false) ->
+  MS = ets:fun2ms(fun({Pid, m}) -> Pid end),
+  _ = [erlang:monitor(process, Pid) || Pid <- ets:select(?TAB, MS)],
+  ok.
+  
+restart_checkers(State, true) -> State;
+restart_checkers(State, false) ->
+  MS = ets:fun2ms(
+    fun({Node, Counter}) when is_atom(Node), is_integer(Counter) -> Node end
+  ),
+  lists:foldl(
+    fun(Node, State1) ->
+      maybe_start_checker(Node, State1)
+    end,
+    State,
+    ets:select(?TAB, MS)
+  ).
 
 handle_call({monitor_node, Node, Pid}, _From, State) ->
-  _ = ets:insert(?NODES, {{Node, Pid}, []}),
+  _ = ets:insert(?TAB, {{Node, Pid}, []}),
   _ = inc_ref_counter(Node),
   _ = maybe_monitor(Pid),
   NewState = maybe_start_checker(Node, State),
   {reply, ok, NewState};
 handle_call({demonitor_node, Node, Pid}, _From, State) ->
-  _ = ets:delete(?NODES, {Node, Pid}),
+  _ = ets:delete(?TAB, {Node, Pid}),
   NewState = case dec_ref_counter(Node) of
                0 -> maybe_stop_checker(Node, State);
                _ -> State
@@ -90,6 +120,10 @@ handle_info({'EXIT', Pid, Reason}, State) ->
   {noreply, NewState};
 handle_info(_Info, State) ->
   {noreply, State}.
+
+terminate(_State, _Reason) ->
+  _ = ets:delete(?TAB),
+  ok.
 
 
 maybe_start_checker(Node, State = #{ nodes := Nodes, workers := Workers}) ->
@@ -160,15 +194,15 @@ worker_loop(Node, TRef, B) ->
   end.
 
 inc_ref_counter(Node) ->
-  try ets:update_counter(?NODES, Node, {2, 1})
+  try ets:update_counter(?TAB, Node, {2, 1})
   catch
     error:badarg ->
-      true = ets:insert(?NODES, {Node, 1}),
+      true = ets:insert(?TAB, {Node, 1}),
       1
   end.
 
 dec_ref_counter(Node) ->
-  try ets:update_counter(?NODES, Node, {2, -1})
+  try ets:update_counter(?TAB, Node, {2, -1})
   catch
     error:badarg ->
       0
@@ -182,14 +216,14 @@ notify(Node, Event) ->
     || Pid <- ets:select(MS)].
 
 maybe_monitor(Pid) ->
-  case ets:insert_new(?NODES, {Pid, m}) of
+  case ets:insert_new(?TAB, {Pid, m}) of
     true -> ok;
     false ->
       erlang:monitor(process, Pid)
   end.
 
 process_is_down(Pid, State) ->
-  case ets:take(?NODES, Pid) of
+  case ets:take(?TAB, Pid) of
     [] -> ok;
     [_] ->
       MS = ets:fun2ms(
@@ -197,13 +231,13 @@ process_is_down(Pid, State) ->
       ),
       lists:foldl(
         fun({Node, _Pid}=NodeKey, State1) ->
-          _ = ets:delete(?NODES, NodeKey),
+          _ = ets:delete(?TAB, NodeKey),
           case dec_ref_counter(Node) of
             0 -> maybe_stop_checker(Node, State1);
             _ -> State1
           end
         end,
         State,
-        ets:select(?NODES, MS)
+        ets:select(?TAB, MS)
       )
   end.
