@@ -119,7 +119,7 @@ check_connections([Node | Rest], Pid, Paused, State) ->
                      Watchers2 = Watchers#{ Watcher => Watchers },
                      State#{ tasks => Tasks2, watchers => Watchers2 }
                  end,
-      check_connections(Rest, Pid, maybe_pause(Node, Paused), NewState)
+      check_connections(Rest, Pid, maybe_pause(Pid, Paused), NewState)
   end;
 check_connections([], _Pid, _Paused, State) ->
   State.
