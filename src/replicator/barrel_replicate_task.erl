@@ -23,8 +23,10 @@
 %% states API
 -export([
   init/2,
-  wait_for_source/1,
-  wait_for_target/1,
+  wait_for_resume/2,
+  wait_for_source/3,
+  wait_for_target/3,
+  wait_registration/1,
   wait_for_changes/1
 ]).
 
@@ -32,7 +34,6 @@
 -export([
   replication_key/1,
   stream_worker/3,
-  wait_for_resume/2,
   loop_changes/1
 ]).
 
@@ -329,15 +330,15 @@ handle_event(Event, StateFun, #st{id=Id, parent=Parent, status=Status}=State) ->
         "resumed replication ~p (~p) received ~p event. next state: ~p~n.",
         [Id, Status, Ev, StateFun]
       ),
-      StateFun(State);
+      erlang:apply(?MODULE, StateFun, [State]);
     {nodeup, _Node} ->
       alarm_handler:clear_alarm({barrel_replication_task, Id}),
-      StateFun(State#st{ status = active });
+      erlang:apply(?MODULE, StateFun, [State#st{ status = active }]);
     stop ->
       cleanup_and_exit(State, normal);
     {get_state, From} ->
       ok = handle_get_state(From, State),
-      StateFun(State);
+      erlang:apply(?MODULE, StateFun, [State]);
     {'EXIT', Parent, Reason} ->
       terminate(Reason, State);
     {system, From, Request} ->
@@ -409,7 +410,7 @@ handle_stream_exit(Reason, #st{ id = RepId} = State) ->
   cleanup_and_exit(State, normal).
 
 system_continue(_, _, {StateFun, State}) ->
-  StateFun(State).
+  erlang:apply(?MODULE, StateFun, [State]).
 
 -spec system_terminate(any(), _, _, _) -> no_return().
 system_terminate(Reason, _, _, {_, State}) ->
