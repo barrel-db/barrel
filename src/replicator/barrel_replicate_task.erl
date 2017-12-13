@@ -114,12 +114,14 @@ nodes_to_watch(_) ->
   [].
 
 register_if_keepalive(#{ keepalive := true} = Config) ->
-  barrel_replicate_monitor:register(self(), nodes_to_watch(Config));
+  _ = [barrel_node_checker:monitor_node(Node) || Node <- nodes_to_watch(Config)],
+  ok;
 register_if_keepalive(_) ->
   ok.
 
-unregister_if_keepalive(#st{keepalive=true}) ->
-  barrel_replicate_monitor:unregister(self());
+unregister_if_keepalive(#st{keepalive=true, config=Config}) ->
+  _ = [barrel_node_checker:demonitor_node(Node) || Node <- nodes_to_watch(Config)],
+  ok;
 unregister_if_keepalive(_) ->
   ok.
 
@@ -260,11 +262,11 @@ loop_changes(State = #st{id=Id, stream=Stream, parent=Parent, keepalive=KeepAliv
     {change, Stream, Change} ->
       NewState = handle_change(Change, State),
       loop_changes(NewState);
-    pause ->
+    {nodedown, _Node} ->
       alarm_handler:set_alarm({{barrel_replication_task, Id}, paused}),
       ok = stop_stream_worker(Stream),
       proc_lib:hibernate(?MODULE, loop_changes, [State#st{stream=nil}]);
-    resume ->
+    {nodeup, _Node} ->
       alarm_handler:clear_alarm({barrel_replication_task, Id}),
       #st{ source = Source, last_seq = LastSeq} = State,
       Stream = spawn_stream_worker(Source, LastSeq),
@@ -300,10 +302,10 @@ loop_changes(State = #st{id=Id, stream=Stream, parent=Parent, keepalive=KeepAliv
 
 handle_event(Event, StateFun, #st{id=Id, parent=Parent}=State) ->
   case Event of
-    pause ->
+    {nodedown, _Node} ->
       alarm_handler:set_alarm({{barrel_replication_task, Id}, paused}),
       proc_lib:hibernate(?MODULE, wait_for_resume, [StateFun, State#st{stream=nil}]);
-    resume ->
+    {nodeup, _Node} ->
       alarm_handler:clear_alarm({barrel_replication_task, Id}),
       StateFun(State);
     stop ->

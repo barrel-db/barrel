@@ -37,11 +37,11 @@ init([]) ->
               modules => [barrel_replicate]},
             %% monitor replication nodes to pause the replication if needed
             #{id => monitor,
-              start => {barrel_replicate_monitor, start_link, []},
+              start => {barrel_node_checker, start_link, []},
               restart => permanent,
               shutdown => 2000,
               type => worker,
-              modules => [barrel_replicator_monitor]
+              modules => [barrel_node_checker]
             },
             %% tasks supervisor
             #{id => barrel_replicate_task_sup,
