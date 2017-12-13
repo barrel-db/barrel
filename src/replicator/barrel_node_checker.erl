@@ -59,7 +59,8 @@ init([IsNew]) ->
   net_kernel:monitor_nodes(true),
   InitState = #{ nodes => #{}, workers => #{}},
   ok = remonitor(IsNew),
-  {ok, restart_checkers(InitState, IsNew)}.
+  ok = remonitor_nodes(IsNew),
+  {ok, InitState}.
 
 remonitor(true) -> ok;
 remonitor(false) ->
@@ -67,18 +68,13 @@ remonitor(false) ->
   _ = [erlang:monitor(process, Pid) || Pid <- ets:select(?TAB, MS)],
   ok.
   
-restart_checkers(State, true) -> State;
-restart_checkers(State, false) ->
+remonitor_nodes(true) -> ok;
+remonitor_nodes(false) ->
   MS = ets:fun2ms(
     fun({Node, Counter}) when is_atom(Node), is_integer(Counter) -> Node end
   ),
-  lists:foldl(
-    fun(Node, State1) ->
-      maybe_start_checker(Node, State1)
-    end,
-    State,
-    ets:select(?TAB, MS)
-  ).
+  _ = [erlang:monitor_node(Node, true) || Node <- ets:select(?TAB, MS)],
+  ok.
 
 handle_call({monitor_node, Node, Pid}, _From, State) ->
   _ = ets:insert(?TAB, {{Node, Pid}, []}),

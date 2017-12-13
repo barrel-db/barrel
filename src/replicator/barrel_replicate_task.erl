@@ -55,6 +55,7 @@
   , options
   , last_seq
   , keepalive=false
+  , status=active
   , config
 }).
 
@@ -257,20 +258,32 @@ wait_for_changes(#st{ source=Source, config=Config } = State0) ->
                       last_seq = StartSeq},
   loop_changes(State1).
 
-loop_changes(State = #st{id=Id, stream=Stream, parent=Parent, keepalive=KeepAlive}) ->
+loop_changes(State = #st{id=Id, stream=Stream, parent=Parent, keepalive=KeepAlive, status=Status}) ->
   receive
     {change, Stream, Change} ->
       NewState = handle_change(Change, State),
       loop_changes(NewState);
+    {nodedown, _Node}=Ev when Status =:= paused ->
+      _ = lager:warning(
+        "replication ~p (~p) received unexpected ~p event on state ~p~n.",
+        [Id, Status, Ev, loop_changes]
+      ),
+      proc_lib:hibernate(?MODULE, loop_changes, [State]);
     {nodedown, _Node} ->
       alarm_handler:set_alarm({{barrel_replication_task, Id}, paused}),
       ok = stop_stream_worker(Stream),
-      proc_lib:hibernate(?MODULE, loop_changes, [State#st{stream=nil}]);
+      proc_lib:hibernate(?MODULE, loop_changes, [State#st{stream=nil, status=paused}]);
+    {nodeup, _Node}=Ev when Status =:= active ->
+      _ = lager:warning(
+        "replication ~p (~p) received unexpected ~p event on state ~p~n.",
+        [Id, Status, Ev, loop_changes]
+      ),
+      loop_changes(State);
     {nodeup, _Node} ->
       alarm_handler:clear_alarm({barrel_replication_task, Id}),
       #st{ source = Source, last_seq = LastSeq} = State,
       Stream = spawn_stream_worker(Source, LastSeq),
-      loop_changes(State#st{ stream = Stream });
+      loop_changes(State#st{ stream = Stream, status=active });
     stop ->
       cleanup_and_exit(State, normal);
     {get_state, From} ->
@@ -300,14 +313,26 @@ loop_changes(State = #st{id=Id, stream=Stream, parent=Parent, keepalive=KeepAliv
       cleanup_and_exit(State, {unexpected_message, Other})
   end.
 
-handle_event(Event, StateFun, #st{id=Id, parent=Parent}=State) ->
+handle_event(Event, StateFun, #st{id=Id, parent=Parent, status=Status}=State) ->
   case Event of
+    {nodedown, _Node}=Ev when Status =:= paused ->
+      _ = lager:warning(
+        "replication ~p (~p) received ~p event on state ~p~n.",
+        [Id, Status, Ev, StateFun]
+      ),
+      proc_lib:hibernate(?MODULE, wait_for_resume, [StateFun, State]);
     {nodedown, _Node} ->
       alarm_handler:set_alarm({{barrel_replication_task, Id}, paused}),
-      proc_lib:hibernate(?MODULE, wait_for_resume, [StateFun, State#st{stream=nil}]);
+      proc_lib:hibernate(?MODULE, wait_for_resume, [StateFun, State#st{stream=nil, status=paused}]);
+    {nodeup, _Node}=Ev when Status =:= active ->
+      _ = lager:warning(
+        "resumed replication ~p (~p) received ~p event. next state: ~p~n.",
+        [Id, Status, Ev, StateFun]
+      ),
+      StateFun(State);
     {nodeup, _Node} ->
       alarm_handler:clear_alarm({barrel_replication_task, Id}),
-      StateFun(State);
+      StateFun(State#st{ status = active });
     stop ->
       cleanup_and_exit(State, normal);
     {get_state, From} ->
