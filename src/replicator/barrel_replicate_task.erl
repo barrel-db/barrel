@@ -271,7 +271,7 @@ loop_changes(State = #st{id=Id, stream=Stream, parent=Parent, status=Status}) ->
           ),
           _ = stop_stream_worker(Stream),
           _ = timer:sleep(1000),
-          wait_for_source(State#st{ stream = nil, status=paused})
+          wait_for_source(State#st{ stream = nil})
       end;
     {nodedown, _Node}=Ev when Status =:= paused ->
       _ = lager:warning(
