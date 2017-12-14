@@ -226,7 +226,7 @@ wait_for_target(#st{ id=Id, target = {_, _} = RemoteDb } = State, TRef, B ) ->
       case barrel_replicate_api_wrapper:database_infos(RemoteDb) of
         {ok, _} ->
           alarm_handler:clear_alarm({barrel_replication_task, Id}),
-          wait_for_changes(State);
+          wait_for_changes(State#{ status = active });
         {bad_rpc, nodedown} ->
           alarm_handler:clear_alarm({barrel_replication_task, Id}),
           receive
