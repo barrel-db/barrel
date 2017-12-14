@@ -39,7 +39,6 @@ sync_revision(Source, Target, DocId, Revision, Metrics) ->
   case read_doc_with_history(Source, DocId, Revision, Metrics) of
     {undefined, undefined, Metrics2} -> Metrics2;
     {Doc, Meta, Metrics2} ->
-      _ = lager:info("got ~p (~p)~n", [Doc, Meta]),
       History = barrel_doc:parse_revisions(Meta),
       Deleted = maps:get(<<"deleted">>, Meta, false),
       Metrics3 = write_doc(Target, Doc, History, Deleted, Metrics2),
