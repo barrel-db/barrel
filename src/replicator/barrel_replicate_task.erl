@@ -259,7 +259,7 @@ wait_for_changes(#st{ source=Source, config=Config } = State0) ->
                       last_seq = StartSeq},
   loop_changes(State1).
 
-loop_changes(State = #st{id=Id, stream=Stream, parent=Parent, keepalive=KeepAlive, status=Status}) ->
+loop_changes(State = #st{id=Id, stream=Stream, parent=Parent, status=Status}) ->
   receive
     {change, Stream, Change} ->
       NewState = handle_change(Change, State),
@@ -290,19 +290,9 @@ loop_changes(State = #st{id=Id, stream=Stream, parent=Parent, keepalive=KeepAliv
     {get_state, From} ->
       ok = handle_get_state(From, State),
       loop_changes(State);
-    {'EXIT', Stream, remote_down} ->
-      case KeepAlive of
-        true ->
-          loop_changes(State#st{stream=nil});
-        fakse ->
-          barrel_statistics:record_tick(num_replications_errors, 1),
-          NewState = handle_stream_exit(remote_down, State),
-          loop_changes(NewState)
-      end;
     {'EXIT', Stream, Reason} ->
       barrel_statistics:record_tick(num_replications_errors, 1),
-      NewState = handle_stream_exit(Reason, State),
-      loop_changes(NewState);
+      handle_stream_exit(Reason, State);
     {'EXIT', Parent, Reason} ->
       terminate(Reason, State);
     {system, From, Request} ->
@@ -398,16 +388,18 @@ handle_get_state({FromPid, FromTag}, State) ->
   ok.
 
 -spec handle_stream_exit(_, _) -> no_return().
-handle_stream_exit({{error, {shutdown ,db_down}}, _}, State) ->
-  %% TODO: is this a normal condition ? We should probably retry there?
-  _ = lager:debug("~s, db shutdown:~n~p~n~n", [?MODULE_STRING, State]),
-  cleanup_and_exit(State, normal);
-handle_stream_exit(Reason, #st{ id = RepId} = State) ->
+handle_stream_exit(Reason, #st{ id = RepId, keepalive = KeepAlive } = State) ->
   _ = lager:info(
     "~s, ~p change stream exited:~p~n~p~n~n",
     [?MODULE_STRING, RepId, Reason, State]
   ),
-  cleanup_and_exit(State, normal).
+  case KeepAlive of
+    true ->
+      wait_for_source(State#st{stream=nil});
+    false ->
+      barrel_statistics:record_tick(num_replications_errors, 1),
+      cleanup_and_exit(State, Reason)
+  end.
 
 system_continue(_, _, {StateFun, State}) ->
   erlang:apply(?MODULE, StateFun, [State]).
