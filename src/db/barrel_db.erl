@@ -429,7 +429,7 @@ put_system_doc(DbName, DocId, Doc) ->
     fun(#db{pid=Pid}) ->
       EncKey = barrel_keys:sys_key(DocId),
       EncVal = term_to_binary(Doc),
-      gen_server:call(Pid, {put, EncKey, EncVal})
+      gen_server:call(Pid, {put, EncKey, EncVal}, infinity)
     end
   ).
 
@@ -451,7 +451,7 @@ delete_system_doc(DbName, DocId) ->
     DbName,
     fun(#db{pid=Pid}) ->
       EncKey = barrel_keys:sys_key(DocId),
-      gen_server:call(Pid, {delete, EncKey})
+      gen_server:call(Pid, {delete, EncKey}, infinity)
     end
   ).
 
