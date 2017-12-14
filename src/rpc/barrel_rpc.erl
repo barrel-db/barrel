@@ -69,7 +69,7 @@ fetch_loop(Pid, Ref, MRef, Deadline, Fun, Acc) ->
 
 revsdiffs(Node, DbName, Fun, Acc, ToDiff, Options) ->
   Ref = cast(Node, self(), {revdiffs, DbName, ToDiff}),
-  Deadline = maps:get(deadline, Options, 5000),
+  Deadline = maps:get(deadline, Options, infinity),
   case recv(Ref, Deadline) of
     {start_stream, Pid} ->
       MRef = erlang:monitor(process, Pid),

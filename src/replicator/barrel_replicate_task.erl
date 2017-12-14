@@ -262,8 +262,17 @@ wait_for_changes(#st{ source=Source, config=Config } = State0) ->
 loop_changes(State = #st{id=Id, stream=Stream, parent=Parent, status=Status}) ->
   receive
     {change, Stream, Change} ->
-      NewState = handle_change(Change, State),
-      loop_changes(NewState);
+      try handle_change(Change, State)
+      catch
+        _:Reason ->
+          _ = lager:error(
+            "~s: error while processing the change ~p, replication stopped: ~p .~n",
+            [?MODULE_STRING, Change, Reason]
+          ),
+          _ = stop_stream_worker(Stream),
+          _ = timer:sleep(1000),
+          wait_for_source(State#st{ stream = nil, status=paused})
+      end;
     {nodedown, _Node}=Ev when Status =:= paused ->
       _ = lager:warning(
         "replication ~p (~p) received unexpected ~p event on state ~p~n.",
@@ -362,7 +371,9 @@ handle_change(Change, State) ->
   ),
   %% notify metrics
   barrel_replicate_metrics:update_task(NewMetrics),
-  State#st{ checkpoint=NewCheckpoint, metrics=NewMetrics, last_seq=LastSeq }.
+  loop_changes(
+    State#st{checkpoint=NewCheckpoint, metrics=NewMetrics, last_seq=LastSeq}
+  ).
 
 handle_get_state({FromPid, FromTag}, State) ->
   #st{
