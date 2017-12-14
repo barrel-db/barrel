@@ -56,7 +56,7 @@ init_tab() ->
 
 init([IsNew]) ->
   erlang:process_flag(trap_exit, true),
-  net_kernel:monitor_nodes(true),
+  ok = net_kernel:monitor_nodes(true),
   InitState = #{ nodes => #{}, workers => #{}},
   ok = remonitor(IsNew),
   ok = remonitor_nodes(IsNew),
@@ -208,8 +208,8 @@ notify(Node, Event) ->
   MS = ets:fun2ms(
     fun({N, P}) when N =:= Node -> P end
   ),
-  [erlang:send(Pid, {Node, Event})
-    || Pid <- ets:select(MS)].
+  _ = [erlang:send(Pid, {Node, Event}) || Pid <- ets:select(?TAB, MS)],
+  ok.
 
 maybe_monitor(Pid) ->
   case ets:insert_new(?TAB, {Pid, m}) of
