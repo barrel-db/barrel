@@ -173,6 +173,8 @@ maybe_start_replication(Config = #{ id := RepId}, State) ->
   case find_repid(RepId) of
     undefined ->
       do_start_replication(Config, State);
+    {ok, {false, _, _}} ->
+      do_start_replication(Config, State);
     {ok, {true, nil, nil}} ->
       do_start_replication(Config, State);
     {ok, {true, _Pid, _Ref}} ->
@@ -209,14 +211,15 @@ do_stop_replication(RepId) ->
     [{RepId, {_, nil, _}}] ->
       ok;
     [{RepId, {true, Pid, MRef}}] ->
-      ok = supervisor:terminate_child(barrel_replicate_task_sup, Pid),
-      true = erlang:demonitor(MRef, [flush]),
+      erlang:demonitor(MRef, [flush]),
+      _ = supervisor:terminate_child(barrel_replicate_task_sup, Pid),
+      erlang:demonitor(MRef, [flush]),
       true = ets:delete(replication_ids, Pid),
       true = ets:insert(replication_ids, {RepId, {true, nil, nil}}),
       ok;
     [{RepId, {false, Pid, MRef}}] ->
-      ok = supervisor:terminate_child(barrel_replicate_task_sup, Pid),
-      true = erlang:demonitor(MRef, [flush]),
+      erlang:demonitor(MRef, [flush]),
+      _ = supervisor:terminate_child(barrel_replicate_task_sup, Pid),
       true = ets:delete(replication_ids, Pid),
       ok
   end.

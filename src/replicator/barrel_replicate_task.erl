@@ -385,7 +385,7 @@ handle_get_state({FromPid, FromTag}, State) ->
   } = State,
   LastSeq = barrel_replicate_checkpoint:get_last_seq(Checkpoint),
   Checkpoints = case barrel_replicate_checkpoint:read_checkpoint_doc(Source, RepId) of
-                  {ok, Doc} ->  maps:get(<<"history">>, Doc);
+                 {ok, Doc} ->  maps:get(<<"history">>, Doc);
                   _Other -> []
                 end,
   Info = #{
@@ -431,6 +431,7 @@ terminate(Reason, State) ->
     metrics = Metrics,
     checkpoint = Checkpoint
   } = State,
+  _ = gproc:unreg(replication_key(RepId)),
   _ = lager:debug( "~s (~p} terminated: ~p", [?MODULE_STRING, RepId, Reason]),
   _ = barrel_replicate_metrics:update_task(Metrics),
   %% try to write the checkpoint if we can

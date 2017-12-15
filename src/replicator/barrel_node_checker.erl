@@ -206,7 +206,7 @@ dec_ref_counter(Node) ->
 
 notify(Node, Event) ->
   MS = ets:fun2ms(
-    fun({N, P}) when N =:= Node -> P end
+    fun({{N, P}, []}) when N =:= Node -> P end
   ),
   _ = [erlang:send(Pid, {Node, Event}) || Pid <- ets:select(?TAB, MS)],
   ok.
