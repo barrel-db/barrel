@@ -43,94 +43,61 @@ start_link() -> supervisor:start_link({local, ?SERVER}, ?MODULE, []).
 
 %% Child :: {Id,StartFunc,Restart,Shutdown,Type,Modules}
 init([]) ->
-  _ = ets:new(barrel_dbs, [ordered_set, named_table, public, {keypos, #db.id}]),
   
-  MonitorSup =
-    #{id => alarm_sup_sup,
-      start => {barrel_monitor_sup, start_link, []},
-      restart => permanent,
-      shutdown => infinity,
-      type => worker,
-      module => [barrel_alarm_sup]
-    },
+  Specs = [%% extensions supervisor
+           #{id => barrel_ext_sup,
+             start => {barrel_ext_sup, start_link, []},
+             restart => permanent,
+             shutdown => infinity,
+             type => supervisor,
+             modules => [barrel_ext_sup]},
 
-  Statistics =
-    #{
-      id => statistics,
-      start => {barrel_statistics, start_link, []},
-      restart => permanent,
-      shutdown => infinity,
-      type => worker,
-      module => [barrel_statistics]
-    },
+           %% persist time server
+           #{
+             id => persist_time_server,
+             start => {barrel_ts, start_link, []},
+             restart => permanent,
+             shutdown => 5000,
+             type => worker,
+             modules => [barrel_flake_ts]
+           },
 
-  DbSup = #{id => barrel_db_sup,
-    start => {barrel_db_sup, start_link, []},
-    restart => permanent,
-    shutdown => infinity,
-    type => supervisor,
-    modules => [barrel_db_sup]},
-
-  Store =
-    #{
-      id => barrel_store,
-      start => {barrel_store, start_link, []},
-      restart => permanent,
-      shutdown => 2000,
-      type => worker,
-      modules => [barrel_store]
-    },
-  
-  ChangesSup =
-    #{id => changes_sup,
-      start => {barrel_changes_sup, start_link, []},
-      restart => permanent,
-      shutdown => infinity,
-      type => supervisor,
-      modules => [barrel_local_changes_sup]},
-
-  Event = #{id => barrel_event,
-            start => {barrel_event, start_link, []},
-            restart => permanent,
-            shutdown => infinity,
-            type => worker,
-            modules => [barrel_event]},
-  
-  Rpc = #{id => barrel_rpc,
-          start => {barrel_rpc, start_link, []},
-          restart => permanent,
-          shutdown => infinity,
-          type => worker,
-          modules => [barrel_rpc]},
-
-  ReplicateSup =
-    #{id => barrel_replicate_sup,
-      start => {barrel_replicate_sup, start_link, []},
-      restart => permanent,
-      shutdown => infinity,
-      type => supervisor,
-      modules => [barrel_replicate_sup]},
-  
-  PersistTimeServer = #{
-    id => persist_time_server,
-    start => {barrel_ts, start_link, []},
-    restart => permanent,
-    shutdown => 5000,
-    type => worker,
-    modules => [barrel_flake_ts]
-  },
+           %% stats
+           #{
+             id => statistics,
+             start => {barrel_statistics, start_link, []},
+             restart => permanent,
+             shutdown => infinity,
+             type => worker,
+             module => [barrel_statistics]
+           },
+           
+           
+           %% main jobs supervisor
+           #{id => barrel_jobs_sup,
+             start => {barrel_jobs_sup, start_link, []},
+             restart => permanent,
+             shutdown => infinity,
+             type => supervisor,
+             modules => [barrel_jobs_sup]},
+           %% barrel containers supervisor
+           #{id => barrel_db_sup,
+             start => {barrel_db_sup, start_link, []},
+             restart => permanent,
+             shutdown => infinity,
+             type => supervisor,
+             modules => [barrel_db_sup]
+           },
+           %% storage manager
+           #{id => barrel_storage,
+             start => {barrel_storage, start_link, []},
+             restart => transient,
+             shutdown => 2000,
+             type => worker,
+             modules => [barrel_storage]
+           }
+          ],
   
   
-  Specs = [
-    MonitorSup,
-    Statistics,
-    PersistTimeServer,
-    ChangesSup,
-    Store,
-    DbSup,
-    Event,
-    Rpc,
-    ReplicateSup
-  ],
   
-  {ok, { {one_for_one, 4, 3600}, Specs} }.
+  {ok, { {one_for_one, 4, 2000}, Specs} }.

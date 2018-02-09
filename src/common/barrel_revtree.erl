@@ -1,4 +1,4 @@
-%% Copyright 2016, Benoit Chesneau
+%% Copyright (c) 2016-2017, Benoit Chesneau
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License"); you may not
 %% use this file except in compliance with the License. You may obtain a copy of
@@ -15,7 +15,7 @@
 -module(barrel_revtree).
 
 -export([
-  new/0, new/1
+    new/0, new/1
   , add/2
   , contains/2
   , info/2
@@ -119,31 +119,31 @@ is_exists(_) -> true.
 
 winning_revision(Tree) ->
   {Winner, _WinnerExists, LeafCount, ActiveLeafCount} =
-  fold_leafs(fun(#{id := Id} = RevInfo, {W, WE, LC, ALC}) ->
-                 Exists = is_exists(RevInfo),
-                 LC2 = LC + 1,
-                 ALC2 = case Exists of
-                          true -> ALC + 1;
-                          false -> ALC
-                        end,
-                 {W2, WE2} = case {Exists, WE} of
-                               {true, false} -> {Id, Exists};
-                               {WE, _} ->
-                                 case barrel_doc:compare(Id, W) of
-                                   R when R > 0 -> {Id, Exists};
-                                   _ -> {W, WE}
-                                 end;
-                               _ -> {W, WE}
-                             end,
-                 {W2, WE2, LC2, ALC2}
-             end, {<<"">>, false, 0, 0}, Tree),
+    fold_leafs(fun(#{id := Id} = RevInfo, {W, WE, LC, ALC}) ->
+      Exists = is_exists(RevInfo),
+      LC2 = LC + 1,
+      ALC2 = case Exists of
+               true -> ALC + 1;
+               false -> ALC
+             end,
+      {W2, WE2} = case {Exists, WE} of
+                    {true, false} -> {Id, Exists};
+                    {WE, _} ->
+                      case barrel_doc:compare(Id, W) of
+                        R when R > 0 -> {Id, Exists};
+                        _ -> {W, WE}
+                      end;
+                    _ -> {W, WE}
+                  end,
+      {W2, WE2, LC2, ALC2}
+               end, {<<"">>, false, 0, 0}, Tree),
   Branched = (LeafCount > 1),
   Conflict = (ActiveLeafCount > 1),
   {Winner, Branched, Conflict}.
 
 
 prune(Depth, Tree) ->
-	prune(Depth, <<"">>, Tree).
+  prune(Depth, <<"">>, Tree).
 
 prune(Depth, KeepRev, Tree) ->
   Sz = maps:size(Tree),
@@ -155,16 +155,16 @@ prune(Depth, KeepRev, Tree) ->
 
 do_prune(Depth, KeepRev, Tree) ->
   {MinPos0, MaxDeletedPos} = fold_leafs(fun(#{id := RevId}=RevInfo, {MP, MDP}) ->
-                                            Deleted = is_deleted(RevInfo),
-                                            {Pos, _} = barrel_doc:parse_revision(RevId),
-                                            case Deleted of
-                                              true when Pos > MDP ->
-                                                {MP, Pos};
-                                              _ when Pos > 0, Pos < MP ->
-                                                {Pos, MDP};
-                                              _ ->
-                                                {MP, MDP}
-                                            end
+    Deleted = is_deleted(RevInfo),
+    {Pos, _} = barrel_doc:parse_revision(RevId),
+    case Deleted of
+      true when Pos > MDP ->
+        {MP, Pos};
+      _ when Pos > 0, Pos < MP ->
+        {Pos, MDP};
+      _ ->
+        {MP, MDP}
+    end
                                         end, {?IMAX1, 0}, Tree),
   MinPos = if
              MinPos0 =:= ?IMAX1 -> MaxDeletedPos;
@@ -179,16 +179,16 @@ do_prune(Depth, KeepRev, Tree) ->
   if
     MinPosToKeep > 1 ->
       maps:fold(fun(RevId, RevInfo, {N, NewTree}) ->
-                    {Pos, _} = barrel_doc:parse_revision(RevId),
-                    if
-                      Pos < MinPosToKeep ->
-                        {N + 1, maps:remove(RevId, NewTree)};
-                      Pos =:= MinPosToKeep ->
-                        RevInfo2 = RevInfo#{parent => <<"">>},
-                        {N, NewTree#{RevId => RevInfo2}};
-                      true ->
-                        {N, NewTree}
-                    end
+        {Pos, _} = barrel_doc:parse_revision(RevId),
+        if
+          Pos < MinPosToKeep ->
+            {N + 1, maps:remove(RevId, NewTree)};
+          Pos =:= MinPosToKeep ->
+            RevInfo2 = RevInfo#{parent => <<"">>},
+            {N, NewTree#{RevId => RevInfo2}};
+          true ->
+            {N, NewTree}
+        end
                 end, {0, Tree}, Tree);
     true ->
       {0, Tree}
@@ -228,7 +228,7 @@ parent_test() ->
 add_test() ->
   NewRev = #{ id => <<"4-four">>, parent => <<"3-three">> },
   NewTree = barrel_revtree:add(NewRev, ?FLAT_TREE),
-
+  
   ?assert(barrel_revtree:contains(<<"4-four">>, NewTree)),
   ?assertEqual(<<"3-three">>, barrel_revtree:parent(<<"4-four">>, NewTree)),
   ?assertError({badrev, already_exists}, barrel_revtree:add(NewRev, NewTree)),
@@ -236,21 +236,21 @@ add_test() ->
                barrel_revtree:add(#{ id => <<"6-six">>, parent => <<"5-five">>}, NewTree)).
 
 leafs_test() ->
-    ?assertEqual([<<"3-three">>, <<"3-three-2">>], lists:sort(barrel_revtree:leaves(?BRANCHED_TREE))),
-    NewTree = barrel_revtree:add(#{ id => <<"4-four">>, parent => <<"3-three">>},?BRANCHED_TREE),
-    ?assertEqual([<<"3-three-2">>, <<"4-four">>], lists:sort(barrel_revtree:leaves(NewTree))),
-    NewTree2 = barrel_revtree:add(#{ id => <<"5-five">>, parent => <<"4-four">>, deleted => true }, NewTree),
-    ?assertEqual([<<"3-three-2">>, <<"5-five">>],  lists:sort(barrel_revtree:leaves(NewTree2))).
+  ?assertEqual([<<"3-three">>, <<"3-three-2">>], lists:sort(barrel_revtree:leaves(?BRANCHED_TREE))),
+  NewTree = barrel_revtree:add(#{ id => <<"4-four">>, parent => <<"3-three">>},?BRANCHED_TREE),
+  ?assertEqual([<<"3-three-2">>, <<"4-four">>], lists:sort(barrel_revtree:leaves(NewTree))),
+  NewTree2 = barrel_revtree:add(#{ id => <<"5-five">>, parent => <<"4-four">>, deleted => true }, NewTree),
+  ?assertEqual([<<"3-three-2">>, <<"5-five">>],  lists:sort(barrel_revtree:leaves(NewTree2))).
 
 history_test() ->
   ?assertEqual([<<"3-three">>, <<"2-two">>, <<"1-one">>],  barrel_revtree:history(<<"3-three">>, ?FLAT_TREE)).
 
 winning_revision_test() ->
-    ?assertEqual({<<"3-three-2">>, true, true}, barrel_revtree:winning_revision(?BRANCHED_TREE)),
-    NewTree = barrel_revtree:add(#{ id => <<"4-four">>, parent => <<"3-three">>},?BRANCHED_TREE),
-    ?assertEqual({<<"4-four">>, true, true}, barrel_revtree:winning_revision(NewTree)),
-    NewTree2 = barrel_revtree:add(#{ id => <<"5-five">>, parent => <<"4-four">>, deleted => true }, NewTree),
-    ?assertEqual({<<"3-three-2">>, true, false},  barrel_revtree:winning_revision(NewTree2)).
+  ?assertEqual({<<"3-three-2">>, true, true}, barrel_revtree:winning_revision(?BRANCHED_TREE)),
+  NewTree = barrel_revtree:add(#{ id => <<"4-four">>, parent => <<"3-three">>},?BRANCHED_TREE),
+  ?assertEqual({<<"4-four">>, true, true}, barrel_revtree:winning_revision(NewTree)),
+  NewTree2 = barrel_revtree:add(#{ id => <<"5-five">>, parent => <<"4-four">>, deleted => true }, NewTree),
+  ?assertEqual({<<"3-three-2">>, true, false},  barrel_revtree:winning_revision(NewTree2)).
 
 prune_test() ->
   Tree = barrel_revtree:add(#{ id => <<"4-four">>, parent => <<"3-three-2">> }, ?BRANCHED_TREE),
@@ -260,7 +260,7 @@ prune_test() ->
   ?assertEqual(4, maps:size(Tree1)),
   ?assertEqual(false, barrel_revtree:contains(<<"1-one">>, Tree1)),
   ?assertEqual(<<"">>, maps:get(parent, maps:get(<<"2-two">>, Tree1))),
-
+  
   %% make sure merged conflicts don't prevevent prunint
   {1, Tree2} = barrel_revtree:prune(1, "", Tree1),
   ?assertEqual(3, maps:size(Tree2)),
@@ -268,17 +268,17 @@ prune_test() ->
   ?assertEqual(<<"">>, maps:get(parent, maps:get(<<"3-three">>, Tree2))),
   ?assertEqual(true, barrel_revtree:contains(<<"4-four">>, Tree2)),
   ?assertEqual(<<"3-three-2">>, maps:get(parent, maps:get(<<"4-four">>, Tree2))),
-
-
+  
+  
   TreeB = lists:foldl(fun(Rev, T) ->
-                          barrel_revtree:add(Rev, T)
+    barrel_revtree:add(Rev, T)
                       end,
                       ?BRANCHED_TREE,
                       [#{ id => <<"4-four-2">>, parent => <<"3-three-2">>, deleted => true},
                        #{ id => <<"4-four">>, parent => <<"3-three">>},
                        #{ id => <<"5-five">>, parent => <<"4-four">> },
                        #{ id => <<"6-six">>, parent => <<"5-five">> }]),
-
+  
   {0, TreeB} = barrel_revtree:prune(3, <<"1-one">>, TreeB),
   {1, TreeB1} = barrel_revtree:prune(3, <<"2-two">>, TreeB),
   {3, TreeB2} = barrel_revtree:prune(3, <<"">>, TreeB1),
@@ -288,14 +288,14 @@ prune_test() ->
   ?assertEqual(<<"5-five">>, maps:get(parent, maps:get(<<"6-six">>, TreeB3))),
   
   TreeC = maps:map(fun(RevId, RevInfo) ->
-                       case lists:member(RevId, [<<"3-three">>, <<"3-three-2">>]) of
-                         true ->
-                           RevInfo#{deleted => true};
-                         false ->
-                           RevInfo
-                       end
+    case lists:member(RevId, [<<"3-three">>, <<"3-three-2">>]) of
+      true ->
+        RevInfo#{deleted => true};
+      false ->
+        RevInfo
+    end
                    end, ?BRANCHED_TREE),
-
+  
   {0, TreeC} = barrel_revtree:prune(3, <<"">>, TreeC),
   {1, _} = barrel_revtree:prune(2, <<"">>, TreeC),
   ok.

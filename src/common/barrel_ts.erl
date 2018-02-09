@@ -140,7 +140,7 @@ persist_file() ->
                    undefined -> ?DEFAULT_CONFIG;
                    {ok, P} -> P
                  end,
-      FullPath = filename:join(barrel_store:data_dir(), FileName),
+      FullPath = filename:join(barrel_lib:data_dir(), FileName),
       ok = filelib:ensure_dir(FullPath),
       FullPath
   end.

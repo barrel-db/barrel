@@ -1,50 +1,29 @@
 
 -define(DATA_DIR, "data").
 
--define(default_fold_options,
-  #{
-    start_key => nil,
-    end_key => nil,
-    gt => nil,
-    gte => nil,
-    lt => nil,
-    lte => nil,
-    max => 0,
-    move => next
-  }
-).
+-define(IMAX1, 16#ffffFFFFffffFFFF).
 
--record(db, {
-  name = <<>>,
-  id = <<>>,
-  path = <<>>,
-  db_opts = [],
-  conf = #{},
-  pid = nil,
-  ref = nil,
-  store = nil,
-  last_rid = 0,
-  updated_seq = 0,
-  docs_count = 0,
-  system_docs_count = 0,
-  deleted_count = 0,
-  deleted = false,
-  write_buffer_size = 64 * 1024 * 1024,
-  write_interval = 200
+-define(jobs_broker, barrel_jobs_broker).
+-define(jobs_pool, barrel_jobs_pool).
+
+%% jobs limit
+-define(JOBS_QUEUE_LIMIT, 128).
+-define(JOBS_QUEUE_TIMEOUT, 5000).
+-define(JOBS_IDLE_MIN_LIMIT, 32).
+-define(JOBS_IDLE_MAX_LIMIT, 128).
+
+-define(barrel(Id), {via, gproc, n, l, {barrel_db, Id}}).
+
+-record(write_op, {
+  type = merge :: merge | merge_with_conflict,
+  doc :: map(),
+  from :: {pid(), reference()}
 }).
 
 
-%% db metadata
--define(DB_INFO, 1).
 
--define(DEFAULT_CHANGES_SIZE, 200).
-
--record(doc, {
-  id :: binary(),
-  revs :: [binary()],
-  body :: map(),
-  deleted = false :: boolean()
-}).
+-define(MIN_ITEM_COUNT, 100).
+-define(MAX_ITEM_COUNT, 1000).
 
 
 -define(MAX_WAIT, 16#ffffffff).

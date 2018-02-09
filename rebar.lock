@@ -8,6 +8,7 @@
  {<<"quickrand">>,{pkg,<<"quickrand">>,<<"1.7.2">>},1},
  {<<"recon">>,{pkg,<<"recon">>,<<"2.3.4">>},0},
  {<<"rocksdb">>,{pkg,<<"rocksdb">>,<<"0.13.1">>},0},
+ {<<"sbroker">>,{pkg,<<"sbroker">>,<<"1.0.0">>},0},
  {<<"uuid">>,{pkg,<<"uuid_erl">>,<<"1.7.2">>},0}]}.
 [
 {pkg_hash,[
@@ -20,5 +21,6 @@
  {<<"quickrand">>, <<"E856F3C69FEC00D1ACCA8E56CB452B650E838D3A9720811410F439121EFAFE59">>},
  {<<"recon">>, <<"B406C2FCCDEAA0D94E23B5E30AE3D635A2D461E363A5C9C6316897037CF050D2">>},
  {<<"rocksdb">>, <<"14BAF1C240F4A678FA4CB0BF624016D5D12A4A0E3F09B8F52924ABDCE31FBD66">>},
+ {<<"sbroker">>, <<"28FF1B5E58887C5098539F236307B36FE1D3EDAA2ACFF9D6A3D17C2DCAFEBBD0">>},
  {<<"uuid">>, <<"D596C8DD01A4AE48B9D8D51832CCC8F8302BF67ACD01336AEC3FCFAE6B9D2BC2">>}]}
 ].
