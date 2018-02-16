@@ -30,7 +30,8 @@
   fetch_doc/1,
   fetch_revision/1,
   write_changes/1,
-  write_conflict/1
+  write_conflict/1,
+  purge_doc/1
 ]).
 
 all() ->
@@ -40,7 +41,8 @@ all() ->
     fetch_doc,
     fetch_revision,
     write_changes,
-    write_conflict
+    write_conflict,
+    purge_doc
   ].
 
 init_per_suite(Config) ->
@@ -209,3 +211,16 @@ write_conflict(_Config) ->
   ok = barrel:destroy_barrel(Store, BarrelId),
   ok.
 
+purge_doc(_Config) ->
+  Store = default,
+  BarrelId = <<"testdb">>,
+  Batch = [
+    {create, #{ <<"id">> => <<"a">>, <<"k">> => <<"v">>}}
+  ],
+  {ok, DbRef} = barrel:get_barrel(Store, BarrelId),
+  [#{ <<"id">> := <<"a">> }] = barrel_db:write_changes(DbRef, Batch),
+  {ok, #{ <<"id">> := <<"a">> }} = barrel_db:fetch_doc(DbRef, <<"a">>, #{}),
+  ok = barrel_db:purge_doc(DbRef, <<"a">>),
+  {error, not_found} = barrel:fetch_doc(DbRef, <<"a">>, #{}),
+  ok = barrel:destroy_barrel(Store, BarrelId),
+  ok.

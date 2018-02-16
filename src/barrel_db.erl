@@ -20,7 +20,8 @@
   start_link/1,
   db_infos/1,
   fetch_doc/3,
-  write_changes/2
+  write_changes/2,
+  purge_doc/2
 ]).
 
 -export([
@@ -79,6 +80,17 @@ await_response(DbPid, Tag) ->
   after 5000 ->
     erlang:error(timeout)
   end.
+
+purge_doc(DbRef, DocId) ->
+  Tag = make_ref(),
+  From = {self(), Tag},
+  do_for_ref(
+    DbRef,
+    fun(DbPid) ->
+      ok = gen_statem:cast(DbPid, {purge_doc, DocId, From}),
+      await_response(DbPid, Tag)
+    end
+  ).
 
 write_changes(DbRef, Batch) ->
   Tag = make_ref(),
@@ -303,6 +315,9 @@ handle_event({call, From}, infos, _State, #{ state := State } = Data) ->
   {keep_state, Data, [{reply, From, State}]};
 handle_event({call, From}, get_state, _State, #{ state := State } = Data) ->
   {keep_state, Data, [{reply, From, State}]};
+handle_event(cast, Cmd, _State, Data) ->
+  _ = handle_command(Cmd, Data),
+  {keep_state, Data};
 handle_event(info, {'EXIT', Pid, Reason}, _State, #{ db_ref := DbRef, writer := Pid } = Data) ->
   _ = lager:info("writer exitded. db=~p reason=~p~n", [DbRef, Reason]),
   {stop, {writer_exit, Reason}, Data#{writer => nil}};
@@ -364,4 +379,16 @@ do_fetch_doc(DbRef, DocId, Options) ->
 
 maybe_add_deleted(Doc, true) -> Doc#{ <<"_deleted">> => true };
 maybe_add_deleted(Doc, false) -> Doc.
-  
+
+
+handle_command({purge_doc, DocId, From}, #{ ref := DbRef }) ->
+  ?jobs_pool:run({barrel_storage, purge_doc, [DbRef, DocId]}, From);
+handle_command({put_local_doc, DocId, Doc, From}, #{ ref := DbRef }) ->
+  ?jobs_pool:run({barrel_storage, put_local_doc, [DbRef, DocId, Doc]}, From);
+handle_command({get_local_doc, DocId, From}, #{ ref := DbRef }) ->
+  ?jobs_pool:run({barrel_storage, get_local_doc, [DbRef, DocId]}, From);
+handle_command({delete_local_doc, DocId, From}, #{ ref := DbRef }) ->
+  ?jobs_pool:run({barrel_storage, delete_local_doc, [DbRef, DocId]}, From);
+handle_command(Cmd, _State) ->
+  _ = lager:debug("~s: unknown db command: ~p~n", [?MODULE_STRING, Cmd]),
+  ok.
