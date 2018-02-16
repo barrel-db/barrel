@@ -327,7 +327,7 @@ notify_writer(Pending, #{ writer := Writer }) ->
 
 do_fetch_doc(DbRef, DocId, Options) ->
   UserRev = maps:get(rev, Options, <<"">>),
-  case barrel_storage:fetch_doc(DbRef, DocId) of
+  case barrel_storage:fetch_docinfo(DbRef, DocId) of
     {ok, #{ deleted := true }} when UserRev =:= <<>> ->
       {error, not_found};
     {ok, #{ rev := CurrentRev, revtree := RevTree}} ->
@@ -338,7 +338,7 @@ do_fetch_doc(DbRef, DocId, Options) ->
       case maps:find(Rev, RevTree) of
         {ok, RevInfo} ->
           Del = maps:get(deleted, RevInfo, false),
-          case barrel_storage:fetch_doc_revision(DbRef, DocId, Rev) of
+          case barrel_storage:get_revision(DbRef, DocId, Rev) of
             {ok, Doc} ->
               WithHistory = maps:get(history, Options, false),
               MaxHistory = maps:get(max_history, Options, ?IMAX1),

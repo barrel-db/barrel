@@ -35,9 +35,13 @@
 
 %% doc
 -export([
-  fetch_doc/2,
-  write_change/6,
-  fetch_doc_revision/3
+  fetch_docinfo/2,
+  write_docinfo/5,
+  get_revision/3,
+  add_revision/4,
+  delete_revision/3,
+  delete_revisions/3,
+  purge_doc/2
 ]).
 
 %% local doc
@@ -102,14 +106,29 @@ clean_barrel(Store, Id) ->
 %% doc api
 
 
-fetch_doc(#{ store := Store, id := Id }, DocId) ->
-  call(Store, fetch_doc, [Id, DocId]).
+fetch_docinfo(#{ store := Store, id := Id }, DocId) ->
+  call(Store, fetch_docinfo, [Id, DocId]).
 
-fetch_doc_revision(#{ store := Store, id := Id }, DocId, Rev) ->
-  call(Store, fetch_doc_revision, [Id, DocId, Rev]).
+write_docinfo(#{ store := Store, id := Id }, DocId, NewSeq, OldSeq, DocInfo) ->
+  call(Store, write_docinfo, [Id, DocId, NewSeq, OldSeq, DocInfo]).
 
-write_change(#{ store := Store, id := Id }, NewSeq, OldSeq, NewRev, Doc, DocInfo) ->
-  call(Store, write_change, [Id, NewSeq, OldSeq, NewRev, Doc, DocInfo]).
+
+
+get_revision(#{ store := Store, id := Id }, DocId, Rev) ->
+  call(Store, get_revision, [Id, DocId, Rev]).
+
+add_revision(#{ store := Store, id := Id }, DocId, Rev, Body) ->
+  call(Store, add_revision, [Id, DocId, Rev, Body]).
+
+delete_revision(#{ store := Store, id := Id }, DocId, RevId) ->
+  call(Store, delete_revision, [Id, DocId, RevId]).
+
+delete_revisions(#{ store := Store, id := Id }, DocId, RevIds) ->
+  call(Store, delete_revisions, [Id, DocId, RevIds]).
+
+purge_doc(#{ store := Store, id := Id }, DocId) ->
+  call(Store, purge_doc, [Id, DocId]).
+
 
 %% -----------
 %% local doc api

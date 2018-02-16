@@ -28,9 +28,13 @@
 
 %% documents
 -export([
-  fetch_doc/3,
-  write_change/7,
-  fetch_doc_revision/4
+  get_revision/4,
+  add_revision/5,
+  delete_revision/4,
+  delete_revisions/4,
+  fetch_docinfo/3,
+  write_docinfo/6,
+  purge_doc/3
 ]).
 
 
@@ -95,14 +99,7 @@ has_barrel(StoreName, Id) ->
 
 %% documents
 
-fetch_doc(StoreName, Id, DocId) ->
-  Tab = tabname(StoreName, Id),
-  case ets:lookup(Tab, {d, DocId}) of
-    [] -> {error, not_found};
-    [{{d, DocId}, Doc}] -> {ok, Doc}
-  end.
-
-fetch_doc_revision(StoreName, Id, DocId, Rev) ->
+get_revision(StoreName, Id, DocId, Rev) ->
   Tab = tabname(StoreName, Id),
   try
     Doc = ets:lookup_element(Tab, {r, DocId, Rev}, 2),
@@ -113,24 +110,62 @@ fetch_doc_revision(StoreName, Id, DocId, Rev) ->
       {error, not_found}
   end.
 
-write_change(StoreName, Id, NewSeq, OldSeq, NewRev, Doc, DocInfo) ->
+add_revision(StoreName, Id, DocId, RevId, Body) ->
   Tab = tabname(StoreName, Id),
-  DocId = maps:get(<<"id">>, Doc),
-  ets:insert(Tab, [
-    {{d, DocId}, DocInfo},
-    {{r, DocId, NewRev}, Doc},
-    {{c, NewSeq}, DocInfo}
-  ]),
-  case is_replace(NewSeq, OldSeq) of
-    true ->
+  ets:insert(Tab, {{r, DocId, RevId}, Body}),
+  ok.
+
+delete_revision(StoreName, Id, DocId, RevId) ->
+  Tab = tabname(StoreName, Id),
+  ets:delete(Tab, {r, DocId, RevId}),
+  ok.
+
+delete_revisions(StoreName, Id, DocId, RevIds) ->
+  Tab = tabname(StoreName, Id),
+  _ = [ets:delete(Tab, {DocId, RevId}) || RevId <- RevIds],
+  ok.
+
+fetch_docinfo(StoreName, Id, DocId) ->
+  Tab = tabname(StoreName, Id),
+  case ets:lookup(Tab, {d, DocId}) of
+    [] -> {error, not_found};
+    [{{d, DocId}, Doc}] -> {ok, Doc}
+  end.
+
+%% TODO: that part should be atomic, maybe we should add a transaction log
+write_docinfo(StoreName, Id, DocId, NewSeq, OldSeq, DocInfo) ->
+  Tab = tabname(StoreName, Id),
+  case write_action(NewSeq, OldSeq) of
+    new ->
+      ets:insert(Tab, [
+        {{d, DocId}, DocInfo},
+        {{c, NewSeq}, DocId, DocInfo}
+      ]);
+    replace ->
+      ets:insert(Tab, [
+        {{d, DocId}, DocInfo},
+        {{c, NewSeq}, DocId, DocInfo}
+      ]),
       ets:delete(Tab, {c, OldSeq});
-    false ->
-      ok
+    edit ->
+      ets:insert(Tab, {{d, DocId}, DocInfo})
   end,
   ok.
 
-is_replace(Seq, Seq) -> false;
-is_replace(_, _) -> true.
+write_action(_Seq, nil) -> new;
+write_action(nil, _Seq) -> edit;
+write_action(Seq, Seq) -> edit;
+write_action(_, _) -> replace.
+
+purge_doc(StoreName, Id, DocId) ->
+  Tab = tabname(StoreName, Id),
+  MS = [
+    {{{d,'$1'},'_'},[{'=:=','$1',{const,DocId}}],[true]},
+    {{{r,'$1', '_'},'_'},[{'=:=','$1',{const,DocId}}],[true]},
+    {{{c,'_'}, '$1','_'},[{'=:=','$1',{const,DocId}}],[true]}
+  ],
+  _ = ets:select_delete(Tab, MS),
+  ok.
 
 %% local documents
 

@@ -71,7 +71,6 @@ new_docinfo(DocId) ->
     revtree => barrel_revtree:new()}.
 
 merge_revtrees([Op | Rest], State) ->
-  #{ db_ref := DbRef }  = State,
   From = op_from(Op),
   OpType = op_type(Op),
   MergeFun = merge_fun(OpType),
@@ -82,7 +81,7 @@ merge_revtrees([Op | Rest], State) ->
       merge_revtrees(Rest, State2);
     false ->
       [Rev | _] = maps:get(revs, Record, [<<>>]),
-      case barrel_storage:fetch_doc(DbRef, DocId) of
+      case fetch_docinfo(DocId, State) of
         {ok, DocInfo} ->
           State2 = MergeFun(Record, DocInfo, From, cache(DocInfo, State)),
           merge_revtrees(Rest, State2);
@@ -104,7 +103,7 @@ merge_revtrees([Op | Rest], State) ->
         Error ->
           _ = lager:error(
             "error reading doc db=~p id=~p error=~p~n",
-            [DbRef, DocId, Error]
+            [maps:get(db_ref, State), DocId, Error]
           ),
           reply(From, {error, DocId, read_error}),
           merge_revtrees(Rest, State)
@@ -113,6 +112,7 @@ merge_revtrees([Op | Rest], State) ->
 merge_revtrees([], State) ->
   update_db_state(State),
   State.
+
   
 merge_revtree(Record, DocInfo, From, State) ->
   #{ id := DocId, rev := CurrentRev, revtree := RevTree } = DocInfo,
@@ -182,15 +182,21 @@ merge_revtree(NewGen, ParentRev, Deleted, Record, DocInfo, From, #{db_ref := Db}
                        branched => Branched,
                        conflict => Conflict,
                        deleted => DocDeleted },
-  case write_doc(NewSeq, OldSeq, NewRev, Doc, DocInfo2, State1) of
+  WriteResult = case add_revision(DocId, NewRev, Doc, State1) of
+                  ok ->
+                    write_docinfo(DocId, NewSeq, OldSeq, DocInfo2, State1);
+                  Error ->
+                    Error
+                end,
+  case WriteResult of
     ok ->
       reply(From, {ok, Doc, DocInfo2}),
       update_db_state(State1),
       cache(DocInfo2, State1);
-    Error  ->
+    WriteError  ->
       _ = lager:error(
         "error writing doc db=~p id=~p error=~p~n",
-        [Db, DocId, Error]
+        [Db, DocId, WriteError]
       ),
       reply(From, {error, DocId, write_error}),
       State
@@ -237,16 +243,22 @@ merge_revtree_with_conflict(Record, DocInfo0, From, #{ db_ref := Db} = State0) -
                                      }
                                  end,
   OldSeq = maps:get(seq, DocInfo0, nil),
-  case write_doc(NewSeq, OldSeq, NewRev, Doc, DocInfo1, NewState) of
+  WriteResult = case add_revision(DocId, NewRev, Doc, NewState) of
+                  ok ->
+                    write_docinfo(DocId, NewSeq, OldSeq, DocInfo1, NewState);
+                  Error ->
+                    Error
+                end,
+  case WriteResult of
     ok ->
       reply(From, {ok, Doc, DocInfo1}),
       cache(DocInfo1, NewState);
-    Error ->
+    WriteError ->
       _ = lager:error(
         "error writing doc db=~p id=~p error=~p~n",
-        [Db, DocId, Error]
+        [Db, DocId, WriteError]
       ),
-      reply(From, {error, DocId, {write_error, Error}}),
+      reply(From, {error, DocId, {write_error, WriteError}}),
       State0
   end.
 
@@ -292,9 +304,14 @@ update_state(#{ db_state := DbState } = State, Inc) ->
   {NewSeq, State#{ db_state => DbState#{updated_seq => NewSeq,
                                         docs_count => DocsCount2} }}.
 
-write_doc(NewSeq, OldSeq, NewRev, Doc, DocInfo, #{ db_ref := DbRef }) ->
-  barrel_storage:write_change(DbRef, NewSeq, OldSeq, NewRev, Doc, DocInfo).
+add_revision(DocId, RevId, Body, #{ db_ref := DbRef }) ->
+  barrel_storage:add_revision(DbRef, DocId, RevId, Body).
 
+fetch_docinfo(DocId, #{ db_ref := DbRef }) ->
+  barrel_storage:fetch_docinfo(DbRef, DocId).
+
+write_docinfo(DocId, NewSeq, OldSeq, DocInfo, #{ db_ref := DbRef }) ->
+  barrel_storage:write_docinfo(DbRef, DocId, NewSeq, OldSeq, DocInfo).
 
 -compile({inline, [reply/2]}).
 -spec reply(From :: {pid(), reference()}, Reply :: term()) -> ok.
