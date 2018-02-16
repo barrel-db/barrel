@@ -48,11 +48,15 @@ handle_call(Msg, _From, State) ->
   _ = lager:debug("db worker received a synchronous event: ~p~n", [Msg]),
   {reply, ok, State}.
 
-handle_cast({work, From, {M, F, A}},  St) ->
-  Res = (catch erlang:apply(M, F, A)),
-  reply(From, Res),
-  _ = enqueue(),
-  {noreply, St};
+handle_cast({work, From, MFA},  St) ->
+  Res = (catch exec(MFA)),
+  case Res of
+    stop -> {stop, normal, St};
+    _ ->
+      reply(From, Res),
+      _ = enqueue(),
+      {noreply, St}
+  end;
 handle_cast(_Msg, St) ->
   {noreply, St}.
 
@@ -69,3 +73,12 @@ reply({To, Tag}, Reply)  ->
 enqueue() ->
   Pool = whereis(?jobs_pool),
   sbroker:async_ask_r(?jobs_broker, self(), {Pool, self()}).
+
+exec(F) when is_function(F) ->
+  F();
+exec({F, A}) when is_function(F), is_list(A) ->
+  erlang:apply(F, A);
+exec({M, F, A}) when is_atom(M), is_function(F), is_list(A) ->
+  erlang:apply(M, F, A);
+exec(_) ->
+  erlang:error(badarg).
