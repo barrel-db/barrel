@@ -61,12 +61,18 @@ db_infos(DbRef) ->
   call(DbRef, infos).
 
 fetch_doc(DbRef, DocId, Options) ->
+  do_command(DbRef, {fetch_doc, DocId, Options}).
+
+purge_doc(DbRef, DocId) ->
+  do_command(DbRef, {purge_doc, DocId}).
+
+do_command(DbRef, Cmd) ->
   Tag = make_ref(),
   From = {self(), Tag},
   do_for_ref(
     DbRef,
     fun(DbPid) ->
-      ok = gen_statem:cast(DbPid, {fetch_doc, DocId, Options, From}),
+      ok = gen_statem:cast(DbPid, {Cmd, From}),
       await_response(DbPid, Tag)
     end
   ).
@@ -80,17 +86,6 @@ await_response(DbPid, Tag) ->
   after 5000 ->
     erlang:error(timeout)
   end.
-
-purge_doc(DbRef, DocId) ->
-  Tag = make_ref(),
-  From = {self(), Tag},
-  do_for_ref(
-    DbRef,
-    fun(DbPid) ->
-      ok = gen_statem:cast(DbPid, {purge_doc, DocId, From}),
-      await_response(DbPid, Tag)
-    end
-  ).
 
 write_changes(DbRef, Batch) ->
   Tag = make_ref(),
@@ -283,7 +278,7 @@ code_change(_OldVsn, State, Data, _Extra) ->
 
 %% states
 
-writeable(cast, {fetch_doc, DocId, Options, From}, #{ ref := DbRef } = Data) ->
+writeable(cast, {{fetch_doc, DocId, Options}, From}, #{ ref := DbRef } = Data) ->
   _ = ?jobs_pool:run({?MODULE, do_fetch_doc, [DbRef,DocId, Options]}, From),
   {keep_state, Data};
 writeable({call, From}, {write_changes, Entries}, Data) ->
@@ -292,7 +287,7 @@ writeable({call, From}, {write_changes, Entries}, Data) ->
 writeable(EventType, Event, Data) ->
   handle_event(EventType, Event, writeable, Data).
 
-writing(cast, {fetch_doc, DocId, Options, From}, #{ ref := DbRef } = Data) ->
+writing(cast, {{fetch_doc, DocId, Options}, From}, #{ ref := DbRef } = Data) ->
   _ = ?jobs_pool:run({?MODULE, do_fetch_doc, [DbRef, DocId, Options]}, From),
   {keep_state, Data};
 writing({call, From}, {write_changes, Entries}, #{ pending := Pending } = Data) ->
@@ -381,13 +376,13 @@ maybe_add_deleted(Doc, true) -> Doc#{ <<"_deleted">> => true };
 maybe_add_deleted(Doc, false) -> Doc.
 
 
-handle_command({purge_doc, DocId, From}, #{ ref := DbRef }) ->
+handle_command({{purge_doc, DocId}, From}, #{ ref := DbRef }) ->
   ?jobs_pool:run({barrel_storage, purge_doc, [DbRef, DocId]}, From);
-handle_command({put_local_doc, DocId, Doc, From}, #{ ref := DbRef }) ->
+handle_command({{put_local_doc, DocId, Doc}, From}, #{ ref := DbRef }) ->
   ?jobs_pool:run({barrel_storage, put_local_doc, [DbRef, DocId, Doc]}, From);
-handle_command({get_local_doc, DocId, From}, #{ ref := DbRef }) ->
+handle_command({{get_local_doc, DocId}, From}, #{ ref := DbRef }) ->
   ?jobs_pool:run({barrel_storage, get_local_doc, [DbRef, DocId]}, From);
-handle_command({delete_local_doc, DocId, From}, #{ ref := DbRef }) ->
+handle_command({{delete_local_doc, DocId}, From}, #{ ref := DbRef }) ->
   ?jobs_pool:run({barrel_storage, delete_local_doc, [DbRef, DocId]}, From);
 handle_command(Cmd, _State) ->
   _ = lager:debug("~s: unknown db command: ~p~n", [?MODULE_STRING, Cmd]),
