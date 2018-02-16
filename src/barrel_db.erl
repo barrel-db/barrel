@@ -351,10 +351,7 @@ handle_command({put_local_doc, DocId, Doc}, From, DbRef) ->
 handle_command({get_local_doc, DocId}, From, DbRef) ->
   ?jobs_pool:run({barrel_storage, get_local_doc, [DbRef, DocId]}, From);
 handle_command({delete_local_doc, DocId}, From, DbRef) ->
-  ?jobs_pool:run({barrel_storage, delete_local_doc, [DbRef, DocId]}, From);
-handle_command(Cmd, _From, _DbRef) ->
-  _ = lager:debug("~s: unknown db command: ~p~n", [?MODULE_STRING, Cmd]),
-  erlang:error(badarg).
+  ?jobs_pool:run({barrel_storage, delete_local_doc, [DbRef, DocId]}, From).
 
 do_fetch_doc(DbRef, DocId, Options) ->
   UserRev = maps:get(rev, Options, <<"">>),

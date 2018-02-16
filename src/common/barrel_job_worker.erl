@@ -74,11 +74,12 @@ enqueue() ->
   Pool = whereis(?jobs_pool),
   sbroker:async_ask_r(?jobs_broker, self(), {Pool, self()}).
 
+
+exec({F, A}) ->
+  erlang:apply(F, A);
+exec({M, F, A}) ->
+  erlang:apply(M, F, A);
 exec(F) when is_function(F) ->
   F();
-exec({F, A}) when is_function(F), is_list(A) ->
-  erlang:apply(F, A);
-exec({M, F, A}) when is_atom(M), is_function(F), is_list(A) ->
-  erlang:apply(M, F, A);
 exec(_) ->
   erlang:error(badarg).
