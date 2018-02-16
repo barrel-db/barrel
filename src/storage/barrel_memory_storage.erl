@@ -167,6 +167,7 @@ purge_doc(StoreName, Id, DocId) ->
   _ = ets:select_delete(Tab, MS),
   ok.
 
+
 %% local documents
 
 put_local_doc(StoreName, Id, DocId, Doc) ->
@@ -186,5 +187,7 @@ get_local_doc(StoreName, Id, DocId) ->
 delete_local_doc(StoreName, Id, DocId) ->
   _ = ets:delete(tabname(StoreName, Id), {l, DocId}),
   ok.
+
+
 
 
