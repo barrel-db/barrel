@@ -40,7 +40,7 @@
 
 %% local documents
 -export([
-  put_local_doc/2,
+  put_local_doc/4,
   get_local_doc/3,
   delete_local_doc/3
 ]).
@@ -169,19 +169,22 @@ purge_doc(StoreName, Id, DocId) ->
 
 %% local documents
 
-put_local_doc(StoreName, Doc) ->
-  Id = maps:get(<<"id">>, Doc),
+put_local_doc(StoreName, Id, DocId, Doc) ->
   Tab = tabname(StoreName, Id),
-  _ = ets:insert(Tab, {{l, Id}, Doc}),
+  _ = ets:insert(Tab, {{l, DocId}, Doc}),
   ok.
 
 get_local_doc(StoreName, Id, DocId) ->
   Tab = tabname(StoreName, Id),
-  case ets:lookup(Tab, {l, DocId}) of
-    [] -> {error, not_found};
-    [{_, Doc}] -> {ok, Doc}
+  try
+    Doc = ets:lookup_element(Tab, {l, DocId}, 2),
+    {ok, Doc}
+  catch
+    error:badarg -> {error, not_found}
   end.
 
 delete_local_doc(StoreName, Id, DocId) ->
-  _ = ets:delete(tabname(StoreName, Id), DocId),
+  _ = ets:delete(tabname(StoreName, Id), {l, DocId}),
   ok.
+
+

@@ -31,7 +31,8 @@
   fetch_revision/1,
   write_changes/1,
   write_conflict/1,
-  purge_doc/1
+  purge_doc/1,
+  local_doc/1
 ]).
 
 all() ->
@@ -42,7 +43,8 @@ all() ->
     fetch_revision,
     write_changes,
     write_conflict,
-    purge_doc
+    purge_doc,
+    local_doc
   ].
 
 init_per_suite(Config) ->
@@ -222,5 +224,18 @@ purge_doc(_Config) ->
   {ok, #{ <<"id">> := <<"a">> }} = barrel_db:fetch_doc(DbRef, <<"a">>, #{}),
   ok = barrel_db:purge_doc(DbRef, <<"a">>),
   {error, not_found} = barrel:fetch_doc(DbRef, <<"a">>, #{}),
+  ok = barrel:destroy_barrel(Store, BarrelId),
+  ok.
+
+
+local_doc(_Config) ->
+  Store = default,
+  BarrelId = <<"testdb">>,
+  {ok, DbRef} = barrel:get_barrel(Store, BarrelId),
+  Doc = #{ <<"id">> => <<"a">>, <<"v">> => 1},
+  ok = barrel_db:put_local_doc(DbRef, <<"a">>, Doc),
+  {ok, Doc} = barrel_db:get_local_doc(DbRef, <<"a">>),
+  ok = barrel_db:delete_local_doc(DbRef, <<"a">>),
+  {error, not_found} = barrel_db:get_local_doc(DbRef, <<"a">>),
   ok = barrel:destroy_barrel(Store, BarrelId),
   ok.

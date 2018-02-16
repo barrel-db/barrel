@@ -46,9 +46,9 @@
 
 %% local doc
 -export([
-  get_local_doc/3,
+  get_local_doc/2,
   put_local_doc/3,
-  delete_local_doc/3
+  delete_local_doc/2
 ]).
 
 
@@ -133,14 +133,14 @@ purge_doc(#{ store := Store, id := Id }, DocId) ->
 %% -----------
 %% local doc api
 
-put_local_doc(Store, Id, Doc) ->
-  call(Store, put_local_doc, [Id, Doc]).
+put_local_doc(#{ store := Store, id := Id }, DocId, Doc) ->
+  call(Store, put_local_doc, [Id, DocId, Doc]).
 
-get_local_doc(Store, Id, Doc) ->
-  call(Store, put_local_doc, [Id, Doc]).
+get_local_doc(#{ store := Store, id := Id }, DocId) ->
+  call(Store, get_local_doc, [Id, DocId]).
 
-delete_local_doc(Store, Id, Doc) ->
-  call(Store, put_local_doc, [Id, Doc]).
+delete_local_doc(#{ store := Store, id := Id }, DocId) ->
+  call(Store, delete_local_doc, [Id, DocId]).
 
 
 call(Name, Fun, Args) ->

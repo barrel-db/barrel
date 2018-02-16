@@ -21,7 +21,10 @@
   db_infos/1,
   fetch_doc/3,
   write_changes/2,
-  purge_doc/2
+  purge_doc/2,
+  get_local_doc/2,
+  put_local_doc/3,
+  delete_local_doc/2
 ]).
 
 -export([
@@ -65,6 +68,15 @@ fetch_doc(DbRef, DocId, Options) ->
 
 purge_doc(DbRef, DocId) ->
   do_command(DbRef, {purge_doc, DocId}).
+
+put_local_doc(DbRef, DocId, Doc) ->
+  do_command(DbRef, {put_local_doc, DocId, Doc}).
+
+get_local_doc(DbRef, DocId) ->
+  do_command(DbRef, {get_local_doc, DocId}).
+
+delete_local_doc(DbRef, DocId) ->
+  do_command(DbRef, {delete_local_doc, DocId}).
 
 do_command(DbRef, Cmd) ->
   Tag = make_ref(),
