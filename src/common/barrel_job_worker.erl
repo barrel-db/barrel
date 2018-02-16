@@ -49,7 +49,7 @@ handle_call(Msg, _From, State) ->
   {reply, ok, State}.
 
 handle_cast({work, From, {M, F, A}},  St) ->
-  Res = erlang:apply(M, F, A),
+  Res = (catch erlang:apply(M, F, A)),
   reply(From, Res),
   _ = enqueue(),
   {noreply, St};
