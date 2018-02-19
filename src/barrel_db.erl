@@ -21,7 +21,7 @@
   db_infos/1,
   fetch_doc/3,
   write_changes/2,
-  purge_doc/2,
+  purge_docs/2,
   get_local_doc/2,
   put_local_doc/3,
   delete_local_doc/2
@@ -66,8 +66,7 @@ db_infos(DbRef) ->
 fetch_doc(DbRef, DocId, Options) ->
   do_command(DbRef, {fetch_doc, DocId, Options}).
 
-purge_doc(DbRef, DocId) ->
-  do_command(DbRef, {purge_doc, DocId}).
+
 
 put_local_doc(DbRef, DocId, Doc) ->
   do_command(DbRef, {put_local_doc, DocId, Doc}).
@@ -103,6 +102,10 @@ await_response(DbPid, Tag) ->
     erlang:error(timeout)
   end.
 
+purge_docs(DbRef, DocIds) ->
+  write_changes(DbRef, [{purge, Id} || Id <- DocIds]).
+
+
 write_changes(DbRef, Batch) ->
   Tag = make_ref(),
   From = {self(), Tag},
@@ -135,6 +138,9 @@ await_response_loop(MRef, Tag, Results, NumEntries) ->
     erlang:error(timeout)
   end.
 
+append_writes_summary({ok, DocId, purged}, Results) ->
+  Doc = #{ <<"id">> => DocId, <<"purged">> => true },
+  [Doc | Results];
 append_writes_summary({ok, Doc0, DocInfo}, Results) ->
   Rev = maps:get(rev, DocInfo),
   Deleted = maps:get(deleted, DocInfo, false),
@@ -183,6 +189,10 @@ prepare_batch([{delete, Id, Rev} | Rest], From, Acc) ->
                                     <<"_deleted">> => true,
                                     <<"_rev">> => Rev}),
   Op = barrel_db_writer:make_op(merge, Record, From),
+  prepare_batch(Rest, From, [Op | Acc]);
+prepare_batch([{purge, Id} | Rest], From, Acc) ->
+  Record = barrel_doc:make_record(#{<<"id">> => Id}),
+  Op = barrel_db_writer:make_op(purge, Record, From),
   prepare_batch(Rest, From, [Op | Acc]);
 prepare_batch([{create, Doc} | Rest], From, Acc) ->
   Record = barrel_doc:make_record(Doc),
@@ -344,8 +354,6 @@ notify_writer(Pending, #{ writer := Writer }) ->
 
 handle_command({fetch_doc, DocId, Options}, From, DbRef) ->
   ?jobs_pool:run({?MODULE, do_fetch_doc, [DbRef,DocId, Options]}, From);
-handle_command({purge_doc, DocId}, From, DbRef) ->
-  ?jobs_pool:run({barrel_storage, purge_doc, [DbRef, DocId]}, From);
 handle_command({put_local_doc, DocId, Doc}, From, DbRef) ->
   ?jobs_pool:run({barrel_storage, put_local_doc, [DbRef, DocId, Doc]}, From);
 handle_command({get_local_doc, DocId}, From, DbRef) ->

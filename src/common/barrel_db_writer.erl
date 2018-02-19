@@ -51,6 +51,10 @@ cache(#{ id := Id } = Doc, #{ cache := Cache0 } = State) ->
   Cache1 = lists:keystore(Id, 1, Cache0, {Id, Doc}),
   State#{ cache => Cache1 }.
 
+remove_cached(Id, #{ cache := Cache0 } = State) ->
+  Cache1 = lists:keydelete(Id, 1, Cache0),
+  State#{ cache => Cache1 }.
+
 
 make_op(Type, Record, From) ->
   #write_op{type=Type, doc=Record, from=From}.
@@ -62,7 +66,9 @@ op_type(#write_op{} = Op) -> Op#write_op.type.
 merge_fun(merge) ->
   fun merge_revtree/4;
 merge_fun(merge_with_conflict) ->
-  fun merge_revtree_with_conflict/4.
+  fun merge_revtree_with_conflict/4;
+merge_fun(purge) ->
+  fun purge/4.
 
 new_docinfo(DocId) ->
   #{id => DocId,
@@ -97,8 +103,9 @@ merge_revtrees([Op | Rest], State) ->
             merge_with_conflict ->
               DocInfo = new_docinfo(DocId),
               State2 = MergeFun(Record, DocInfo, From, State),
-              merge_revtrees(Rest, State2)
-            
+              merge_revtrees(Rest, State2);
+            purge ->
+              reply(From, {ok, DocId, purged})
           end;
         Error ->
           _ = lager:error(
@@ -283,6 +290,24 @@ find_parent([RevId | Rest], RevTree, I) ->
 find_parent([], _RevTree, I) ->
   {I, <<"">>}.
 
+
+purge(_Record, DocInfo, From, #{ db_ref := Db} = State) ->
+  #{ id := DocId, seq := Seq, revtree := RevTree } = DocInfo,
+  Revisions = barrel_revtree:revisions(RevTree),
+  case purge_doc(DocId, Seq, Revisions, State) of
+    ok ->
+      reply(From, {ok, DocId, purged}),
+      remove_cached(DocId, State);
+    WriteError ->
+      _ = lager:error(
+        "error purging doc db=~p id=~p error=~p~n",
+        [Db, DocId, WriteError]
+      ),
+      reply(From, {error, DocId, {write_error, WriteError}}),
+      State
+  end.
+  
+
 update_db_state(#{ db_pid := DbPid, db_state := DbState }) ->
   barrel_db:set_state(DbPid, DbState).
 
@@ -312,6 +337,10 @@ fetch_docinfo(DocId, #{ db_ref := DbRef }) ->
 
 write_docinfo(DocId, NewSeq, OldSeq, DocInfo, #{ db_ref := DbRef }) ->
   barrel_storage:write_docinfo(DbRef, DocId, NewSeq, OldSeq, DocInfo).
+
+
+purge_doc(DocId, LastSeq, Revisions, #{ db_ref := DbRef }) ->
+  barrel_storage:purge_doc(DbRef, DocId, LastSeq, Revisions).
 
 -compile({inline, [reply/2]}).
 -spec reply(From :: {pid(), reference()}, Reply :: term()) -> ok.

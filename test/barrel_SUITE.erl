@@ -222,7 +222,7 @@ purge_doc(_Config) ->
   {ok, DbRef} = barrel:get_barrel(Store, BarrelId),
   [#{ <<"id">> := <<"a">> }] = barrel_db:write_changes(DbRef, Batch),
   {ok, #{ <<"id">> := <<"a">> }} = barrel_db:fetch_doc(DbRef, <<"a">>, #{}),
-  ok = barrel_db:purge_doc(DbRef, <<"a">>),
+  [#{<<"id">> := <<"a">>, <<"purged">> := true }] = barrel_db:purge_docs(DbRef, [<<"a">>]),
   {error, not_found} = barrel:fetch_doc(DbRef, <<"a">>, #{}),
   ok = barrel:destroy_barrel(Store, BarrelId),
   ok.

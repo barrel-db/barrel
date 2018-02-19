@@ -11,6 +11,7 @@
     crypto,
     public_key,
     ssl,
+    memstore,
     rocksdb,
     uuid,
     gproc,

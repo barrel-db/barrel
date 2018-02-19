@@ -34,7 +34,7 @@
   delete_revisions/4,
   fetch_docinfo/3,
   write_docinfo/6,
-  purge_doc/3
+  purge_doc/5
 ]).
 
 
@@ -62,36 +62,28 @@ tabname(StoreName, DbId) ->
 
 init_barrel(StoreName, Id) ->
   Tab = tabname(StoreName, Id),
-  case ets:info(Tab, name) of
-    undefined  ->
-      _  = ets:new(Tab, [named_table, ordered_set, public,
-                         {read_concurrency, true},
-                         {write_concurrency, true}]),
+  case memstore:open(Tab, []) of
+    ok ->
       InitState  = #{ updated_seq => 0, docs_count => 0 },
-      _ = ets:insert(Tab, [{'$update_seq', 0}, {'$docs_count', 0}]),
-      
+      _ = memstore:write_batch(Tab, [{put, '$update_seq', 0},
+                                     {put, '$docs_count', 0}]),
       {ok, InitState};
-    _ ->
-      {error, already_exists}
+    Error ->
+      Error
   end.
 
 
 close_barrel(StoreName, Id) ->
   Tab = tabname(StoreName, Id),
-  _ = (catch ets:delete(Tab)),
-  ok.
+  memstore:close(Tab).
 
 destroy_barrel(StoreName, Id) ->
   close_barrel(StoreName, Id).
 
 
 clean_barrel(StoreName, Id) ->
-  Tab = tabname(StoreName, Id),
-  _ = (catch ets:delete(Tab)),
-  _  = ets:new(Tab, [named_table, ordered_set, public,
-                     {read_concurrency, true},
-                     {write_concurrency, true}]),
-  ok.
+  ok = close_barrel(StoreName, Id),
+  init_barrel(StoreName, Id).
 
 has_barrel(StoreName, Id) ->
   (ets:info(tabname(StoreName, Id), name) =/= undefined).
@@ -101,35 +93,31 @@ has_barrel(StoreName, Id) ->
 
 get_revision(StoreName, Id, DocId, Rev) ->
   Tab = tabname(StoreName, Id),
-  try
-    Doc = ets:lookup_element(Tab, {r, DocId, Rev}, 2),
-    {ok, Doc}
-  catch
-    error:badarg ->
+  case memstore:get(Tab, {r, DocId, Rev}) of
+    {ok, Doc} -> {ok, Doc};
+    not_found ->
       _ = lager:error("not found ~p~n", [ets:lookup(Tab, {r, DocId, Rev})]),
       {error, not_found}
   end.
 
 add_revision(StoreName, Id, DocId, RevId, Body) ->
   Tab = tabname(StoreName, Id),
-  ets:insert(Tab, {{r, DocId, RevId}, Body}),
-  ok.
+  memstore:put(Tab, {r, DocId, RevId}, Body).
 
 delete_revision(StoreName, Id, DocId, RevId) ->
   Tab = tabname(StoreName, Id),
-  ets:delete(Tab, {r, DocId, RevId}),
-  ok.
+  memstore:delete(Tab, {r, DocId, RevId}).
 
 delete_revisions(StoreName, Id, DocId, RevIds) ->
   Tab = tabname(StoreName, Id),
-  _ = [ets:delete(Tab, {DocId, RevId}) || RevId <- RevIds],
+  _ = [memstore:delete(Tab, {r, DocId, RevId}) || RevId <- RevIds],
   ok.
 
 fetch_docinfo(StoreName, Id, DocId) ->
   Tab = tabname(StoreName, Id),
-  case ets:lookup(Tab, {d, DocId}) of
-    [] -> {error, not_found};
-    [{{d, DocId}, Doc}] -> {ok, Doc}
+  case memstore:get(Tab, {d, DocId}) of
+    {ok, Doc} -> {ok, Doc};
+    not_found -> {error, not_found}
   end.
 
 %% TODO: that part should be atomic, maybe we should add a transaction log
@@ -137,56 +125,54 @@ write_docinfo(StoreName, Id, DocId, NewSeq, OldSeq, DocInfo) ->
   Tab = tabname(StoreName, Id),
   case write_action(NewSeq, OldSeq) of
     new ->
-      ets:insert(Tab, [
-        {{d, DocId}, DocInfo},
-        {{c, NewSeq}, DocId, DocInfo}
-      ]);
+      memstore:write_batch(
+        Tab,
+        [{put, {d, DocId}, DocInfo},
+         {put, {c, NewSeq}, DocInfo}]
+      );
     replace ->
-      ets:insert(Tab, [
-        {{d, DocId}, DocInfo},
-        {{c, NewSeq}, DocId, DocInfo}
-      ]),
-      ets:delete(Tab, {c, OldSeq});
+      memstore:write_batch(
+        Tab,
+        [{put, {d, DocId}, DocInfo},
+         {put, {c, NewSeq}, DocInfo},
+         {delete, {c, OldSeq}}]
+      );
     edit ->
-      ets:insert(Tab, {{d, DocId}, DocInfo})
-  end,
-  ok.
+      memstore:put(Tab, {d, DocId}, DocInfo)
+  end.
 
 write_action(_Seq, nil) -> new;
 write_action(nil, _Seq) -> edit;
 write_action(Seq, Seq) -> edit;
 write_action(_, _) -> replace.
 
-purge_doc(StoreName, Id, DocId) ->
+purge_doc(StoreName, Id, DocId, LastSeq, Revisions) ->
   Tab = tabname(StoreName, Id),
-  MS = [
-    {{{d,'$1'},'_'},[{'=:=','$1',{const,DocId}}],[true]},
-    {{{r,'$1', '_'},'_'},[{'=:=','$1',{const,DocId}}],[true]},
-    {{{c,'_'}, '$1','_'},[{'=:=','$1',{const,DocId}}],[true]}
-  ],
-  _ = ets:select_delete(Tab, MS),
-  ok.
-
+  Batch = lists:foldl(
+    fun(RevId, Batch1) ->
+      [{delete, {r, DocId, RevId}} | Batch1]
+        end,
+    [{delete, {c, LastSeq}}, {delete, {d, DocId}}],
+    Revisions
+  ),
+  memstore:write_batch(Tab, Batch).
 
 %% local documents
 
 put_local_doc(StoreName, Id, DocId, Doc) ->
   Tab = tabname(StoreName, Id),
-  _ = ets:insert(Tab, {{l, DocId}, Doc}),
-  ok.
+  memstore:put(Tab, {l, DocId}, Doc).
 
 get_local_doc(StoreName, Id, DocId) ->
   Tab = tabname(StoreName, Id),
-  try
-    Doc = ets:lookup_element(Tab, {l, DocId}, 2),
-    {ok, Doc}
-  catch
-    error:badarg -> {error, not_found}
+  case memstore:get(Tab, {l, DocId}) of
+    {ok, Doc} -> {ok, Doc};
+    not_found -> {error, not_found}
   end.
 
 delete_local_doc(StoreName, Id, DocId) ->
-  _ = ets:delete(tabname(StoreName, Id), {l, DocId}),
-  ok.
+  Tab = tabname(StoreName, Id),
+  memstore:delete(Tab, {l, DocId}).
 
 
 

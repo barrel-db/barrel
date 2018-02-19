@@ -15,7 +15,7 @@
 -define(barrel(Id), {via, gproc, n, l, {barrel_db, Id}}).
 
 -record(write_op, {
-  type = merge :: merge | merge_with_conflict,
+  type = merge :: merge | merge_with_conflict | purge,
   doc :: map(),
   from :: {pid(), reference()}
 }).

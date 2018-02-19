@@ -1,4 +1,4 @@
-%% Copyright (c) 2016-2017, Benoit Chesneau
+%% Copyright (c) 2016-2018, Benoit Chesneau
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License"); you may not
 %% use this file except in compliance with the License. You may obtain a copy of
@@ -19,6 +19,7 @@
   , add/2
   , contains/2
   , info/2
+  , revisions/1
   , parent/2
   , history/2
   , fold_leafs/3
@@ -59,6 +60,8 @@ info(RevId, Tree) ->
     error -> {error, not_found}
   end.
 
+
+revisions(Tree) -> maps:keys(Tree).
 
 parent(RevId, Tree) ->
   case maps:find(RevId, Tree) of

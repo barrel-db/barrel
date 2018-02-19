@@ -41,7 +41,9 @@
   add_revision/4,
   delete_revision/3,
   delete_revisions/3,
-  purge_doc/2
+  purge_doc/4,
+  fold_changes/4,
+  fold_docs/5
 ]).
 
 %% local doc
@@ -126,8 +128,15 @@ delete_revision(#{ store := Store, id := Id }, DocId, RevId) ->
 delete_revisions(#{ store := Store, id := Id }, DocId, RevIds) ->
   call(Store, delete_revisions, [Id, DocId, RevIds]).
 
-purge_doc(#{ store := Store, id := Id }, DocId) ->
-  call(Store, purge_doc, [Id, DocId]).
+purge_doc(#{ store := Store, id := Id }, DocId, LastSeq, Revisions) ->
+  call(Store, purge_doc, [Id, DocId, LastSeq, Revisions]).
+
+fold_docs(#{ store := Store, id := Id }, Start, End, Fun, Acc) ->
+  call(Store, fold_docs, [Id, Start, End, Fun, Acc]).
+
+fold_changes(#{ store := Store, id := Id }, Since, Fun, Acc) ->
+  call(Store, fold_changes, [Id, Since, Fun, Acc]).
+
 
 
 %% -----------
