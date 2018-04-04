@@ -173,7 +173,3 @@ get_local_doc(StoreName, Id, DocId) ->
 delete_local_doc(StoreName, Id, DocId) ->
   Tab = tabname(StoreName, Id),
   memstore:delete(Tab, {l, DocId}).
-
-
-
-
