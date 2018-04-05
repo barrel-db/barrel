@@ -63,6 +63,11 @@
   terminate/2
 ]).
 
+
+-export([default_dir/0, data_dir/0]).
+
+-include("barrel.hrl").
+
 -include_lib("stdlib/include/ms_transform.hrl").
 
 -define(TAB, barrel_storages).
@@ -155,6 +160,18 @@ delete_local_doc(#{ store := Store, id := Id }, DocId) ->
 call(Name, Fun, Args) ->
   Mod = ets:lookup_element(?TAB, Name, 2),
   apply(Mod, Fun, [Name] ++ Args).
+
+
+default_dir() ->
+  filename:join([?DATA_DIR, node()]).
+
+-spec data_dir() -> string().
+data_dir() ->
+  Dir = application:get_env(barrel, data_dir, default_dir()),
+  _ = filelib:ensure_dir(filename:join([".", Dir, "dummy"])),
+  Dir.
+
+
 
 start_link() ->
   _ = init_tab(),
