@@ -19,7 +19,7 @@
 -include("barrel.hrl").
 
 
--define(DEFAULT_MAX, 1000).
+-define(DEFAULT_MAX, 1 bsl 32 -1).
 
 -export([decode_path/2]).
 
