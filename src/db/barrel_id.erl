@@ -11,7 +11,8 @@
 %% API
 -export([
   id/0, id/1,
-  binary_id/1
+  binary_id/1,
+  event_id/0
 ]).
 
 -export([
@@ -33,6 +34,19 @@ binary_id(Base) -> erlang:list_to_binary(id(Base)).
 
 timestamp(<<Time:64/integer, _:48/integer, _Seq:16/integer >>) -> Time;
 timestamp(_) -> erlang:error(badarg).
+
+
+event_id() ->
+  <<
+    (hid(node()))/binary,
+    $@,
+    (barrel_ts:curr_time_millis()):64/integer,
+    (seq()):16/integer
+  >>.
+
+%% host unique identifier
+hid(Node) ->
+  <<(erlang:phash2(Node, 1 bsl 32)):32>>.
 
 %% ==============================
 %% internals
