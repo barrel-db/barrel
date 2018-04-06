@@ -845,13 +845,13 @@ merge_revtrees(DocBuckets, Db = #db{last_rid=LastRid}) ->
           #{ local_seq := Seq } = DI1,
           case WithConflict of
             true ->
-              {ok, DI2} = merge_revtree_with_conflict(Doc, DI1),
+              {ok, DI2} = merge_revtree_with_conflict(Doc, DI1, Db),
               {DI2, [Req | Reqs1]};
             false when CreateIfMissing =/= true, Seq =:= 0 ->
               _ = send_result(Req, {error, not_found}),
               {DI1, Reqs1};
             false ->
-              case merge_revtree(Doc, DI1, ErrorIfExists) of
+              case merge_revtree(Doc, DI1, ErrorIfExists, Db) of
                 {ok, DI2} ->
                   {DI2, [Req | Reqs1]};
                 Conflict ->
@@ -869,7 +869,7 @@ merge_revtrees(DocBuckets, Db = #db{last_rid=LastRid}) ->
     DocBuckets
   ).
 
-merge_revtree(Doc = #doc{ revs = [Rev|_]}, DocInfo, ErrorIfExists) ->
+merge_revtree(Doc = #doc{ revs = [Rev|_]}, DocInfo, ErrorIfExists, Db) ->
   #{ local_seq := Seq, current_rev := CurrentRev, revtree := RevTree, body_map := BodyMap } = DocInfo,
   {Gen, _}  = barrel_doc:parse_revision(Rev),
   Res = case Rev of
@@ -908,8 +908,10 @@ merge_revtree(Doc = #doc{ revs = [Rev|_]}, DocInfo, ErrorIfExists) ->
         end,
   case Res of
     {ok, NewGen, ParentRev} ->
-      NewRev = barrel_doc:revid(NewGen, Rev, Doc),
-      RevInfo = #{  id => NewRev,  parent => ParentRev, deleted => Doc#doc.deleted },
+      %% hack to modify the doc before it's merged
+      Doc2 = hooks:run_fold(before_merge, [Db], Doc),
+      NewRev = barrel_doc:revid(NewGen, Rev, Doc2),
+      RevInfo = #{  id => NewRev,  parent => ParentRev, deleted => Doc2#doc.deleted },
       RevTree2 = barrel_revtree:add(RevInfo, RevTree),
 
       %% find winning revision and update doc infos with it
@@ -917,7 +919,7 @@ merge_revtree(Doc = #doc{ revs = [Rev|_]}, DocInfo, ErrorIfExists) ->
       WinningRevInfo = maps:get(WinningRev, RevTree2),
 
       %% update docinfo
-      DocInfo2 = DocInfo#{ body_map => BodyMap#{ NewRev => Doc#doc.body },
+      DocInfo2 = DocInfo#{ body_map => BodyMap#{ NewRev => Doc2#doc.body },
                            revtree => RevTree2,
                            local_seq => Seq + 1,
                            current_rev => WinningRev,
@@ -929,7 +931,9 @@ merge_revtree(Doc = #doc{ revs = [Rev|_]}, DocInfo, ErrorIfExists) ->
       Conflict
   end.
 
-merge_revtree_with_conflict(Doc = #doc{revs=[NewRev |_]=Revs, body=Body}, DocInfo) ->
+merge_revtree_with_conflict(Doc, DocInfo, Db) ->
+  Doc2 = hooks:run_fold(before_merge_conflict, [Db], Doc),
+  #doc{revs=[NewRev |_]=Revs, body=Body} = Doc2,
   #{current_rev := CurrentRev, local_seq := Seq, revtree := RevTree, body_map := BodyMap} = DocInfo,
   {OldPos, _}  = barrel_doc:parse_revision(CurrentRev),
   {Idx, Parent} = find_parent(Revs, RevTree, 0),
@@ -938,7 +942,7 @@ merge_revtree_with_conflict(Doc = #doc{revs=[NewRev |_]=Revs, body=Body}, DocInf
       {ok, DocInfo};
     true ->
       ToAdd = lists:sublist(Revs, Idx),
-      RevTree2 = edit_revtree(lists:reverse(ToAdd), Parent, Doc#doc.deleted, RevTree),
+      RevTree2 = edit_revtree(lists:reverse(ToAdd), Parent, Doc2#doc.deleted, RevTree),
 
       %% update docinfo
       DocInfo2 = DocInfo#{ local_seq := Seq + 1,
