@@ -37,8 +37,6 @@ timestamp(_) -> erlang:error(badarg).
 
 
 event_id() ->
-  Ts =
-
   <<
     (base64:encode(hid(node())))/binary,
     $@,
