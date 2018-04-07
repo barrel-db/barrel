@@ -37,11 +37,15 @@ timestamp(_) -> erlang:error(badarg).
 
 
 event_id() ->
+  Ts =
+
   <<
-    (hid(node()))/binary,
+    (base64:encode(hid(node())))/binary,
     $@,
-    (barrel_ts:curr_time_millis()):64/integer,
-    (seq()):16/integer
+    (base64:encode(
+      << (barrel_ts:curr_time_millis()):64/integer,
+         (seq()):16/integer
+      >>))/binary
   >>.
 
 %% host unique identifier

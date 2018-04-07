@@ -16,7 +16,8 @@
      jsone,
      uuid,
      gproc,
-     hooks
+     hooks,
+     base58
     ]},
    {env, []},
    {modules, []},
