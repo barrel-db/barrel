@@ -80,6 +80,15 @@ init([]) ->
              shutdown => infinity,
              type => supervisor,
              modules => [barrel_jobs_sup]},
+
+           %% stores supervisor
+           #{id => barrel_store_sup,
+             start => {barrel_store_sup, start_link, []},
+             restart => permanent,
+             shutdown => infinity,
+             type => supervisor,
+             modules => [barrel_store_sup]},
+           
            %% barrel containers supervisor
            #{id => barrel_db_sup,
              start => {barrel_db_sup, start_link, []},

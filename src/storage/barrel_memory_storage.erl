@@ -16,14 +16,14 @@
 -author("benoitc").
 
 %% API
+
 -export([
   init/2,
-  close/1,
-  init_barrel/2,
-  close_barrel/2,
-  destroy_barrel/2,
-  has_barrel/2,
-  clean_barrel/2
+  terminate/2,
+  create_barrel/4,
+  open_barrel/3,
+  delete_barrel/3,
+  has_barrel/3
 ]).
 
 %% documents
@@ -48,45 +48,94 @@
 -include("barrel.hrl").
 -include_lib("stdlib/include/ms_transform.hrl").
 
+%%
+%% -- storage behaviour
+%%
 
-init(_Name, _Config) ->
-  ok.
+init(StoreName, _Options) ->
+  StateFile = state_file(StoreName),
+  State = read_state(StateFile),
+  {ok, State}.
 
-close(_Name) ->
-  ok.
+terminate(_, _) -> ok.
+
+
+create_barrel(StoreName, Name, Options, State) ->
+  case maps:is_key(Name, State) of
+    true ->
+      {{error, already_exists}, State};
+    false ->
+      Tab = tabname(StoreName, Name),
+      case memstore:open(Tab, []) of
+        ok ->
+          NewState = State#{ Name => Options },
+          ok = write_state(state_file(StoreName)),
+          Barrel = init_barrel(StoreName, Name),
+          {{ok, Barrel}, NewState};
+        Error ->
+          {Error, State}
+      end
+  end.
+
+
+open_barrel(StoreName, Name, State) ->
+  case maps:is_key(Name, State) of
+    true ->
+      Barrel = init_barrel(StoreName, Name),
+      {ok, Barrel};
+    false ->
+      {error, not_found}
+  end.
+
+delete_barrel(StoreName, Name, State) ->
+  Tab = tabname(StoreName, Id),
+  ok =  memstore:close(Tab),
+  NewState = maps:remove(Name, State),
+  ok = write_state(state_file(StoreName), NewState),
+  {ok, NewState};
+  
+  
+has_barrel(_StoreName, Name, State) ->
+  maps:is_key(Name, State).
+
+
+state_file(StoreName) ->
+  Filename = StoreName ++ ".000",
+  filename:join([barrel_storage:data_dir(), Filename]).
+
+read_state(StateFile) ->
+  case file:read_file(StateFile) of
+    {ok, Bin} ->
+      Term = erlang:binary_to_term(Bin),
+      {ok,  Term};
+    Error ->
+      Error
+  end.
+
+write_state(StateFile, State) ->
+  Bin = term_to_binary(State),
+  file:write_file(StateFile, Bin).
 
 tabname(StoreName, DbId) ->
   list_to_atom(
     barrel_lib:to_list(StoreName) ++ [$_|barrel_lib:to_list(DbId)]
   ).
 
-init_barrel(StoreName, Id) ->
-  Tab = tabname(StoreName, Id),
+init_barrel(StoreName, Name) ->
+  Tab = tabname(StoreName, Name),
   case memstore:open(Tab, []) of
     ok ->
-      InitState  = #{ updated_seq => 0, docs_count => 0 },
+      Barrel  = #{ tab => Tab, updated_seq => 0, docs_count => 0 },
       _ = memstore:write_batch(Tab, [{put, '$update_seq', 0},
                                      {put, '$docs_count', 0}]),
-      {ok, InitState};
+      {ok, Barrel};
     Error ->
       Error
   end.
 
-
-close_barrel(StoreName, Id) ->
-  Tab = tabname(StoreName, Id),
-  memstore:close(Tab).
-
-destroy_barrel(StoreName, Id) ->
-  close_barrel(StoreName, Id).
-
-
-clean_barrel(StoreName, Id) ->
-  ok = close_barrel(StoreName, Id),
-  init_barrel(StoreName, Id).
-
-has_barrel(StoreName, Id) ->
-  (ets:info(tabname(StoreName, Id), name) =/= undefined).
+%%
+%% -- document storage API
+%%
 
 
 %% documents

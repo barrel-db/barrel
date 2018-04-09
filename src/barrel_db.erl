@@ -227,6 +227,17 @@ cast(DbRef, Msg) ->
     end
   ).
 
+open(Name) ->
+  case barrel_pm:whereis_name(DbRef) of
+    Pid when is_pid(Pid) ->
+      Pid;
+    undefined ->
+      case find_store<
+  end.
+
+    
+  
+
 do_for_ref(DbRef, Fun) ->
   try
       case barrel_pm:whereis_name(DbRef) of
