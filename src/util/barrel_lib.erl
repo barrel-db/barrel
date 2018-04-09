@@ -24,7 +24,8 @@
   uniqid/0, uniqid/1,
   binary_join/2,
   load_config/2,
-  pmap/2, pmap/3, pmap/4
+  pmap/2, pmap/3, pmap/4,
+  os_cmd/1
 ]).
 
 to_atom(V) when is_atom(V) -> V;
@@ -174,6 +175,23 @@ pmap_worker(Parent, Fun) ->
       Parent ! {Ref, Fun(E)},
       pmap_worker(Parent, Fun)
   end.
+
+-spec os_cmd(string()) -> string().
+os_cmd(Command) ->
+  case os:type() of
+    {win32, _} ->
+      %% Clink workaround; see
+      %% http://code.google.com/p/clink/issues/detail?id=141
+      os:cmd(" " ++ Command);
+    _ ->
+      %% Don't just return "/bin/sh: <cmd>: not found" if not found
+      Exec = hd(string:tokens(Command, " ")),
+      case os:find_executable(Exec) of
+        false -> throw({command_not_found, Exec});
+        _     -> os:cmd(Command)
+      end
+  end.
+
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").

@@ -69,7 +69,7 @@ fetch_loop(Pid, Ref, MRef, Deadline, Fun, Acc) ->
 
 revsdiffs(Node, DbName, Fun, Acc, ToDiff, Options) ->
   Ref = cast(Node, self(), {revdiffs, DbName, ToDiff}),
-  Deadline = maps:get(deadline, Options, 5000),
+  Deadline = maps:get(deadline, Options, infinity),
   case recv(Ref, Deadline) of
     {start_stream, Pid} ->
       MRef = erlang:monitor(process, Pid),
@@ -141,8 +141,8 @@ await_changes({Ref, _Node, Pid}=Stream, Timeout) ->
     {done, LastSeq} ->
       erlang:demonitor(MRef, [flush]),
       {done, LastSeq};
-    remote_timeout ->
-      erlang:error(timeout);
+    remote_down ->
+      erlang:error(remote_down);
     local_timeout ->
       erlang:demonitor(MRef, [flush]),
       unsubscribe_changes(Stream),
@@ -417,7 +417,7 @@ recv(Ref, Pid, Timeout) ->
     {Ref, Reply} ->
       Reply;
     {'DOWN', _, Pid, _} ->
-      remote_timeout
+      remote_down
   after Timeout ->
     local_timeout
   end.

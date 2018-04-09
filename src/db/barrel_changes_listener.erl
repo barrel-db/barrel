@@ -19,8 +19,7 @@
 -export([
   start_link/2,
   stop/1,
-  changes/1,
-  parse_change/1
+  changes/1
 ]).
 
 
@@ -70,23 +69,6 @@ changes(FeedPid) ->
     erlang:demonitor(MRef, [flush]),
     exit(timeout)
   end.
-
-
-parse_change(ChangeBin) ->
-  Lines = binary:split(ChangeBin, <<"\n">>, [global]),
-  lists:foldl(
-    fun(Line, Acc) ->
-      case Line of
-        << "data: ", Change/binary >> ->
-          jsx:decode(Change, [return_maps]);
-        _ ->
-          Acc
-      end
-    end,
-    #{},
-    Lines
-  ).
-
 
 init_feed(Parent, Db, Options) ->
   process_flag(trap_exit, true),

@@ -54,11 +54,13 @@
   changes_since/4, changes_since/5,
   subscribe_changes/3,
   await_change/1, await_change/2,
-  unsubscribe_changes/1
+  unsubscribe_changes/1,
+  get_sequences/4
 ]).
 
 -export([
-  walk/5
+  walk/5,
+  pull/3, pull/1
 ]).
 
 -export([
@@ -156,6 +158,17 @@
   | {error, any()}
 ].
 
+-type pull_options() :: #{
+  limit => non_neg_integer(),
+  history => last | all
+}.
+
+
+-type pull_data() :: [any()].
+-type pull_continuation() :: term().
+
+-type pull_result() ::
+  {pull_data(), pull_continuation()}.
 
 -export_type([
   dbname/0,
@@ -365,6 +378,22 @@ changes_since(Db, Since, Fun, Acc) ->
 changes_since(Db, Since, Fun, Acc, Opts) ->
   barrel_db:changes_since(Db, Since, Fun, Acc, Opts).
 
+
+get_sequences(Db, SeqFrom, SeqTo, Opts) ->
+  Res = changes_since(
+    Db,
+    SeqFrom,
+    fun
+      (#{ <<"seq">> := Seq } = Change, Acc) when Seq =< SeqTo ->
+        {ok, [Change | Acc] };
+      (_, Acc) ->
+        {stop, Acc}
+    end,
+    [],
+    Opts
+  ),
+  lists:reverse(Res).
+
 subscribe_changes(DbId, Since, Options) ->
   {ok, Pid} = barrel_changes_sup:start_consumer(self(), DbId, Since, Options),
   _ = erlang:put({Pid, last_seq},  Since),
@@ -418,6 +447,18 @@ find_by_key(Db, Path, Fun, AccIn, Opts) ->
   _ = lager:warning("~s : find_by_key is deprecated", [?MODULE_STRING]),
   barrel:walk(Db, Path, Fun, AccIn, Opts).
 
+-spec pull(Db, Path, Options) -> Result when
+  Db :: db(),
+  Path :: binary(),
+  Options :: pull_options(),
+  Result :: pull_result() | 'end_of_pull'.
+pull(DbName, Path, Options) ->
+   barrel_walk:pull(DbName, Path, Options).
+
+-spec pull(Cont) -> Result when
+  Cont :: pull_continuation(),
+  Result :: pull_result() | 'end_of_pull'.
+pull(Cont) -> barrel_walk:pull(Cont).
 
 %% ==============================
 %% replication

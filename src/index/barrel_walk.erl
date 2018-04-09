@@ -14,23 +14,171 @@
 
 -module(barrel_walk).
 
--export([walk/5]).
+-export([
+  walk/5,
+  pull/3, pull/1
+]).
 
 -include("barrel.hrl").
-
 
 -define(DEFAULT_MAX, 1 bsl 32 -1).
 
 -export([decode_path/2]).
 
 
-walk(#db{store=Store}, Path, UserFun, AccIn, Options) ->
+pull(#{ db := DbId, path := Path, options := Options, cont := ContKey }) ->
+  barrel_db:with_db(
+    DbId,
+    fun(Db) ->
+      pull(Db, Path, ContKey, Options)
+    end
+  ).
+
+pull(DbId, Path, Options) when is_binary(DbId) ->
+  barrel_db:with_db(
+    DbId,
+    fun(Db) ->
+      pull(Db, Path, undefined, Options)
+    end
+  );
+pull(_, _, _) ->
+  erlang:error(badarg).
+
+pull(#db{store=Store}=Db, Path, ContKey, Options) ->
   {ok, Snapshot} = rocksdb:snapshot(Store),
-  try walk_1(Store, Snapshot, Path, UserFun, AccIn, Options)
+  try pull_1(Db, Path, ContKey, Options, Snapshot)
   after rocksdb:release_snapshot(Snapshot)
   end.
 
-walk_1(Store, Snapshot, Path, UserFun, AccIn, Options0) ->
+
+pull_1(#db{id=DbId, store=Store}, Path, ContKey, Options, Snapshot) ->
+  Limit = maps:get(limit, Options, ?DEFAULT_MAX),
+  WithHistory = maps:get(history, Options, last) =:= all,
+  PathParts0 = decode_path(Path, []),
+  {PathParts, Move} = case lists:last(PathParts0) of
+                        <<"_", Last/binary >> ->
+                          PathParts1 = lists:droplast(PathParts0) ++ [Last],
+                          {PathParts1, prev};
+                        _ ->
+                          {PathParts0, next}
+                      end,
+  Prefix = encode_key(PathParts, order_by_key),
+  {First, RangeFun} = case ContKey of
+                        undefined ->
+                          FirstParts = case maps:find(start_at, Options) of
+                                     {ok, StartAt} ->
+                                       PathParts ++ [StartAt];
+                                     error ->
+                                       PathParts
+                                   end,
+                          case Move of
+                            prev ->
+                              {
+                                encode_key(FirstParts, 16#7FFFFFFFFFFFFFFF, order_by_key),
+                                fun(K) -> match_prefix(K, Prefix) end
+                              };
+                            _ ->
+                              {
+                                encode_key(FirstParts, order_by_key),
+                                fun(K) -> match_prefix(K, Prefix) end
+                              }
+                          end;
+                        _ when Move =:= prev ->
+                          {
+                            ContKey,
+                            fun(K) -> match_prefix(K, Prefix) end
+                          };
+                        _ ->
+                          {
+                            ContKey,
+                            fun(K) -> match_prefix(K, Prefix) end
+                          }
+                      end,
+  ReadOptions = [{snapshot, Snapshot}],
+  Ref = erlang:make_ref(),
+  %% wrapper function to retrieve the results from the iterator
+  PullFun =
+    fun(KeyBin, _, Acc) ->
+      erlang:put(Ref, KeyBin),
+      {Rid, _Pattern} = parse_rid(KeyBin, order_by_key),
+      Res = rocksdb:get(Store, barrel_keys:res_key(Rid), ReadOptions),
+      case Res of
+        {ok, Bin} ->
+          DocInfo = binary_to_term(Bin),
+          RevId = maps:get(current_rev, DocInfo),
+          Deleted = maps:get(deleted, DocInfo),
+          DocId = maps:get(id, DocInfo),
+          Rid = maps:get(rid, DocInfo),
+          RevTree = maps:get(revtree, DocInfo),
+          Changes = case WithHistory of
+                      false -> [RevId];
+                      true -> barrel_revtree:history(RevId, RevTree)
+                    end,
+          
+          Row = pull_with_deleted(
+            #{ <<"id">> => DocId,
+               <<"rev">> => RevId,
+               <<"changes">> => Changes },
+            Deleted
+          ),
+          [Row | Acc];
+        _Else ->
+          Acc
+      end
+    end,
+  Cont0 = #{ db => DbId, path => Path, options => Options },
+  %% initialize the iterator
+  {ok, Itr} = rocksdb:iterator(Store, ReadOptions),
+  Next = fun() -> rocksdb:iterator_move(Itr, Move) end,
+  Start = case Move of
+            next -> rocksdb:iterator_move(Itr, First);
+            prev -> rocksdb:iterator_move(Itr, {seek_for_prev, First})
+          end,
+  try do_pull(
+    Start, Next, PullFun, [], RangeFun, Cont0, ContKey, Ref, Limit - 1)
+  after safe_iterator_close(Itr)
+  end.
+
+do_pull(Start, Next, PullFun, Acc, Cmp, Cont0, ContKey, Ref, Limit) ->
+  Result = pull_loop(Start, Next, PullFun, Acc, ContKey, Cmp, Limit),
+  case Result of
+    [] -> 'end_of_pull';
+    _ ->
+      ContKey2 = erlang:erase(Ref),
+      Cont1 = Cont0#{ cont => ContKey2 },
+      {Result, Cont1}
+  end.
+ 
+
+pull_loop({error, iterator_closed}, _Next, _WrapperFun, Acc, _ContKey, _Cmp, _Limit) ->
+  Acc;
+pull_loop({error, invalid_iterator}, _Next, _WrapperFun, Acc, _ContKey, _Cmp, _Limit) ->
+  Acc;
+pull_loop({ok, ContKey, _V}, Next, WrapperFun, Acc, ContKey, Cmp, Limit) ->
+  pull_loop(Next(), Next, WrapperFun, Acc, ContKey, Cmp, Limit);
+pull_loop({ok, K, V}, Next, WrapperFun, Acc0, ContKey, Cmp, Limit) ->
+  case Cmp(K) of
+    true ->
+      case WrapperFun(K, V, Acc0) of
+        Acc1 when Limit > 0 ->
+          pull_loop(Next(), Next, WrapperFun, Acc1, ContKey, Cmp, Limit - 1);
+        Acc1 -> Acc1
+      end;
+    false ->
+      Acc0
+  end.
+
+
+pull_with_deleted(Row, true) -> Row#{<<"deleted">> => true};
+pull_with_deleted(Row, _) -> Row.
+
+walk(#db{store=Store}, Path, UserFun, AccIn, Options) ->
+  {ok, Snapshot} = rocksdb:snapshot(Store),
+  try do_walk(Store, Snapshot, Path, UserFun, AccIn, Options)
+  after rocksdb:release_snapshot(Snapshot)
+  end.
+
+do_walk(Store, Snapshot, Path, UserFun, AccIn, Options0) ->
   Options1 = validate_options(Options0),
   PathParts = decode_path(Path, []),
   %% set fold options
@@ -72,8 +220,7 @@ walk_1(Store, Snapshot, Path, UserFun, AccIn, Options0) ->
   %% start folding
   try
     fold_loop(
-      Start,
-      Next, WrapperFun, AccIn, RangeFun, Limit - 1
+      Start, Next, WrapperFun, AccIn, RangeFun, Limit - 1
     )
   after safe_iterator_close(Itr)
   end.
