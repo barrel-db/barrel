@@ -349,11 +349,11 @@ callback_mode() -> state_functions.
 
 terminate({shutdown, deleted}, _State, #{ store := Store, name := Name}) ->
   _ = barrel_storage:delete_barrel(Store, Name),
-  gproc:reg(?barrel(Name)),
+  gproc:unreg(?barrel(Name)),
   ok;
 terminate(_Reason, _State, #{ store := Store, name := Name}) ->
   _ = barrel_storage:close_barrel(Store, Name),
-  gproc:reg(?barrel(Name)),
+  gproc:unreg(?barrel(Name)),
   ok.
 
 code_change(_OldVsn, State, Data, _Extra) ->
