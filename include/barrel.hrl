@@ -12,7 +12,11 @@
 -define(JOBS_IDLE_MIN_LIMIT, 32).
 -define(JOBS_IDLE_MAX_LIMIT, 128).
 
--define(barrel(Id), {via, gproc, n, l, {barrel_db, Id}}).
+-define(barrel(Name), {n, l, {barrel, Name}}).
+-define(store(Name), {n, l, {barrel_storage, Name}}).
+-define(via_store(Name), {via, gproc, {n, l, {barrel_storage, Name}}}).
+
+
 
 -record(write_op, {
   type = merge :: merge | merge_with_conflict | purge,
@@ -27,7 +31,8 @@
 
 
 -define(MAX_WAIT, 16#ffffffff).
--define(SUPERVISOR_WAIT,
-  application:get_env(rabbit, supervisor_shutdown_timeout, infinity)).
+
 -define(WORKER_WAIT,
   application:get_env(barrel, worker_shutdown_timeout, 30000)).
+
+

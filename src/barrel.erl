@@ -17,9 +17,8 @@
 
 %% API
 -export([
-  get_barrel/2,
-  has_barrel/2,
-  destroy_barrel/2,
+  create_barrel/2,
+  delete_barrel/1,
   barrel_infos/1
 ]).
 
@@ -27,42 +26,16 @@
   fetch_doc/3
 ]).
 
-get_barrel(Store, Id) ->
-  when_store(
-    Store,
-    fun() ->
-      {ok,
-       #{store => Store,
-         id => Id}}
-    end
-  ).
 
-has_barrel(Store, Id) ->
-  when_store(
-    Store,
-    fun() -> barrel_storage:has_barrel(Store, Id) end
-  ).
+create_barrel(Name, Options) ->
+  barrel_db:create_barrel(Name, Options).
 
-destroy_barrel(Store, Id) ->
-  when_store(
-    Store,
-    fun() ->
-      ok = barrel_db:close(#{ store => Store, id => Id }),
-      barrel_storage:destroy_barrel(Store, Id)
-    end
-  ).
+delete_barrel(Name) ->
+  barrel_db:delete_barrel(Name).
+  
 
 barrel_infos(DbRef) ->
   barrel_db:db_infos(DbRef).
 
 fetch_doc(DbRef, DocId, Options) ->
   barrel_db:fetch_doc(DbRef, DocId, Options).
-
-
-when_store(Store, Fun) ->
-  case barrel_storage:has_storage_provider(Store) of
-    true -> Fun();
-    false ->
-      {error, storage_provider_not_found}
-  end.
-  

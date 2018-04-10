@@ -20,29 +20,30 @@
 -export([
   init/2,
   terminate/2,
-  create_barrel/4,
-  open_barrel/3,
-  delete_barrel/3,
-  has_barrel/3
+  create_barrel/3,
+  open_barrel/2,
+  delete_barrel/2,
+  has_barrel/2,
+  close_barrel/2
 ]).
 
 %% documents
 -export([
-  get_revision/4,
-  add_revision/5,
-  delete_revision/4,
-  delete_revisions/4,
-  fetch_docinfo/3,
-  write_docinfo/6,
-  purge_doc/5
+  get_revision/3,
+  add_revision/4,
+  delete_revision/3,
+  delete_revisions/3,
+  fetch_docinfo/2,
+  write_docinfo/5,
+  purge_doc/4
 ]).
 
 
 %% local documents
 -export([
-  put_local_doc/4,
-  get_local_doc/3,
-  delete_local_doc/3
+  put_local_doc/3,
+  get_local_doc/2,
+  delete_local_doc/2
 ]).
 
 -include("barrel.hrl").
@@ -53,33 +54,34 @@
 %%
 
 init(StoreName, _Options) ->
-  StateFile = state_file(StoreName),
-  State = read_state(StateFile),
-  {ok, State}.
+  {ok, #{ store => StoreName, barrels => #{} } }.
 
 terminate(_, _) -> ok.
 
 
-create_barrel(StoreName, Name, Options, State) ->
-  case maps:is_key(Name, State) of
+create_barrel(Name, Options, #{ store := StoreName, barrels := Barrels } = State) ->
+  case maps:is_key(Name, Barrels) of
     true ->
       {{error, already_exists}, State};
     false ->
       Tab = tabname(StoreName, Name),
       case memstore:open(Tab, []) of
         ok ->
-          NewState = State#{ Name => Options },
-          ok = write_state(state_file(StoreName)),
-          Barrel = init_barrel(StoreName, Name),
-          {{ok, Barrel}, NewState};
+          case init_barrel(StoreName, Name) of
+            {ok, Barrel} ->
+              NewState = State#{ barrels => Barrels#{ Name => Options } },
+              {{ok, Barrel}, NewState};
+            Error ->
+              {Error, State}
+          end;
         Error ->
           {Error, State}
       end
   end.
 
 
-open_barrel(StoreName, Name, State) ->
-  case maps:is_key(Name, State) of
+open_barrel(Name,  #{ store := StoreName, barrels := Barrels }) ->
+  case maps:is_key(Name, Barrels) of
     true ->
       Barrel = init_barrel(StoreName, Name),
       {ok, Barrel};
@@ -87,34 +89,17 @@ open_barrel(StoreName, Name, State) ->
       {error, not_found}
   end.
 
-delete_barrel(StoreName, Name, State) ->
-  Tab = tabname(StoreName, Id),
-  ok =  memstore:close(Tab),
-  NewState = maps:remove(Name, State),
-  ok = write_state(state_file(StoreName), NewState),
-  {ok, NewState};
+delete_barrel(Name, #{ store := StoreName, barrels := Barrels } = State) ->
+  Tab = tabname(StoreName, Name),
+  _ =  memstore:close(Tab),
+  NewState = State#{ barrels => maps:remove(Name, Barrels) },
+  {ok, NewState}.
+
+close_barrel(Name, State) ->
+  delete_barrel(Name, State).
   
-  
-has_barrel(_StoreName, Name, State) ->
-  maps:is_key(Name, State).
-
-
-state_file(StoreName) ->
-  Filename = StoreName ++ ".000",
-  filename:join([barrel_storage:data_dir(), Filename]).
-
-read_state(StateFile) ->
-  case file:read_file(StateFile) of
-    {ok, Bin} ->
-      Term = erlang:binary_to_term(Bin),
-      {ok,  Term};
-    Error ->
-      Error
-  end.
-
-write_state(StateFile, State) ->
-  Bin = term_to_binary(State),
-  file:write_file(StateFile, Bin).
+has_barrel(Name, #{ barrels := Barrels } ) ->
+  maps:is_key(Name, Barrels).
 
 tabname(StoreName, DbId) ->
   list_to_atom(
@@ -125,7 +110,11 @@ init_barrel(StoreName, Name) ->
   Tab = tabname(StoreName, Name),
   case memstore:open(Tab, []) of
     ok ->
-      Barrel  = #{ tab => Tab, updated_seq => 0, docs_count => 0 },
+      Barrel  = #{store => StoreName,
+                  name => Name,
+                  tab => Tab,
+                  updated_seq => 0,
+                  docs_count => 0 },
       _ = memstore:write_batch(Tab, [{put, '$update_seq', 0},
                                      {put, '$docs_count', 0}]),
       {ok, Barrel};
@@ -140,8 +129,7 @@ init_barrel(StoreName, Name) ->
 
 %% documents
 
-get_revision(StoreName, Id, DocId, Rev) ->
-  Tab = tabname(StoreName, Id),
+get_revision(DocId, Rev, #{ tab := Tab }) ->
   case memstore:get(Tab, {r, DocId, Rev}) of
     {ok, Doc} -> {ok, Doc};
     not_found ->
@@ -149,29 +137,24 @@ get_revision(StoreName, Id, DocId, Rev) ->
       {error, not_found}
   end.
 
-add_revision(StoreName, Id, DocId, RevId, Body) ->
-  Tab = tabname(StoreName, Id),
+add_revision(DocId, RevId, Body, #{ tab := Tab }) ->
   memstore:put(Tab, {r, DocId, RevId}, Body).
 
-delete_revision(StoreName, Id, DocId, RevId) ->
-  Tab = tabname(StoreName, Id),
+delete_revision(DocId, RevId, #{ tab := Tab }) ->
   memstore:delete(Tab, {r, DocId, RevId}).
 
-delete_revisions(StoreName, Id, DocId, RevIds) ->
-  Tab = tabname(StoreName, Id),
+delete_revisions(DocId, RevIds, #{ tab := Tab }) ->
   _ = [memstore:delete(Tab, {r, DocId, RevId}) || RevId <- RevIds],
   ok.
 
-fetch_docinfo(StoreName, Id, DocId) ->
-  Tab = tabname(StoreName, Id),
+fetch_docinfo(DocId, #{ tab := Tab }) ->
   case memstore:get(Tab, {d, DocId}) of
     {ok, Doc} -> {ok, Doc};
     not_found -> {error, not_found}
   end.
 
 %% TODO: that part should be atomic, maybe we should add a transaction log
-write_docinfo(StoreName, Id, DocId, NewSeq, OldSeq, DocInfo) ->
-  Tab = tabname(StoreName, Id),
+write_docinfo(DocId, NewSeq, OldSeq, DocInfo, #{ tab := Tab }) ->
   case write_action(NewSeq, OldSeq) of
     new ->
       memstore:write_batch(
@@ -195,8 +178,7 @@ write_action(nil, _Seq) -> edit;
 write_action(Seq, Seq) -> edit;
 write_action(_, _) -> replace.
 
-purge_doc(StoreName, Id, DocId, LastSeq, Revisions) ->
-  Tab = tabname(StoreName, Id),
+purge_doc(DocId, LastSeq, Revisions, #{ tab := Tab }) ->
   Batch = lists:foldl(
     fun(RevId, Batch1) ->
       [{delete, {r, DocId, RevId}} | Batch1]
@@ -208,17 +190,14 @@ purge_doc(StoreName, Id, DocId, LastSeq, Revisions) ->
 
 %% local documents
 
-put_local_doc(StoreName, Id, DocId, Doc) ->
-  Tab = tabname(StoreName, Id),
+put_local_doc(DocId, Doc, #{ tab := Tab }) ->
   memstore:put(Tab, {l, DocId}, Doc).
 
-get_local_doc(StoreName, Id, DocId) ->
-  Tab = tabname(StoreName, Id),
+get_local_doc(DocId, #{ tab := Tab }) ->
   case memstore:get(Tab, {l, DocId}) of
     {ok, Doc} -> {ok, Doc};
     not_found -> {error, not_found}
   end.
 
-delete_local_doc(StoreName, Id, DocId) ->
-  Tab = tabname(StoreName, Id),
+delete_local_doc(DocId, #{ tab := Tab }) ->
   memstore:delete(Tab, {l, DocId}).

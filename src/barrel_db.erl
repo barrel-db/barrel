@@ -17,7 +17,9 @@
 
 %% API
 -export([
-  start_link/1,
+  create_barrel/2,
+  delete_barrel/1,
+  start_link/3,
   db_infos/1,
   fetch_doc/3,
   write_changes/2,
@@ -60,6 +62,22 @@
 
 -define(WRITE_BATCH_SIZE, 128).
 
+
+create_barrel(Name, Options) ->
+  case barrel_pm:whereis_name(Name) of
+    Pid when is_pid(Pid) ->
+      {error, already_exists};
+    undefined ->
+      case barrel_db_sup:start_db(Name, create, Options) of
+        {ok, _Pid} -> ok;
+        {error, {already_started, _Pid}} -> ok;
+        {error, Error} -> Error
+      end
+  end.
+
+delete_barrel(Name) ->
+  call(Name, delete).
+
 db_infos(DbRef) ->
   call(DbRef, infos).
 
@@ -83,7 +101,7 @@ do_command(DbRef, Cmd) ->
   do_for_ref(
     DbRef,
     fun(DbPid) ->
-      case handle_command(Cmd, From, DbRef) of
+      case gen_statem:call(DbPid, {handle_command, Cmd, From}) of
         ok ->
           await_response(DbPid, Tag);
         Error ->
@@ -227,17 +245,6 @@ cast(DbRef, Msg) ->
     end
   ).
 
-open(Name) ->
-  case barrel_pm:whereis_name(DbRef) of
-    Pid when is_pid(Pid) ->
-      Pid;
-    undefined ->
-      case find_store<
-  end.
-
-    
-  
-
 do_for_ref(DbRef, Fun) ->
   try
       case barrel_pm:whereis_name(DbRef) of
@@ -251,14 +258,15 @@ do_for_ref(DbRef, Fun) ->
               Fun(Pid);
             {error, {already_started, Pid}} ->
               Fun(Pid);
-            {error, Error} ->
-              exit({noproc, Error})
+            Error ->
+              Error
           end
       end
   catch
       exit:Reason when Reason =:= normal  ->
         do_for_ref(DbRef, Fun)
   end.
+
 
 close(DbRef) ->
   case barrel_pm:whereis_name(DbRef) of
@@ -278,36 +286,74 @@ set_state(DbPid, State) ->
   DbPid ! {set_state, State},
   ok.
 
-start_link(DbRef) ->
-  gen_statem:start_link({via, gproc, {n, l, DbRef}}, ?MODULE, [DbRef], []).
+start_link(Name, OpenType, Options) ->
+  proc_lib:start_link(?MODULE, init, [[Name, OpenType, Options]]).
 
 %% -----------------
-%% gen_statem callbacks
+%% gen_statem callbaxcks
 
-init([#{ store := Store, id := Id}=DbRef]) ->
-  process_flag(trap_exit, true),
-  case barrel_storage:init_barrel(Store, Id) of
-    {ok, State} ->
-      {ok, Writer} = barrel_db_writer:start_link(DbRef, State),
-      BatchSize = application:get_env(barrel, write_batch_size, ?WRITE_BATCH_SIZE),
-      Data = #{ ref => DbRef,
-                store => Store,
-                id => Id,
-                state => State,
-                writer => Writer,
-                write_batch_size => BatchSize,
-                pending => []},
-      {ok, writeable, Data};
-    not_found ->
-      ignore;
-    Error ->
-      {stop, Error}
+
+init([Name, create, Options]) ->
+  case barrel_storage:find_barrel(Name) of
+    error ->
+      Store = maps:get(store, Options, barrel_storage:get_default()),
+      case barrel_storage:create_barrel(Store, Name, Options) of
+        {{ok, State}, Mod} ->
+          process_flag(trap_exit, true),
+          proc_lib:init_ack({ok, self()}),
+          {ok, Writer} = barrel_db_writer:start_link(Name, Mod, State),
+          BatchSize = application:get_env(barrel, write_batch_size, ?WRITE_BATCH_SIZE),
+          Data = #{ store => Store,
+                    name => Name,
+                    mod => Mod,
+                    state => State,
+                    writer => Writer,
+                    write_batch_size => BatchSize,
+                    pending => []},
+          gproc:reg(?barrel(Name)),
+          gen_statem:enter_loop(?MODULE, [], writeable, Data);
+        {Error, _} ->
+          exit(Error)
+      end;
+    {ok, _} ->
+      exit({error, already_exists})
+  end;
+init([Name, open, _Options]) ->
+  case barrel_storage:find_barrel(Name) of
+    {ok, Store} ->
+      case barrel_storage:open_barrel(Store, Name) of
+        {{ok, State}, Mod} ->
+          process_flag(trap_exit, true),
+          proc_lib:init_ack({ok, self()}),
+          {ok, Writer} = barrel_db_writer:start_link(Name, Mod, State),
+          BatchSize = application:get_env(barrel, write_batch_size, ?WRITE_BATCH_SIZE),
+          Data = #{ store => Store,
+                    name => Name,
+                    mod => Mod,
+                    state => State,
+                    writer => Writer,
+                    write_batch_size => BatchSize,
+                    pending => []},
+          gproc:reg(?barrel(Name)),
+          gen_statem:enter_loop(?MODULE, [], writeable, Data);
+        {Error, _} ->
+          proc_lib:init_ack({error, Error}),
+          exit(normal)
+      end;
+    error ->
+      proc_lib:init_ack({error, not_found}),
+      exit(normal)
   end.
 
 callback_mode() -> state_functions.
 
-terminate(_Reason, _State, #{ store := Store, id := Id}) ->
-  _ = barrel_storage:close_barrel(Store, Id),
+terminate({shutdown, deleted}, _State, #{ store := Store, name := Name}) ->
+  _ = barrel_storage:delete_barrel(Store, Name),
+  gproc:reg(?barrel(Name)),
+  ok;
+terminate(_Reason, _State, #{ store := Store, name := Name}) ->
+  _ = barrel_storage:close_barrel(Store, Name),
+  gproc:reg(?barrel(Name)),
   ok.
 
 code_change(_OldVsn, State, Data, _Extra) ->
@@ -328,19 +374,26 @@ writing(info, {set_state, State}, #{ pending := Pending, write_batch_size := Bat
   ok = maybe_notify_changes(State, Data),
   case Pending of
     [] ->
-      {next_state, writeable, Data#{ state => State }};
+      NewData = Data#{ state => State },
+      {next_state, writeable, NewData};
     _ ->
       {ToSend, Pending2} = filter_pending(Pending, BatchSize, []),
-      _ = notify_writer(ToSend, Data),
-      {keep_state, Data#{ pending => Pending2 }}
+      NewData = Data#{ state => State,  pending => Pending2 },
+      _ = notify_writer(ToSend, NewData),
+      {keep_state, NewData}
   end;
 writing(EventType, Event, Data) ->
   handle_event(EventType, Event, writing, Data).
 
+handle_event({call, From}, {handle_command, Cmd, CmdFrom}, _State, Data) ->
+  Reply = handle_command(Cmd, CmdFrom, Data),
+  {keep_state, Data, [{reply, From, Reply}]};
 handle_event({call, From}, infos, _State, #{ state := State } = Data) ->
   {keep_state, Data, [{reply, From, State}]};
 handle_event({call, From}, get_state, _State, #{ state := State } = Data) ->
   {keep_state, Data, [{reply, From, State}]};
+handle_event({call, From}, delete, _State, _Data) ->
+  {stop_and_reply, {shutdown, deleted}, [{reply, From, ok}]};
 handle_event(info, {'EXIT', Pid, Reason}, _State, #{ db_ref := DbRef, writer := Pid } = Data) ->
   _ = lager:info("writer exitded. db=~p reason=~p~n", [DbRef, Reason]),
   {stop, {writer_exit, Reason}, Data#{writer => nil}};
@@ -363,18 +416,26 @@ filter_pending([Job | Rest], N, Acc) ->
 notify_writer(Pending, #{ writer := Writer }) ->
   Writer ! {store, Pending}.
 
-handle_command({fetch_doc, DocId, Options}, From, DbRef) ->
-  ?jobs_pool:run({?MODULE, do_fetch_doc, [DbRef,DocId, Options]}, From);
-handle_command({put_local_doc, DocId, Doc}, From, DbRef) ->
-  ?jobs_pool:run({barrel_storage, put_local_doc, [DbRef, DocId, Doc]}, From);
-handle_command({get_local_doc, DocId}, From, DbRef) ->
-  ?jobs_pool:run({barrel_storage, get_local_doc, [DbRef, DocId]}, From);
-handle_command({delete_local_doc, DocId}, From, DbRef) ->
-  ?jobs_pool:run({barrel_storage, delete_local_doc, [DbRef, DocId]}, From).
 
-do_fetch_doc(DbRef, DocId, Options) ->
+handle_command(Cmd, From, #{ mod := Mod, state := State}) ->
+  case Cmd of
+    {fetch_doc, DocId, Options} ->
+      ?jobs_pool:run({?MODULE, do_fetch_doc, [DocId, Options, {Mod, State}]}, From);
+    {put_local_doc, DocId, Doc} ->
+      ?jobs_pool:run({Mod, put_local_doc, [DocId, Doc, State]}, From);
+    {get_local_doc, DocId} ->
+      ?jobs_pool:run({Mod, get_local_doc, [DocId, State]}, From);
+    {delete_local_doc, DocId} ->
+      ?jobs_pool:run({Mod, delete_local_doc, [DocId, State]}, From);
+    _Other ->
+      {error, unknown_command}
+  end.
+
+
+
+do_fetch_doc(DocId, Options, {Mod, State}) ->
   UserRev = maps:get(rev, Options, <<"">>),
-  case barrel_storage:fetch_docinfo(DbRef, DocId) of
+  case Mod:fetch_docinfo(DocId, State) of
     {ok, #{ deleted := true }} when UserRev =:= <<>> ->
       {error, not_found};
     {ok, #{ rev := CurrentRev, revtree := RevTree}} ->
@@ -385,7 +446,7 @@ do_fetch_doc(DbRef, DocId, Options) ->
       case maps:find(Rev, RevTree) of
         {ok, RevInfo} ->
           Del = maps:get(deleted, RevInfo, false),
-          case barrel_storage:get_revision(DbRef, DocId, Rev) of
+          case Mod:get_revision(DocId, Rev, State) of
             {ok, Doc} ->
               WithHistory = maps:get(history, Options, false),
               MaxHistory = maps:get(max_history, Options, ?IMAX1),

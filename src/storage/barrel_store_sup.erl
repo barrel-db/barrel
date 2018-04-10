@@ -18,7 +18,8 @@
 %% API
 -export([
   start_store/3,
-  stop_store/1
+  stop_store/1,
+  all_stores/0
 ]).
 
 -export([start_link/0]).
@@ -37,6 +38,9 @@ stop_store(Name) ->
     Error ->
       Error
   end.
+
+all_stores() ->
+  [Id || {Id, _Child, _Type, _Modules} <- supervisor:which_children(?MODULE)].
 
 start_link() ->
   supervisor:start_link({local, ?MODULE}, ?MODULE, []).

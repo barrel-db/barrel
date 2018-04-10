@@ -20,6 +20,8 @@
   whereis_name/1
 ]).
 
+-include("barrel.hrl").
+
 %% TODO: add gossip support but for now be local only
-whereis_name(DbRef) ->
-  gproc:whereis_name({n, l, DbRef}).
+whereis_name(Name) ->
+  gproc:whereis_name(?barrel(Name)).

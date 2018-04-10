@@ -11,7 +11,7 @@
 
 %% API
 -export([
-  start_link/2
+  start_link/3
 ]).
 
 -export([
@@ -22,17 +22,18 @@
 ]).
 
 
--export([init/3]).
+-export([init/1]).
 
 -include("barrel.hrl").
 
-start_link(DbRef, DbState) ->
-  Pid = spawn_link(?MODULE, init, [self(), DbRef, DbState]),
+start_link(DbRef, Mod, DbState) ->
+  Pid = spawn_link(?MODULE, init, [[self(), DbRef, Mod, DbState]]),
   {ok, Pid}.
 
-init(DbPid, DbRef, DbState) ->
+init([DbPid, DbRef, Mod, DbState]) ->
   State = #{ db_pid => DbPid,
              db_ref => DbRef,
+             db_mod => Mod,
              db_state => DbState,
              cache => [] },
   loop(State).
@@ -329,18 +330,18 @@ update_state(#{ db_state := DbState } = State, Inc) ->
   {NewSeq, State#{ db_state => DbState#{updated_seq => NewSeq,
                                         docs_count => DocsCount2} }}.
 
-add_revision(DocId, RevId, Body, #{ db_ref := DbRef }) ->
-  barrel_storage:add_revision(DbRef, DocId, RevId, Body).
+add_revision(DocId, RevId, Body, #{ db_mod := Mod, db_state := DbState }) ->
+  Mod:add_revision(DocId, RevId, Body, DbState).
 
-fetch_docinfo(DocId, #{ db_ref := DbRef }) ->
-  barrel_storage:fetch_docinfo(DbRef, DocId).
+fetch_docinfo(DocId, #{ db_mod := Mod, db_state := DbState }) ->
+  Mod:fetch_docinfo(DocId, DbState).
 
-write_docinfo(DocId, NewSeq, OldSeq, DocInfo, #{ db_ref := DbRef }) ->
-  barrel_storage:write_docinfo(DbRef, DocId, NewSeq, OldSeq, DocInfo).
+write_docinfo(DocId, NewSeq, OldSeq, DocInfo, #{ db_mod := Mod, db_state := DbState }) ->
+  Mod:write_docinfo(DocId, NewSeq, OldSeq, DocInfo, DbState).
 
 
-purge_doc(DocId, LastSeq, Revisions, #{ db_ref := DbRef }) ->
-  barrel_storage:purge_doc(DbRef, DocId, LastSeq, Revisions).
+purge_doc(DocId, LastSeq, Revisions,  #{ db_mod := Mod, db_state := DbState }) ->
+  Mod:purge_doc(DocId, LastSeq, Revisions, DbState).
 
 -compile({inline, [reply/2]}).
 -spec reply(From :: {pid(), reference()}, Reply :: term()) -> ok.

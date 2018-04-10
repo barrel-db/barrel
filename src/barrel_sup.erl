@@ -96,14 +96,6 @@ init([]) ->
              shutdown => infinity,
              type => supervisor,
              modules => [barrel_db_sup]
-           },
-           %% storage manager
-           #{id => barrel_storage,
-             start => {barrel_storage, start_link, []},
-             restart => transient,
-             shutdown => 2000,
-             type => worker,
-             modules => [barrel_storage]
            }
           ],
   

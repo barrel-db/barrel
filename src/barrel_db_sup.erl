@@ -20,7 +20,7 @@
 %% API
 -export([
   start_link/0,
-  start_db/1,
+  start_db/1, start_db/3,
   stop_db/1
 ]).
 
@@ -30,8 +30,11 @@ start_link() ->
   supervisor:start_link({local, ?MODULE}, ?MODULE, []).
 
 start_db(DbRef) ->
-  _ = lager:info("start db: ref=~p", [DbRef]),
-  supervisor:start_child(?MODULE, [DbRef]).
+  start_db(DbRef, open, #{}).
+
+start_db(DbRef, StartType, Options) ->
+  _ = lager:info("start db: ref=~p, type=~p, options=~p", [DbRef, StartType, Options]),
+  supervisor:start_child(?MODULE, [DbRef, StartType, Options]).
 
 stop_db(DbPid) ->
   supervisor:terminate_child(?MODULE, DbPid).

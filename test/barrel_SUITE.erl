@@ -49,7 +49,7 @@ all() ->
 
 init_per_suite(Config) ->
   {ok, _} = application:ensure_all_started(barrel),
-  ok = barrel_storage:register_storage_provider(default, barrel_memory_storage, #{}),
+  {ok, _} = barrel_store_sup:start_store(default, barrel_memory_storage, #{}),
   Config.
 
 init_per_testcase(_, Config) ->
@@ -64,112 +64,107 @@ end_per_suite(Config) ->
 
 
 get_db(_Config) ->
-  Store = default,
   BarrelId = <<"someid">>,
-  {ok, DbRef} = barrel:get_barrel(Store, BarrelId),
-  #{ store := Store, id := BarrelId } = DbRef,
-  #{ updated_seq := 0, docs_count := 0 } = barrel:barrel_infos(DbRef),
-  barrel:destroy_barrel(Store, BarrelId).
+  {error, not_found} = barrel:barrel_infos(BarrelId),
+  ok = barrel:create_barrel(BarrelId, #{}),
+  #{ updated_seq := 0, docs_count := 0 } = barrel:barrel_infos(BarrelId),
+  ok = barrel:delete_barrel(BarrelId).
   
 
 write_change(_Config) ->
-  Store = default,
   BarrelId = <<"testdb">>,
   Batch = [
     {create, #{ <<"id">> => <<"a">>, <<"k">> => <<"v">>}}
   ],
-  {ok, DbRef} = barrel:get_barrel(Store, BarrelId),
-  [Record] = barrel_db:write_changes(DbRef, Batch),
+  ok = barrel:create_barrel(BarrelId, #{}),
+  [Record] = barrel_db:write_changes(BarrelId, Batch),
   #{ <<"id">> := <<"a">>, <<"_rev">> := Rev } = Record,
   true = is_binary(Rev),
-  #{ updated_seq := 1, docs_count := 1 } = barrel:barrel_infos(DbRef),
+  #{ updated_seq := 1, docs_count := 1 } = barrel:barrel_infos(BarrelId),
    [#{<<"id">> := <<"a">>,
       <<"error">> := <<"conflict">>,
-      <<"conflict">> := <<"doc_exists">>}] = barrel_db:write_changes(DbRef, Batch),
-  #{ updated_seq := 1, docs_count := 1 } = barrel:barrel_infos(DbRef),
+      <<"conflict">> := <<"doc_exists">>}] = barrel_db:write_changes(BarrelId, Batch),
+  #{ updated_seq := 1, docs_count := 1 } = barrel:barrel_infos(BarrelId),
   Batch2 = [
     {replace, #{ <<"id">> => <<"a">>, <<"k">> => <<"v1">>, <<"_rev">> => Rev}}
   ],
   [#{ <<"id">> := <<"a">>,
       <<"_rev">> := Rev2,
-      <<"k">> := <<"v1">> }] = barrel_db:write_changes(DbRef, Batch2),
+      <<"k">> := <<"v1">> }] = barrel_db:write_changes(BarrelId, Batch2),
   true = (Rev =/= Rev2),
-  #{ updated_seq := 2, docs_count := 1 } = barrel:barrel_infos(DbRef),
+  #{ updated_seq := 2, docs_count := 1 } = barrel:barrel_infos(BarrelId),
   Batch3 = [{delete, <<"a">>, Rev2}],
   [#{ <<"id">> := <<"a">>,
       <<"_rev">> := Rev3,
-      <<"_deleted">> := true }] = barrel_db:write_changes(DbRef, Batch3),
+      <<"_deleted">> := true }] = barrel_db:write_changes(BarrelId, Batch3),
   true = (Rev2 =/= Rev3),
-  #{ updated_seq := 3, docs_count := 0 } = barrel:barrel_infos(DbRef),
-  [#{<<"id">> := <<"a">>, <<"_rev">> := Rev4 }] = barrel_db:write_changes(DbRef, Batch),
+  #{ updated_seq := 3, docs_count := 0 } = barrel:barrel_infos(BarrelId),
+  [#{<<"id">> := <<"a">>, <<"_rev">> := Rev4 }] = barrel_db:write_changes(BarrelId, Batch),
   true = (Rev =/= Rev4),
-  #{ updated_seq := 4, docs_count := 1 } = barrel:barrel_infos(DbRef),
-  ok = barrel:destroy_barrel(Store, BarrelId),
+  #{ updated_seq := 4, docs_count := 1 } = barrel:barrel_infos(BarrelId),
+  ok = barrel:delete_barrel(BarrelId),
   ok.
 
 fetch_doc(_Config) ->
-  Store = default,
   BarrelId = <<"testdb">>,
   Doc = #{ <<"id">> => <<"a">>, <<"k">> => <<"v">>},
   Batch = [
     {create, Doc}
   ],
-  {ok, DbRef} = barrel:get_barrel(Store, BarrelId),
-  [#{ <<"id">> := <<"a">>, <<"_rev">> := Rev }] = barrel_db:write_changes(DbRef, Batch),
-  {ok, Doc1} = barrel_db:fetch_doc(DbRef, <<"a">>, #{}),
+  ok = barrel:create_barrel(BarrelId, #{}),
+  [#{ <<"id">> := <<"a">>, <<"_rev">> := Rev }] = barrel_db:write_changes(BarrelId, Batch),
+  {ok, Doc1} = barrel_db:fetch_doc(BarrelId, <<"a">>, #{}),
   Rev = maps:get(<<"_rev">>, Doc1),
   Batch2 = [
     {delete, <<"a">>, Rev}
   ],
-  [#{ <<"id">> := <<"a">>, <<"_deleted">> := true }] = barrel_db:write_changes(DbRef, Batch2),
-  {error, not_found} = barrel:fetch_doc(DbRef, <<"a">>, #{}),
-  ok = barrel:destroy_barrel(Store, BarrelId),
+  [#{ <<"id">> := <<"a">>, <<"_deleted">> := true }] = barrel_db:write_changes(BarrelId, Batch2),
+  {error, not_found} = barrel:fetch_doc(BarrelId, <<"a">>, #{}),
+  ok = barrel:delete_barrel(BarrelId),
   ok.
 
 
 fetch_revision(_Config) ->
-  Store = default,
   BarrelId = <<"testdb">>,
   Batch = [
     {create, #{ <<"id">> => <<"a">>, <<"k">> => <<"v">>}}
   ],
-  {ok, DbRef} = barrel:get_barrel(Store, BarrelId),
-  [#{ <<"id">> := <<"a">>, <<"_rev">> := Rev }] = barrel_db:write_changes(DbRef, Batch),
+  ok = barrel:create_barrel(BarrelId, #{}),
+  [#{ <<"id">> := <<"a">>, <<"_rev">> := Rev }] = barrel_db:write_changes(BarrelId, Batch),
   Batch2 = [
     {replace, #{ <<"id">> => <<"a">>, <<"k">> => <<"v1">>, <<"_rev">> => Rev}}
   ],
-  [#{ <<"id">> := <<"a">>, <<"_rev">> := Rev2 }] = barrel_db:write_changes(DbRef, Batch2),
+  [#{ <<"id">> := <<"a">>, <<"_rev">> := Rev2 }] = barrel_db:write_changes(BarrelId, Batch2),
   {ok, #{<<"id">> := <<"a">>,
          <<"k">> := <<"v1">>,
-         <<"_rev">> := Rev2 }} = barrel_db:fetch_doc(DbRef, <<"a">>, #{}),
+         <<"_rev">> := Rev2 }} = barrel_db:fetch_doc(BarrelId, <<"a">>, #{}),
   {ok, #{<<"id">> := <<"a">>,
          <<"k">> := <<"v">>,
-         <<"_rev">> := Rev }} = barrel_db:fetch_doc(DbRef, <<"a">>, #{ rev => Rev }),
+         <<"_rev">> := Rev }} = barrel_db:fetch_doc(BarrelId, <<"a">>, #{ rev => Rev }),
   {ok, #{<<"id">> := <<"a">>,
          <<"k">> := <<"v1">>,
-         <<"_rev">> := Rev2 }} = barrel_db:fetch_doc(DbRef, <<"a">>, #{ rev => Rev2 }),
+         <<"_rev">> := Rev2 }} = barrel_db:fetch_doc(BarrelId, <<"a">>, #{ rev => Rev2 }),
   Batch3 = [
     {delete, <<"a">>, Rev2}
   ],
-  [#{ <<"id">> := <<"a">>, <<"_rev">> := Rev3, <<"_deleted">> := true }] = barrel_db:write_changes(DbRef, Batch3),
+  [#{ <<"id">> := <<"a">>, <<"_rev">> := Rev3, <<"_deleted">> := true }] = barrel_db:write_changes(BarrelId, Batch3),
   {ok, #{<<"id">> := <<"a">>,
          <<"_rev">> := Rev3,
-         <<"_deleted">> := true }} = barrel_db:fetch_doc(DbRef, <<"a">>, #{ rev => Rev3 }),
-  ok = barrel:destroy_barrel(Store, BarrelId),
+         <<"_deleted">> := true }} = barrel_db:fetch_doc(BarrelId, <<"a">>, #{ rev => Rev3 }),
+  ok = barrel:delete_barrel(BarrelId),
   ok.
 
 write_changes(_Config) ->
-  Store = default,
   BarrelId = <<"testdb">>,
   Batch = [
     {create, #{ <<"id">> => <<"a">>, <<"ka">> => <<"va">>}},
     {create, #{ <<"id">> => <<"b">>, <<"kb">> => <<"vb">>}}
   ],
-  {ok, DbRef} = barrel:get_barrel(Store, BarrelId),
+  ok = barrel:create_barrel(BarrelId, #{}),
   [
     #{ <<"id">> := <<"a">>, <<"_rev">> := RevA1, <<"ka">> := <<"va">> },
     #{<<"id">> := <<"b">>, <<"_rev">> := RevB1, <<"kb">> := <<"vb">> }
-  ] = barrel_db:write_changes(DbRef, Batch),
+  ] = barrel_db:write_changes(BarrelId, Batch),
   Batch2 = [
     {replace, #{ <<"id">> => <<"a">>, <<"_rev">> => RevA1, <<"ka">> => <<"va1">> }},
     {delete, <<"b">>, RevB1}
@@ -177,65 +172,62 @@ write_changes(_Config) ->
   [
     #{ <<"id">> := <<"a">>, <<"_rev">> := _RevA2, <<"ka">> := <<"va1">> } = Doc,
     #{<<"id">> := <<"b">>,  <<"_rev">> := _RevB2, <<"_deleted">> := true }
-  ] = barrel_db:write_changes(DbRef, Batch2),
+  ] = barrel_db:write_changes(BarrelId, Batch2),
   false = maps:is_key(<<"_deleted">>, Doc),
   false = maps:is_key(<<"kb">>, Doc),
-  {ok, Doc} = barrel_db:fetch_doc(DbRef, <<"a">>, #{}),
-  {error, not_found} = barrel_db:fetch_doc(DbRef, <<"b">>, #{}),
-  ok = barrel:destroy_barrel(Store, BarrelId),
+  {ok, Doc} = barrel_db:fetch_doc(BarrelId, <<"a">>, #{}),
+  {error, not_found} = barrel_db:fetch_doc(BarrelId, <<"b">>, #{}),
+  ok = barrel:delete_barrel(BarrelId),
   ok.
 
 write_conflict(_Config) ->
-  Store = default,
   BarrelId = <<"testdb">>,
   Batch = [
     {create, #{ <<"id">> => <<"a">>, <<"k">> => <<"v">>}}
   ],
-  {ok, DbRef} = barrel:get_barrel(Store, BarrelId),
-  [#{ <<"id">> := <<"a">>, <<"_rev">> := Rev }] = barrel_db:write_changes(DbRef, Batch),
+  ok = barrel:create_barrel(BarrelId, #{}),
+  [#{ <<"id">> := <<"a">>, <<"_rev">> := Rev }] = barrel_db:write_changes(BarrelId, Batch),
   Batch2 = [
     {create, #{ <<"id">> => <<"a">>, <<"k">> => <<"v">>, <<"_rev">> => Rev}}
   ],
-  [#{ <<"id">> := <<"a">>, <<"_rev">> := Rev2 }] = barrel_db:write_changes(DbRef, Batch2),
+  [#{ <<"id">> := <<"a">>, <<"_rev">> := Rev2 }] = barrel_db:write_changes(BarrelId, Batch2),
   true = (Rev =/= Rev2),
   [#{ <<"id">> := <<"a">>,
       <<"error">> := <<"conflict">>,
       <<"error_code">> := 409,
-      <<"conflict">> := <<"revision_conflict">> }] = barrel_db:write_changes(DbRef, Batch2),
+      <<"conflict">> := <<"revision_conflict">> }] = barrel_db:write_changes(BarrelId, Batch2),
   Batch3 = [
     {create, #{ <<"id">> => <<"a">>, <<"k">> => <<"v">>, <<"_rev">> => Rev2}}
   ],
-  [#{ <<"id">> := <<"a">>, <<"_rev">> := _Rev3 }] = barrel_db:write_changes(DbRef, Batch3),
+  [#{ <<"id">> := <<"a">>, <<"_rev">> := _Rev3 }] = barrel_db:write_changes(BarrelId, Batch3),
   [#{ <<"id">> := <<"a">>,
       <<"error">> := <<"conflict">>,
       <<"error_code">> := 409,
-      <<"conflict">> := <<"doc_exists">> }] = barrel_db:write_changes(DbRef, Batch),
-  ok = barrel:destroy_barrel(Store, BarrelId),
+      <<"conflict">> := <<"doc_exists">> }] = barrel_db:write_changes(BarrelId, Batch),
+  ok = barrel:delete_barrel(BarrelId),
   ok.
 
 purge_doc(_Config) ->
-  Store = default,
   BarrelId = <<"testdb">>,
   Batch = [
     {create, #{ <<"id">> => <<"a">>, <<"k">> => <<"v">>}}
   ],
-  {ok, DbRef} = barrel:get_barrel(Store, BarrelId),
-  [#{ <<"id">> := <<"a">> }] = barrel_db:write_changes(DbRef, Batch),
-  {ok, #{ <<"id">> := <<"a">> }} = barrel_db:fetch_doc(DbRef, <<"a">>, #{}),
-  [#{<<"id">> := <<"a">>, <<"purged">> := true }] = barrel_db:purge_docs(DbRef, [<<"a">>]),
-  {error, not_found} = barrel:fetch_doc(DbRef, <<"a">>, #{}),
-  ok = barrel:destroy_barrel(Store, BarrelId),
+  ok = barrel:create_barrel(BarrelId, #{}),
+  [#{ <<"id">> := <<"a">> }] = barrel_db:write_changes(BarrelId, Batch),
+  {ok, #{ <<"id">> := <<"a">> }} = barrel_db:fetch_doc(BarrelId, <<"a">>, #{}),
+  [#{<<"id">> := <<"a">>, <<"purged">> := true }] = barrel_db:purge_docs(BarrelId, [<<"a">>]),
+  {error, not_found} = barrel:fetch_doc(BarrelId, <<"a">>, #{}),
+  ok = barrel:delete_barrel(BarrelId),
   ok.
 
 
 local_doc(_Config) ->
-  Store = default,
   BarrelId = <<"testdb">>,
-  {ok, DbRef} = barrel:get_barrel(Store, BarrelId),
+  ok = barrel:create_barrel(BarrelId, #{}),
   Doc = #{ <<"id">> => <<"a">>, <<"v">> => 1},
-  ok = barrel_db:put_local_doc(DbRef, <<"a">>, Doc),
-  {ok, Doc} = barrel_db:get_local_doc(DbRef, <<"a">>),
-  ok = barrel_db:delete_local_doc(DbRef, <<"a">>),
-  {error, not_found} = barrel_db:get_local_doc(DbRef, <<"a">>),
-  ok = barrel:destroy_barrel(Store, BarrelId),
+  ok = barrel_db:put_local_doc(BarrelId, <<"a">>, Doc),
+  {ok, Doc} = barrel_db:get_local_doc(BarrelId, <<"a">>),
+  ok = barrel_db:delete_local_doc(BarrelId, <<"a">>),
+  {error, not_found} = barrel_db:get_local_doc(BarrelId, <<"a">>),
+  ok = barrel:delete_barrel(BarrelId),
   ok.
