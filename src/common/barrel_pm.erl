@@ -17,7 +17,9 @@
 
 %% API
 -export([
-  whereis_name/1
+  whereis_name/1,
+  register_name/2,
+  unregister_name/1
 ]).
 
 -include("barrel.hrl").
@@ -25,3 +27,12 @@
 %% TODO: add gossip support but for now be local only
 whereis_name(Name) ->
   gproc:whereis_name(?barrel(Name)).
+
+register_name(Name, Pid) ->
+  gproc:register_name(?barrel(Name), Pid).
+
+unregister_name(Name) ->
+  gproc:unregister_name(?barrel(Name)).
+
+
+

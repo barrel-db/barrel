@@ -86,8 +86,10 @@ find_barrel(Name) ->
   fold_stores(
     fun ({Store, _Pid}, Acc) ->
       case barrel_storage:has_barrel(Store, Name) of
-        true -> {stop, {ok, Store}};
-        false -> {ok, Acc}
+        true ->
+          {stop, {ok, Store}};
+        false ->
+          {ok, Acc}
       end
     end,
     error
@@ -99,6 +101,8 @@ all_stores() ->
     []
   ).
 
+
+-spec fold_stores(fun(({term(), pid()}, any()) -> {ok, any()} | {stop, any()}), any()) -> any().
 fold_stores(Fun, Acc) ->
   Res =  gproc:select({l,n}, [{{{n, l, {barrel_storage, '_'}}, '_','_'},[],['$_'] }]),
   fold_stores_1(Res, Fun, Acc).
@@ -106,8 +110,7 @@ fold_stores(Fun, Acc) ->
 fold_stores_1([{{n, l, {barrel_storage, Name}}, Pid, _} | Rest], Fun, Acc0) ->
   case Fun({Name, Pid}, Acc0) of
     {ok, Acc1} -> fold_stores_1(Rest, Fun, Acc1);
-    {stop, Acc1} -> Acc1;
-    stop -> Acc0
+    {stop, StopAcc} -> StopAcc
   end;
 fold_stores_1([], _Fun, Acc) ->
   Acc.

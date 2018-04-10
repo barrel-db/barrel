@@ -76,7 +76,22 @@ create_barrel(Name, Options) ->
   end.
 
 delete_barrel(Name) ->
-  call(Name, delete).
+  do_for_ref(
+    Name,
+    fun(DbPid) ->
+      MRef = erlang:monitor(process, DbPid),
+      case gen_statem:call(DbPid, delete) of
+        ok ->
+          receive
+            {'DOWN', _, process, DbPid, _} -> ok
+          end;
+        Other ->
+          erlang:demonitor(MRef, [flush]),
+          Other
+      end
+    end
+  ).
+
 
 db_infos(DbRef) ->
   call(DbRef, infos).
@@ -299,6 +314,7 @@ init([Name, create, Options]) ->
       Store = maps:get(store, Options, barrel_storage:get_default()),
       case barrel_storage:create_barrel(Store, Name, Options) of
         {{ok, State}, Mod} ->
+          barrel_pm:register_name(Name, self()),
           process_flag(trap_exit, true),
           proc_lib:init_ack({ok, self()}),
           {ok, Writer} = barrel_db_writer:start_link(Name, Mod, State),
@@ -310,8 +326,7 @@ init([Name, create, Options]) ->
                     writer => Writer,
                     write_batch_size => BatchSize,
                     pending => []},
-          gproc:reg(?barrel(Name)),
-          gen_statem:enter_loop(?MODULE, [], writeable, Data);
+          gen_statem:enter_loop(?MODULE, [], writeable, Data, {via, barrel_pm, Name});
         {Error, _} ->
           exit(Error)
       end;
@@ -323,6 +338,7 @@ init([Name, open, _Options]) ->
     {ok, Store} ->
       case barrel_storage:open_barrel(Store, Name) of
         {{ok, State}, Mod} ->
+          barrel_pm:register_name(Name, self()),
           process_flag(trap_exit, true),
           proc_lib:init_ack({ok, self()}),
           {ok, Writer} = barrel_db_writer:start_link(Name, Mod, State),
@@ -334,8 +350,7 @@ init([Name, open, _Options]) ->
                     writer => Writer,
                     write_batch_size => BatchSize,
                     pending => []},
-          gproc:reg(?barrel(Name)),
-          gen_statem:enter_loop(?MODULE, [], writeable, Data);
+          gen_statem:enter_loop(?MODULE, [], writeable, Data, {via, barrel_pm, Name});
         {Error, _} ->
           proc_lib:init_ack({error, Error}),
           exit(normal)
@@ -349,11 +364,9 @@ callback_mode() -> state_functions.
 
 terminate({shutdown, deleted}, _State, #{ store := Store, name := Name}) ->
   _ = barrel_storage:delete_barrel(Store, Name),
-  gproc:unreg(?barrel(Name)),
   ok;
 terminate(_Reason, _State, #{ store := Store, name := Name}) ->
   _ = barrel_storage:close_barrel(Store, Name),
-  gproc:unreg(?barrel(Name)),
   ok.
 
 code_change(_OldVsn, State, Data, _Extra) ->
