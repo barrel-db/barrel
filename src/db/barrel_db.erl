@@ -421,6 +421,8 @@ handle_command(Cmd, From, #{ mod := Mod, state := State}) ->
   case Cmd of
     {fetch_doc, DocId, Options} ->
       ?jobs_pool:run({?MODULE, do_fetch_doc, [DocId, Options, {Mod, State}]}, From);
+    {changes_since, Since, Options} ->
+      ?jobs_pool:run({?MODULE, do_changes_since, [Since, Options, Mod, State]}, From);
     {put_local_doc, DocId, Doc} ->
       ?jobs_pool:run({Mod, put_local_doc, [DocId, Doc, State]}, From);
     {get_local_doc, DocId} ->
