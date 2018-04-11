@@ -19,7 +19,8 @@
 %% API
 -export([
   start_link/0,
-  handle_work/3
+  handle_work/3,
+  handle_request/4
 ]).
 
 %% gen_server callbacks
@@ -37,6 +38,10 @@
 
 handle_work(Worker, From, Job) ->
   gen_server:cast(Worker, {work, From, Job}).
+
+handle_request(Worker, From, Cmd, DbPid) ->
+  gen_server:cast(Worker, {request, From, Cmd, DbPid}).
+
 
 start_link() ->
   gen_server:start_link(?MODULE, [], []).
@@ -60,6 +65,10 @@ handle_cast({work, {Pid, _} = From, MFA},  St) ->
       _ = enqueue(),
       {noreply, St}
   end;
+
+handle_cast({request, From, Cmd, DbPid},  St) ->
+  handle_command(Cmd, From, DbPid, St);
+
 handle_cast(_Msg, St) ->
   {noreply, St}.
 
@@ -67,6 +76,21 @@ handle_info({'DOWN', _, _, _, _}, State) ->
   {stop, normal, State};
 handle_info(_Info, State) ->
   {noreply, State}.
+
+handle_command(Cmd, From, DbPid, State) ->
+  {Mod, ModState} = barrel_db:get_state(DbPid),
+  Task = case Cmd of
+           {fetch_doc, DocId, Options} ->
+             {barrel_db, do_fetch_doc, [DocId, Options, {Mod, ModState}]};
+           {put_local_doc, DocId, Doc} ->
+             {Mod, put_local_doc, [DocId, Doc, ModState]};
+           {get_local_doc, DocId} ->
+             {Mod, get_local_doc, [DocId, ModState]};
+           {delete_local_doc, DocId} ->
+             {Mod, delete_local_doc, [DocId, ModState]}
+         end,
+  handle_cast({work, From, Task}, State).
+
 
 reply({To, Tag}, Reply)  ->
   _ = lager:debug("reply to=~p, reply=~p~n", [To, Reply]),

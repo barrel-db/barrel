@@ -47,7 +47,6 @@ run(Task, TaskFrom) ->
       {error, dropped}
   end.
 
-
 get_workers() ->
   gen_server:call(?jobs_pool, get_workers).
 

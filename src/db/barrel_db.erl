@@ -116,27 +116,12 @@ do_command(Name, Cmd) ->
     fun(DbPid) ->
       case sbroker:ask(?jobs_broker) of
         {go, _Ref, WorkerPid, _RelativeTime, _SojournTime} ->
-          {Mod, State} = get_state(DbPid),
-           _= handle_command(WorkerPid, Cmd, From, {Mod, State}),
+          barrel_job_worker:handle_request(WorkerPid, From, Cmd, DbPid),
           await_response(DbPid, Tag);
         {drop, _N} ->
           {error, dropped}
       end
     end).
-
-handle_command(WorkerPid, Cmd, From, {Mod, State}) ->
-  Task = case Cmd of
-    {fetch_doc, DocId, Options} ->
-      {?MODULE, do_fetch_doc, [DocId, Options, {Mod, State}]};
-    {put_local_doc, DocId, Doc} ->
-      {Mod, put_local_doc, [DocId, Doc, State]};
-    {get_local_doc, DocId} ->
-      {Mod, get_local_doc, [DocId, State]};
-    {delete_local_doc, DocId} ->
-      {Mod, delete_local_doc, [DocId, State]}
-  end,
-  barrel_job_worker:handle_work(WorkerPid, From, Task).
-
 
 await_response(DbPid, Tag) ->
   MRef = erlang:monitor(process, DbPid),
