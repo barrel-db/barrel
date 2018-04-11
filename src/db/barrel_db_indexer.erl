@@ -111,19 +111,13 @@ process_changes(Parent, Pid) ->
   NewSeq = try process_changes_1(LastIndexedSeq, Mod, Snapshot)
            after Mod:release_snapshot(Snapshot)
            end,
-  if
-    NewSeq =/=  LastIndexedSeq ->
-      barrel_db:set_last_indexed_seq(Pid, NewSeq);
-    true ->
-      ok
-  end,
+  _ = maybe_update_index(NewSeq, LastIndexedSeq, Pid),
   case gen_statem:call(Parent, available) of
     refresh ->
       process_changes(Parent, Pid);
     wait ->
       wait_for_refresh(Parent, Pid)
   end.
-
 
 process_changes_1(LastIndexedSeq, Mod, Snapshot) ->
   Mod:fold_changes(
@@ -140,7 +134,11 @@ process_changes_1(LastIndexedSeq, Mod, Snapshot) ->
     LastIndexedSeq,
     Snapshot).
 
-  
+maybe_update_index(Seq, Seq, _Pid) -> ok;
+maybe_update_index(NewSeq, _, Pid) ->
+  _ = barrel_db:set_last_indexed_seq(Pid, NewSeq),
+  ok.
+
 wait_for_refresh(Parent, Pid) ->
   receive
     refresh ->
