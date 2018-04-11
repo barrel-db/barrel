@@ -328,7 +328,7 @@ changes_since_int(#db{ store=Store}, Since0, Fun, AccIn, Opts) ->
     max => Max,
     read_options => ReadOptions
   },
-  IncludeDoc = maps:get(include_doc, Opts, false),
+  IncludeDoc = maps:get(, Opts, false),
   WithHistory = maps:get(history, Opts, last) =:= all,
   %% wrap fun fold function to handle indexed results
   WrapperFun =

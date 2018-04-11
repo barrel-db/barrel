@@ -46,6 +46,13 @@
   delete_local_doc/2
 ]).
 
+-export([
+  get_snapshot/1,
+  release_snapshot/1
+]).
+
+-export([fold_changes/4]).
+
 -include("barrel.hrl").
 -include_lib("stdlib/include/ms_transform.hrl").
 
@@ -129,11 +136,10 @@ init_barrel(StoreName, Name) ->
 
 %% documents
 
-get_revision(DocId, Rev, #{ tab := Tab }) ->
-  case memstore:get(Tab, {r, DocId, Rev}) of
+get_revision(DocId, Rev, #{ tab := Tab } = State) ->
+  case memstore:get(Tab, {r, DocId, Rev}, read_options(State)) of
     {ok, Doc} -> {ok, Doc};
     not_found ->
-      _ = lager:error("not found ~p~n", [ets:lookup(Tab, {r, DocId, Rev})]),
       {error, not_found}
   end.
 
@@ -147,8 +153,8 @@ delete_revisions(DocId, RevIds, #{ tab := Tab }) ->
   _ = [memstore:delete(Tab, {r, DocId, RevId}) || RevId <- RevIds],
   ok.
 
-fetch_docinfo(DocId, #{ tab := Tab }) ->
-  case memstore:get(Tab, {d, DocId}) of
+fetch_docinfo(DocId, #{ tab := Tab } = State) ->
+  case memstore:get(Tab, {d, DocId}, read_options(State)) of
     {ok, Doc} -> {ok, Doc};
     not_found -> {error, not_found}
   end.
@@ -193,11 +199,42 @@ purge_doc(DocId, LastSeq, Revisions, #{ tab := Tab }) ->
 put_local_doc(DocId, Doc, #{ tab := Tab }) ->
   memstore:put(Tab, {l, DocId}, Doc).
 
-get_local_doc(DocId, #{ tab := Tab }) ->
-  case memstore:get(Tab, {l, DocId}) of
+get_local_doc(DocId, #{ tab := Tab } = State) ->
+  case memstore:get(Tab, {l, DocId}, read_options(State)) of
     {ok, Doc} -> {ok, Doc};
     not_found -> {error, not_found}
   end.
 
 delete_local_doc(DocId, #{ tab := Tab }) ->
   memstore:delete(Tab, {l, DocId}).
+
+
+get_snapshot(#{ tab := Tab } = State) ->
+  Snapshot = memstore:new_snapshot(Tab),
+  State#{ snapshot := Snapshot}.
+
+release_snapshot(#{ snapshot := Snapshot }) ->
+  memstore:release_snapshot(Snapshot);
+release_snapshot(_) ->
+  erlang:error(badarg).
+
+read_options(#{ snapshot := Snapshot }) -> [{snapshot, Snapshot}];
+read_options(_) -> [].
+
+fold_changes(Since, Fun, Acc, State) ->
+  Tab = maps:get(tab, State),
+  {ok, Itr} = memstore:iterator(Tab, read_options(State)),
+  try fold_changes_loop(memstore:iterator_move(Tab, {seek, Since + 1}), Itr, Fun, Acc)
+  after memstore:iterator_close(Itr)
+  end.
+
+fold_changes_loop({ok, _Seq, DocInfo}, Itr, Fun, Acc0) ->
+  case Fun(DocInfo, Acc0) of
+    {ok, Acc1} ->
+      fold_changes_loop(memstore:iterator_move(Itr, next), Itr, Fun, Acc1);
+    {stop, Acc1} ->
+      Acc1
+  end;
+fold_changes_loop(Else, _, _, Acc) ->
+  _ = lager:warning("folding changes unexpectedly stopped : ~p~n", [Else]),
+  Acc.
