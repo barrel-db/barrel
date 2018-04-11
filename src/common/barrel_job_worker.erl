@@ -26,7 +26,8 @@
 -export([
   init/1,
   handle_call/3,
-  handle_cast/2
+  handle_cast/2,
+  handle_info/2
 ]).
 
 -include("barrel.hrl").
@@ -48,8 +49,10 @@ handle_call(Msg, _From, State) ->
   _ = lager:debug("db worker received a synchronous event: ~p~n", [Msg]),
   {reply, ok, State}.
 
-handle_cast({work, From, MFA},  St) ->
+handle_cast({work, {Pid, _} = From, MFA},  St) ->
+  MRef = erlang:monitor(process, Pid),
   Res = (catch exec(MFA)),
+  erlang:demonitor(MRef, [flush]),
   case Res of
     stop -> {stop, normal, St};
     _ ->
@@ -59,6 +62,11 @@ handle_cast({work, From, MFA},  St) ->
   end;
 handle_cast(_Msg, St) ->
   {noreply, St}.
+
+handle_info({'DOWN', _, _, _, _}, State) ->
+  {stop, normal, State};
+handle_info(_Info, State) ->
+  {noreply, State}.
 
 reply({To, Tag}, Reply)  ->
   _ = lager:debug("reply to=~p, reply=~p~n", [To, Reply]),
