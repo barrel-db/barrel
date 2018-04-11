@@ -81,6 +81,15 @@ init([]) ->
              type => supervisor,
              modules => [barrel_jobs_sup]},
 
+           %% barrel event server
+           #{id => barrrel_event,
+             start => {barrrel_event, start_link, []},
+             restart => permanent,
+             shutdown => infinity,
+             type => worker,
+             modules => [barrrel_event]
+           }
+
            %% stores supervisor
            #{id => barrel_store_sup,
              start => {barrel_store_sup, start_link, []},
