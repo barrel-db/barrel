@@ -66,8 +66,8 @@ handle_cast({work, {Pid, _} = From, MFA},  St) ->
       {noreply, St}
   end;
 
-handle_cast({request, From, Cmd, DbPid},  St) ->
-  handle_command(Cmd, From, DbPid, St);
+handle_cast({request, From, Req, DbPid},  St) ->
+  handle_requestd(Req, From, DbPid, St);
 
 handle_cast(_Msg, St) ->
   {noreply, St}.
@@ -77,9 +77,9 @@ handle_info({'DOWN', _, _, _, _}, State) ->
 handle_info(_Info, State) ->
   {noreply, State}.
 
-handle_command(Cmd, {Pid, _} = From, DbPid, State) ->
+handle_requestd(Req, {Pid, _} = From, DbPid, State) ->
   {Mod, ModState} = barrel_db:get_state(DbPid),
-  MFA = case Cmd of
+  MFA = case Req of
           {fetch_doc, DocId, Options} ->
             {barrel_db, do_fetch_doc, [DocId, Options, {Mod, ModState}]};
           {put_local_doc, DocId, Doc} ->
