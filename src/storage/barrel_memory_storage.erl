@@ -51,7 +51,17 @@
   release_snapshot/1
 ]).
 
+-export([
+  save_state/1,
+  last_indexed_seq/1
+]).
+
 -export([fold_changes/4]).
+
+-export([
+  index_path/3,
+  unindex_path/3
+]).
 
 -include("barrel.hrl").
 -include_lib("stdlib/include/ms_transform.hrl").
@@ -120,14 +130,26 @@ init_barrel(StoreName, Name) ->
       Barrel  = #{store => StoreName,
                   name => Name,
                   tab => Tab,
+                  indexed_seq => 0,
                   updated_seq => 0,
                   docs_count => 0 },
       _ = memstore:write_batch(Tab, [{put, '$update_seq', 0},
+                                     {put, 'indexed_seq', 0},
                                      {put, '$docs_count', 0}]),
       {ok, Barrel};
     Error ->
       Error
   end.
+
+save_state(#{ tab := Tab, updated_seq := Seq, docs_count := Count, indexed_seq := ISeq}) ->
+  _ = memstore:write_batch(Tab, [{put, '$update_seq', Seq},
+                                 {put, 'indexed_seq', ISeq},
+                                 {put, '$docs_count', Count}]),
+  ok.
+
+
+last_indexed_seq(#{ indexed_seq := ISeq }) -> ISeq.
+
 
 %%
 %% -- document storage API
@@ -211,7 +233,7 @@ delete_local_doc(DocId, #{ tab := Tab }) ->
 
 get_snapshot(#{ tab := Tab } = State) ->
   Snapshot = memstore:new_snapshot(Tab),
-  State#{ snapshot := Snapshot}.
+  State#{ snapshot => Snapshot}.
 
 release_snapshot(#{ snapshot := Snapshot }) ->
   memstore:release_snapshot(Snapshot);
@@ -224,7 +246,7 @@ read_options(_) -> [].
 fold_changes(Since, Fun, Acc, State) ->
   Tab = maps:get(tab, State),
   {ok, Itr} = memstore:iterator(Tab, read_options(State)),
-  try fold_changes_loop(memstore:iterator_move(Tab, {seek, Since + 1}), Itr, Fun, Acc)
+  try fold_changes_loop(memstore:iterator_move(Itr, {seek, Since + 1}), Itr, Fun, Acc)
   after memstore:iterator_close(Itr)
   end.
 
@@ -238,3 +260,13 @@ fold_changes_loop({ok, _Seq, DocInfo}, Itr, Fun, Acc0) ->
 fold_changes_loop(Else, _, _, Acc) ->
   _ = lager:warning("folding changes unexpectedly stopped : ~p~n", [Else]),
   Acc.
+
+
+index_path(Path, DocId, #{ tab := Tab }) ->
+  memstore:write_batch(Tab, [{put, {Path, DocId}, <<>>},
+                             {put, {lists:reverse(Path), DocId}}, <<>>]).
+
+unindex_path(Path, DocId, #{ tab := Tab }) ->
+  memstore:write_batch(Tab, [{delete, {Path, DocId}, <<>>},
+                             {delete, {lists:reverse(Path), DocId}}, <<>>]).
+

@@ -35,7 +35,8 @@
   do_for_ref/2,
   get_state/1,
   set_state/2,
-  close/1
+  close/1,
+  set_last_indexed_seq/2
 ]).
 
 -export([
@@ -299,6 +300,9 @@ set_state(DbPid, State) ->
   DbPid ! {set_state, State},
   ok.
 
+set_last_indexed_seq(DbPid, Seq) ->
+  DbPid ! { set_last_indexed_seq, Seq}.
+
 start_link(Name, OpenType, Options) ->
   proc_lib:start_link(?MODULE, init, [[Name, OpenType, Options]]).
 
@@ -316,14 +320,17 @@ init([Name, create, Options]) ->
           process_flag(trap_exit, true),
           proc_lib:init_ack({ok, self()}),
           {ok, Writer} = barrel_db_writer:start_link(Name, Mod, State),
+          {ok, Indexer} = barrel_db_indexer:start_link(Name, self()),
           BatchSize = application:get_env(barrel, write_batch_size, ?WRITE_BATCH_SIZE),
           Data = #{ store => Store,
                     name => Name,
                     mod => Mod,
                     state => State,
                     writer => Writer,
+                    indexer => Indexer,
                     write_batch_size => BatchSize,
                     pending => []},
+          
           gen_statem:enter_loop(?MODULE, [], writeable, Data, {via, barrel_pm, Name});
         {Error, _} ->
           exit(Error)
@@ -340,12 +347,14 @@ init([Name, open, _Options]) ->
           process_flag(trap_exit, true),
           proc_lib:init_ack({ok, self()}),
           {ok, Writer} = barrel_db_writer:start_link(Name, Mod, State),
+          {ok, Indexer} = barrel_db_indexer:start_link(Name, self()),
           BatchSize = application:get_env(barrel, write_batch_size, ?WRITE_BATCH_SIZE),
           Data = #{ store => Store,
                     name => Name,
                     mod => Mod,
                     state => State,
                     writer => Writer,
+                    indexer => Indexer,
                     write_batch_size => BatchSize,
                     pending => []},
           gen_statem:enter_loop(?MODULE, [], writeable, Data, {via, barrel_pm, Name});
@@ -375,14 +384,28 @@ code_change(_OldVsn, State, Data, _Extra) ->
 writeable({call, From}, {write_changes, Entries}, Data) ->
   _ = notify_writer(Entries, Data),
   {next_state, writing, Data#{ pending => []}, [{reply, From, ok}]};
+
+writeable(info, {set_last_indexed_seq, Seq}, #{ mod := Mod, state := State0 } = Data) ->
+  State1 = State0#{ indexed_seq => Seq },
+  ok = Mod:save_state(State1),
+  {keep_state, Data#{ state => State1}};
+writeable(info, {set_state, State}, #{ mod := Mod } = Data) ->
+  ok = Mod:save_state(State),
+  {keep_state, Data#{ state => State}};
 writeable(EventType, Event, Data) ->
   handle_event(EventType, Event, writeable, Data).
 
 writing({call, From}, {write_changes, Entries}, #{ pending := Pending } = Data) ->
   Pending2 = Pending ++ Entries,
   {keep_state, Data#{ pending => Pending2}, [{reply, From, ok}]};
-writing(info, {set_state, State}, #{ pending := Pending, write_batch_size := BatchSize } = Data) ->
+writing(info, {set_last_indexed_seq, Seq}, #{ mod := Mod, state := State0 } = Data) ->
+  State1 = State0#{ indexed_seq => Seq },
+  ok = Mod:save_state(State1),
+  {keep_state, Data#{ state => State1}};
+writing(info, {set_state, State}, #{ mod := Mod, pending := Pending, write_batch_size := BatchSize } = Data) ->
+  ok = Mod:save_state(State),
   ok = maybe_notify_changes(State, Data),
+  
   case Pending of
     [] ->
       NewData = Data#{ state => State },
@@ -405,6 +428,9 @@ handle_event({call, From}, delete, _State, _Data) ->
 handle_event(info, {'EXIT', Pid, Reason}, _State, #{ db_ref := DbRef, writer := Pid } = Data) ->
   _ = lager:info("writer exitded. db=~p reason=~p~n", [DbRef, Reason]),
   {stop, {writer_exit, Reason}, Data#{writer => nil}};
+handle_event(info, {'EXIT', Pid, Reason}, _State, #{ db_ref := DbRef, indexer := Pid } = Data) ->
+  _ = lager:info("indexer exitded. db=~p reason=~p~n", [DbRef, Reason]),
+  {stop, {indexer_exit, Reason}, Data#{writer => nil}};
 handle_event(_EventType, _Event, _State, Data) ->
   {keep_state, Data}.
 
@@ -423,8 +449,6 @@ filter_pending([Job | Rest], N, Acc) ->
 
 notify_writer(Pending, #{ writer := Writer }) ->
   Writer ! {store, Pending}.
-
-
 
 do_fetch_doc(DocId, Options, {Mod, State}) ->
   UserRev = maps:get(rev, Options, <<"">>),

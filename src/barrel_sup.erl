@@ -82,13 +82,13 @@ init([]) ->
              modules => [barrel_jobs_sup]},
 
            %% barrel event server
-           #{id => barrrel_event,
-             start => {barrrel_event, start_link, []},
+           #{id => barrel_event,
+             start => {barrel_event, start_link, []},
              restart => permanent,
              shutdown => infinity,
              type => worker,
-             modules => [barrrel_event]
-           }
+             modules => [barrel_event]
+           },
 
            %% stores supervisor
            #{id => barrel_store_sup,

@@ -168,7 +168,7 @@ merge_revtree(Record, DocInfo, From, State) ->
   end.
 
 merge_revtree(NewGen, ParentRev, Deleted, Record, DocInfo, From, #{db_ref := Db} = State) ->
-  #{ id := DocId, deleted := OldDeleted, revtree := RevTree } = DocInfo,
+  #{ id := DocId, rev := OldRev, deleted := OldDeleted, revtree := RevTree } = DocInfo,
   OldSeq = maps:get(seq, DocInfo, nil),
   #{ id := DocId,
      doc := Doc,
@@ -187,9 +187,11 @@ merge_revtree(NewGen, ParentRev, Deleted, Record, DocInfo, From, #{db_ref := Db}
   DocInfo2 = DocInfo#{ seq => NewSeq,
                        revtree => RevTree2,
                        rev => WinningRev,
+                       old_rev => OldRev,
                        branched => Branched,
                        conflict => Conflict,
                        deleted => DocDeleted },
+  
   WriteResult = case add_revision(DocId, NewRev, Doc, State1) of
                   ok ->
                     write_docinfo(DocId, NewSeq, OldSeq, DocInfo2, State1);
@@ -245,6 +247,7 @@ merge_revtree_with_conflict(Record, DocInfo0, From, #{ db_ref := Db} = State0) -
                                        DocInfo0#{seq => Seq,
                                                  revtree => RevTree2,
                                                  current_rev => WinningRev,
+                                                 old_rev => CurrentRev,
                                                  branched => Branched,
                                                  conflict => Conflict,
                                                  deleted => Deleted},
@@ -343,7 +346,6 @@ fetch_docinfo(DocId, #{ db_mod := Mod, db_state := DbState }) ->
 
 write_docinfo(DocId, NewSeq, OldSeq, DocInfo, #{ db_mod := Mod, db_state := DbState }) ->
   Mod:write_docinfo(DocId, NewSeq, OldSeq, DocInfo, DbState).
-
 
 purge_doc(DocId, LastSeq, Revisions,  #{ db_mod := Mod, db_state := DbState }) ->
   Mod:purge_doc(DocId, LastSeq, Revisions, DbState).
