@@ -99,8 +99,6 @@ db_infos(DbRef) ->
 fetch_doc(DbRef, DocId, Options) ->
   do_command(DbRef, {fetch_doc, DocId, Options}).
 
-
-
 put_local_doc(DbRef, DocId, Doc) ->
   do_command(DbRef, {put_local_doc, DocId, Doc}).
 
@@ -110,20 +108,35 @@ get_local_doc(DbRef, DocId) ->
 delete_local_doc(DbRef, DocId) ->
   do_command(DbRef, {delete_local_doc, DocId}).
 
-do_command(DbRef, Cmd) ->
+do_command(Name, Cmd) ->
   Tag = make_ref(),
   From = {self(), Tag},
   do_for_ref(
-    DbRef,
+    Name,
     fun(DbPid) ->
-      case gen_statem:call(DbPid, {handle_command, Cmd, From}) of
-        ok ->
+      case sbroker:ask(?jobs_broker) of
+        {go, _Ref, WorkerPid, _RelativeTime, _SojournTime} ->
+          {Mod, State} = get_state(DbPid),
+           _= handle_command(WorkerPid, Cmd, From, {Mod, State}),
           await_response(DbPid, Tag);
-        Error ->
-          Error
+        {drop, _N} ->
+          {error, dropped}
       end
-    end
-  ).
+    end).
+
+handle_command(WorkerPid, Cmd, From, {Mod, State}) ->
+  Task = case Cmd of
+    {fetch_doc, DocId, Options} ->
+      {?MODULE, do_fetch_doc, [DocId, Options, {Mod, State}]};
+    {put_local_doc, DocId, Doc} ->
+      {Mod, put_local_doc, [DocId, Doc, State]};
+    {get_local_doc, DocId} ->
+      {Mod, get_local_doc, [DocId, State]};
+    {delete_local_doc, DocId} ->
+      {Mod, delete_local_doc, [DocId, State]}
+  end,
+  barrel_job_worker:handle_work(WorkerPid, From, Task).
+
 
 await_response(DbPid, Tag) ->
   MRef = erlang:monitor(process, DbPid),
@@ -398,13 +411,10 @@ writing(info, {set_state, State}, #{ pending := Pending, write_batch_size := Bat
 writing(EventType, Event, Data) ->
   handle_event(EventType, Event, writing, Data).
 
-handle_event({call, From}, {handle_command, Cmd, CmdFrom}, _State, Data) ->
-  Reply = handle_command(Cmd, CmdFrom, Data),
-  {keep_state, Data, [{reply, From, Reply}]};
 handle_event({call, From}, infos, _State, #{ state := State } = Data) ->
   {keep_state, Data, [{reply, From, State}]};
-handle_event({call, From}, get_state, _State, #{ state := State } = Data) ->
-  {keep_state, Data, [{reply, From, State}]};
+handle_event({call, From}, get_state, _State, #{ mod := Mod, state := State } = Data) ->
+  {keep_state, Data, [{reply, From, {Mod, State}}]};
 handle_event({call, From}, delete, _State, _Data) ->
   {stop_and_reply, {shutdown, deleted}, [{reply, From, ok}]};
 handle_event(info, {'EXIT', Pid, Reason}, _State, #{ db_ref := DbRef, writer := Pid } = Data) ->
@@ -428,23 +438,6 @@ filter_pending([Job | Rest], N, Acc) ->
 
 notify_writer(Pending, #{ writer := Writer }) ->
   Writer ! {store, Pending}.
-
-
-handle_command(Cmd, From, #{ mod := Mod, state := State}) ->
-  case Cmd of
-    {fetch_doc, DocId, Options} ->
-      ?jobs_pool:run({?MODULE, do_fetch_doc, [DocId, Options, {Mod, State}]}, From);
-    {changes_since, Since, Options} ->
-      ?jobs_pool:run({?MODULE, do_changes_since, [Since, Options, Mod, State]}, From);
-    {put_local_doc, DocId, Doc} ->
-      ?jobs_pool:run({Mod, put_local_doc, [DocId, Doc, State]}, From);
-    {get_local_doc, DocId} ->
-      ?jobs_pool:run({Mod, get_local_doc, [DocId, State]}, From);
-    {delete_local_doc, DocId} ->
-      ?jobs_pool:run({Mod, delete_local_doc, [DocId, State]}, From);
-    _Other ->
-      {error, unknown_command}
-  end.
 
 
 

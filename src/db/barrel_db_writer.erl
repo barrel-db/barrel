@@ -308,10 +308,8 @@ purge(_Record, DocInfo, From, #{ db_ref := Db} = State) ->
       State
   end.
   
-
 update_db_state(#{ db_pid := DbPid, db_state := DbState }) ->
   barrel_db:set_state(DbPid, DbState).
-
 
 %% docs count increment:
 %% parent revision is <<>> when creating a new doc then we increment the docs count,
