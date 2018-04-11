@@ -188,7 +188,7 @@ append_writes_summary({error, DocId, not_found}, Results) ->
   ErrorDoc = error_doc(DocId, <<"not_found">>, 404),
   [ErrorDoc | Results];
 append_writes_summary({error, DocId, {conflict, Conflict}}=Error, Results) ->
-  _ = lager:info("got error ~p~n", [Error]),
+  _ = lager:debug("got error ~p~n", [Error]),
   ErrorDoc  = error_doc(DocId,
                         <<"conflict">>,
                         409,

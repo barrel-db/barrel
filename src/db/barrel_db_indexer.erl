@@ -68,7 +68,7 @@ active(info, {'$barrel_event', Name, db_updated}, #{ name := Name } = Data) ->
 active(EventType, Event, Data) ->
   handle_event(EventType, Event, active, Data).
 
-idle(nfo, {'$barrel_event', Name, db_updated}, #{ name := Name, worker := Worker } = Data) ->
+idle(info, {'$barrel_event', _, db_updated}, #{ worker := Worker } = Data) ->
   Worker ! refresh,
   {keep_state, Data#{ pending => true }};
 
@@ -106,9 +106,12 @@ process_changes(Parent, Pid) ->
   NewSeq = try process_changes_1(LastIndexedSeq, Mod, Snapshot)
            after Mod:release_snapshot(Snapshot)
            end,
-  lager:info("last indexed seq is ~p~n", [NewSeq]),
-  barrel_db:set_last_indexed_seq(Pid, NewSeq),
-  
+  if
+    NewSeq =/=  LastIndexedSeq ->
+      barrel_db:set_last_indexed_seq(Pid, NewSeq);
+    true ->
+      ok
+  end,
   case gen_statem:call(Parent, available) of
     refresh ->
       process_changes(Parent, Pid);
@@ -120,8 +123,9 @@ process_changes(Parent, Pid) ->
 process_changes_1(LastIndexedSeq, Mod, Snapshot) ->
   Mod:fold_changes(
     LastIndexedSeq,
-    fun(DI) ->
-      #{ id := DocId, seq := Seq, rev := Rev, old_rev := OldRev } = DI,
+    fun(DI, _OldSeq) ->
+      #{ id := DocId, seq := Seq, rev := Rev } = DI,
+      OldRev = maps:get(old_rev, DI, undefined),
       NewDoc = idoc(DocId, Rev, Mod, Snapshot),
       OldDoc = idoc(DocId, OldRev, Mod, Snapshot),
       {Added, Removed} = barrel_index:diff(NewDoc, OldDoc),
@@ -138,6 +142,9 @@ wait_for_refresh(Parent, Pid) ->
       process_changes(Parent, Pid)
   end.
 
+
+idoc(_DocId, undefined, _Mod, _Snapshot) ->
+  #{};
 idoc(DocId, Rev, Mod, Snapshot) ->
   case Mod:get_revision(DocId, Rev, Snapshot) of
     {ok, NewDoc} -> NewDoc;
@@ -147,13 +154,13 @@ idoc(DocId, Rev, Mod, Snapshot) ->
 update_index(Added, Removed, DocId, Mod, Snapshot) ->
   lists:foreach(
     fun(Path) ->
-      Mod:index_path(Path, DocId, Mod, Snapshot)
+      Mod:index_path(Path, DocId, Snapshot)
     end,
     Added),
   
   lists:foreach(
     fun(Path) ->
-      Mod:unindex_path(Path, DocId, Mod, Snapshot)
+      Mod:unindex_path(Path, DocId, Snapshot)
     end,
     Removed),
   ok.

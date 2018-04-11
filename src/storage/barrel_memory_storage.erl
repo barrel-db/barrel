@@ -246,27 +246,26 @@ read_options(_) -> [].
 fold_changes(Since, Fun, Acc, State) ->
   Tab = maps:get(tab, State),
   {ok, Itr} = memstore:iterator(Tab, read_options(State)),
-  try fold_changes_loop(memstore:iterator_move(Itr, {seek, Since + 1}), Itr, Fun, Acc)
+  try fold_changes_loop(memstore:iterator_move(Itr, {seek, {c, Since + 1}}), Itr, Fun, Acc)
   after memstore:iterator_close(Itr)
   end.
 
-fold_changes_loop({ok, _Seq, DocInfo}, Itr, Fun, Acc0) ->
+fold_changes_loop({ok, {c, _Seq}, DocInfo}, Itr, Fun, Acc0) ->
   case Fun(DocInfo, Acc0) of
     {ok, Acc1} ->
       fold_changes_loop(memstore:iterator_move(Itr, next), Itr, Fun, Acc1);
     {stop, Acc1} ->
       Acc1
   end;
-fold_changes_loop(Else, _, _, Acc) ->
-  _ = lager:warning("folding changes unexpectedly stopped : ~p~n", [Else]),
+fold_changes_loop(_Else, _, _, Acc) ->
   Acc.
 
 
 index_path(Path, DocId, #{ tab := Tab }) ->
-  memstore:write_batch(Tab, [{put, {Path, DocId}, <<>>},
-                             {put, {lists:reverse(Path), DocId}}, <<>>]).
+  memstore:write_batch(Tab, [{put, {i, Path, DocId}, <<>>},
+                             {put, {ri, lists:reverse(Path), DocId}, <<>>}]).
 
 unindex_path(Path, DocId, #{ tab := Tab }) ->
-  memstore:write_batch(Tab, [{delete, {Path, DocId}, <<>>},
-                             {delete, {lists:reverse(Path), DocId}}, <<>>]).
+  memstore:write_batch(Tab, [{delete, {i, Path, DocId}},
+                             {delete, {ri, lists:reverse(Path), DocId}}]).
 
