@@ -98,7 +98,12 @@ index_worker(Parent, Pid, Action) ->
     _ ->
       wait_for_refresh(Parent, Pid)
   end.
-  
+
+
+%% TODO: make it parallel,
+%% there is no reason there we can't process the change in //.
+%% We can spawn processes that will analyze them in // and
+%% collect the final result in order before writing it.
 process_changes(Parent, Pid) ->
   {Mod, ModState} = barrel_db:get_state(Pid),
   Snapshot = Mod:get_snapshot(ModState),
