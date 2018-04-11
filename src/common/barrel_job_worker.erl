@@ -77,19 +77,24 @@ handle_info({'DOWN', _, _, _, _}, State) ->
 handle_info(_Info, State) ->
   {noreply, State}.
 
-handle_command(Cmd, From, DbPid, State) ->
+handle_command(Cmd, {Pid, _} = From, DbPid, State) ->
   {Mod, ModState} = barrel_db:get_state(DbPid),
-  Task = case Cmd of
-           {fetch_doc, DocId, Options} ->
-             {barrel_db, do_fetch_doc, [DocId, Options, {Mod, ModState}]};
-           {put_local_doc, DocId, Doc} ->
-             {Mod, put_local_doc, [DocId, Doc, ModState]};
-           {get_local_doc, DocId} ->
-             {Mod, get_local_doc, [DocId, ModState]};
-           {delete_local_doc, DocId} ->
-             {Mod, delete_local_doc, [DocId, ModState]}
-         end,
-  handle_cast({work, From, Task}, State).
+  MFA = case Cmd of
+          {fetch_doc, DocId, Options} ->
+            {barrel_db, do_fetch_doc, [DocId, Options, {Mod, ModState}]};
+          {put_local_doc, DocId, Doc} ->
+            {Mod, put_local_doc, [DocId, Doc, ModState]};
+          {get_local_doc, DocId} ->
+            {Mod, get_local_doc, [DocId, ModState]};
+          {delete_local_doc, DocId} ->
+            {Mod, delete_local_doc, [DocId, ModState]}
+        end,
+  
+  MRef = erlang:monitor(process, Pid),
+  Res = (catch exec(MFA)),
+  erlang:demonitor(MRef, [flush]),
+  reply(From, Res),
+  {stop, normal, State}.
 
 
 reply({To, Tag}, Reply)  ->
