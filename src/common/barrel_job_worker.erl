@@ -82,6 +82,8 @@ handle_requestd(Req, {Pid, _} = From, DbPid, State) ->
   MFA = case Req of
           {fetch_doc, DocId, Options} ->
             {barrel_db, do_fetch_doc, [DocId, Options, {Mod, ModState}]};
+          {revsdiff, DocId, RevIds} ->
+            {barrel_db, do_revsdiff, [DocId, RevIds, {Mod, ModState}]};
           {put_local_doc, DocId, Doc} ->
             {Mod, put_local_doc, [DocId, Doc, ModState]};
           {get_local_doc, DocId} ->

@@ -26,7 +26,8 @@
   purge_docs/2,
   get_local_doc/2,
   put_local_doc/3,
-  delete_local_doc/2
+  delete_local_doc/2,
+  revsdiff/3
 ]).
 
 -export([
@@ -54,7 +55,8 @@
 
 %% jobs
 -export([
-  do_fetch_doc/3
+  do_fetch_doc/3,
+  do_revsdiff/3
 ]).
 
 -export([handle_event/4]).
@@ -99,6 +101,10 @@ db_infos(DbRef) ->
 
 fetch_doc(DbRef, DocId, Options) ->
   do_command(DbRef, {fetch_doc, DocId, Options}).
+
+revsdiff(Name, DocId, RevIds) ->
+  do_command(Name, {revsdiff, DocId, RevIds}).
+
 
 put_local_doc(DbRef, DocId, Doc) ->
   do_command(DbRef, {put_local_doc, DocId, Doc}).
@@ -489,3 +495,39 @@ do_fetch_doc(DocId, Options, {Mod, State}) ->
 
 maybe_add_deleted(Doc, true) -> Doc#{ <<"_deleted">> => true };
 maybe_add_deleted(Doc, false) -> Doc.
+
+do_revsdiff(DocId, RevIds, {Mod, State}) ->
+  Snapshot = Mod:get_snapshot(State),
+  case Mod:fetch_docinfo(DocId, Snapshot) of
+    {ok, #{revtree := RevTree}} ->
+      {Missing, PossibleAncestors} = lists:foldl(
+        fun(RevId, {M, A} = Acc) ->
+          case barrel_revtree:contains(RevId, RevTree) of
+            true -> Acc;
+            false ->
+              M2 = [RevId | M],
+              {Gen, _} = barrel_doc:parse_revision(RevId),
+              A2 = barrel_revtree:fold_leafs(
+                fun(#{ id := Id}=RevInfo, A1) ->
+                  Parent = maps:get(parent, RevInfo, <<"">>),
+                  case lists:member(Id, RevIds) of
+                    true ->
+                      {PGen, _} = barrel_doc:parse_revision(Id),
+                      if
+                        PGen < Gen -> [Id | A1];
+                        PGen =:= Gen, Parent =/= <<"">> -> [Parent | A1];
+                        true -> A1
+                      end;
+                    false -> A1
+                  end
+                end, A, RevTree),
+              {M2, A2}
+          end
+        end, {[], []}, RevIds),
+      {ok, lists:reverse(Missing), lists:usort(PossibleAncestors)};
+    {error, not_found} ->
+      {ok, RevIds, []};
+    Error ->
+      Error
+  end.
+  

@@ -32,7 +32,8 @@
   write_changes/1,
   write_conflict/1,
   purge_doc/1,
-  local_doc/1
+  local_doc/1,
+  revsdiff/1
 ]).
 
 all() ->
@@ -44,7 +45,8 @@ all() ->
     write_changes,
     write_conflict,
     purge_doc,
-    local_doc
+    local_doc,
+    revsdiff
   ].
 
 init_per_suite(Config) ->
@@ -229,5 +231,15 @@ local_doc(_Config) ->
   {ok, Doc} = barrel_db:get_local_doc(BarrelId, <<"a">>),
   ok = barrel_db:delete_local_doc(BarrelId, <<"a">>),
   {error, not_found} = barrel_db:get_local_doc(BarrelId, <<"a">>),
+  ok = barrel:delete_barrel(BarrelId),
+  ok.
+
+revsdiff(_Config) ->
+  BarrelId = <<"testdb">>,
+  ok = barrel:create_barrel(BarrelId, #{}),
+  Doc = #{ <<"id">> => <<"revsdiff">>, <<"v">> => 1},
+  [Doc2 = #{ <<"id">> := <<"revsdiff">> }] = barrel_db:write_changes(BarrelId, [{create, Doc}]),
+  [_Doc3] = barrel_db:write_changes(BarrelId, [{replace, Doc2#{<<"v">> => 2}}]),
+  {ok, [<<"1-missing">>], []} = barrel_db:revsdiff(<<"testdb">>, <<"revsdiff">>, [<<"1-missing">>]),
   ok = barrel:delete_barrel(BarrelId),
   ok.
