@@ -130,8 +130,6 @@ handle_info({trigger_fetch, Stream, SubRef}, State = #{ streams := Streams}) ->
   enqueue_stream(Stream, SubRef, Pid, Since),
   {noreply, State}.
 
-
-
 enqueue_stream(StreamRef, SubRef, Subscriber, Since) ->
   sbroker:async_ask(?db_stream_broker, {StreamRef, SubRef, Subscriber, Since},
                     {self(), {StreamRef, SubRef}}).

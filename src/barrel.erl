@@ -23,7 +23,15 @@
 ]).
 
 -export([
-  fetch_doc/3
+  fetch_doc/3,
+  save_doc/2,
+  delete_doc/3,
+  purge_doc/2,
+  save_docs/2,
+  delete_docs/2,
+  save_local_doc/3,
+  delete_local_doc/2,
+  get_local_doc/2
 ]).
 
 
@@ -39,3 +47,50 @@ barrel_infos(DbRef) ->
 
 fetch_doc(DbRef, DocId, Options) ->
   barrel_db:fetch_doc(DbRef, DocId, Options).
+
+save_doc(Barrel, Doc) ->
+  [Res] = save_doc1(Barrel, Doc),
+  Res.
+
+save_doc1(Barrel, #{ <<"_rev">> := _Rev} = Doc) ->
+  barrel_db:write_changes(Barrel, [{replace, Doc}]);
+save_doc1(Barrel,  Doc)  ->
+  barrel_db:write_changes(Barrel, [{create, Doc}]).
+
+delete_doc(Barrel, DocId, Rev) ->
+  [Res] = barrel_db:write_changes(Barrel, [{delete, DocId, Rev}]),
+  Res.
+
+purge_doc(Barrel, DocId) ->
+  [Res] = barrel_db:write_changes(Barrel, [{purge, DocId}]),
+  Res.
+
+save_docs(Barrel, Docs) ->
+  Batch = lists:map(
+    fun
+      (#{ <<"_rev">> := _}=Doc) -> {replace, Doc};
+      (Doc) -> {create, Doc}
+    end,
+    Docs
+  ),
+  barrel_db:write_changes(Barrel, Batch).
+
+delete_docs(Barrel, DocsOrDocsRevId) ->
+  Batch = lists:map(
+    fun
+      (#{ <<"id">> := _, <<"_deleted">> := true, <<"_rev">> := _}=Doc) -> {replace, Doc};
+      ({DocId, Rev})-> {delete, DocId, Rev};
+      (_) -> erlang:error(badarg)
+    end,
+    DocsOrDocsRevId
+  ),
+  barrel_db:write_changes(Barrel, Batch).
+
+save_local_doc(Barrel, DocId, Doc) ->
+  barrel_db:put_local_doc(Barrel, DocId, Doc).
+
+get_local_doc(Barrel, DocId) ->
+  barrel_db:get_local_doc(Barrel, DocId).
+
+delete_local_doc(Barrel, DocId) ->
+  barrel_db:delete_local_doc(Barrel, DocId).
