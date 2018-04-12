@@ -6,6 +6,8 @@
 -define(jobs_broker, barrel_jobs_broker).
 -define(jobs_pool, barrel_jobs_pool).
 
+-define(db_stream_broker, barrel_db_stream_broker).
+
 %% jobs limit
 -define(JOBS_QUEUE_LIMIT, 128).
 -define(JOBS_QUEUE_TIMEOUT, 5000).
@@ -16,7 +18,7 @@
 -define(store(Name), {n, l, {barrel_storage, Name}}).
 -define(via_store(Name), {via, gproc, {n, l, {barrel_storage, Name}}}).
 
-
+-define(STREAMS, barrel_db_streams).
 
 -record(write_op, {
   type = merge :: merge | merge_with_conflict | purge,

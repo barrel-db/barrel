@@ -299,8 +299,13 @@ close(DbRef) ->
 %% -----------------
 %% private state functions
 
-get_state(DbPid) ->
-  gen_statem:call(DbPid, get_state).
+get_state(DbPid) when is_pid(DbPid) ->
+  gen_statem:call(DbPid, get_state);
+get_state(Name) ->
+  do_for_ref(
+    Name,
+    fun(DbPid) -> gen_statem:call(DbPid, get_state) end
+  ).
 
 set_state(DbPid, State) ->
   DbPid ! {set_state, State},

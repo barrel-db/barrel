@@ -105,8 +105,18 @@ init([]) ->
              shutdown => infinity,
              type => supervisor,
              modules => [barrel_db_sup]
+           },
+
+           %% changes streams supervisor
+           #{id => barrel_db_stream_sup,
+             start => {barrel_db_stream_sup, start_link, []},
+             restart => permanent,
+             shutdown => infinity,
+             type => supervisor,
+             modules => [barrel_db_stream_sup]
            }
-          ],
+  
+    ],
   
   
   
