@@ -19,6 +19,7 @@
 -export([
   create_barrel/2,
   delete_barrel/1,
+  is_barrel/1,
   start_link/3,
   db_infos/1,
   fetch_doc/3,
@@ -95,6 +96,9 @@ delete_barrel(Name) ->
     end
   ).
 
+is_barrel(Name) ->
+  Res = do_for_ref( Name, fun(_) -> ok end),
+  (Res =:= ok).
 
 db_infos(DbRef) ->
   call(DbRef, infos).
@@ -273,7 +277,7 @@ do_for_ref(DbRef, Fun) ->
         undefined ->
           case barrel_db_sup:start_db(DbRef) of
             {ok, undefined} ->
-              {error, db_not_found};
+              {error, not_found};
             {ok, Pid} ->
               Fun(Pid);
             {error, {already_started, Pid}} ->

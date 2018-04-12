@@ -238,7 +238,7 @@ get_snapshot(#{ tab := Tab } = State) ->
 release_snapshot(#{ snapshot := Snapshot }) ->
   memstore:release_snapshot(Snapshot);
 release_snapshot(_) ->
-  erlang:error(badarg).
+  ok.
 
 read_options(#{ snapshot := Snapshot }) -> [{snapshot, Snapshot}];
 read_options(_) -> [].

@@ -34,15 +34,17 @@ handle_call(_Msg, _From, State) -> {noreply, State}.
 
 handle_cast(_Msg, State) -> {noreply, State}.
 
-handle_info({_, {go, _Ref, { #{barrel := Name } = Stream, SubRef, Subscriber, Since}}}, St) ->
+handle_info({_, {go, _Ref, { #{barrel := Name } = Stream, SubRef, Subscriber, Since},
+                 _RelativeTime, _SojournTime}}, St) ->
   %% get options
   IncludeDoc = maps:get(include_doc, Stream, true),
   WithHistory = maps:get(with_history, Stream, true),
   {Mod, BState} = barrel_db:get_state(Name),
   Snapshot = Mod:get_snapshot(BState),
+  %%Snapshot = BState,
   WrapperFun =
     fun
-      (DI, {Acc0, N}) ->
+      (DI, {Acc0, LastSeq, N}) ->
         #{ id := DocId,
            rev := Rev,
            seq := Seq,
@@ -63,25 +65,26 @@ handle_info({_, {go, _Ref, { #{barrel := Name } = Stream, SubRef, Subscriber, Si
         Acc1 = [Change | Acc0],
         if
           N >= 100 ->
-            {stop, {Acc1, N}};
+            {stop, {Acc1, erlang:max(Seq, LastSeq), N}};
           true ->
-            {ok,  {Acc1, N+1}}
+            {ok,  {Acc1, erlang:max(Seq, LastSeq), N+1}}
         end
     end,
-  {Changes, _} = try Mod:fold_changes(Since, WrapperFun, {[], 0}, Snapshot)
+  {Changes, LastSeq, _} = try Mod:fold_changes(Since, WrapperFun, {[], Since, 0}, Snapshot)
                  after Mod:release_snapshot(Snapshot)
                  end,
   %% send changes
-  LastSeq = send_changes(Changes, Subscriber, Name),
+  send_changes(lists:reverse(Changes), LastSeq, Stream, Subscriber),
   %% register last seq
-  barrel_db_stream_mgr:next(Stream, SubRef, LastSeq),
+  ok = barrel_db_stream_mgr:next(Stream, SubRef, LastSeq),
   sbroker:async_ask_r(?db_stream_broker),
   {noreply, St}.
-  
-  
-send_changes([#{ <<"seq">> := LastSeq } | _] = Changes, Subscriber, Name) ->
-  Subscriber ! {changes, Name, Changes, LastSeq},
-  LastSeq.
+
+send_changes([], _LastSeq, _Stream, _Subscriber) ->
+  ok;
+send_changes(Changes, LastSeq, Stream, Subscriber) ->
+  Subscriber ! {changes, Stream, Changes, LastSeq},
+  ok.
 
 change_with_deleted(Change, true) -> Change#{ <<"deleted">> => true };
 change_with_deleted(Change, _) -> Change.

@@ -11,6 +11,12 @@
 -behaviour(gen_server).
 
 %% API
+-export([
+  subscribe/3, subscribe/4,
+  unsubscribe/2, unsubscribe/3,
+  next/3
+]).
+
 -export([start_link/0]).
 
 -export([
@@ -21,6 +27,24 @@
 ]).
 
 -include("barrel.hrl").
+
+subscribe(Stream, Pid, Since) ->
+  gen_server:call(?MODULE, {subscribe, Stream, Pid, Since}).
+
+subscribe(Node, Stream, Pid, Since) ->
+  gen_server:call({?MODULE, Node}, {subscribe, Stream, Pid, Since}).
+
+
+unsubscribe(Stream, Pid) ->
+  gen_server:call(?MODULE, {unsubscribe, Stream, Pid}).
+
+unsubscribe(Node, Stream, Pid) ->
+  gen_server:call({?MODULE, Node}, {unsubscribe, Stream, Pid}).
+
+
+next(Stream, SubRef, LastSeq) ->
+  gen_server:call(?MODULE, {next, Stream, SubRef, LastSeq}).
+
 
 start_link() ->
   gen_server:start_link({local, ?MODULE}, ?MODULE, [],[]).
@@ -50,19 +74,24 @@ handle_call({next, Stream, SubRef, LastSeq},  {FromPid, _Tag},
       {reply, {error, unknown_stream}, State}
   end;
 handle_call({subscribe, Stream, Pid, Since},_From, State = #{ streams := Streams0 }) ->
-  #{ interval := Interval } = Stream,
-  SubRef = erlang:make_ref(),
-  {ok, T} = timer:send_interval(Interval, {trigger_fetch, Stream, SubRef}),
-  Sub = #{ pid => Pid, timer => T,  since => Since},
-  enqueue_stream(Stream, SubRef, Pid, Since),
-  %% we only care about unique streams there, so just store stream
-  Streams1 = case maps:find(Stream, Streams0) of
-               {ok, Subscribers} ->
-                 Streams0#{ Stream => [{SubRef, Sub} | Subscribers] };
-               error ->
-                 Streams0#{ Stream => [{SubRef, Sub} ] }
-             end,
-  {reply, ok, State#{ streams => Streams1 }};
+  #{ barrel := Name, interval := Interval } = Stream,
+  case barrel_db:is_barrel(Name) of
+    true ->
+      SubRef = erlang:make_ref(),
+      {ok, T} = timer:send_interval(Interval, {trigger_fetch, Stream, SubRef}),
+      Sub = #{ pid => Pid, timer => T,  since => Since},
+      enqueue_stream(Stream, SubRef, Pid, Since),
+      %% we only care about unique streams there, so just store stream
+      Streams1 = case maps:find(Stream, Streams0) of
+                   {ok, Subscribers} ->
+                     Streams0#{ Stream => [{SubRef, Sub} | Subscribers] };
+                   error ->
+                     Streams0#{ Stream => [{SubRef, Sub} ] }
+                 end,
+      {reply, ok, State#{ streams => Streams1 }};
+    false ->
+      {reply, {error, unknown_barrel}, State}
+  end;
 handle_call({unsubscribe, Stream, Pid}, _From, State = #{ streams := Streams0 }) ->
   case maps:find(Stream, Streams0) of
     {ok, Subs} ->
