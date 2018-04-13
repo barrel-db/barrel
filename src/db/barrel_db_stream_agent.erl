@@ -27,7 +27,7 @@ start_link() ->
   gen_server:start_link(?MODULE, [], []).
 
 init([]) ->
-  sbroker:async_ask_r(?db_stream_broker),
+  _ = sbroker:async_ask_r(?db_stream_broker),
   {ok, #{}}.
 
 handle_call(_Msg, _From, State) -> {noreply, State}.
@@ -77,7 +77,7 @@ handle_info({_, {go, _Ref, { #{barrel := Name } = Stream, SubRef, Subscriber, Si
   send_changes(lists:reverse(Changes), LastSeq, Stream, Subscriber),
   %% register last seq
   ok = barrel_db_stream_mgr:next(Stream, SubRef, LastSeq),
-  sbroker:async_ask_r(?db_stream_broker),
+  _ = sbroker:async_ask_r(?db_stream_broker),
   {noreply, St}.
 
 send_changes([], _LastSeq, _Stream, _Subscriber) ->

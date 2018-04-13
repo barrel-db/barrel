@@ -28,6 +28,8 @@
 
 -include("barrel.hrl").
 
+-dialyzer({nowarn_function, enqueue_stream/4}).
+
 subscribe(Stream, Pid, Since) ->
   gen_server:call(?MODULE, {subscribe, Stream, Pid, Since}).
 
@@ -80,7 +82,7 @@ handle_call({subscribe, Stream, Pid, Since},_From, State = #{ streams := Streams
       SubRef = erlang:make_ref(),
       {ok, T} = timer:send_interval(Interval, {trigger_fetch, Stream, SubRef}),
       Sub = #{ pid => Pid, timer => T,  since => Since},
-      enqueue_stream(Stream, SubRef, Pid, Since),
+      _ = enqueue_stream(Stream, SubRef, Pid, Since),
       %% we only care about unique streams there, so just store stream
       Streams1 = case maps:find(Stream, Streams0) of
                    {ok, Subscribers} ->
@@ -127,9 +129,10 @@ handle_info({_Stream, {drop, _SojournTime}}, State) ->
 handle_info({trigger_fetch, Stream, SubRef}, State = #{ streams := Streams}) ->
   Subs = maps:get(Stream,Streams),
   {_, #{ pid := Pid, since := Since }} = lists:keyfind(SubRef, 1, Subs),
-  enqueue_stream(Stream, SubRef, Pid, Since),
+  _ = enqueue_stream(Stream, SubRef, Pid, Since),
   {noreply, State}.
 
+-spec enqueue_stream(map(), reference(), pid(), term()) -> {await, any(), pid()} | {drop, 0}.
 enqueue_stream(StreamRef, SubRef, Subscriber, Since) ->
   sbroker:async_ask(?db_stream_broker, {StreamRef, SubRef, Subscriber, Since},
                     {self(), {StreamRef, SubRef}}).
