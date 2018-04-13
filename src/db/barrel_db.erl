@@ -147,7 +147,6 @@ await_response(DbPid, Tag) ->
 purge_docs(DbRef, DocIds) ->
   write_changes(DbRef, [{purge, Id} || Id <- DocIds]).
 
-
 write_changes(DbRef, Batch) ->
   Tag = make_ref(),
   From = {self(), Tag},
@@ -175,14 +174,15 @@ await_response_loop(MRef, Tag, Results, NumEntries) ->
       Results2 = append_writes_summary(Resp, Results),
       await_response_loop(MRef, Tag, Results2, NumEntries - 1);
     {'DOWN', MRef, _, _, _} ->
-      erlang:error(db_down)
+      erlang:exit(db_down)
   after 5000 ->
-    erlang:error(timeout)
+    erlang:exit(timeout)
   end.
 
+
 append_writes_summary({ok, DocId, purged}, Results) ->
-  Doc = #{ <<"id">> => DocId, <<"purged">> => true },
-  [Doc | Results];
+  Doc = #{ <<"id">> => DocId },
+  [{ok, Doc} | Results];
 append_writes_summary({ok, Doc0, DocInfo}, Results) ->
   Rev = maps:get(rev, DocInfo),
   Deleted = maps:get(deleted, DocInfo, false),
@@ -193,38 +193,23 @@ append_writes_summary({ok, Doc0, DocInfo}, Results) ->
     ),
     Deleted
   ),
-  [Doc1 | Results];
+  [{ok, Doc1} | Results];
 append_writes_summary({error, DocId, not_found}, Results) ->
-  ErrorDoc = error_doc(DocId, <<"not_found">>, 404),
-  [ErrorDoc | Results];
-append_writes_summary({error, DocId, {conflict, Conflict}}=Error, Results) ->
-  _ = lager:debug("got error ~p~n", [Error]),
-  ErrorDoc  = error_doc(DocId,
-                        <<"conflict">>,
-                        409,
-                        #{ <<"conflict">> => barrel_lib:to_binary(Conflict) }),
-  [ErrorDoc | Results];
+  [{error, {not_found, DocId}} | Results];
+append_writes_summary({error, DocId, {conflict, _}=Conflict}, Results) ->
+  [{error, {Conflict, DocId}} | Results];
 append_writes_summary({error, DocId, read_error}, Results) ->
-  ErrorDoc = error_doc(DocId, <<"read_error">>, 500),
-  [ErrorDoc | Results];
+  [{error, {read_error, DocId}} | Results];
 append_writes_summary({error, DocId, write_error}, Results) ->
-  ErrorDoc = error_doc(DocId, <<"write_error">>, 500),
-  [ErrorDoc | Results];
+  [{error, {write_error, DocId}} | Results];
 append_writes_summary(Other, __Results) ->
-  erlang:error({bad_msg, Other}).
+  erlang:error({undefined, Other}).
 
 maybe_deleted(Doc, false) -> Doc;
 maybe_deleted(Doc, true) -> Doc#{ <<"_deleted">>  => true }.
 
 maybe_conflict(Doc, false) -> Doc;
 maybe_conflict(Doc, true) -> Doc#{ <<"conflict">> => true }.
-
-error_doc(DocId, Error, ErrorCode) -> error_doc(DocId, Error, ErrorCode, #{}).
-
-error_doc(DocId, Error, ErrorCode, Extra) ->
-  Extra#{<<"id">> => DocId,
-         <<"error">> => Error,
-         <<"error_code">> => ErrorCode}.
 
 prepare_batch([{delete, Id, Rev} | Rest], From, Acc) ->
   Record = barrel_doc:make_record(#{<<"id">> => Id,

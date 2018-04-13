@@ -52,7 +52,8 @@ save_doc(Barrel, Doc) ->
   [Res] = save_doc1(Barrel, Doc),
   Res.
 
-save_doc1(Barrel, #{ <<"_rev">> := _Rev} = Doc) ->
+save_doc1(Barrel, Doc = #{ <<"_rev">> := _Rev}) ->
+  io:format("i'm there ...~n", []),
   barrel_db:write_changes(Barrel, [{replace, Doc}]);
 save_doc1(Barrel,  Doc)  ->
   barrel_db:write_changes(Barrel, [{create, Doc}]).

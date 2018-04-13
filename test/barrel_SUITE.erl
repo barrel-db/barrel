@@ -38,7 +38,7 @@ init_per_testcase(_, Config) ->
   Config.
 
 end_per_testcase(_, _Config) ->
-  ok = barrel:delete_barrel(<<"test">>, #{}),
+  ok = barrel:delete_barrel(<<"test">>),
   ok.
 
 end_per_suite(Config) ->
@@ -48,10 +48,11 @@ end_per_suite(Config) ->
 
 save_doc(_Config) ->
   Doc0 = #{ <<"id">> => <<"a">>, <<"v">> => 1},
-  Doc1 = barrel:save_doc(<<"test">>, Doc0),
+  {ok, Doc1} = barrel:save_doc(<<"test">>, Doc0),
   #{ <<"id">> := <<"a">>, <<"v">> := 1, <<"_rev">> := _Rev} = Doc1,
   {ok, Doc1} = barrel:fetch_doc(<<"test">>, <<"a">>, #{}),
-  #{ <<"v">> := 2} = Doc2 = barrel:save_doc(<<"test">>, Doc1#{ <<"v">> => 2 }),
+  io:format("doc is ~p~n", [Doc1]),
+  {ok, #{ <<"v">> := 2} = Doc2} = barrel:save_doc(<<"test">>, Doc1#{ <<"v">> => 2 }),
   {ok, Doc2} = barrel:fetch_doc(<<"test">>, <<"a">>, #{}),
-  {error, conflict} =  barrel:save_doc(<<"test">>, Doc1#{ <<"v">> => 2 }),
+  {error, {{conflict, revision_conflict}, <<"a">>}} =  barrel:save_doc(<<"test">>, Doc1#{ <<"v">> => 2 }),
   ok.
