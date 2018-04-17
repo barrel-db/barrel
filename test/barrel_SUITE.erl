@@ -19,12 +19,14 @@
 ]).
 
 -export([
-  save_doc/1
+  save_doc/1,
+  update_non_existing_doc/1
 ]).
 
 all() ->
   [
-    save_doc
+    save_doc,
+    update_non_existing_doc
   ].
 
 init_per_suite(Config) ->
@@ -51,8 +53,12 @@ save_doc(_Config) ->
   {ok, Doc1} = barrel:save_doc(<<"test">>, Doc0),
   #{ <<"id">> := <<"a">>, <<"v">> := 1, <<"_rev">> := _Rev} = Doc1,
   {ok, Doc1} = barrel:fetch_doc(<<"test">>, <<"a">>, #{}),
-  io:format("doc is ~p~n", [Doc1]),
   {ok, #{ <<"v">> := 2} = Doc2} = barrel:save_doc(<<"test">>, Doc1#{ <<"v">> => 2 }),
   {ok, Doc2} = barrel:fetch_doc(<<"test">>, <<"a">>, #{}),
   {error, {{conflict, revision_conflict}, <<"a">>}} =  barrel:save_doc(<<"test">>, Doc1#{ <<"v">> => 2 }),
+  {error, {{conflict, doc_exists}, <<"a">>}} = barrel:save_doc(<<"test">>, Doc0),
   ok.
+
+update_non_existing_doc(_Config) ->
+  Doc0 = #{ <<"id">> => <<"a">>, <<"v">> => 1, <<"_rev">> => <<"1-AAAAAAAAAAA">>},
+  {error, {not_found, <<"a">>}} = barrel:save_doc(<<"test">>, Doc0).
