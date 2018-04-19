@@ -119,27 +119,33 @@ get_local_doc(DbRef, DocId) ->
 delete_local_doc(DbRef, DocId) ->
   do_command(DbRef, {delete_local_doc, DocId}).
 
+do_command({Name, Node}, Cmd) ->
+  Tag = make_ref(),
+  From = {self(), Tag},
+  case sbroker:ask({?jobs_broker, Node}) of
+    {go, _Ref, WorkerPid, _RelativeTime, _SojournTime} ->
+      barrel_job_worker:handle_request(WorkerPid, From, Cmd, Name),
+      await_response(WorkerPid, Tag);
+    {drop, _N} ->
+      {error, dropped}
+  end;
 do_command(Name, Cmd) ->
   Tag = make_ref(),
   From = {self(), Tag},
-  do_for_ref(
-    Name,
-    fun(DbPid) ->
-      case sbroker:ask(?jobs_broker) of
-        {go, _Ref, WorkerPid, _RelativeTime, _SojournTime} ->
-          barrel_job_worker:handle_request(WorkerPid, From, Cmd, DbPid),
-          await_response(DbPid, Tag);
-        {drop, _N} ->
-          {error, dropped}
-      end
-    end).
+  case sbroker:ask(?jobs_broker) of
+    {go, _Ref, WorkerPid, _RelativeTime, _SojournTime} ->
+      barrel_job_worker:handle_request(WorkerPid, From, Cmd, Name),
+      await_response(WorkerPid, Tag);
+    {drop, _N} ->
+      {error, dropped}
+  end.
 
 await_response(DbPid, Tag) ->
   MRef = erlang:monitor(process, DbPid),
   receive
     {Tag, Resp} -> Resp;
-    {'DOWN', MRef, _, _, _} ->
-      erlang:error(db_down)
+    {'DOWN', MRef, _, _, Reason} ->
+      erlang:error({worker_down, Reason})
   after 5000 ->
     erlang:error(timeout)
   end.

@@ -260,7 +260,6 @@ fold_changes_loop({ok, {c, _Seq}, DocInfo}, Itr, Fun, Acc0) ->
 fold_changes_loop(_Else, _, _, Acc) ->
   Acc.
 
-
 index_path(Path, DocId, #{ tab := Tab }) ->
   memstore:write_batch(Tab, [{put, {i, Path, DocId}, <<>>},
                              {put, {ri, lists:reverse(Path), DocId}, <<>>}]).
@@ -268,4 +267,5 @@ index_path(Path, DocId, #{ tab := Tab }) ->
 unindex_path(Path, DocId, #{ tab := Tab }) ->
   memstore:write_batch(Tab, [{delete, {i, Path, DocId}},
                              {delete, {ri, lists:reverse(Path), DocId}}]).
+
 

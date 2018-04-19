@@ -32,12 +32,22 @@ start_link() ->
 start_db(DbRef) ->
   start_db(DbRef, open, #{}).
 
+start_db({DbRef, Node}, StartType, Options) ->
+  _ = lager:info("start db: ref=~p on node:~p, type=~p, options=~p", [DbRef, Node, StartType, Options]),
+  supervisor:start_child({?MODULE, Node}, [DbRef, StartType, Options]);
 start_db(DbRef, StartType, Options) ->
   _ = lager:info("start db: ref=~p, type=~p, options=~p", [DbRef, StartType, Options]),
   supervisor:start_child(?MODULE, [DbRef, StartType, Options]).
 
 stop_db(DbPid) ->
-  supervisor:terminate_child(?MODULE, DbPid).
+  Node = node(),
+  case node(DbPid) of
+    Node ->
+      supervisor:terminate_child(?MODULE, DbPid);
+    _ ->
+      supervisor:terminate_child({?MODULE, node(DbPid)}, DbPid)
+  end.
+  
 
 init([]) ->
   SupFlags = #{strategy=> simple_one_for_one,

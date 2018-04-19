@@ -24,7 +24,9 @@
 
 -include("barrel.hrl").
 
-%% TODO: add gossip support but for now be local only
+
+whereis_name({Name, Node}) ->
+  rpc:call(Node, gproc, whereis_name, [?barrel(Name)]);
 whereis_name(Name) ->
   gproc:whereis_name(?barrel(Name)).
 

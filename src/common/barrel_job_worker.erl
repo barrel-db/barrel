@@ -54,10 +54,8 @@ handle_call(Msg, _From, State) ->
   _ = lager:debug("db worker received a synchronous event: ~p~n", [Msg]),
   {reply, ok, State}.
 
-handle_cast({work, {Pid, _} = From, MFA},  St) ->
-  MRef = erlang:monitor(process, Pid),
-  Res = (catch exec(MFA)),
-  erlang:demonitor(MRef, [flush]),
+handle_cast({work, From, MFA},  St) ->
+  Res = (catch do_exec(MFA)),
   case Res of
     stop -> {stop, normal, St};
     _ ->
@@ -72,31 +70,32 @@ handle_cast({request, From, Req, DbPid},  St) ->
 handle_cast(_Msg, St) ->
   {noreply, St}.
 
-handle_info({'DOWN', _, _, _, _}, State) ->
-  {stop, normal, State};
+
 handle_info(_Info, State) ->
   {noreply, State}.
 
-handle_requestd(Req, {Pid, _} = From, DbPid, State) ->
-  {Mod, ModState} = barrel_db:get_state(DbPid),
-  MFA = case Req of
-          {fetch_doc, DocId, Options} ->
-            {barrel_db, do_fetch_doc, [DocId, Options, {Mod, ModState}]};
-          {revsdiff, DocId, RevIds} ->
-            {barrel_db, do_revsdiff, [DocId, RevIds, {Mod, ModState}]};
-          {put_local_doc, DocId, Doc} ->
-            {Mod, put_local_doc, [DocId, Doc, ModState]};
-          {get_local_doc, DocId} ->
-            {Mod, get_local_doc, [DocId, ModState]};
-          {delete_local_doc, DocId} ->
-            {Mod, delete_local_doc, [DocId, ModState]}
+handle_requestd(Req, From, Name, State) ->
+  Res = case barrel_db:get_state(Name) of
+          {error, _} = Error ->
+            Error;
+          {Mod, ModState} ->
+            MFA = case Req of
+                    {fetch_doc, DocId, Options} ->
+                      {barrel_db, do_fetch_doc, [DocId, Options, {Mod, ModState}]};
+                    {revsdiff, DocId, RevIds} ->
+                      {barrel_db, do_revsdiff, [DocId, RevIds, {Mod, ModState}]};
+                    {put_local_doc, DocId, Doc} ->
+                      {Mod, put_local_doc, [DocId, Doc, ModState]};
+                    {get_local_doc, DocId} ->
+                      {Mod, get_local_doc, [DocId, ModState]};
+                    {delete_local_doc, DocId} ->
+                      {Mod, delete_local_doc, [DocId, ModState]}
+                  end,
+            (catch do_exec(MFA))
         end,
-  
-  MRef = erlang:monitor(process, Pid),
-  Res = (catch exec(MFA)),
-  erlang:demonitor(MRef, [flush]),
   reply(From, Res),
-  {stop, normal, State}.
+  enqueue(),
+  {noereply, State}.
 
 
 reply({To, Tag}, Reply)  ->
@@ -113,12 +112,11 @@ enqueue() ->
   Pool = whereis(?jobs_pool),
   sbroker:async_ask_r(?jobs_broker, self(), {Pool, self()}).
 
-
-exec({F, A}) ->
+do_exec({F, A}) ->
   erlang:apply(F, A);
-exec({M, F, A}) ->
+do_exec({M, F, A}) ->
   erlang:apply(M, F, A);
-exec(F) when is_function(F) ->
+do_exec(F) when is_function(F) ->
   F();
-exec(_) ->
+do_exec(_) ->
   erlang:error(badarg).
