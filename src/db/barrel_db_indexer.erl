@@ -120,19 +120,34 @@ process_changes(Parent, Pid) ->
   end.
 
 process_changes_1(LastIndexedSeq, Mod, Snapshot) ->
-  Mod:fold_changes(
+  IndexWorkers = application:get_env(barrel, index_workers_num, erlang:system_info(schedulers)),
+  {LastSeq, Changes} = Mod:fold_changes(
     LastIndexedSeq,
-    fun(DI, _OldSeq) ->
-      #{ id := DocId, seq := Seq, rev := Rev } = DI,
+    fun(#{ seq := Seq }= DI, {_OldSeq, Acc}) ->
+      {ok, {Seq, [DI | Acc]}}
+    end,
+    {LastIndexedSeq, []},
+    Snapshot
+  ),
+  _  = barrel_lib:pmap(
+    fun(DI) ->
+      #{ id := DocId, rev := Rev } = DI,
       OldRev = maps:get(old_rev, DI, undefined),
       NewDoc = idoc(DocId, Rev, Mod, Snapshot),
       OldDoc = idoc(DocId, OldRev, Mod, Snapshot),
       {Added, Removed} = barrel_index:diff(NewDoc, OldDoc),
-      ok = update_index(Added, Removed, DocId, Mod, Snapshot),
-      {ok, Seq}
+  
+      update_index(partial_paths(Added), DocId, Mod, index_path, Snapshot),
+      update_index(partial_reverse_paths(Added), DocId, Mod, index_reverse_path, Snapshot),
+      update_index(partial_paths(Removed), DocId, Mod, unindex_path, Snapshot),
+      update_index(partial_reverse_paths(Removed), DocId, Mod, unindex_reverse_path, Snapshot)
     end,
-    LastIndexedSeq,
-    Snapshot).
+    Changes,
+    IndexWorkers,
+    15000
+  ),
+  LastSeq.
+
 
 maybe_update_index(Seq, Seq, _Pid) -> ok;
 maybe_update_index(NewSeq, _, Pid) ->
@@ -154,16 +169,27 @@ idoc(DocId, Rev, Mod, Snapshot) ->
     _ -> #{}
   end.
 
-update_index(Added, Removed, DocId, Mod, Snapshot) ->
-  lists:foreach(
-    fun(Path) ->
-      Mod:index_path(Path, DocId, Snapshot)
-    end,
-    Added),
-  
-  lists:foreach(
-    fun(Path) ->
-      Mod:unindex_path(Path, DocId, Snapshot)
-    end,
-    Removed),
+
+partial_paths(Paths) -> partial_paths(Paths, []).
+
+partial_paths([Path |Rest], Acc) ->
+  Partials = barrel_index:split_path(Path),
+  Acc2 = lists:foldl(fun(P, Acc1) -> [P | Acc1] end, Acc, Partials),
+  partial_paths(Rest, Acc2);
+partial_paths([], Acc) ->
+  Acc.
+
+
+partial_reverse_paths(Paths) -> partial_reverse_paths(Paths, []).
+
+partial_reverse_paths([Path |Rest], Acc) ->
+  Partials = barrel_index:split_path(lists:reverse(Path)),
+  Acc2 = lists:foldl(fun(P, Acc1) -> [P | Acc1] end, Acc, Partials),
+  partial_reverse_paths(Rest, Acc2);
+partial_reverse_paths([], Acc) ->
+  Acc.
+
+
+update_index(Paths, DocId, Mod, Fun, Snapshot) ->
+  _ = [Mod:Fun(Path, DocId, Snapshot) || Path <- Paths],
   ok.

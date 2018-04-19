@@ -109,7 +109,6 @@ fetch_doc(DbRef, DocId, Options) ->
 revsdiff(Name, DocId, RevIds) ->
   do_command(Name, {revsdiff, DocId, RevIds}).
 
-
 put_local_doc(DbRef, DocId, Doc) ->
   do_command(DbRef, {put_local_doc, DocId, Doc}).
 

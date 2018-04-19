@@ -60,7 +60,9 @@
 
 -export([
   index_path/3,
-  unindex_path/3
+  unindex_path/3,
+  index_reverse_path/3,
+  unindex_reverse_path/3
 ]).
 
 -include("barrel.hrl").
@@ -261,11 +263,13 @@ fold_changes_loop(_Else, _, _, Acc) ->
   Acc.
 
 index_path(Path, DocId, #{ tab := Tab }) ->
-  memstore:write_batch(Tab, [{put, {i, Path, DocId}, <<>>},
-                             {put, {ri, lists:reverse(Path), DocId}, <<>>}]).
+  memstore:write_batch(Tab, [{put, {i, Path, DocId}, <<>>}]).
+
+index_reverse_path(Path, DocId, #{ tab := Tab }) ->
+  memstore:write_batch(Tab, [{put, {ri, Path, DocId}, <<>>}]).
 
 unindex_path(Path, DocId, #{ tab := Tab }) ->
-  memstore:write_batch(Tab, [{delete, {i, Path, DocId}},
-                             {delete, {ri, lists:reverse(Path), DocId}}]).
+  memstore:write_batch(Tab, [{delete, {i, Path, DocId}}]).
 
-
+unindex_reverse_path(Path, DocId, #{ tab := Tab }) ->
+  memstore:write_batch(Tab, [{delete, {ri, Path, DocId}}]).

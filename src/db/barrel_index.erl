@@ -31,17 +31,18 @@
 
 %% @doc split a path in subitems. used to create partial paths
 -spec split_path(list()) -> [list()].
-split_path(Path) -> split_path_1(Path, ?N_SEGMENTS, []).
+split_path(Path) -> split_path_1(Path, ?N_SEGMENTS, [], []).
 
 -spec split_path(list(), non_neg_integer()) -> [list()].
-split_path(Path, N) -> split_path_1(Path, N, []).
+split_path(Path, N) -> split_path_1(Path, N, [], []).
 
-split_path_1(Path, N, Segments0) when length(Path) >= N ->
+split_path_1(Path, N, Prefix0, Segments0) when length(Path) >= N ->
   {Segment, Rest} = lists:split(N, Path),
   [_ | Last ] = Segment,
-  Segments1 = [Segment | Segments0],
-  split_path_1(Last ++ Rest, N, Segments1);
-split_path_1(_, _, Segments) ->
+  Segments1 = [[Prefix0, Segment] | Segments0],
+  Prefix1 = Prefix0 ++ [lists:nth(1, Segment)],
+  split_path_1(Last ++ Rest, N, Prefix1, Segments1);
+split_path_1(_, _, _, Segments) ->
   Segments.
 
 %% %% @doc get the operations maintenance to do between
@@ -173,14 +174,14 @@ diff_test() ->
 split_path_test() ->
   Path = [<<"$">>, <<"c">>, <<"b">>, 0, <<"a">>],
   ExpectedForward = [
-    [<<"b">>, 0, <<"a">>],
-    [<<"c">>, <<"b">>, 0],
-    [<<"$">>, <<"c">>, <<"b">>]
+    [[<<"$">>, <<"c">>], [<<"b">>, 0, <<"a">>]],
+    [[<<"$">>], [<<"c">>, <<"b">>, 0]],
+    [[], [<<"$">>, <<"c">>, <<"b">>]]
   ],
   ?assertEqual(ExpectedForward, split_path(Path)),
   ExpectedForward1 = [
-    [<<"c">>, <<"b">>, 0, <<"a">>],
-    [<<"$">>, <<"c">>, <<"b">>, 0]
+    [[<<"$">>], [<<"c">>, <<"b">>, 0, <<"a">>]],
+    [[], [<<"$">>, <<"c">>, <<"b">>, 0]]
   ],
   ?assertEqual(ExpectedForward1, split_path(Path, 4)).
 
