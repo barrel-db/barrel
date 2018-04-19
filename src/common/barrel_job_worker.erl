@@ -95,7 +95,7 @@ handle_requestd(Req, From, Name, State) ->
         end,
   reply(From, Res),
   enqueue(),
-  {noereply, State}.
+  {noreply, State}.
 
 
 reply({To, Tag}, Reply)  ->
