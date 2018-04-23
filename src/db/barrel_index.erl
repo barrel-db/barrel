@@ -25,6 +25,8 @@
 
 -export([short/1]).
 
+-export([query/5]).
+
 -define(STRING_PRECISION, 100).
 -define(N_SEGMENTS, 3).
 
@@ -110,6 +112,76 @@ array([], _Root, _Idx, Acc) ->
 short(<< S:100/binary, _/binary >>) -> S;
 short(S) when is_binary(S) -> S;
 short(S) -> S.
+
+query(Barrel, Path0, Fun, Acc, Options) ->
+  Path1 = normalize_path(Path0),
+  DecodedPath = decode_path(Path1, []),
+  OrderBy = maps:get(order_by, Options, order_by_key),
+  Limit = limit(Options),
+  {Path, StartPath, EndPath} = case maps:find(equal_to, Options) of
+                                 {ok, EqualTo} ->
+                                   {DecodedPath ++ [EqualTo], undefined, undefined};
+                                 error ->
+                                   Start = start_at(Options, DecodedPath),
+                                   End = end_at(Options, DecodedPath),
+                                   {DecodedPath, Start, End}
+                               end,
+  {FoldFun, PartialFun} = case OrderBy of
+              order_by_key ->
+                {fold_path, fun partial/1};
+              order_by_value ->
+                {fold_reverse_path, fun reverse_partial/1}
+            end,
+  barrel_db:do_command(
+    Barrel,
+    {FoldFun, PartialFun(Path), PartialFun(StartPath), PartialFun(EndPath), Limit, Fun, Acc}
+  ).
+
+partial(undefined) ->
+  undefined;
+partial(Path) when length(Path) < 3 ->
+  [[], Path];
+partial(Path) ->
+  io:format(" mak partial=~p, split=~p~n", [Path, split_path(Path)]),
+  [Partial | _] = split_path(Path),
+  Partial.
+
+reverse_partial(Path) ->
+  [Partial | _] = split_path(lists:reverse(Path)),
+  Partial.
+
+
+start_at(#{ start_at := Start }, Path) -> Path ++ [Start];
+start_at(_, _) -> undefined.
+
+end_at(#{ end_at := End }, Path) -> Path ++ [End];
+end_at(_, _) -> undefined.
+
+limit(#{ limit_to_first := L }) -> {limit_to_first, L};
+limit(#{ limit_to_last:= L }) -> {limit_to_last, L};
+limit(_) -> undefined.
+
+normalize_path(<<>>) -> <<"/id">>;
+normalize_path(<<"/">>) -> <<"/id">>;
+normalize_path(P) ->  P.
+
+decode_path(<<>>, Acc) ->
+  [ << "$" >> | lists:reverse(Acc)];
+decode_path(<< $/, Rest/binary >>, Acc) ->
+  decode_path(Rest, [<<>> |Acc]);
+decode_path(<< $[, Rest/binary >>, Acc) ->
+  decode_path(Rest, [<<>> |Acc]);
+decode_path(<< $], Rest/binary >>, [BinInt | Acc] ) ->
+  case (catch binary_to_integer(BinInt)) of
+    {'EXIT', _} ->
+      erlang:error(bad_path);
+    Int ->
+      decode_path(Rest, [Int | Acc])
+  end;
+decode_path(<<Codepoint/utf8, Rest/binary>>, []) ->
+  decode_path(Rest, [<< Codepoint/utf8 >>]);
+decode_path(<<Codepoint/utf8, Rest/binary>>, [Current|Done]) ->
+  decode_path(Rest, [<< Current/binary, Codepoint/utf8 >> | Done]).
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").

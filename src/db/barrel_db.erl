@@ -38,7 +38,8 @@
   get_state/1,
   set_state/2,
   close/1,
-  set_last_indexed_seq/2
+  set_last_indexed_seq/2,
+  do_command/2
 ]).
 
 -export([

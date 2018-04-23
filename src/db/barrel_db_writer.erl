@@ -138,7 +138,8 @@ merge_revtree(Record, DocInfo, From, State) ->
                 CurrentGen + 1, CurrentRev, Deleted,
                 Record, DocInfo, From, State
               );
-            _ ->
+            _Else ->
+              io:format("got else ~p~n", [_Else]),
               reply(From, {error, DocId, {conflict, doc_exists}}),
               State
           end;

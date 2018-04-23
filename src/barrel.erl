@@ -34,6 +34,8 @@
   get_local_doc/2
 ]).
 
+-export([query/5]).
+
 
 create_barrel(Name, Options) ->
   barrel_db:create_barrel(Name, Options).
@@ -95,3 +97,6 @@ get_local_doc(Barrel, DocId) ->
 
 delete_local_doc(Barrel, DocId) ->
   barrel_db:delete_local_doc(Barrel, DocId).
+
+query(Barrel, Path, Fun, Acc, Options) ->
+  barrel_index:query(Barrel, Path, Fun, Acc, Options).
