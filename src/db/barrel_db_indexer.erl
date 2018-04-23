@@ -119,6 +119,7 @@ process_changes(Parent, Pid) ->
       wait_for_refresh(Parent, Pid)
   end.
 
+%% TODO: handle doc & writes separately, limit the number of docs retrieved
 process_changes_1(LastIndexedSeq, Mod, Snapshot) ->
   IndexWorkers = application:get_env(barrel, index_workers_num, erlang:system_info(schedulers)),
   {LastSeq, Changes} = Mod:fold_changes(
@@ -136,7 +137,6 @@ process_changes_1(LastIndexedSeq, Mod, Snapshot) ->
       NewDoc = idoc(DocId, Rev, Mod, Snapshot),
       OldDoc = idoc(DocId, OldRev, Mod, Snapshot),
       {Added, Removed} = barrel_index:diff(NewDoc, OldDoc),
-  
       update_index(partial_paths(Added), DocId, Mod, index_path, Snapshot),
       update_index(partial_reverse_paths(Added), DocId, Mod, index_reverse_path, Snapshot),
       update_index(partial_paths(Removed), DocId, Mod, unindex_path, Snapshot),
@@ -188,7 +188,6 @@ partial_reverse_paths([Path |Rest], Acc) ->
   partial_reverse_paths(Rest, Acc2);
 partial_reverse_paths([], Acc) ->
   Acc.
-
 
 update_index(Paths, DocId, Mod, Fun, Snapshot) ->
   _ = [Mod:Fun(Path, DocId, Snapshot) || Path <- Paths],

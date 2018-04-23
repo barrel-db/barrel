@@ -29,13 +29,13 @@ start_link() ->
 init([]) ->
   JobSQueueLimit = application:get_env(barrel, jobs_queue_limit, ?JOBS_QUEUE_LIMIT),
   JobsQueueTimeout = application:get_env(barrel, jobs_queue_timeout, ?JOBS_QUEUE_TIMEOUT),
-  JobsIdleMaxLimit = application:get_env(barrel, jobs_idle_max_limit, ?JOBS_IDLE_MAX_LIMIT),
+  %%JobsIdleMaxLimit = application:get_env(barrel, jobs_idle_max_limit, ?JOBS_IDLE_MAX_LIMIT),
   QueueSpec = {sbroker_timeout_queue, #{out => out,
                                         timeout => JobsQueueTimeout,
                                         drop => drop_r,
                                         min => 0,
                                         max => JobSQueueLimit}}, %% TODO: optimize
-  WorkerSpec = {sbroker_drop_queue, #{ max => JobsIdleMaxLimit }},
+  WorkerSpec = {sbroker_drop_queue, #{ max => infinity }},
   {ok,  {QueueSpec, WorkerSpec, []}}.
 
 

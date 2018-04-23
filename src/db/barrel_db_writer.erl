@@ -138,7 +138,7 @@ merge_revtree(Record, DocInfo, From, State) ->
                 CurrentGen + 1, CurrentRev, Deleted,
                 Record, DocInfo, From, State
               );
-            _ ->
+            _Else ->
               reply(From, {error, DocId, {conflict, doc_exists}}),
               State
           end;
@@ -191,7 +191,6 @@ merge_revtree(NewGen, ParentRev, Deleted, Record, DocInfo, From, #{db_ref := Db}
                        branched => Branched,
                        conflict => Conflict,
                        deleted => DocDeleted },
-  
   WriteResult = case add_revision(DocId, NewRev, Doc, State1) of
                   ok ->
                     write_docinfo(DocId, NewSeq, OldSeq, DocInfo2, State1);

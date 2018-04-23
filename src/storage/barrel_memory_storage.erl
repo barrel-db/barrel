@@ -65,6 +65,11 @@
   unindex_reverse_path/3
 ]).
 
+-export([
+  fold_path/7,
+  fold_reverse_path/7
+]).
+
 -include("barrel.hrl").
 -include_lib("stdlib/include/ms_transform.hrl").
 
@@ -273,3 +278,70 @@ unindex_path(Path, DocId, #{ tab := Tab }) ->
 
 unindex_reverse_path(Path, DocId, #{ tab := Tab }) ->
   memstore:write_batch(Tab, [{delete, {ri, Path, DocId}}]).
+
+
+fold_path(Path, Start, End, Limit, Fun, Acc, State) ->
+  fold_path_1(i, Path, Start, End, Limit, Fun, Acc, State).
+
+fold_reverse_path(Path, Start, End, Limit, Fun, Acc, State) ->
+  fold_path_1(ri, Path, Start, End, Limit, Fun, Acc, State).
+
+
+fold_path_1(Prefix, Path, Start, End, Limit, Fun, Acc, State) ->
+  Tab = maps:get(tab, State),
+  {ok, Itr} = memstore:iterator(Tab, read_options(State)),
+  SeekKey = case Start of
+              undefined -> {Prefix, Path, <<>>};
+              _  -> {Prefix, Start, <<>>}
+            end,
+  {Next, Less, Max} = case Limit of
+                        {limit_to_last, N} ->
+                          {fun() -> memstore:iterator_move(Itr, prev) end,
+                           less_fun(End, prev),
+                           N};
+                        {limit_to_first, N} ->
+                          {fun() -> memstore:iterator_move(Itr, next) end,
+                           less_fun(End, next),
+                           N};
+                        undefined ->
+                          {fun() -> memstore:iterator_move(Itr, next) end,
+                           less_fun(End, next),
+                           undefined}
+                      end,
+  try fold_path_loop(memstore:iterator_move(Itr, {seek, SeekKey}), Next, Prefix, Path, Less, Max, Fun, Acc)
+  after memstore:iterator_close(Itr)
+  end.
+
+
+less_fun(undefined, _) -> fun(_) -> true end;
+less_fun(End, prev) -> fun(Key) -> (Key >= End) end;
+less_fun(End, next) -> fun(Key) -> (Key =< End) end.
+
+in_path([Prefix, PA], [Prefix, PB]) ->
+  case lists:sublist(PA, length(PB)) of
+    PB -> true;
+    _ -> false
+  end;
+in_path(_, _) ->
+  false.
+
+dec(I) when is_integer(I) -> I - 1;
+dec(I) -> I.
+
+fold_path_loop({ok, {Prefix, Key, DocId}, <<>>}, Next, Prefix, Path, Less, Max, Fun, Acc0) ->
+  Max2 = dec(Max),
+  case {in_path(Key, Path), Less(Key)} of
+    {true, true}  ->
+      case Fun(DocId, Acc0) of
+        {ok, Acc1} when Max2 =:= 0 ->
+          Acc1;
+        {ok, Acc1} ->
+          fold_path_loop(Next(), Next, Prefix, Path, Less, Max2, Fun, Acc1);
+        {stop, Acc1} ->
+          Acc1
+      end;
+    {_, _} ->
+      Acc0
+  end;
+fold_path_loop(_Else, _, _, _, _, _, _, Acc) ->
+  Acc.

@@ -89,7 +89,11 @@ handle_requestd(Req, From, Name, State) ->
                     {get_local_doc, DocId} ->
                       {Mod, get_local_doc, [DocId, ModState]};
                     {delete_local_doc, DocId} ->
-                      {Mod, delete_local_doc, [DocId, ModState]}
+                      {Mod, delete_local_doc, [DocId, ModState]};
+                    {fold_path, Path, Start, End, Limit, Fun, Acc} ->
+                      {Mod, fold_path, [Path, Start, End, Limit, Fun, Acc, ModState]};
+                    {fold_reverse_path, Path, Start, End, Limit, Fun, Acc} ->
+                      {Mod, fold_reverse_path, [Path, Start, End, Limit, Fun, Acc, ModState]}
                   end,
             (catch do_exec(MFA))
         end,

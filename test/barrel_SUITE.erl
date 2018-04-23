@@ -21,14 +21,16 @@
 -export([
   save_doc/1,
   update_non_existing_doc/1,
-  delete_doc/1
+  delete_doc/1,
+  save_docs/1
 ]).
 
 all() ->
   [
     save_doc,
     update_non_existing_doc,
-    delete_doc
+    delete_doc,
+    save_docs
   ].
 
 init_per_suite(Config) ->
@@ -73,5 +75,15 @@ delete_doc(_Config) ->
   undefined = maps:get(<<"v">>, Doc2, undefined),
   {error, not_found} = barrel:fetch_doc(<<"test">>, <<"a">>, #{}),
   {ok, Doc2} = barrel:fetch_doc(<<"test">>, <<"a">>, #{ rev => maps:get(<<"_rev">>, Doc2)}),
+  ok.
+
+
+save_docs(_Config) ->
+  Docs = [
+    #{ <<"id">> => <<"a">>, <<"v">> => 1},
+    #{ <<"id">> => <<"b">>, <<"v">> => 1}
+  ],
+  [{ok, #{ <<"id">> := <<"a">>}},
+   {ok, #{ <<"id">> :=  <<"b">>}}] = barrel:save_docs(<<"test">>, Docs),
   ok.
   

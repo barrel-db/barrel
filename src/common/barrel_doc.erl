@@ -44,6 +44,7 @@ revision_hash(Doc, Rev, Deleted) ->
   Digest = ehash:hash(sha256, [Doc, Rev, Deleted]),
   barrel_lib:to_hex(Digest).
 
+
 revision_id(RevPos, RevHash) when is_integer(RevPos), is_binary(RevHash) ->
   << (integer_to_binary(RevPos))/binary, "-", RevHash/binary >>.
   
