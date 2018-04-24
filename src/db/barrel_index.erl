@@ -20,7 +20,8 @@
 -export([
   split_path/1, split_path/2,
   diff/2,
-  analyze/1
+  analyze/1,
+  do_query/8
 ]).
 
 -export([short/1]).
@@ -134,8 +135,21 @@ query(Barrel, Path0, Fun, Acc, Options) ->
             end,
   barrel_db:do_command(
     Barrel,
-    {FoldFun, PartialFun(Path), PartialFun(StartPath), PartialFun(EndPath), Limit, Fun, Acc}
+    {query, FoldFun, PartialFun(Path), PartialFun(StartPath), PartialFun(EndPath), Limit, Fun, Acc}
   ).
+
+
+do_query(FoldFun, Path, Start, End, Limit, UserFun, UserAcc, {Mod, ModState}) ->
+  Snapshot = Mod:get_snapshot(ModState),
+  WrapperFun = fun(#{ id := DocId, rev := Rev }=DI, Acc) ->
+                {ok, Doc0} = Mod:get_revision(DocId, Rev, Snapshot),
+                Doc1 = maybe_add_deleted(DI, Doc0#{<<"_rev">> => Rev}),
+                UserFun(Doc1, Acc)
+               end,
+  Mod:FoldFun(Path, Start, End, Limit, WrapperFun, UserAcc, Snapshot).
+
+maybe_add_deleted(#{ deleted := true }, Doc) -> Doc#{ <<"_deleted">> => true };
+maybe_add_deleted(_, Doc) -> Doc.
 
 partial(undefined) ->
   undefined;

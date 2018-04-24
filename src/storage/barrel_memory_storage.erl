@@ -308,7 +308,7 @@ fold_path_1(Prefix, Path, Start, End, Limit, Fun, Acc, State) ->
                            less_fun(End, next),
                            undefined}
                       end,
-  try fold_path_loop(memstore:iterator_move(Itr, {seek, SeekKey}), Next, Prefix, Path, Less, Max, Fun, Acc)
+  try fold_path_loop(memstore:iterator_move(Itr, {seek, SeekKey}), Next, Prefix, Path, Less, Max, Fun, Acc, State)
   after memstore:iterator_close(Itr)
   end.
 
@@ -328,20 +328,25 @@ in_path(_, _) ->
 dec(I) when is_integer(I) -> I - 1;
 dec(I) -> I.
 
-fold_path_loop({ok, {Prefix, Key, DocId}, <<>>}, Next, Prefix, Path, Less, Max, Fun, Acc0) ->
+fold_path_loop({ok, {Prefix, Key, DocId}, <<>>}, Next, Prefix, Path, Less, Max, Fun, Acc0, State) ->
   Max2 = dec(Max),
   case {in_path(Key, Path), Less(Key)} of
     {true, true}  ->
-      case Fun(DocId, Acc0) of
-        {ok, Acc1} when Max2 =:= 0 ->
-          Acc1;
-        {ok, Acc1} ->
-          fold_path_loop(Next(), Next, Prefix, Path, Less, Max2, Fun, Acc1);
-        {stop, Acc1} ->
-          Acc1
+      case fetch_docinfo(DocId, State) of
+        {ok, DI} ->
+          case Fun(DI, Acc0) of
+            {ok, Acc1} when Max2 =:= 0 ->
+              Acc1;
+            {ok, Acc1} ->
+              fold_path_loop(Next(), Next, Prefix, Path, Less, Max2, Fun, Acc1, State);
+            {stop, Acc1} ->
+              Acc1
+          end;
+        {error, not_found} ->
+          fold_path_loop(Next(), Next, Prefix, Path, Less, Max, Fun, Acc0, State)
       end;
     {_, _} ->
       Acc0
   end;
-fold_path_loop(_Else, _, _, _, _, _, _, Acc) ->
+fold_path_loop(_Else, _, _, _, _, _, _, Acc, _) ->
   Acc.

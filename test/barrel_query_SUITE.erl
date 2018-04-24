@@ -53,7 +53,7 @@ basic(_Suite) ->
   [{ok, #{ <<"id">> := <<"a">>}}] = barrel:save_docs(<<"test">>, Docs),
   timer:sleep(200),
   io:format("tab ~p~n", [ets:tab2list(default_test_data)]),
-  Fun = fun(DocId, Acc) -> {ok, [DocId | Acc]} end,
-  [<<"a">>] = barrel:query(<<"test">>, <<"/id">>, Fun, [], #{}),
+  Fun = fun(Doc, Acc) -> {ok, [Doc | Acc]} end,
+  [#{ <<"id">> := <<"a">>, <<"v">> := 1 }] = barrel:query(<<"test">>, <<"/id">>, Fun, [], #{}),
   ok.
   
