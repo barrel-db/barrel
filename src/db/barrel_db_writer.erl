@@ -193,7 +193,12 @@ merge_revtree(NewGen, ParentRev, Deleted, Record, DocInfo, From, #{db_ref := Db}
                        deleted => DocDeleted },
   WriteResult = case add_revision(DocId, NewRev, Doc, State1) of
                   ok ->
-                    write_docinfo(DocId, NewSeq, OldSeq, DocInfo2, State1);
+                    case write_docinfo(DocId, NewSeq, OldSeq, DocInfo2, State1) of
+                      ok ->
+                        maybe_index(OldRev, WinningRev, NewRev, Doc, State1);
+                      Error ->
+                        Error
+                    end;
                   Error ->
                     Error
                 end,
@@ -256,7 +261,12 @@ merge_revtree_with_conflict(Record, DocInfo0, From, #{ db_ref := Db} = State0) -
   OldSeq = maps:get(seq, DocInfo0, nil),
   WriteResult = case add_revision(DocId, NewRev, Doc, NewState) of
                   ok ->
-                    write_docinfo(DocId, NewSeq, OldSeq, DocInfo1, NewState);
+                    case write_docinfo(DocId, NewSeq, OldSeq, DocInfo1, NewState) of
+                      ok ->
+                        maybe_index(CurrentRev, WinningRev, NewRev, Doc, NewState);
+                      Error ->
+                        Error
+                    end;
                   Error ->
                     Error
                 end,
@@ -300,6 +310,48 @@ find_parent([RevId | Rest], RevTree, I) ->
   end;
 find_parent([], _RevTree, I) ->
   {I, <<"">>}.
+
+
+maybe_index(OldRev, OldRev, _DocRev, _Doc, _State) -> ok;
+maybe_index(OldRev, WinningRev, WinningRev, #{ <<"id">> := DocId} = Doc, State) ->
+  {ok, OldDoc} = fetch_revision(DocId, OldRev, State),
+  index(Doc, OldDoc, DocId, State);
+maybe_index(OldRev, WinningRev, _DocRev, #{ <<"id">> := DocId}, State) ->
+  {ok, OldDoc} = fetch_revision(DocId, OldRev, State),
+  {ok, NewDoc} = fetch_revision(DocId, WinningRev, State),
+  index(NewDoc, OldDoc, DocId, State).
+
+
+index(NewDoc, OldDoc, DocId, #{ db_mod := Mod, db_state := DbState }) ->
+  {Added, Removed} = barrel_index:diff(NewDoc, OldDoc),
+  update_index(partial_paths(Added), DocId, Mod, index_path, DbState),
+  update_index(partial_reverse_paths(Added), DocId, Mod, index_reverse_path, DbState),
+  update_index(partial_paths(Removed), DocId, Mod, unindex_path, DbState),
+  update_index(partial_reverse_paths(Removed), DocId, Mod, unindex_reverse_path, DbState).
+
+
+partial_paths(Paths) -> partial_paths(Paths, []).
+
+partial_paths([Path |Rest], Acc) ->
+  Partials = barrel_index:split_path(Path),
+  Acc2 = lists:foldl(fun(P, Acc1) -> [P | Acc1] end, Acc, Partials),
+  partial_paths(Rest, Acc2);
+partial_paths([], Acc) ->
+  Acc.
+
+
+partial_reverse_paths(Paths) -> partial_reverse_paths(Paths, []).
+
+partial_reverse_paths([Path |Rest], Acc) ->
+  Partials = barrel_index:split_path(lists:reverse(Path)),
+  Acc2 = lists:foldl(fun(P, Acc1) -> [P | Acc1] end, Acc, Partials),
+  partial_reverse_paths(Rest, Acc2);
+partial_reverse_paths([], Acc) ->
+  Acc.
+
+update_index(Paths, DocId, Mod, Fun, Snapshot) ->
+  _ = [Mod:Fun(Path, DocId, Snapshot) || Path <- Paths],
+  ok.
 
 
 purge(_Record, DocInfo, From, #{ db_ref := Db} = State) ->
@@ -346,6 +398,11 @@ fetch_docinfo(DocId, #{ db_mod := Mod, db_state := DbState }) ->
 
 write_docinfo(DocId, NewSeq, OldSeq, DocInfo, #{ db_mod := Mod, db_state := DbState }) ->
   Mod:write_docinfo(DocId, NewSeq, OldSeq, DocInfo, DbState).
+
+fetch_revision(_, <<>>, _) -> {ok, #{}};
+fetch_revision(DocId, RevId, #{ db_mod := Mod, db_state := DbState }) ->
+  Mod:get_revision(DocId, RevId, DbState).
+
 
 purge_doc(DocId, LastSeq, Revisions,  #{ db_mod := Mod, db_state := DbState }) ->
   Mod:purge_doc(DocId, LastSeq, Revisions, DbState).
