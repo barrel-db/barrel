@@ -54,11 +54,10 @@ end_per_suite(Config) ->
 
 save_doc(_Config) ->
   Doc0 = #{ <<"id">> => <<"a">>, <<"v">> => 1},
-  {ok, Doc1} = barrel:save_doc(<<"test">>, Doc0),
-  #{ <<"id">> := <<"a">>, <<"v">> := 1, <<"_rev">> := _Rev} = Doc1,
-  {ok, Doc1} = barrel:fetch_doc(<<"test">>, <<"a">>, #{}),
-  {ok, #{ <<"v">> := 2} = Doc2} = barrel:save_doc(<<"test">>, Doc1#{ <<"v">> => 2 }),
-  {ok, Doc2} = barrel:fetch_doc(<<"test">>, <<"a">>, #{}),
+  {ok, <<"a">>, Rev} = barrel:save_doc(<<"test">>, Doc0),
+  {ok, #{ <<"_rev">> := Rev } = Doc1} = barrel:fetch_doc(<<"test">>, <<"a">>, #{}),
+  {ok, <<"a">>, Rev2} = barrel:save_doc(<<"test">>, Doc1#{ <<"v">> => 2 }),
+  {ok, #{ <<"_rev">> := Rev2} } = barrel:fetch_doc(<<"test">>, <<"a">>, #{}),
   {error, {{conflict, revision_conflict}, <<"a">>}} =  barrel:save_doc(<<"test">>, Doc1#{ <<"v">> => 2 }),
   {error, {{conflict, doc_exists}, <<"a">>}} = barrel:save_doc(<<"test">>, Doc0),
   ok.
@@ -69,12 +68,12 @@ update_non_existing_doc(_Config) ->
 
 delete_doc(_Config) ->
   Doc0 = #{ <<"id">> => <<"a">>, <<"v">> => 1},
-  {ok, Doc1} = barrel:save_doc(<<"test">>, Doc0),
-  {ok, Doc1} = barrel:fetch_doc(<<"test">>, <<"a">>, #{}),
-  {ok, Doc2} = barrel:delete_doc(<<"test">>, <<"a">>, maps:get(<<"_rev">>, Doc1)),
-  undefined = maps:get(<<"v">>, Doc2, undefined),
+  {ok, <<"a">>, Rev} = barrel:save_doc(<<"test">>, Doc0),
+  {ok, #{ <<"_rev">> := Rev }} = barrel:fetch_doc(<<"test">>, <<"a">>, #{}),
+  {ok, <<"a">>, Rev2} = barrel:delete_doc(<<"test">>, <<"a">>, Rev),
   {error, not_found} = barrel:fetch_doc(<<"test">>, <<"a">>, #{}),
-  {ok, Doc2} = barrel:fetch_doc(<<"test">>, <<"a">>, #{ rev => maps:get(<<"_rev">>, Doc2)}),
+  {ok, Doc2} = barrel:fetch_doc(<<"test">>, <<"a">>, #{ rev => Rev2}),
+  undefined = maps:get(<<"v">>, Doc2, undefined),
   ok.
 
 
@@ -83,7 +82,7 @@ save_docs(_Config) ->
     #{ <<"id">> => <<"a">>, <<"v">> => 1},
     #{ <<"id">> => <<"b">>, <<"v">> => 1}
   ],
-  [{ok, #{ <<"id">> := <<"a">>}},
-   {ok, #{ <<"id">> :=  <<"b">>}}] = barrel:save_docs(<<"test">>, Docs),
+  [{ok, <<"a">>, _Rev1},
+   {ok, <<"b">>, _Rev2}] = barrel:save_docs(<<"test">>, Docs),
   ok.
   

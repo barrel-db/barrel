@@ -59,8 +59,8 @@ basic(_Config) ->
   timer:sleep(100),
   Stream = #{ barrel => BarrelId, interval => 100},
   ok = barrel_db_stream_mgr:subscribe(Stream, self(), 0),
-  [{ok, #{ <<"id">> := <<"a">>, <<"_rev">> := RevA }},
-   {ok, #{ <<"id">> := <<"b">>, <<"_rev">> := RevB }}] = barrel_db:write_changes(BarrelId, Batch),
+  [{ok, <<"a">>, RevA },
+   {ok, <<"b">> ,RevB }] = barrel_db:write_changes(BarrelId, Batch),
   timer:sleep(200),
   receive
     {changes, Stream, Changes, LastSeq} ->

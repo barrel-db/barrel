@@ -49,11 +49,10 @@ end_per_testcase(_, Config) ->
 save_doc(Config) ->
   Db = remote_db(Config),
   Doc0 = #{ <<"id">> => <<"a">>, <<"v">> => 1},
-  {ok, Doc1} = barrel:save_doc(Db, Doc0),
-  #{ <<"id">> := <<"a">>, <<"v">> := 1, <<"_rev">> := _Rev} = Doc1,
-  {ok, Doc1} = barrel:fetch_doc(Db, <<"a">>, #{}),
-  {ok, #{ <<"v">> := 2} = Doc2} = barrel:save_doc(Db, Doc1#{ <<"v">> => 2 }),
-  {ok, Doc2} = barrel:fetch_doc(Db, <<"a">>, #{}),
+  {ok, <<"a">>, Rev} = barrel:save_doc(Db, Doc0),
+  {ok, #{ <<"_rev">> := Rev } = Doc1} = barrel:fetch_doc(Db, <<"a">>, #{}),
+  {ok, <<"a">>, Rev2} = barrel:save_doc(Db, Doc1#{ <<"v">> => 2 }),
+  {ok, #{ <<"_rev">> := Rev2 }} = barrel:fetch_doc(Db, <<"a">>, #{}),
   {error, {{conflict, revision_conflict}, <<"a">>}} =  barrel:save_doc(Db, Doc1#{ <<"v">> => 2 }),
   {error, {{conflict, doc_exists}, <<"a">>}} = barrel:save_doc(Db, Doc0),
   ok.
@@ -66,12 +65,11 @@ update_non_existing_doc(Config) ->
 delete_doc(Config) ->
   Db = remote_db(Config),
   Doc0 = #{ <<"id">> => <<"a">>, <<"v">> => 1},
-  {ok, Doc1} = barrel:save_doc(Db, Doc0),
-  {ok, Doc1} = barrel:fetch_doc(Db, <<"a">>, #{}),
-  {ok, Doc2} = barrel:delete_doc(Db, <<"a">>, maps:get(<<"_rev">>, Doc1)),
-  undefined = maps:get(<<"v">>, Doc2, undefined),
+  {ok, <<"a">>, Rev} = barrel:save_doc(Db, Doc0),
+  {ok, #{<<"_rev">> := Rev } } = barrel:fetch_doc(Db, <<"a">>, #{}),
+  {ok, _, Rev2} = barrel:delete_doc(Db, <<"a">>, Rev),
   {error, not_found} = barrel:fetch_doc(Db, <<"a">>, #{}),
-  {ok, Doc2} = barrel:fetch_doc(Db, <<"a">>, #{ rev => maps:get(<<"_rev">>, Doc2)}),
+  {ok, _Doc2} = barrel:fetch_doc(Db, <<"a">>, #{ rev => Rev2}),
   ok.
 
 

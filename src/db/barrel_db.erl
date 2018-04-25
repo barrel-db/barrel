@@ -187,19 +187,9 @@ await_response_loop(MRef, Tag, Results, NumEntries) ->
 
 
 append_writes_summary({ok, DocId, purged}, Results) ->
-  Doc = #{ <<"id">> => DocId },
-  [{ok, Doc} | Results];
-append_writes_summary({ok, Doc0, DocInfo}, Results) ->
-  Rev = maps:get(rev, DocInfo),
-  Deleted = maps:get(deleted, DocInfo, false),
-  Conflict = maps:get(conflict, DocInfo, false),
-  Doc1 = maybe_deleted(
-    maybe_conflict(
-      Doc0#{ <<"_rev">> => Rev },  Conflict
-    ),
-    Deleted
-  ),
-  [{ok, Doc1} | Results];
+  [{ok, DocId, undefined} | Results];
+append_writes_summary({ok, DocId, RevId}, Results) ->
+  [{ok, DocId, RevId} | Results];
 append_writes_summary({error, DocId, not_found}, Results) ->
   [{error, {not_found, DocId}} | Results];
 append_writes_summary({error, DocId, {conflict, _}=Conflict}, Results) ->
@@ -210,12 +200,6 @@ append_writes_summary({error, DocId, write_error}, Results) ->
   [{error, {write_error, DocId}} | Results];
 append_writes_summary(Other, __Results) ->
   erlang:error({undefined, Other}).
-
-maybe_deleted(Doc, false) -> Doc;
-maybe_deleted(Doc, true) -> Doc#{ <<"_deleted">>  => true }.
-
-maybe_conflict(Doc, false) -> Doc;
-maybe_conflict(Doc, true) -> Doc#{ <<"conflict">> => true }.
 
 prepare_batch([{delete, Id, Rev} | Rest], From, Acc) ->
   Record = barrel_doc:make_record(#{<<"id">> => Id,

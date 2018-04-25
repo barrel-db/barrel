@@ -204,7 +204,7 @@ merge_revtree(NewGen, ParentRev, Deleted, Record, DocInfo, From, #{db_ref := Db}
                 end,
   case WriteResult of
     ok ->
-      reply(From, {ok, Doc, DocInfo2}),
+      reply(From, {ok, DocId, WinningRev}),
       update_db_state(State1),
       barrel_event:notify(Db, db_updated),
       cache(DocInfo2, State1);
@@ -272,7 +272,7 @@ merge_revtree_with_conflict(Record, DocInfo0, From, #{ db_ref := Db} = State0) -
                 end,
   case WriteResult of
     ok ->
-      reply(From, {ok, Doc, DocInfo1}),
+      reply(From, {ok, DocId, WinningRev}),
       if
         NewSeq /= nil ->
           update_db_state(NewState),
