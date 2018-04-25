@@ -154,19 +154,30 @@ purge_docs(DbRef, DocIds) ->
   write_changes(DbRef, [{purge, Id} || Id <- DocIds]).
 
 write_changes(DbRef, Batch) ->
+  case write_changes_async(DbRef, Batch) of
+    {ok, RespStream} ->
+      await_response(RespStream);
+    Error ->
+      Error
+  end.
+
+write_changes_async(DbRef, Batch) ->
+  write_changes_async(DbRef, Batch, self()).
+
+write_changes_async(DbRef, Batch, To) ->
   Tag = make_ref(),
-  From = {self(), Tag},
+  From = {To, Tag},
   Entries = prepare_batch(Batch, From, []),
   NumEntries = length(Entries),
   do_for_ref(
     DbRef,
     fun(DbPid) ->
       ok = gen_statem:call(DbPid, {write_changes, Entries}),
-      await_response(DbPid, Tag, NumEntries)
+      {ok, {Tag, DbPid, NumEntries}}
     end
   ).
 
-await_response(DbPid, Tag, NumEntries) ->
+await_response({Tag, DbPid, NumEntries}) ->
   MRef = erlang:monitor(process, DbPid),
   try await_response_loop(MRef, Tag, [], NumEntries)
   after erlang:demonitor(MRef, [flush])
