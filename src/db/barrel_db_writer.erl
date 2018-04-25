@@ -126,6 +126,7 @@ merge_revtree(Record, DocInfo, From, State) ->
   #{ id := DocId, rev := CurrentRev, revtree := RevTree } = DocInfo,
   [Rev | _ ] = maps:get(revs, Record, [<<>>]),
   Deleted = maps:get(deleted, Record, false),
+  Replace = maps:get(replace, Record, false),
   {Gen, _}  = barrel_doc:parse_revision(Rev),
   case Rev of
     <<>> ->
@@ -142,6 +143,9 @@ merge_revtree(Record, DocInfo, From, State) ->
               reply(From, {error, DocId, {conflict, doc_exists}}),
               State
           end;
+        CurrentRev =:= <<>>, Replace =:= true ->
+          reply(From, {error, DocId, not_found}),
+          State;
         true ->
           merge_revtree(
             Gen + 1, <<>>, Deleted,

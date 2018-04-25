@@ -99,3 +99,4 @@ delete_local_doc(Barrel, DocId) ->
 
 query(Barrel, Path, Fun, Acc, Options) ->
   barrel_index:query(Barrel, Path, Fun, Acc, Options).
+

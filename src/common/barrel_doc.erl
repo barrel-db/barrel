@@ -127,6 +127,7 @@ deleted(_) -> false.
 doc_without_meta(Doc) ->
   maps:filter(
     fun
+      (<< "_attachments", _/binary >>, _) -> true;
       (<< "_", _/binary >>, _) -> false;
       (_, _) -> true
     end,

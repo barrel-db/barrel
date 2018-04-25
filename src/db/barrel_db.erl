@@ -221,7 +221,7 @@ prepare_batch([{delete, Id, Rev} | Rest], From, Acc) ->
   Record = barrel_doc:make_record(#{<<"id">> => Id,
                                     <<"_deleted">> => true,
                                     <<"_rev">> => Rev}),
-  Op = barrel_db_writer:make_op(merge, Record, From),
+  Op = barrel_db_writer:make_op(merge, Record#{ replace => true }, From),
   prepare_batch(Rest, From, [Op | Acc]);
 prepare_batch([{purge, Id} | Rest], From, Acc) ->
   Record = barrel_doc:make_record(#{<<"id">> => Id}),
@@ -232,8 +232,9 @@ prepare_batch([{create, Doc} | Rest], From, Acc) ->
   Op = barrel_db_writer:make_op(merge, Record, From),
   prepare_batch(Rest, From, [Op | Acc]);
 prepare_batch([{replace, Doc} | Rest], From, Acc) ->
+  ok = check_docid(Doc),
   Record = barrel_doc:make_record(Doc),
-  Op = barrel_db_writer:make_op(merge, Record, From),
+  Op = barrel_db_writer:make_op(merge, Record#{ replace => true }, From),
   prepare_batch(Rest, From, [Op | Acc]);
 prepare_batch([{add_rev, RevDoc} | Rest], From, Acc) ->
   Record = barrel_doc:make_record(RevDoc),
@@ -243,6 +244,12 @@ prepare_batch([_], _From, _Acc) ->
   erlang:error(badarg);
 prepare_batch([], _From, Acc) ->
   lists:reverse(Acc).
+
+
+check_docid(#{ <<"id">> := _Id}) -> ok;
+check_docid(_) ->
+  io:format("error badarg ~n", []),
+  error(badarg).
 
 call(DbRef, Msg) ->
   do_for_ref(
