@@ -32,6 +32,11 @@
 ]).
 
 -export([
+  write_changes_async/2,  write_changes_async/3,
+  await_response/1
+]).
+
+-export([
   call/2,
   cast/2,
   do_for_ref/2,
