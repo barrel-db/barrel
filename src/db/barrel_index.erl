@@ -119,9 +119,9 @@ query(Barrel, Path0, Fun, Acc, Options) ->
   DecodedPath = decode_path(Path1, []),
   OrderBy = maps:get(order_by, Options, order_by_key),
   Limit = limit(Options),
-  {Path, StartPath, EndPath} = case maps:find(equal_to, Options) of
+  {Path, {StartInclusive, StartPath}, {EndInclusive, EndPath}} = case maps:find(equal_to, Options) of
                                  {ok, EqualTo} ->
-                                   {DecodedPath ++ [EqualTo], undefined, undefined};
+                                   {DecodedPath ++ [EqualTo], {true, undefined}, {true, undefined}};
                                  error ->
                                    Start = start_at(Options, DecodedPath),
                                    End = end_at(Options, DecodedPath),
@@ -135,7 +135,10 @@ query(Barrel, Path0, Fun, Acc, Options) ->
             end,
   barrel_db:do_command(
     Barrel,
-    {query, FoldFun, PartialFun(Path), PartialFun(StartPath), PartialFun(EndPath), Limit, Fun, Acc}
+    {query,
+     FoldFun, PartialFun(Path),
+     {StartInclusive, PartialFun(StartPath)}, {EndInclusive, PartialFun(EndPath)},
+     Limit, Fun, Acc}
   ).
 
 
@@ -164,11 +167,13 @@ reverse_partial(Path) ->
   Partial.
 
 
-start_at(#{ start_at := Start }, Path) -> Path ++ [Start];
-start_at(_, _) -> undefined.
+start_at(#{ start_at := Start }, Path) -> {true, Path ++ [Start]};
+start_at(#{ next_to := Start }, Path) -> {false, Path ++ [Start]};
+start_at(_, _) -> {true, undefined}.
 
-end_at(#{ end_at := End }, Path) -> Path ++ [End];
-end_at(_, _) -> undefined.
+end_at(#{ end_at := End }, Path) -> {true, Path ++ [End]};
+end_at(#{ previous_to := End }, Path) -> {false, Path ++ [End]};
+end_at(_, _) -> {true, undefined}.
 
 limit(#{ limit_to_first := L }) -> {limit_to_first, L};
 limit(#{ limit_to_last:= L }) -> {limit_to_last, L};

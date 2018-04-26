@@ -287,7 +287,7 @@ fold_reverse_path(Path, Start, End, Limit, Fun, Acc, State) ->
   fold_path_1(ri, Path, Start, End, Limit, Fun, Acc, State).
 
 
-fold_path_1(Prefix, Path, Start, End, Limit, Fun, Acc, State) ->
+fold_path_1(Prefix, Path, {StartInclusive, Start}, {EndInclusive, End}, Limit, Fun, Acc, State) ->
   Tab = maps:get(tab, State),
   {ok, Itr} = memstore:iterator(Tab, read_options(State)),
   SeekKey = case Start of
@@ -297,25 +297,30 @@ fold_path_1(Prefix, Path, Start, End, Limit, Fun, Acc, State) ->
   {Next, Less, Max} = case Limit of
                         {limit_to_last, N} ->
                           {fun() -> memstore:iterator_move(Itr, prev) end,
-                           less_fun(End, prev),
+                           less_fun(End, EndInclusive, prev),
                            N};
                         {limit_to_first, N} ->
                           {fun() -> memstore:iterator_move(Itr, next) end,
-                           less_fun(End, next),
+                           less_fun(End, EndInclusive, next),
                            N};
                         undefined ->
                           {fun() -> memstore:iterator_move(Itr, next) end,
-                           less_fun(End, next),
+                           less_fun(End, EndInclusive, next),
                            undefined}
                       end,
-  try fold_path_loop(memstore:iterator_move(Itr, {seek, SeekKey}), Next, Prefix, Path, Less, Max, Fun, Acc, State)
+  First = case {StartInclusive, memstore:iterator_move(Itr, {seek, SeekKey})} of
+             {false, {ok, _, _}} -> Next();
+             {_, First0} -> First0
+           end,
+  try fold_path_loop(First, Next, Prefix, Path, Less, Max, Fun, Acc, State)
   after memstore:iterator_close(Itr)
   end.
 
-
-less_fun(undefined, _) -> fun(_) -> true end;
-less_fun(End, prev) -> fun(Key) -> (Key >= End) end;
-less_fun(End, next) -> fun(Key) -> (Key =< End) end.
+less_fun(undefined, _, _) -> fun(_) -> true end;
+less_fun(End, true, prev) -> fun(Key) -> (Key >= End) end;
+less_fun(End, false, prev) -> fun(Key) -> (Key > End) end;
+less_fun(End, true, next) -> fun(Key) -> (Key =< End) end;
+less_fun(End, false,  next) -> fun(Key) -> (Key < End) end.
 
 in_path([Prefix, PA], [Prefix, PB]) ->
   case lists:sublist(PA, length(PB)) of
