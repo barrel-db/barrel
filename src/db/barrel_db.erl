@@ -284,8 +284,10 @@ do_for_ref(DbRef, Fun) ->
               Fun(Pid);
             {error, {already_started, Pid}} ->
               Fun(Pid);
+            Err = {error, _} ->
+              Err;
             Error ->
-              Error
+              {error, Error}
           end
       end
   catch
