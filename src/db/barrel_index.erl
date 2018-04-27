@@ -181,7 +181,8 @@ limit(_) -> undefined.
 
 normalize_path(<<>>) -> <<"/id">>;
 normalize_path(<<"/">>) -> <<"/id">>;
-normalize_path(P) ->  P.
+normalize_path(<< "/", _/binary >> = P) ->  P;
+normalize_path(P) ->  <<"/", P/binary >>.
 
 decode_path(<<>>, Acc) ->
   [ << "$" >> | lists:reverse(Acc)];
