@@ -89,18 +89,27 @@ delete_barrel(Name) ->
   do_for_ref(
     Name,
     fun(DbPid) ->
-      MRef = erlang:monitor(process, DbPid),
-      case gen_statem:call(DbPid, delete) of
-        ok ->
-          receive
-            {'DOWN', _, process, DbPid, _} -> ok
-          end;
-        Other ->
-          erlang:demonitor(MRef, [flush]),
-          Other
+      try
+        delete_barrel_1(DbPid)
+      catch
+        exit:{noproc,_} -> ok;
+        exit:noproc -> ok;
+        %% Handle the case where the monitor triggers
+        exit:{normal, _} -> ok
       end
-    end
-  ).
+    end).
+
+delete_barrel_1(DbPid) ->
+  MRef = erlang:monitor(process, DbPid),
+  case gen_statem:call(DbPid, delete) of
+    ok ->
+      receive
+        {'DOWN', _, process, DbPid, _} -> ok
+      end;
+    Other ->
+      erlang:demonitor(MRef, [flush]),
+      Other
+  end.
 
 is_barrel(Name) ->
   Res = do_for_ref( Name, fun(_) -> ok end),
@@ -389,10 +398,10 @@ init([Name, open, _Options]) ->
 callback_mode() -> state_functions.
 
 terminate({shutdown, deleted}, _State, #{ store := Store, name := Name}) ->
-  _ = barrel_storage:delete_barrel(Store, Name),
+  _ = (catch barrel_storage:delete_barrel(Store, Name)),
   ok;
 terminate(_Reason, _State, #{ store := Store, name := Name}) ->
-  _ = barrel_storage:close_barrel(Store, Name),
+  _ = (catch barrel_storage:close_barrel(Store, Name)),
   ok.
 
 code_change(_OldVsn, State, Data, _Extra) ->
