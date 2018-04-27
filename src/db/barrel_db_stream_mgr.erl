@@ -143,9 +143,13 @@ handle_info({trigger_fetch, Stream, SubRef}, State = #{ streams := Streams}) ->
 handle_down_agent(MonitorRef, Monitors, Streams) ->
   {{Stream, SubRef}, Monitors1} = maps:take(MonitorRef, Monitors),
   SubStreams = maps:get(Stream, Streams),
-  {_, #{pid := Pid, since := Since}} = lists:keyfind(SubRef, 1, SubStreams),
-  _ = enqueue_stream(Stream, SubRef, Pid, Since),
-  Monitors1.
+  case lists:keyfind(SubRef, 1, SubStreams) of
+    {_, #{pid := Pid, since := Since}} ->
+      _ = enqueue_stream(Stream, SubRef, Pid, Since),
+      Monitors1;
+    false ->
+      Monitors1
+  end.
 
 -spec enqueue_stream(map(), reference(), pid(), term()) -> {await, any(), pid()} | {drop, 0}.
 enqueue_stream(StreamRef, SubRef, Subscriber, Since) ->
