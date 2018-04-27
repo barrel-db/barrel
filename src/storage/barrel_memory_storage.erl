@@ -361,7 +361,6 @@ dec(I) -> I.
 
 fold_path_loop({ok, {Prefix, Key, DocId}, <<>>}, Next, Prefix, Path, Less, Max, Fun, Acc0, State) ->
   Max2 = dec(Max),
-  _ = lager:info("key=~p in path=~p in bond=~p~n", [{Prefix, Key, DocId}, in_path(Key, Path), Less(Key)]),
   case {in_path(Key, Path), Less(Key)} of
     {true, true}  ->
       case fetch_docinfo(DocId, State) of
