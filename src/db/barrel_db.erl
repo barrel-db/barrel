@@ -227,8 +227,12 @@ prepare_batch([{purge, Id} | Rest], From, Acc) ->
   Record = barrel_doc:make_record(#{<<"id">> => Id}),
   Op = barrel_db_writer:make_op(purge, Record, From),
   prepare_batch(Rest, From, [Op | Acc]);
-prepare_batch([{create, Doc} | Rest], From, Acc) ->
-  Record = barrel_doc:make_record(Doc),
+prepare_batch([{create, Doc0} | Rest], From, Acc) ->
+  Doc1 = case maps:find(<<"id">>, Doc0) of
+           {ok, _Id} -> Doc0;
+           error -> Doc0#{ <<"id">> => barrel_id:binary_id(62) }
+         end,
+  Record = barrel_doc:make_record(Doc1),
   Op = barrel_db_writer:make_op(merge, Record, From),
   prepare_batch(Rest, From, [Op | Acc]);
 prepare_batch([{replace, Doc} | Rest], From, Acc) ->

@@ -137,11 +137,6 @@ query(Barrel, Path0, Fun, Acc, Options) ->
   Command = {query,
              FoldFun, ByFun(Path),
              {StartInclusive, ByFun(StartPath)}, {EndInclusive, ByFun(EndPath)}, Limit, Fun, Acc},
-
-  _ = lager:info("query ~p~n", [{query,
-                                 FoldFun, ByFun(Path),
-                                 {StartInclusive, ByFun(StartPath)}, {EndInclusive, ByFun(EndPath)},
-                                 Limit, Fun, Acc}]),
   barrel_db:do_command(Barrel, Command).
 
 

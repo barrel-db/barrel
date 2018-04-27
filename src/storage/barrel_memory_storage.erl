@@ -290,40 +290,68 @@ fold_reverse_path(Path, Start, End, Limit, Fun, Acc, State) ->
 fold_path_1(Prefix, Path, {StartInclusive, Start}, {EndInclusive, End}, Limit, Fun, Acc, State) ->
   Tab = maps:get(tab, State),
   {ok, Itr} = memstore:iterator(Tab, read_options(State)),
-  SeekKey = case Start of
-              undefined -> {Prefix, Path, <<>>};
-              _  -> {Prefix, Start, <<>>}
-            end,
-  {Next, Less, Max} = case Limit of
-                        {limit_to_last, N} ->
-                          {fun() -> memstore:iterator_move(Itr, prev) end,
-                           less_fun(End, EndInclusive, prev),
-                           N};
-                        {limit_to_first, N} ->
-                          {fun() -> memstore:iterator_move(Itr, next) end,
-                           less_fun(End, EndInclusive, next),
-                           N};
-                        undefined ->
-                          {fun() -> memstore:iterator_move(Itr, next) end,
-                           less_fun(End, EndInclusive, next),
-                           undefined}
-                      end,
-  First = case {StartInclusive, memstore:iterator_move(Itr, {seek, SeekKey})} of
+  {Seek, Inclusive, Next, InBoundFun, Max} = case Limit of
+                                       {limit_to_last, N} ->
+                                         {Key, Inc} = case End of
+                                                 undefined ->
+                                                   [Last | Rest] = lists:reverse(Path),
+                                                   EndKey = lists:reverse([last(Last) | Rest]),
+                                                   {{seek_for_prev, {Prefix, EndKey, <<>>}}, true};
+                                                 _  ->
+                                                   {{seek, {Prefix, End, <<>>}}, EndInclusive}
+                                               end,
+                                         {Key, Inc,
+                                          fun() -> memstore:iterator_move(Itr, prev) end,
+                                          in_bound_fun(Start, StartInclusive, prev),
+                                          N};
+                                       {limit_to_first, N} ->
+                                         Key = case Start of
+                                                 undefined -> {Prefix, Path, <<>>};
+                                                 _  -> {Prefix, Start, <<>>}
+                                               end,
+
+                                         {{seek, Key}, StartInclusive,
+                                          fun() -> memstore:iterator_move(Itr, next) end,
+                                          in_bound_fun(End, EndInclusive, next),
+                                          N};
+                                       undefined ->
+                                         Key = case Start of
+                                                 undefined -> {Prefix, Path, <<>>};
+                                                 _  -> {Prefix, Start, <<>>}
+                                               end,
+                                         {{seek, Key}, StartInclusive,
+                                          fun() -> memstore:iterator_move(Itr, next) end,
+                                          in_bound_fun(End, EndInclusive, next),
+                                          undefined}
+                                     end,
+  First = case {Inclusive, memstore:iterator_move(Itr, Seek)} of
              {false, {ok, _, _}} -> Next();
              {_, First0} -> First0
            end,
-  try fold_path_loop(First, Next, Prefix, Path, Less, Max, Fun, Acc, State)
+  try fold_path_loop(First, Next, Prefix, Path, InBoundFun, Max, Fun, Acc, State)
   after memstore:iterator_close(Itr)
   end.
 
-less_fun(undefined, _, _) -> fun(_) -> true end;
-less_fun(End, true, prev) -> fun(Key) -> (Key >= End) end;
-less_fun(End, false, prev) -> fun(Key) -> (Key > End) end;
-less_fun(End, true, next) -> fun(Key) -> (Key =< End) end;
-less_fun(End, false,  next) -> fun(Key) -> (Key < End) end.
+
+last(Last) when is_binary(Last) ->
+  << Last/binary, 0 >>;
+last(Last) when is_integer(Last) ->
+  1 bsl 64 - 1.
+
+
+in_bound_fun(undefined, _, _) -> fun(_) -> true end;
+in_bound_fun(End, true, prev) -> fun(Key) -> (path_to_test(Key, End) >= End) end;
+in_bound_fun(End, false, prev) -> fun(Key) -> (path_to_test(Key, End) > End) end;
+in_bound_fun(End, true, next) -> fun(Key) ->  (path_to_test(Key, End) =< End) end;
+in_bound_fun(End, false,  next) -> fun(Key) -> (path_to_test(Key, End) < End) end.
+
+
+path_to_test(T, P) ->
+  lists:sublist(T, length(P)).
+
 
 in_path(PA, PB) ->
-  case lists:sublist(PA, length(PB)) of
+  case path_to_test(PA, PB) of
     PB -> true;
     _ -> false
   end.
@@ -333,6 +361,7 @@ dec(I) -> I.
 
 fold_path_loop({ok, {Prefix, Key, DocId}, <<>>}, Next, Prefix, Path, Less, Max, Fun, Acc0, State) ->
   Max2 = dec(Max),
+  _ = lager:info("key=~p in path=~p in bond=~p~n", [{Prefix, Key, DocId}, in_path(Key, Path), Less(Key)]),
   case {in_path(Key, Path), Less(Key)} of
     {true, true}  ->
       case fetch_docinfo(DocId, State) of

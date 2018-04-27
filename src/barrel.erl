@@ -70,7 +70,7 @@ purge_doc(Barrel, DocId) ->
 save_docs(Barrel, Docs) ->
   Batch = lists:map(
     fun
-      (#{ <<"_rev">> := _}=Doc) -> {replace, Doc};
+      (Doc = #{ <<"_rev">> := _}) -> {replace, Doc};
       (Doc) -> {create, Doc}
     end,
     Docs
