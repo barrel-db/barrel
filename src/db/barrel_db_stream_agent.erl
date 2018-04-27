@@ -34,8 +34,13 @@ handle_call(_Msg, _From, State) -> {noreply, State}.
 
 handle_cast(_Msg, State) -> {noreply, State}.
 
-handle_info({_, {go, _Ref, { #{barrel := Name } = Stream, SubRef, Subscriber, Since},
+handle_info({_, {go, _Ref, {Stream, SubRef, Subscriber, Since},
                  _RelativeTime, _SojournTime}}, St) ->
+  ok = fetch_changes(Stream, SubRef, Subscriber, Since),
+  {noreply, St}.
+
+
+fetch_changes(#{barrel := Name } = Stream, SubRef, Subscriber, Since) ->
   %% get options
   IncludeDoc = maps:get(include_doc, Stream, true),
   WithHistory = maps:get(with_history, Stream, true),
@@ -43,33 +48,33 @@ handle_info({_, {go, _Ref, { #{barrel := Name } = Stream, SubRef, Subscriber, Si
   Snapshot = Mod:get_snapshot(BState),
   %%Snapshot = BState,
   WrapperFun =
-    fun
-      (DI, {Acc0, LastSeq, N}) ->
-        #{ id := DocId,
-           rev := Rev,
-           seq := Seq,
-           deleted := Deleted,
-           revtree := RevTree } = DI,
-        Changes = case WithHistory of
-                    false -> [Rev];
-                    true -> barrel_revtree:history(Rev, RevTree)
-                  end,
-        Change0 = #{ <<"id">> => DocId,
-                     <<"seq">> => Seq,
-                     <<"rev">> => Rev,
-                     <<"changes">> => Changes},
-        Change = change_with_doc(
-          change_with_deleted(Change0, Deleted),
-          DocId, Rev, Mod, Snapshot, IncludeDoc
-        ),
-        Acc1 = [Change | Acc0],
-        if
-          N >= 100 ->
-            {stop, {Acc1, erlang:max(Seq, LastSeq), N}};
-          true ->
-            {ok,  {Acc1, erlang:max(Seq, LastSeq), N+1}}
-        end
-    end,
+  fun
+    (DI, {Acc0, LastSeq, N}) ->
+      #{ id := DocId,
+         rev := Rev,
+         seq := Seq,
+         deleted := Deleted,
+         revtree := RevTree } = DI,
+      Changes = case WithHistory of
+                  false -> [Rev];
+                  true -> barrel_revtree:history(Rev, RevTree)
+                end,
+      Change0 = #{ <<"id">> => DocId,
+                   <<"seq">> => Seq,
+                   <<"rev">> => Rev,
+                   <<"changes">> => Changes},
+      Change = change_with_doc(
+        change_with_deleted(Change0, Deleted),
+        DocId, Rev, Mod, Snapshot, IncludeDoc
+      ),
+      Acc1 = [Change | Acc0],
+      if
+        N >= 100 ->
+          {stop, {Acc1, erlang:max(Seq, LastSeq), N}};
+        true ->
+          {ok,  {Acc1, erlang:max(Seq, LastSeq), N+1}}
+      end
+  end,
   {Changes, LastSeq, _} = try Mod:fold_changes(Since, WrapperFun, {[], Since, 0}, Snapshot)
                           after Mod:release_snapshot(Snapshot)
                           end,
@@ -78,7 +83,8 @@ handle_info({_, {go, _Ref, { #{barrel := Name } = Stream, SubRef, Subscriber, Si
   %% register last seq
   ok = barrel_db_stream_mgr:next(Stream, SubRef, LastSeq),
   _ = sbroker:async_ask_r(?db_stream_broker),
-  {noreply, St}.
+  ok.
+
 
 send_changes([], _LastSeq, _Stream, _Subscriber) ->
   ok;
