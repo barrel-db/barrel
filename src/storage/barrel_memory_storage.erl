@@ -322,13 +322,11 @@ less_fun(End, false, prev) -> fun(Key) -> (Key > End) end;
 less_fun(End, true, next) -> fun(Key) -> (Key =< End) end;
 less_fun(End, false,  next) -> fun(Key) -> (Key < End) end.
 
-in_path([Prefix, PA], [Prefix, PB]) ->
+in_path(PA, PB) ->
   case lists:sublist(PA, length(PB)) of
     PB -> true;
     _ -> false
-  end;
-in_path(_, _) ->
-  false.
+  end.
 
 dec(I) when is_integer(I) -> I - 1;
 dec(I) -> I.

@@ -127,19 +127,22 @@ query(Barrel, Path0, Fun, Acc, Options) ->
                                    End = end_at(Options, DecodedPath),
                                    {DecodedPath, Start, End}
                                end,
-  {FoldFun, PartialFun} = case OrderBy of
-              order_by_key ->
-                {fold_path, fun partial/1};
-              order_by_value ->
-                {fold_reverse_path, fun reverse_partial/1}
-            end,
-  barrel_db:do_command(
-    Barrel,
-    {query,
-     FoldFun, PartialFun(Path),
-     {StartInclusive, PartialFun(StartPath)}, {EndInclusive, PartialFun(EndPath)},
-     Limit, Fun, Acc}
-  ).
+  {FoldFun, ByFun} = case OrderBy of
+                       order_by_key ->
+                         {fold_path, fun(P) -> P end};
+                       order_by_value ->
+                         {fold_reverse_path, fun lists:reverse/1}
+
+                     end,
+  Command = {query,
+             FoldFun, ByFun(Path),
+             {StartInclusive, ByFun(StartPath)}, {EndInclusive, ByFun(EndPath)}, Limit, Fun, Acc},
+
+  _ = lager:info("query ~p~n", [{query,
+                                 FoldFun, ByFun(Path),
+                                 {StartInclusive, ByFun(StartPath)}, {EndInclusive, ByFun(EndPath)},
+                                 Limit, Fun, Acc}]),
+  barrel_db:do_command(Barrel, Command).
 
 
 do_query(FoldFun, Path, Start, End, Limit, UserFun, UserAcc, {Mod, ModState}) ->
@@ -154,17 +157,6 @@ do_query(FoldFun, Path, Start, End, Limit, UserFun, UserAcc, {Mod, ModState}) ->
 maybe_add_deleted(#{ deleted := true }, Doc) -> Doc#{ <<"_deleted">> => true };
 maybe_add_deleted(_, Doc) -> Doc.
 
-partial(undefined) ->
-  undefined;
-partial(Path) when length(Path) < 3 ->
-  [[], Path];
-partial(Path) ->
-  [Partial | _] = split_path(Path),
-  Partial.
-
-reverse_partial(Path) ->
-  [Partial | _] = split_path(lists:reverse(Path)),
-  Partial.
 
 
 start_at(#{ start_at := Start }, Path) -> {true, Path ++ [Start]};

@@ -328,30 +328,10 @@ maybe_index(OldRev, WinningRev, _DocRev, #{ <<"id">> := DocId}, State) ->
 
 index(NewDoc, OldDoc, DocId, #{ db_mod := Mod, db_state := DbState }) ->
   {Added, Removed} = barrel_index:diff(NewDoc, OldDoc),
-  update_index(partial_paths(Added), DocId, Mod, index_path, DbState),
-  update_index(partial_reverse_paths(Added), DocId, Mod, index_reverse_path, DbState),
-  update_index(partial_paths(Removed), DocId, Mod, unindex_path, DbState),
-  update_index(partial_reverse_paths(Removed), DocId, Mod, unindex_reverse_path, DbState).
-
-
-partial_paths(Paths) -> partial_paths(Paths, []).
-
-partial_paths([Path |Rest], Acc) ->
-  Partials = barrel_index:split_path(Path),
-  Acc2 = lists:foldl(fun(P, Acc1) -> [P | Acc1] end, Acc, Partials),
-  partial_paths(Rest, Acc2);
-partial_paths([], Acc) ->
-  Acc.
-
-
-partial_reverse_paths(Paths) -> partial_reverse_paths(Paths, []).
-
-partial_reverse_paths([Path |Rest], Acc) ->
-  Partials = barrel_index:split_path(lists:reverse(Path)),
-  Acc2 = lists:foldl(fun(P, Acc1) -> [P | Acc1] end, Acc, Partials),
-  partial_reverse_paths(Rest, Acc2);
-partial_reverse_paths([], Acc) ->
-  Acc.
+  update_index(Added, DocId, Mod, index_path, DbState),
+  update_index(Added, DocId, Mod, index_reverse_path, DbState),
+  update_index(Removed, DocId, Mod, unindex_path, DbState),
+  update_index(Removed, DocId, Mod, unindex_reverse_path, DbState).
 
 update_index(Paths, DocId, Mod, Fun, Snapshot) ->
   _ = [Mod:Fun(Path, DocId, Snapshot) || Path <- Paths],
