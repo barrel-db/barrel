@@ -71,8 +71,8 @@ handle_info({_, {go, _Ref, { #{barrel := Name } = Stream, SubRef, Subscriber, Si
         end
     end,
   {Changes, LastSeq, _} = try Mod:fold_changes(Since, WrapperFun, {[], Since, 0}, Snapshot)
-                 after Mod:release_snapshot(Snapshot)
-                 end,
+                          after Mod:release_snapshot(Snapshot)
+                          end,
   %% send changes
   send_changes(lists:reverse(Changes), LastSeq, Stream, Subscriber),
   %% register last seq

@@ -344,8 +344,14 @@ fold_path_loop({ok, {Prefix, Key, DocId}, <<>>}, Next, Prefix, Path, Less, Max, 
               Acc1;
             {ok, Acc1} ->
               fold_path_loop(Next(), Next, Prefix, Path, Less, Max2, Fun, Acc1, State);
+            {skip, Acc1} ->
+              fold_path_loop(Next(), Next, Prefix, Path, Less, Max2, Fun, Acc1, State);
             {stop, Acc1} ->
-              Acc1
+              Acc1;
+            skip ->
+              fold_path_loop(Next(), Next, Prefix, Path, Less, Max2, Fun, Acc0, State);
+            stop ->
+              Acc0
           end;
         {error, not_found} ->
           fold_path_loop(Next(), Next, Prefix, Path, Less, Max, Fun, Acc0, State)
