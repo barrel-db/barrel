@@ -119,10 +119,18 @@ handle_call(_Msg, _From, State) -> {noreply, State}.
 
 handle_cast(_Msg, State) -> {noreply, State}.
 
+handle_info({'DOWN', MonitorRef, _, _, _}, State=#{ monitors := Monitors, streams := Streams }) ->
+  %% an agent crashed while handling a stream
+  %% find out what stream it is and enqueue it again
+  Monitors1 = handle_down_agent(MonitorRef, Monitors, Streams),
+  {noreply, State#{ monitors => Monitors1 }};
+
 handle_info({Sub = {_Stream, _SubRef}, {go, _Ref, Pid, _RelativeTime, _SojournTime}},
             State = #{ monitors := Monitors }) ->
   MRef = erlang:monitor(process, Pid),
   {noreply, State#{monitors => Monitors#{MRef => Sub}}};
+
+
 handle_info({_Stream, {drop, _SojournTime}}, State) ->
   {noreply, State};
 
@@ -131,6 +139,13 @@ handle_info({trigger_fetch, Stream, SubRef}, State = #{ streams := Streams}) ->
   {_, #{ pid := Pid, since := Since }} = lists:keyfind(SubRef, 1, Subs),
   _ = enqueue_stream(Stream, SubRef, Pid, Since),
   {noreply, State}.
+
+handle_down_agent(MonitorRef, Monitors, Streams) ->
+  {{Stream, SubRef}, Monitors1} = maps:take(MonitorRef, Monitors),
+  SubStreams = maps:get(Stream, Streams),
+  {_, #{pid := Pid, since := Since}} = lists:keyfind(SubRef, 1, SubStreams),
+  _ = enqueue_stream(Stream, SubRef, Pid, Since),
+  Monitors1.
 
 -spec enqueue_stream(map(), reference(), pid(), term()) -> {await, any(), pid()} | {drop, 0}.
 enqueue_stream(StreamRef, SubRef, Subscriber, Since) ->
