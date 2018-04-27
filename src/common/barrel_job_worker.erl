@@ -101,7 +101,6 @@ handle_requestd(Req, From, Name, State) ->
 
 
 reply({To, Tag}, Reply)  ->
-  _ = lager:debug("reply to=~p, reply=~p~n", [To, Reply]),
   Msg = {Tag, Reply},
   try To ! Msg of
     _ ->
