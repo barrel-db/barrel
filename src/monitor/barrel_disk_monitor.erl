@@ -189,7 +189,7 @@ code_change(_OldVsn, State, _Extra) ->
 
 % the partition / drive containing this directory will be monitored
 %% TODO: make it an option
-dir() -> barrel_store:data_dir().
+dir() -> barrel_storage:data_dir().
 
 set_disk_limits(State, Limit0) ->
   Limit = interpret_limit(Limit0),

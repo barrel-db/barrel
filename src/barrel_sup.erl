@@ -52,6 +52,13 @@ init([]) ->
              type => supervisor,
              modules => [barrel_ext_sup]},
 
+           #{id => barrel_monitor_sup,
+             start => {barrel_monitor_sup, start_link, []},
+             restart => permanent,
+             shutdown => infinity,
+             type => supervisor,
+             modules => [barrel_monitor_sup]},
+
            %% persist time server
            #{
              id => persist_time_server,
