@@ -49,6 +49,7 @@ get_last_ts() ->
 %% gen server API
 
 init([]) ->
+  process_flag(trap_exit, true),
   AllowableDowntime = application:get_env(barrel, ts_allowable_downtime, ?ALLOWABLE_DOWNTIME),
   {ok, LastTs} = barrel_ts:read_timestamp(),
   Now = barrel_ts:curr_time_millis(),
@@ -94,7 +95,8 @@ handle_info(_Msg, State) -> {noreply, State}.
 
 handle_cast(_Msg, State) -> {noreply, State}.
 
-terminate(_Reason, _State) -> ok.
+terminate(_Reason, _State) ->
+  ok.
 
 code_change(_, State, _) -> {ok, State}.
 
