@@ -206,8 +206,6 @@ await_response_loop(MRef, Tag, Results, NumEntries) ->
       await_response_loop(MRef, Tag, Results2, NumEntries - 1);
     {'DOWN', MRef, _, _, _} ->
       erlang:exit(db_down)
-  after 5000 ->
-    erlang:exit(timeout)
   end.
 
 
@@ -260,9 +258,7 @@ prepare_batch([], _From, Acc) ->
 
 
 check_docid(#{ <<"id">> := _Id}) -> ok;
-check_docid(_) ->
-  io:format("error badarg ~n", []),
-  error(badarg).
+check_docid(_) -> erlang:error(badarg).
 
 call(DbRef, Msg) ->
   do_for_ref(
