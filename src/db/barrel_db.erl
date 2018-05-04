@@ -204,11 +204,9 @@ await_response_loop(MRef, Tag, Results, NumEntries) ->
     {Tag, Resp} ->
       Results2 = append_writes_summary(Resp, Results),
       await_response_loop(MRef, Tag, Results2, NumEntries - 1);
-    {'DOWN', MRef, _, _, Reason} ->
-      _ = lager:error("db down: ~p~n", [Reason]),
+    {'DOWN', MRef, _, _, _} ->
       erlang:exit(db_down)
   after 5000 ->
-    _ = lager:error("write timeout~n", []),
     erlang:exit(timeout)
   end.
 
@@ -471,7 +469,7 @@ maybe_notify_changes(_NewState, _Data) ->
 
 filter_pending([], _N, Acc) ->
   {lists:reverse(Acc), []};
-filter_pending(Pending, N, Acc) when N =< ?WRITE_BATCH_SIZE ->
+filter_pending(Pending, N, Acc) when N =< 0 ->
   {lists:reverse(Acc), Pending};
 filter_pending([Job | Rest], N, Acc) ->
   filter_pending(Rest, N - 1, [Job | Acc]).
