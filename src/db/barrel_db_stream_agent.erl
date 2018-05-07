@@ -36,7 +36,14 @@ handle_cast(_Msg, State) -> {noreply, State}.
 
 handle_info({_, {go, _Ref, {Stream, SubRef, Subscriber, Since},
                  _RelativeTime, _SojournTime}}, St) ->
-  ok = fetch_changes(Stream, SubRef, Subscriber, Since),
+  try
+    fetch_changes(Stream, SubRef, Subscriber, Since)
+  catch
+    _:Error ->
+      _ = lager:error("error fetching changes: stream=~p error=~p~n", [Stream, Error]),
+      ok = barrel_db_stream_mgr:next(Stream, SubRef, Since),
+      _ = sbroker:async_ask_r(?db_stream_broker)
+  end,
   {noreply, St}.
 
 
