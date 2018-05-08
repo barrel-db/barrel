@@ -113,7 +113,7 @@ init_index(DbPid) ->
           indexed_seq => IndexedSeq,
           waiters => [] }}.
 
-handle_call({refresh, UpdatedSeq}, From, State = #{ indexed_seq := IndexedSeq }) when  IndexedSeq < UpdatedSeq ->
+handle_call({refresh, UpdatedSeq}, From, State = #{ indexed_seq := IndexedSeq }) when IndexedSeq < UpdatedSeq ->
   #{ waiters := Waiters } = State,
   Waiters2 = Waiters ++ [From],
   {noreply, State#{ waiters => Waiters2 }};

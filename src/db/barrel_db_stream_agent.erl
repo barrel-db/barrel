@@ -40,22 +40,11 @@ handle_call(_Msg, _From, State) -> {noreply, State}.
 handle_cast(_Msg, State) -> {noreply, State}.
 
 handle_info({_, {go, _Ref, {Stream, SubRef, Subscriber, Since},
-                 _RelativeTime, _SojournTime}}, St) ->
+                 _RelativeTime, _SojournTime}}, State) ->
   _ = fetch_changes(Stream, SubRef, Subscriber, Since),
-  {noreply, St}.
+  {noreply, State}.
 
-
-fetch_changes(Stream, SubRef, Subscriber, Since) ->
-  try
-    fetch_changes_1(Stream, SubRef, Subscriber, Since)
-  catch
-    _:Error ->
-      _ = lager:error("error fetching changes: stream=~p error=~p~n", [Stream, Error]),
-      ok = barrel_db_stream_mgr:next(Stream, SubRef, Since),
-      sbroker:async_ask_r(?db_stream_broker)
-  end.
-
-fetch_changes_1(#{barrel := Name } = Stream, SubRef, Subscriber, Since) ->
+fetch_changes(#{barrel := Name } = Stream, SubRef, Subscriber, Since) ->
   %% get options
   IncludeDoc = maps:get(include_doc, Stream, true),
   WithHistory = maps:get(with_history, Stream, true),
