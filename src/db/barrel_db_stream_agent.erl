@@ -1,11 +1,16 @@
-%%%-------------------------------------------------------------------
-%%% @author benoitc
-%%% @copyright (C) 2018, <COMPANY>
-%%% @doc
-%%%
-%%% @end
-%%% Created : 12. Apr 2018 00:24
-%%%-------------------------------------------------------------------
+%% Copyright 2018, Benoit Chesneau
+%%
+%% Licensed under the Apache License, Version 2.0 (the "License"); you may not
+%% use this file except in compliance with the License. You may obtain a copy of
+%% the License at
+%%
+%%   http://www.apache.org/licenses/LICENSE-2.0
+%%
+%% Unless required by applicable law or agreed to in writing, software
+%% distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+%% WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+%% License for the specific language governing permissions and limitations under
+%% the License.
 -module(barrel_db_stream_agent).
 -author("benoitc").
 -behaviour(gen_server).
@@ -36,18 +41,21 @@ handle_cast(_Msg, State) -> {noreply, State}.
 
 handle_info({_, {go, _Ref, {Stream, SubRef, Subscriber, Since},
                  _RelativeTime, _SojournTime}}, St) ->
+  _ = fetch_changes(Stream, SubRef, Subscriber, Since),
+  {noreply, St}.
+
+
+fetch_changes(Stream, SubRef, Subscriber, Since) ->
   try
-    fetch_changes(Stream, SubRef, Subscriber, Since)
+    fetch_changes_1(Stream, SubRef, Subscriber, Since)
   catch
     _:Error ->
       _ = lager:error("error fetching changes: stream=~p error=~p~n", [Stream, Error]),
       ok = barrel_db_stream_mgr:next(Stream, SubRef, Since),
-      _ = sbroker:async_ask_r(?db_stream_broker)
-  end,
-  {noreply, St}.
+      sbroker:async_ask_r(?db_stream_broker)
+  end.
 
-
-fetch_changes(#{barrel := Name } = Stream, SubRef, Subscriber, Since) ->
+fetch_changes_1(#{barrel := Name } = Stream, SubRef, Subscriber, Since) ->
   %% get options
   IncludeDoc = maps:get(include_doc, Stream, true),
   WithHistory = maps:get(with_history, Stream, true),

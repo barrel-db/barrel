@@ -53,7 +53,8 @@
 
 -export([
   save_state/1,
-  last_indexed_seq/1
+  get_indexed_seq/1,
+  set_indexed_seq/2
 ]).
 
 -export([fold_changes/4]).
@@ -63,6 +64,12 @@
   unindex_path/3,
   index_reverse_path/3,
   unindex_reverse_path/3
+]).
+
+-export([
+  get_batch/1,
+  get_ilog/2,
+  commit/2
 ]).
 
 -export([
@@ -155,8 +162,14 @@ save_state(#{ tab := Tab, updated_seq := Seq, docs_count := Count, indexed_seq :
   ok.
 
 
-last_indexed_seq(#{ indexed_seq := ISeq }) -> ISeq.
+get_indexed_seq(#{tab := Tab}) ->
+  case ets:lookup(Tab, '$indexed_seq') of
+    [] -> 0;
+    [{_, Seq}] -> Seq
+  end.
 
+
+set_indexed_seq(Seq, #{tab := Tab}) -> ets:insert(Tab, {'$indexed_seq', Seq}).
 
 %%
 %% -- document storage API
@@ -267,6 +280,17 @@ fold_changes_loop({ok, {c, _Seq}, DocInfo}, Itr, Fun, Acc0) ->
 fold_changes_loop(_Else, _, _, Acc) ->
   Acc.
 
+
+get_batch(_) ->
+  barrel_memory_index:new_batch().
+
+get_ilog(DocId, State) ->
+  barrel_memory_index:get_log(DocId, State).
+
+
+commit(Batch, State) ->
+  barrel_memory_index:commit(Batch, State).
+
 index_path(Path, DocId, #{ tab := Tab }) ->
   memstore:write_batch(Tab, [{put, {i, Path, DocId}, <<>>}]).
 
@@ -278,6 +302,11 @@ unindex_path(Path, DocId, #{ tab := Tab }) ->
 
 unindex_reverse_path(Path, DocId, #{ tab := Tab }) ->
   memstore:write_batch(Tab, [{delete, {ri, Path, DocId}}]).
+
+
+
+
+
 
 
 fold_path(Path, Start, End, Limit, Fun, Acc, State) ->

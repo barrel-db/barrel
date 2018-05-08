@@ -1,4 +1,4 @@
-%% Copyright 2016, Benoit Chesneau
+%% Copyright 2018, Benoit Chesneau
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License"); you may not
 %% use this file except in compliance with the License. You may obtain a copy of
@@ -51,16 +51,20 @@ split_path_1(_, _, _, Segments) ->
 %% %% @doc get the operations maintenance to do between
 %% 2 instances of a document
 -spec diff(D1, D2) -> {Added, Removed} when
-  D1 :: map(), %% new instance of the document
-  D2 :: map(), %% old instance of the document
+  D1 :: map() | list(), %% new instance of the document or list of new paths
+  D2 :: map() | list(), %% old instance of the document or list of old paths
   Added :: list(), %% paths added
   Removed :: list(). %% paths removed
-diff(D1, D2) ->
+diff(D1, D2) when is_map(D1), is_map(D2) ->
   A1 = analyze(D1),
   A2 = analyze(D2),
+  diff(A1, A2);
+diff(A1, A2) when is_list(A1), is_list(A2) ->
   Removed = A2 -- A1,
   Added = A1 -- A2,
-  {Added, Removed}.
+  {Added, Removed};
+diff(_, _) ->
+  erlang:error(badarg).
 
 %% @doc analyze a document and yield paths to update
 -spec analyze(D) -> [P] when
@@ -115,6 +119,8 @@ short(S) when is_binary(S) -> S;
 short(S) -> S.
 
 query(Barrel, Path0, Fun, Acc, Options) ->
+  ok = barrel_index_actor:refresh(Barrel),
+
   Path1 = normalize_path(Path0),
   DecodedPath = decode_path(Path1, []),
   OrderBy = maps:get(order_by, Options, order_by_key),

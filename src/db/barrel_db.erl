@@ -44,7 +44,8 @@
   set_state/2,
   close/1,
   set_last_indexed_seq/2,
-  do_command/2
+  do_command/2,
+  updated_seq/1
 ]).
 
 -export([
@@ -290,8 +291,10 @@ do_for_ref(DbRef, Fun) ->
             {ok, undefined} ->
               {error, not_found};
             {ok, Pid} ->
+              ok = barrel_index_actor:refresh(DbRef),
               Fun(Pid);
             {error, {already_started, Pid}} ->
+              ok = barrel_index_actor:refresh(DbRef),
               Fun(Pid);
             Err = {error, _} ->
               Err;
@@ -322,6 +325,20 @@ get_state(Name) ->
   do_for_ref(
     Name,
     fun(DbPid) -> gen_statem:call(DbPid, get_state) end
+  ).
+
+updated_seq(DbPid) when is_pid(DbPid) ->
+  try gen_statem:call(DbPid, updated_seq)
+  catch
+    exit:{noproc,_} -> {error, db_not_found};
+    exit:noproc ->  {error, db_not_found};
+    %% Handle the case where the monitor triggers
+    exit:{normal, _} -> {error, db_not_found}
+  end;
+updated_seq(Name) ->
+  do_for_ref(
+    Name,
+    fun(DbPid) -> updated_seq(DbPid) end
   ).
 
 set_state(DbPid, State) ->
@@ -449,6 +466,9 @@ writing(EventType, Event, Data) ->
 
 handle_event({call, From}, infos, _State, #{ state := State } = Data) ->
   {keep_state, Data, [{reply, From, State}]};
+handle_event({call, From}, updated_seq, _State, #{ state := State } = Data) ->
+  #{ updated_seq := UpdatedSeq } = State,
+  {keep_state, Data, [{reply, From, {ok, UpdatedSeq}}]};
 handle_event({call, From}, get_state, _State, #{ mod := Mod, state := State } = Data) ->
   {keep_state, Data, [{reply, From, {Mod, State}}]};
 handle_event({call, From}, delete, _State, _Data) ->

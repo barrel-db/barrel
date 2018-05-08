@@ -18,6 +18,9 @@
 -define(store(Name), {n, l, {barrel_storage, Name}}).
 -define(via_store(Name), {via, gproc, {n, l, {barrel_storage, Name}}}).
 
+
+-define(index(Name), {n, l, {barrel_index, Name}}).
+
 -define(STREAMS, barrel_db_streams).
 
 -record(write_op, {
