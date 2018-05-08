@@ -48,7 +48,8 @@ log(DocId, Paths, #{ batch := Batch }) ->
 
 commit(#{ batch := Batch }, #{ tab := Tab }) ->
   WriteBatch = [OP || {_Key, OP} <- ets:tab2list(Batch)],
-  memstore:write_batch(Tab, WriteBatch).
+  ok = memstore:write_batch(Tab, WriteBatch),
+  ets:delete(Batch).
 
 get_log(DocId, #{ tab := Tab }) ->
   Key = {ilog, DocId},
