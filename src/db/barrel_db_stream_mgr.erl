@@ -105,7 +105,6 @@ handle_call({unsubscribe, Stream, Pid}, _From, State = #{ streams := Streams0 })
         [{SubRef, Sub}] ->
           #{ timer := T } = Sub,
           _ = timer:cancel(T),
-          Subs1 = lists:keydelete(SubRef, 1, Subs),
           Streams1 = case lists:keydelete(SubRef, 1, Subs) of
                        [] -> maps:remove(Stream, Streams0);
                        Subs1 -> Streams0#{ Stream => Subs1 }
