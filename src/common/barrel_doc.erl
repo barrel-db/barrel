@@ -15,6 +15,10 @@
 -module(barrel_doc).
 
 -export([
+  is_deleted/1
+]).
+
+-export([
     revision_hash/3,
     revision_id/2,
     parse_revision/1, 
@@ -38,6 +42,23 @@
 -export_types([docid/0, revid/0]).
 
 -include("barrel.hrl").
+
+
+is_deleted(Revtree) ->
+  try
+    barrel_revtree:fold_leafs(
+      fun(RevInfo, _Acc) ->
+        case barrel_revtree:is_deleted(RevInfo) of
+          false  -> throw(deleted);
+          true -> true
+        end
+      end,
+      false,
+      Revtree
+    )
+  catch
+    throw:deleted -> false
+  end.
 
 %% @doc generate a unique revision hash for a document.
 revision_hash(Doc, Rev, Deleted) ->

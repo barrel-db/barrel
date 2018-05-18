@@ -12,22 +12,25 @@
 %% License for the specific language governing permissions and limitations under
 %% the License.
 
+%% TODO: we should store in the tree a parsed revision instead of the whole string
+
 -module(barrel_revtree).
 
 -export([
-    new/0, new/1
-  , add/2
-  , contains/2
-  , info/2
-  , revisions/1
-  , parent/2
-  , history/2
-  , fold_leafs/3
-  , leaves/1
-  , is_leaf/2
-  , missing_revs/2
-  , winning_revision/1
-  , prune/2, prune/3]).
+    new/0, new/1,
+    add/2,
+    contains/2,
+    info/2,
+    revisions/1,
+    parent/2,
+    history/2,
+    fold_leafs/3,
+    leaves/1,
+    is_leaf/2,
+    missing_revs/2,
+    winning_revision/1,
+    prune/2, prune/3
+]).
 
 -export([is_deleted/1]).
 
@@ -49,7 +52,6 @@ add(RevInfo, Tree) ->
     false -> error({badrev, missing_parent})
   end,
   Tree#{ Id => RevInfo }.
-
 
 contains(RevId, Tree) ->
   maps:is_key(RevId, Tree).
@@ -105,6 +107,7 @@ missing_revs(Revs, RevTree) ->
 is_leaf(RevId, Tree) ->
   case maps:is_key(RevId, Tree) of
     true ->
+
       is_leaf_1(maps:values(Tree), RevId);
     false ->
       false
@@ -117,32 +120,30 @@ is_leaf_1([], _) -> true.
 is_deleted(#{deleted := Del}) -> Del;
 is_deleted(_) -> false.
 
-is_exists(#{ deleted := true }) -> false;
-is_exists(_) -> true.
-
 winning_revision(Tree) ->
-  {Winner, _WinnerExists, LeafCount, ActiveLeafCount} =
-    fold_leafs(fun(#{id := Id} = RevInfo, {W, WE, LC, ALC}) ->
-      Exists = is_exists(RevInfo),
-      LC2 = LC + 1,
-      ALC2 = case Exists of
-               true -> ALC + 1;
-               false -> ALC
-             end,
-      {W2, WE2} = case {Exists, WE} of
-                    {true, false} -> {Id, Exists};
-                    {WE, _} ->
-                      case barrel_doc:compare(Id, W) of
-                        R when R > 0 -> {Id, Exists};
-                        _ -> {W, WE}
-                      end;
-                    _ -> {W, WE}
-                  end,
-      {W2, WE2, LC2, ALC2}
-               end, {<<"">>, false, 0, 0}, Tree),
-  Branched = (LeafCount > 1),
-  Conflict = (ActiveLeafCount > 1),
-  {Winner, Branched, Conflict}.
+  {Leaves, ActiveCount} = fold_leafs(
+    fun(RevInfo, {Acc, ActiveCount1}) ->
+      Deleted = is_deleted(RevInfo),
+      ActiveCount2 = case Deleted of
+                       true -> ActiveCount1;
+                        false -> ActiveCount1 + 1
+                     end,
+      {[RevInfo#{ deleted => is_deleted(RevInfo) }| Acc], ActiveCount2 }
+    end, {[], 0}, Tree),
+
+  SortedRevInfos = lists:sort(
+    fun(#{ id := RevIdA, deleted := DeletedA }, #{ id := RevIdB, deleted := DeletedB }) ->
+      % sort descending by {not deleted, rev}
+      RevA = barrel_doc:parse_revision(RevIdA),
+      RevB = barrel_doc:parse_revision(RevIdB),
+      {not DeletedA, RevA} > {not DeletedB, RevB}
+    end,
+    Leaves
+  ),
+  [#{ id := WinningRev} | _] = SortedRevInfos,
+  Branched = length(Leaves) > 0,
+  Conflict = ActiveCount > 1,
+  {WinningRev, Branched, Conflict}.
 
 
 prune(Depth, Tree) ->

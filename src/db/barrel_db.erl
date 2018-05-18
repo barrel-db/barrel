@@ -352,7 +352,7 @@ start_link(Name, OpenType, Options) ->
   proc_lib:start_link(?MODULE, init, [[Name, OpenType, Options]]).
 
 %% -----------------
-%% gen_statem callbaxcks
+%% gen_statem callbacks
 
 
 init([Name, create, Options]) ->
@@ -392,14 +392,12 @@ init([Name, open, _Options]) ->
           process_flag(trap_exit, true),
           proc_lib:init_ack({ok, self()}),
           {ok, Writer} = barrel_db_writer:start_link(Name, Mod, State),
-          %%{ok, Indexer} = barrel_db_indexer:start_link(Name, self()),
           BatchSize = application:get_env(barrel, write_batch_size, ?WRITE_BATCH_SIZE),
           Data = #{ store => Store,
                     name => Name,
                     mod => Mod,
                     state => State,
                     writer => Writer,
-                    %%indexer => Indexer,
                     write_batch_size => BatchSize,
                     pending => []},
           gen_statem:enter_loop(?MODULE, [], writeable, Data, {via, barrel_pm, Name});
@@ -503,9 +501,10 @@ do_fetch_doc(DocId, Options, {Mod, State}) ->
   case Mod:fetch_docinfo(DocId, State) of
     {ok, #{ deleted := true }} when UserRev =:= <<>> ->
       {error, not_found};
-    {ok, #{ rev := CurrentRev, revtree := RevTree}} ->
+    {ok, #{ revtree := RevTree}} ->
+      {WinningRev, _, _} = barrel_revtree:winning_revision(RevTree),
       Rev = case UserRev of
-              <<"">> -> CurrentRev;
+              <<"">> -> WinningRev;
               _ -> UserRev
             end,
       case maps:find(Rev, RevTree) of

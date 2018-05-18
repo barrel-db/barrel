@@ -60,10 +60,10 @@ fetch_changes(#{barrel := Name } = Stream, SubRef, Subscriber, Since) ->
       fun
         (DI, {Acc0, LastSeq, N}) ->
           #{ id := DocId,
-             rev := Rev,
              seq := Seq,
              deleted := Deleted,
              revtree := RevTree } = DI,
+          {Rev, _, _} = barrel_revtree:winning_revision(RevTree),
           Changes = case WithHistory of
                       false -> [Rev];
                       true -> barrel_revtree:history(Rev, RevTree)

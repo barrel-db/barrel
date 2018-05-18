@@ -73,7 +73,7 @@ merge_fun(purge) ->
 
 new_docinfo(DocId) ->
   #{id => DocId,
-    rev => <<>>,
+    seq => 0,
     deleted => false,
     revtree => barrel_revtree:new()}.
 
@@ -121,190 +121,177 @@ merge_revtrees([], State) ->
   update_db_state(State),
   State.
 
-  
-merge_revtree(Record, DocInfo, From, State) ->
-  #{ id := DocId, rev := CurrentRev, revtree := RevTree } = DocInfo,
-  [Rev | _ ] = maps:get(revs, Record, [<<>>]),
-  Deleted = maps:get(deleted, Record, false),
-  Replace = maps:get(replace, Record, false),
-  {Gen, _}  = barrel_doc:parse_revision(Rev),
-  case Rev of
-    <<>> ->
-      if
-        CurrentRev /= <<>> ->
-          case maps:get(CurrentRev, RevTree) of
-            #{ deleted := true } ->
-              {CurrentGen, _} = barrel_doc:parse_revision(CurrentRev),
-              merge_revtree(
-                CurrentGen + 1, CurrentRev, Deleted,
-                Record, DocInfo, From, State
-              );
-            _Else ->
-              reply(From, {error, DocId, {conflict, doc_exists}}),
-              State
-          end;
-        CurrentRev =:= <<>>, Replace =:= true ->
-          reply(From, {error, DocId, not_found}),
-          State;
-        true ->
-          merge_revtree(
-            Gen + 1, <<>>, Deleted,
-            Record, DocInfo, From, State
-          )
-      end;
-    _ ->
-      case barrel_revtree:is_leaf(Rev, RevTree) of
-        true ->
-          case {maps:get(Rev, RevTree), Deleted} of
-            {#{ deleted := true}, true} ->
-              reply(From, {error, DocId, not_found}),
-              State;
-            _ ->
-              merge_revtree(
-                Gen + 1, Rev, Deleted,
-                Record, DocInfo, From, State
-              )
-          end;
-        false ->
-          reply(From, {error, DocId, {conflict, revision_conflict}}),
+merge_revtree(Record, #{ deleted := true } = DocInfo, From,  #{ db_ref := Db} = State) ->
+  #{ id := DocId, seq := OldSeq, revtree := RevTree } = DocInfo,
+  #{ revs := [Rev | _ ], deleted := NewDeleted, doc := Doc } = Record,
+  case Rev =:= <<>> andalso not NewDeleted of
+    true ->
+      {WinningRev, _Branched, _Conflict} = barrel_revtree:winning_revision(RevTree),
+      {Gen, _}  = barrel_doc:parse_revision(WinningRev),
+      NewRevHash = barrel_doc:revision_hash(Doc, WinningRev, false),
+      NewRev = << (integer_to_binary(Gen+1))/binary, "-", NewRevHash/binary  >>,
+      RevInfo = #{  id => NewRev,  parent => WinningRev, deleted => false },
+      RevTree2 = barrel_revtree:add(RevInfo, RevTree),
+      DocInfo2 = DocInfo#{ deleted => false, revtree => RevTree2 },
+      {NewSeq, State1} = update_state(State, 1),
+      WriteResult = case add_revision(DocId, NewRev, Doc, State1) of
+                      ok ->
+                        write_docinfo(DocId, NewSeq, OldSeq, DocInfo2, State1);
+                      Error ->
+                        Error
+                    end,
+      case WriteResult of
+        ok ->
+          reply(From, {ok, DocId, WinningRev}),
+          update_db_state(State1),
+          barrel_event:notify(Db, db_updated),
+          cache(DocInfo2, State1);
+        WriteError  ->
+          _ = lager:error(
+            "error writing doc db=~p id=~p error=~p~n",
+            [Db, DocId, WriteError]
+          ),
+          reply(From, {error, DocId, write_error}),
           State
-      end
-  end.
+      end;
+    false when Rev /= <<>> ->
+      reply(From, {error, DocId, not_found}),
+      State;
+    false ->
+      reply(From, {error, DocId, {conflict, revision_conflict}}),
+      State
+  end;
+merge_revtree(Record, DocInfo, From,  #{ db_ref := Db} = State) ->
+  #{ id := DocId, seq := OldSeq, revtree := RevTree } = DocInfo,
+  #{ revs := [Rev | _ ], deleted := NewDeleted, hash := RevHash, doc := Doc } = Record,
 
-merge_revtree(NewGen, ParentRev, Deleted, Record, DocInfo, From, #{db_ref := Db} = State) ->
-  #{ id := DocId, rev := OldRev, deleted := OldDeleted, revtree := RevTree } = DocInfo,
-  OldSeq = maps:get(seq, DocInfo, nil),
-  #{ id := DocId,
-     doc := Doc,
-     hash := RevHash } = Record,
-  NewRev = << (integer_to_binary(NewGen))/binary, "-", RevHash/binary  >>,
-  RevInfo = #{  id => NewRev,  parent => ParentRev, deleted => Deleted },
-  RevTree2 = barrel_revtree:add(RevInfo, RevTree),
-  %% find winning revision and update doc infos with it
-  {WinningRev, Branched, Conflict} = barrel_revtree:winning_revision(RevTree2),
-  WinningRevInfo = maps:get(WinningRev, RevTree2),
-  %% update the db state:
-  Inc = docs_count_inc(ParentRev, Deleted, OldDeleted),
-  {NewSeq, State1} = update_state(State, Inc),
-  DocDeleted = barrel_revtree:is_deleted(WinningRevInfo),
-  %% update docinfo
-  DocInfo2 = DocInfo#{ seq => NewSeq,
-                       revtree => RevTree2,
-                       rev => WinningRev,
-                       old_rev => OldRev,
-                       branched => Branched,
-                       conflict => Conflict,
-                       deleted => DocDeleted },
-  WriteResult = case add_revision(DocId, NewRev, Doc, State1) of
-                  ok ->
-                    write_docinfo(DocId, NewSeq, OldSeq, DocInfo2, State1);
-                  Error ->
-                    Error
-                end,
-  case WriteResult of
-    ok ->
-      reply(From, {ok, DocId, WinningRev}),
-      update_db_state(State1),
-      barrel_event:notify(Db, db_updated),
-      cache(DocInfo2, State1);
-    WriteError  ->
-      _ = lager:error(
-        "error writing doc db=~p id=~p error=~p~n",
-        [Db, DocId, WriteError]
-      ),
-      reply(From, {error, DocId, write_error}),
+  {Gen, _}  = barrel_doc:parse_revision(Rev),
+  {DocInfo2, Rev2, Seq, NewState} = case Rev of
+                                      <<"">> when map_size(RevTree) =:= 0  ->
+                                        NewRev = << "1-", RevHash/binary  >>,
+                                        RevInfo = #{  id => NewRev, parent => <<>> },
+                                        RevTree1 = barrel_revtree:add(RevInfo, RevTree),
+                                        DocInfo1 = DocInfo#{ revtree => RevTree1 },
+                                        {NewSeq, State1} = update_state(State, 1),
+                                        {DocInfo1#{ seq := NewSeq }, NewRev, NewSeq, State1};
+                                      <<"">> ->
+                                        reply(From, {error, DocId, {conflict, doc_exists}}),
+                                        {DocInfo, Rev, OldSeq, State};
+                                      _ ->
+                                        case barrel_revtree:is_leaf(Rev, RevTree) of
+                                          true ->
+                                            NewRev = << (integer_to_binary(Gen+1))/binary, "-", RevHash/binary  >>,
+                                            RevInfo = #{  id => NewRev, parent => Rev, deleted => NewDeleted },
+                                            RevTree2 = barrel_revtree:add(RevInfo, RevTree),
+                                            DocInfo1 = case NewDeleted of
+                                                         false ->
+                                                           DocInfo#{ deleted => false, revtree => RevTree2 };
+                                                         true ->
+                                                           DocInfo#{deleted => barrel_doc:is_deleted(RevTree2),
+                                                                    revtree => RevTree2 }
+                                                       end,
+                                            {NewSeq, State1} = case maps:get(deleted, DocInfo1) of
+                                                                 false -> update_state(State, 0);
+                                                                 true -> update_state(State, -1)
+                                                               end,
+                                            {DocInfo1#{ seq := NewSeq }, NewRev, NewSeq, State1};
+                                          false ->
+                                            reply(From, {error, DocId, {conflict, revision_conflict}}),
+                                            {DocInfo, Rev, OldSeq, State}
+
+                                        end
+                                    end,
+
+  case DocInfo =/= DocInfo2 of
+    true ->
+      WriteResult = case add_revision(DocId, Rev2, Doc, NewState) of
+                      ok ->
+                        write_docinfo(DocId, Seq, OldSeq, DocInfo2, NewState);
+                      Error ->
+                        Error
+                    end,
+      case WriteResult of
+        ok ->
+          reply(From, {ok, DocId, Rev2}),
+          update_db_state(NewState),
+          barrel_event:notify(Db, db_updated),
+          cache(DocInfo2, NewState);
+        WriteError  ->
+          _ = lager:error(
+            "error writing doc db=~p id=~p error=~p~n",
+            [Db, DocId, WriteError]
+          ),
+          reply(From, {error, DocId, write_error}),
+          State
+      end;
+    false ->
       State
   end.
 
-merge_revtree_with_conflict(Record, DocInfo0, From, #{ db_ref := Db} = State0) ->
-  #{ id := DocId, rev := CurrentRev, revtree := RevTree, deleted := OldDeleted } = DocInfo0,
-  {OldPos, _}  = barrel_doc:parse_revision(CurrentRev),
-  [NewRev | _] = Revs = maps:get(revs, Record, []),
-  Deleted = maps:get(deleted, Record, false),
-  Doc = maps:get(doc, Record),
-  {Idx, Parent} = find_parent(Revs, RevTree, 0),
-  RevTree2 = if
-               Idx =:= 0 ->
-                 %% parent is missing, let's store it
-                 %% TODO: maybe we should change the position of the rev to 1 since we don't have any parent and consider it unique?
-                 RevInfo = #{ id => NewRev,  parent => <<>>, deleted => Deleted },
-                 barrel_revtree:add(RevInfo, RevTree);
-               true ->
-                 ToAdd = lists:sublist(Revs, Idx),
-                 edit_revtree(lists:reverse(ToAdd), Parent, Deleted, RevTree)
-             end,
-  %% find winning revision and update doc infos with it
-  {WinningRev, Branched, Conflict} = barrel_revtree:winning_revision(RevTree2),
-  %% if the new winning revision is at the same position we keep the current
-  %% one as winner. Else we update the doc info.
-  {NewSeq, DocInfo1, NewState} = case barrel_doc:parse_revision(WinningRev) of
-                                   {OldPos, _} ->
-                                     {nil, DocInfo0#{ revtree => RevTree2 }, State0};
-                                   {_NewPos, _} ->
-                                     WinningRevInfo = maps:get(WinningRev, RevTree2),
-                                     Deleted = barrel_revtree:is_deleted(WinningRevInfo),
-                                     Inc = docs_count_inc(CurrentRev, Deleted, OldDeleted),
-                                     {Seq, State1} = update_state(State0, Inc),
-                                     {
-                                       Seq,
-                                       DocInfo0#{seq => Seq,
-                                                 revtree => RevTree2,
-                                                 current_rev => WinningRev,
-                                                 old_rev => CurrentRev,
-                                                 branched => Branched,
-                                                 conflict => Conflict,
-                                                 deleted => Deleted},
-                                       State1
-                                     }
-                                 end,
-  OldSeq = maps:get(seq, DocInfo0, nil),
-  WriteResult = case add_revision(DocId, NewRev, Doc, NewState) of
-                  ok ->
-                    write_docinfo(DocId, NewSeq, OldSeq, DocInfo1, NewState);
-                  Error ->
-                    Error
-                end,
-  case WriteResult of
-    ok ->
-      reply(From, {ok, DocId, WinningRev}),
-      if
-        NewSeq /= nil ->
+merge_revtree_with_conflict(Record, DocInfo, From, #{ db_ref := Db} = State) ->
+  #{ id := DocId, revtree := RevTree, seq := OldSeq } = DocInfo,
+  #{ revs := [LeafRev | Revs],  deleted := NewDeleted, doc := Doc  } = Record,
+
+  %% Find the point where this doc's history branches from the current rev:
+  {_MergeType, [Parent | Path]} = find_parent(Revs, RevTree, []),
+
+  %% merge path in the revision tree
+  {_, RevTree2} = lists:foldl(
+    fun(RevId, {P, Tree}) ->
+      Deleted = (NewDeleted =:= true andalso RevId =:= LeafRev),
+      RevInfo = #{ id => RevId, parent => P, deleted => Deleted },
+      {RevId, barrel_revtree:add(RevInfo, Tree)}
+    end,
+    {Parent, RevTree},
+    Path
+  ),
+
+  %% update DocInfo, we always find is the doc is deleted there
+  %% since we could have only updated an internal branch
+  DocInfo2 = DocInfo#{ revtree => RevTree2, deleted => barrel_doc:is_deleted(RevTree2) },
+
+  %% update current state and increase new seq if needed
+  DocsCountInc = docs_count_inc(DocInfo2, DocInfo),
+  {NewSeq, NewState} = update_state(State, DocsCountInc),
+
+  case DocInfo =/= DocInfo2 of
+    true ->
+      WriteResult = case add_revision(DocId, LeafRev, Doc, NewState) of
+                      ok ->
+                        write_docinfo(DocId, NewSeq, OldSeq, DocInfo2, NewState);
+                      Error ->
+                        Error
+                    end,
+      case WriteResult of
+        ok ->
+          reply(From, {ok, DocId, LeafRev}),
           update_db_state(NewState),
-          barrel_event:notify(Db, db_updated);
-        true ->
-          ok
-      end,
-      cache(DocInfo1, NewState);
-    WriteError ->
-      _ = lager:error(
-        "error writing doc db=~p id=~p error=~p~n",
-        [Db, DocId, WriteError]
-      ),
-      reply(From, {error, DocId, {write_error, WriteError}}),
-      State0
+          barrel_event:notify(Db, db_updated),
+          cache(DocInfo2, NewState);
+        WriteError  ->
+          _ = lager:error(
+            "error writing doc db=~p id=~p error=~p~n",
+            [Db, DocId, WriteError]
+          ),
+          reply(From, {error, DocId, write_error}),
+          State
+      end;
+    false ->
+      State
   end.
 
-edit_revtree([RevId], Parent, Deleted, Tree) ->
-  case Deleted of
-    true ->
-      barrel_revtree:add(#{ id => RevId, parent => Parent, deleted => true}, Tree);
-    false ->
-      barrel_revtree:add(#{ id => RevId, parent => Parent}, Tree)
-  end;
-edit_revtree([RevId | Rest], Parent, Deleted, Tree) ->
-  Tree2 = barrel_revtree:add(#{ id => RevId, parent => Parent}, Tree),
-  edit_revtree(Rest, RevId, Deleted, Tree2);
-edit_revtree([], _Parent, _Deleted, Tree) ->
-  Tree.
-
-find_parent([RevId | Rest], RevTree, I) ->
+find_parent([RevId | Rest], RevTree, Acc) ->
   case barrel_revtree:contains(RevId, RevTree) of
-    true -> {I, RevId};
-    false -> find_parent(Rest, RevTree, I+1)
+    true -> {extend, [RevId | Acc]};
+    false -> find_parent(Rest, RevTree, [RevId | Acc])
   end;
-find_parent([], _RevTree, I) ->
-  {I, <<"">>}.
+find_parent([], _RevTree, Acc) ->
+  {new_branch, [<<"">> | Acc]}.
 
+docs_count_inc(#{ deleted := true }, #{ deleted := false }) -> -1;
+docs_count_inc(#{ deleted := false }, #{ deleted := true }) -> 1;
+docs_count_inc(#{ deleted := false }, #{ seq := 0 }) -> 1;
+docs_count_inc(_, _) -> 0.
 
 purge(_Record, DocInfo, From, #{ db_ref := Db} = State) ->
   #{ id := DocId, seq := Seq, revtree := RevTree } = DocInfo,
@@ -325,15 +312,6 @@ purge(_Record, DocInfo, From, #{ db_ref := Db} = State) ->
 update_db_state(#{ db_pid := DbPid, db_state := DbState }) ->
   barrel_db:set_state(DbPid, DbState).
 
-%% docs count increment:
-%% parent revision is <<>> when creating a new doc then we increment the docs count,
-%% when doc is already deleted or is updated we don't increment the docs count
-%% in other case, the doc is deleted then we decrement the docs count
-docs_count_inc(<<>>, _, _) -> 1;
-docs_count_inc(_, false, true) -> 1;
-docs_count_inc(_, false, _) -> 0;
-docs_count_inc(_, true, true) -> 0;
-docs_count_inc(_, true, _) -> -1.
 
 update_state(#{ db_state := DbState } = State, Inc) ->
   #{ updated_seq := Seq, docs_count := DocsCount } = DbState,
