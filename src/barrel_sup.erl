@@ -106,15 +106,6 @@ init([]) ->
              modules => [barrel_store_sup]},
 
            %% barrel containers supervisor
-           #{id => barrel_index_actor_sup,
-             start => {barrel_index_actor_sup, start_link, []},
-             restart => permanent,
-             shutdown => infinity,
-             type => supervisor,
-             modules => [barrel_index_actor_sup]
-           },
-           
-           %% barrel containers supervisor
            #{id => barrel_db_sup,
              start => {barrel_db_sup, start_link, []},
              restart => permanent,

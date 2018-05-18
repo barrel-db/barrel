@@ -21,7 +21,8 @@
   refresh/1
 ]).
 
--export([start_link/1]).
+-export([start_link/4]).
+
 -export([
   init/1,
   handle_call/3,
@@ -29,12 +30,15 @@
   handle_info/2
 ]).
 
+-export([where/1]).
 
 -include("barrel.hrl").
 
 refresh(DbRef) ->
+  lager:info("get updated seq debug=~p", [DbRef]),
   case barrel_db:updated_seq(DbRef) of
     {ok, UpdatedSeq} ->
+      lager:info("refresh sq=~p", [UpdatedSeq]),
       call(DbRef, {refresh, UpdatedSeq});
     Error ->
       Error
@@ -66,18 +70,7 @@ with_index_actor(DbRef, Fun) ->
     IndexPid when is_pid(IndexPid) ->
       Fun(IndexPid);
     undefined ->
-      case barrel_index_actor_sup:start_index(DbRef) of
-        {ok, undefined} ->
-          {error, db_not_found};
-        {ok, Pid} ->
-          Fun(Pid);
-        {error, {already_started, Pid}} ->
-          Fun(Pid);
-        Err = {error, _} ->
-          Err;
-        Error ->
-          {error, Error}
-      end
+      {error, db_not_found}
   end.
 
 where({DbName, Node}) ->
@@ -87,31 +80,22 @@ where(DbName) ->
 
 
 
-start_link(DbName) ->
-  proc_lib:start_link(?MODULE, init, [[DbName]]).
+start_link(DbName, DbPid, Mod, State) ->
+  gen_server:start_link({via, gproc, ?index(DbName)}, ?MODULE, [DbName, DbPid, Mod, State], []).
 
-init([DbName]) ->
-  case barrel_db:do_for_ref(DbName, fun init_index/1) of
-    {ok, #{ db := DbPid, indexed_seq := StartSeq } = InitState} ->
-      gproc:register_name(?index(DbName), self()),
-      process_flag(trap_exit, true),
-      proc_lib:init_ack({ok, self()}),
-      {ok, Updater} = barrel_index_updater:start_link(self(), DbName, DbPid, StartSeq),
-      State = InitState#{ name => DbName, updater => Updater },
-      gen_server:enter_loop(?MODULE, [], State, {via, gproc, ?index(DbName)});
-    Error ->
-      exit(Error)
-  end.
+init([DbName, DbPid, Mod, ModState]) ->
+  process_flag(trap_exit, true),
+  StartSeq = Mod:get_indexed_seq(ModState),
+  {ok, Updater} = barrel_index_updater:start_link(self(), DbName, Mod, ModState, StartSeq),
+  State = #{ name => DbName,
+             db => DbPid,
+             mod => Mod,
+             modstate => ModState,
+             indexed_seq => StartSeq,
+             updater => Updater,
+             waiters => [] },
+  {ok, State}.
 
-init_index(DbPid) ->
-  _ = erlang:monitor(process, DbPid),
-  {Mod, ModState} = barrel_db:get_state(DbPid),
-  IndexedSeq = Mod:get_indexed_seq(ModState),
-  {ok, #{ db => DbPid,
-          mod => Mod,
-          modstate => ModState,
-          indexed_seq => IndexedSeq,
-          waiters => [] }}.
 
 handle_call({refresh, UpdatedSeq}, From, State = #{ indexed_seq := IndexedSeq }) when IndexedSeq < UpdatedSeq ->
   #{ waiters := Waiters } = State,
@@ -135,14 +119,14 @@ handle_info({updated, IndexedSeq}, State) ->
       {noreply, State#{ indexed_seq => IndexedSeq, waiters => []}}
   end;
 
-handle_info({'DOWN', _, process, DbPid, Reason}, State = #{ db := DbPid }) ->
+handle_info({'EXIT', DbPid, Reason}, State = #{ db := DbPid }) ->
   _ = lager:info("closing index, db=~p down=~p~n", [maps:get(name, State), Reason]),
   notify(maps:get(waiters, State), {error, db_not_found}),
   {stop, normal, State};
 
 handle_info({'EXIT', Updater, Reason}, State = #{ updater := Updater }) ->
   #{ db := DbPid, name := DbName, indexed_seq := StartSeq } = State,
-  _ = lager:error("index updater for db=~p exited with reason=~p~n", [DbName, Reason]),
+  _ = lager:info("index updater for db=~p exited with reason=~p~n", [DbName, Reason]),
   {ok, NewUpdater} = barrel_index_updater:start_link(self(), DbName, DbPid, StartSeq),
   {noreply, #{ updater => NewUpdater }};
 

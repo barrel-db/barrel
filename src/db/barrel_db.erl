@@ -262,7 +262,6 @@ prepare_batch([], _From, Acc) ->
 
 check_docid(#{ <<"id">> := _Id}) -> ok;
 check_docid(_) ->
-  io:format("error badarg ~n", []),
   error(badarg).
 
 call(DbRef, Msg) ->
@@ -363,16 +362,16 @@ init([Name, create, Options]) ->
         {{ok, State}, Mod} ->
           barrel_pm:register_name(Name, self()),
           process_flag(trap_exit, true),
-          proc_lib:init_ack({ok, self()}),
           {ok, Writer} = barrel_db_writer:start_link(Name, Mod, State),
-         %% {ok, Indexer} = barrel_db_indexer:start_link(Name, self()),
+          {ok, Indexer} = barrel_index_actor:start_link(Name, self(), Mod, State),
+          proc_lib:init_ack({ok, self()}),
           BatchSize = application:get_env(barrel, write_batch_size, ?WRITE_BATCH_SIZE),
           Data = #{ store => Store,
                     name => Name,
                     mod => Mod,
                     state => State,
                     writer => Writer,
-                    %%indexer => Indexer,
+                    indexer => Indexer,
                     write_batch_size => BatchSize,
                     pending => []},
           
@@ -390,14 +389,16 @@ init([Name, open, _Options]) ->
         {{ok, State}, Mod} ->
           barrel_pm:register_name(Name, self()),
           process_flag(trap_exit, true),
-          proc_lib:init_ack({ok, self()}),
           {ok, Writer} = barrel_db_writer:start_link(Name, Mod, State),
+          {ok, Indexer} = barrel_index_actor:start_link(Name, self(), Mod, State),
+          proc_lib:init_ack({ok, self()}),
           BatchSize = application:get_env(barrel, write_batch_size, ?WRITE_BATCH_SIZE),
           Data = #{ store => Store,
                     name => Name,
                     mod => Mod,
                     state => State,
                     writer => Writer,
+                    indexer => Indexer,
                     write_batch_size => BatchSize,
                     pending => []},
           gen_statem:enter_loop(?MODULE, [], writeable, Data, {via, barrel_pm, Name});
@@ -472,12 +473,13 @@ handle_event({call, From}, get_state, _State, #{ mod := Mod, state := State } = 
 handle_event({call, From}, delete, _State, _Data) ->
   {stop_and_reply, {shutdown, deleted}, [{reply, From, ok}]};
 handle_event(info, {'EXIT', Pid, Reason}, _State, #{ db_ref := DbRef, writer := Pid } = Data) ->
-  _ = lager:info("writer exitded. db=~p reason=~p~n", [DbRef, Reason]),
+  _ = lager:error("writer exitded. db=~p reason=~p~n", [DbRef, Reason]),
   {stop, {writer_exit, Reason}, Data#{writer => nil}};
 handle_event(info, {'EXIT', Pid, Reason}, _State, #{ db_ref := DbRef, indexer := Pid } = Data) ->
-  _ = lager:info("indexer exitded. db=~p reason=~p~n", [DbRef, Reason]),
+  _ = lager:error("indexer exitded. db=~p reason=~p~n", [DbRef, Reason]),
   {stop, {indexer_exit, Reason}, Data#{writer => nil}};
-handle_event(_EventType, _Event, _State, Data) ->
+handle_event(_EventType, Event, _State, #{ db_ref := DbRef } = Data) ->
+  _ = lager:warning("db got unknown name=~p, event=~p", [DbRef, Event]),
   {keep_state, Data}.
 
 %% TODO: add event handling

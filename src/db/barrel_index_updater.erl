@@ -16,7 +16,7 @@
 
 %% API
 -export([
-  start_link/4
+  start_link/5
 ]).
 
 -export([
@@ -29,13 +29,12 @@
 -define(INDEX_INTERVAL, 100).
 
 
-start_link(Parent, DbName, DbPid, StartSeq) ->
-  gen_server:start_link(?MODULE, [Parent, DbName, DbPid, StartSeq], []).
+start_link(Parent, DbName, Mod, ModState, StartSeq) ->
+  gen_server:start_link(?MODULE, [Parent, DbName, Mod, ModState, StartSeq], []).
 
 
-init([Parent, DbName, DbPid, StartSeq]) ->
+init([Parent, DbName, Mod, ModState, StartSeq]) ->
   process_flag(trap_exit, true),
-  {Mod, ModState} = barrel_db:get_state(DbPid),
   %% subscribe to the database
   Interval = application:get_env(barrel, index_interval, ?INDEX_INTERVAL),
   Stream = #{ barrel => DbName, interval => Interval, include_doc => true},
@@ -43,7 +42,6 @@ init([Parent, DbName, DbPid, StartSeq]) ->
 
   {ok, #{parent => Parent,
          db_name => DbName,
-         db_pid => DbPid,
          mod => Mod,
          modstate => ModState,
          stream => Stream,
