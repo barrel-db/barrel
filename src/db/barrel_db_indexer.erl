@@ -119,7 +119,7 @@ process_changes(Parent, Pid) ->
       wait_for_refresh(Parent, Pid)
   end.
 
-%% TODO: handle doc & writes separately, limit the number of docs retrieved
+%% TODO: handle doc writes separately, limit the number of docs retrieved
 process_changes_1(LastIndexedSeq, Mod, Snapshot) ->
   IndexWorkers = application:get_env(barrel, index_workers_num, erlang:system_info(schedulers)),
   {LastSeq, Changes} = Mod:fold_changes(

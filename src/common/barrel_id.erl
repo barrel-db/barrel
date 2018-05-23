@@ -65,7 +65,8 @@ as_list(I, Base)
 as_list(I, Base) ->
   erlang:error(badarg, [I, Base]).
 
-%% @spec integer_to_list(integer(), integer(), stringing()) -> string()
+%% TODO: detail errors
+-spec as_list(I :: integer(), Base :: integer(), Exr :: string()) -> string() | {error, any()}.
 as_list(I0, Base, R0) ->
   D = I0 rem Base,
   I1 = I0 div Base,

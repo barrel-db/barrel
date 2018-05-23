@@ -35,11 +35,11 @@
 -export([id/1, rev/1, id_rev/1]).
 -export([deleted/1]).
 
--type doc() :: map().
+-type doc() :: #{ binary() => binary() }.
 -type docid() :: binary().
 -type revid() :: binary().
 
--export_types([docid/0, revid/0]).
+-export_types([doc/0, docid/0, revid/0]).
 
 -include("barrel.hrl").
 

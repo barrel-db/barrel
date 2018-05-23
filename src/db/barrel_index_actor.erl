@@ -35,10 +35,8 @@
 -include("barrel.hrl").
 
 refresh(DbRef) ->
-  lager:info("get updated seq debug=~p", [DbRef]),
   case barrel_db:updated_seq(DbRef) of
     {ok, UpdatedSeq} ->
-      lager:info("refresh sq=~p", [UpdatedSeq]),
       call(DbRef, {refresh, UpdatedSeq});
     Error ->
       Error

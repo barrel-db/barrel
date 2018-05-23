@@ -14,6 +14,9 @@
 %% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
+%% @private
+
+
 %% In practice Erlang shouldn't be allowed to grow to more than a half
 %% of available memory. The pessimistic scenario is when the Erlang VM
 %% has a single process that's consuming all memory. In such a case,
@@ -70,26 +73,14 @@
 
 -type memory_calculation_strategy() :: rss | erlang | allocated.
 -type vm_memory_high_watermark() :: (float() | {'absolute', integer() | string()}).
--spec start_link(float()) -> rabbit_types:ok_pid_or_error().
--spec start_link(float(), fun ((any()) -> 'ok'),
-                 fun ((any()) -> 'ok')) -> rabbit_types:ok_pid_or_error().
--spec get_total_memory() -> (non_neg_integer() | 'unknown').
--spec get_vm_limit() -> non_neg_integer().
--spec get_check_interval() -> non_neg_integer().
--spec set_check_interval(non_neg_integer()) -> 'ok'.
--spec get_vm_memory_high_watermark() -> vm_memory_high_watermark().
--spec set_vm_memory_high_watermark(vm_memory_high_watermark()) -> 'ok'.
--spec get_memory_limit() -> non_neg_integer().
--spec get_memory_use(bytes) -> {non_neg_integer(),  float() | infinity};
-                    (ratio) -> float() | infinity.
--spec get_cached_process_memory_and_limit() -> {non_neg_integer(), non_neg_integer()}.
--spec get_rss_memory() -> non_neg_integer().
+
 
 -export_type([memory_calculation_strategy/0]).
 %%----------------------------------------------------------------------------
 %% Public API
 %%----------------------------------------------------------------------------
 
+-spec get_total_memory() -> (non_neg_integer() | 'unknown').
 get_total_memory() ->
   case application:get_env(barrel, total_memory_available_override_value) of
     {ok, Value} ->
@@ -107,24 +98,32 @@ get_total_memory() ->
       get_total_memory_from_os()
   end.
 
+-spec get_vm_limit() -> non_neg_integer().
 get_vm_limit() -> get_vm_limit(os:type()).
 
+-spec get_check_interval() -> non_neg_integer().
 get_check_interval() ->
   gen_server:call(?MODULE, get_check_interval, infinity).
 
+-spec set_check_interval(non_neg_integer()) -> 'ok'.
 set_check_interval(Fraction) ->
   gen_server:call(?MODULE, {set_check_interval, Fraction}, infinity).
 
+-spec get_vm_memory_high_watermark() -> vm_memory_high_watermark().
 get_vm_memory_high_watermark() ->
   gen_server:call(?MODULE, get_vm_memory_high_watermark, infinity).
 
+-spec set_vm_memory_high_watermark(vm_memory_high_watermark()) -> 'ok'.
 set_vm_memory_high_watermark(Fraction) ->
   gen_server:call(?MODULE, {set_vm_memory_high_watermark, Fraction},
                   infinity).
 
+-spec get_memory_limit() -> non_neg_integer().
 get_memory_limit() ->
   gen_server:call(?MODULE, get_memory_limit, infinity).
 
+-spec get_memory_use(bytes) -> {non_neg_integer(),  float() | infinity};
+                    (ratio) -> float() | infinity.
 get_memory_use(bytes) ->
   {ProcessMemory, MemoryLimit} = get_cached_process_memory_and_limit(),
   {ProcessMemory, case MemoryLimit > 0.0 of
@@ -182,10 +181,13 @@ get_memory_calculation_strategy() ->
 %% gen_server callbacks
 %%----------------------------------------------------------------------------
 
+-spec start_link(float()) -> rabbit_types:ok_pid_or_error().
 start_link(MemFraction) ->
   start_link(MemFraction,
              fun alarm_handler:set_alarm/1, fun alarm_handler:clear_alarm/1).
 
+-spec start_link(float(), fun ((any()) -> 'ok'),
+                 fun ((any()) -> 'ok')) -> rabbit_types:ok_pid_or_error().
 start_link(MemFraction, AlarmSet, AlarmClear) ->
   gen_server:start_link({local, ?SERVER}, ?MODULE,
                         [MemFraction, {AlarmSet, AlarmClear}], []).
@@ -249,11 +251,14 @@ code_change(_OldVsn, State, _Extra) ->
 %%----------------------------------------------------------------------------
 %% Server Internals
 %%----------------------------------------------------------------------------
+
+-spec get_rss_memory() -> non_neg_integer().
 get_rss_memory() ->
   TmpState = init_state_by_os(#state{}),
   {ok, ProcMem} = get_process_memory_using_strategy(rss, TmpState),
   ProcMem.
 
+-spec get_cached_process_memory_and_limit() -> {non_neg_integer(), non_neg_integer()}.
 get_cached_process_memory_and_limit() ->
   try
     gen_server:call(?MODULE, get_cached_process_memory_and_limit, infinity)
