@@ -413,9 +413,7 @@ init([Name, open, _Options]) ->
 
 callback_mode() -> state_functions.
 
-terminate({shutdown, deleted}, _State, #{ store := Store, name := Name}) ->
-  _ = (catch barrel_storage:delete_barrel(Store, Name)),
-  ok;
+
 terminate(_Reason, _State, #{ store := Store, name := Name}) ->
   _ = (catch barrel_storage:close_barrel(Store, Name)),
   ok.
@@ -470,14 +468,15 @@ handle_event({call, From}, updated_seq, _State, #{ state := State } = Data) ->
   {keep_state, Data, [{reply, From, {ok, UpdatedSeq}}]};
 handle_event({call, From}, get_state, _State, #{ mod := Mod, state := State } = Data) ->
   {keep_state, Data, [{reply, From, {Mod, State}}]};
-handle_event({call, From}, delete, _State, _Data) ->
-  {stop_and_reply, {shutdown, deleted}, [{reply, From, ok}]};
+handle_event({call, From}, delete, _State, #{ store := Store, name := Name }) ->
+  _ = (catch barrel_storage:delete_barrel(Store, Name)),
+  {stop_and_reply, normal, [{reply, From, ok}]};
 handle_event(info, {'EXIT', Pid, Reason}, _State, #{ db_ref := DbRef, writer := Pid } = Data) ->
   _ = lager:error("writer exitded. db=~p reason=~p~n", [DbRef, Reason]),
-  {stop, {writer_exit, Reason}, Data#{writer => nil}};
+  {stop, normal, Data#{writer => nil}};
 handle_event(info, {'EXIT', Pid, Reason}, _State, #{ db_ref := DbRef, indexer := Pid } = Data) ->
   _ = lager:error("indexer exitded. db=~p reason=~p~n", [DbRef, Reason]),
-  {stop, {indexer_exit, Reason}, Data#{writer => nil}};
+  {stop, normal, Data#{writer => nil}};
 handle_event(_EventType, Event, _State, #{ db_ref := DbRef } = Data) ->
   _ = lager:warning("db got unknown name=~p, event=~p", [DbRef, Event]),
   {keep_state, Data}.
