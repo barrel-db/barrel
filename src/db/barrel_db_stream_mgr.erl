@@ -134,10 +134,14 @@ handle_info({_Stream, {drop, _SojournTime}}, State) ->
   {noreply, State};
 
 handle_info({trigger_fetch, Stream, SubRef}, State = #{ streams := Streams}) ->
-  Subs = maps:get(Stream,Streams),
-  {_, #{ pid := Pid, since := Since }} = lists:keyfind(SubRef, 1, Subs),
-  _ = enqueue_stream(Stream, SubRef, Pid, Since),
-  {noreply, State}.
+  case maps:find(Stream, Streams) of
+    {ok, Subs} ->
+      {_, #{ pid := Pid, since := Since }} = lists:keyfind(SubRef, 1, Subs),
+      _ = enqueue_stream(Stream, SubRef, Pid, Since),
+      {noreply, State};
+    error ->
+      {noreply, State}
+  end.
 
 handle_down_agent(MonitorRef, Monitors, Streams) ->
   {{Stream, SubRef}, Monitors1} = maps:take(MonitorRef, Monitors),

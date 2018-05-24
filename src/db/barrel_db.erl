@@ -288,7 +288,7 @@ do_for_ref(DbRef, Fun) ->
         undefined ->
           case barrel_db_sup:start_db(DbRef) of
             {ok, undefined} ->
-              {error, not_found};
+              {error, db_not_found};
             {ok, Pid} ->
               ok = barrel_index_actor:refresh(DbRef),
               Fun(Pid);
@@ -380,7 +380,7 @@ init([Name, create, Options]) ->
           exit(Error)
       end;
     {ok, _} ->
-      exit({error, already_exists})
+      exit({error, db_already_exists})
   end;
 init([Name, open, _Options]) ->
   case barrel_storage:find_barrel(Name) of
@@ -407,7 +407,7 @@ init([Name, open, _Options]) ->
           exit(normal)
       end;
     error ->
-      proc_lib:init_ack({error, not_found}),
+      proc_lib:init_ack({error, db_not_found}),
       exit(normal)
   end.
 

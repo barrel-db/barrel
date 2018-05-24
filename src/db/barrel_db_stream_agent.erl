@@ -90,7 +90,7 @@ fetch_changes(#{barrel := Name } = Stream, SubRef, Subscriber, Since) ->
       %% send changes
       send_changes(lists:reverse(Changes), LastSeq, Stream, Subscriber),
       %% register last seq
-      ok = barrel_db_stream_mgr:next(Stream, SubRef, LastSeq),
+      _ = barrel_db_stream_mgr:next(Stream, SubRef, LastSeq),
       _ = sbroker:async_ask_r(?db_stream_broker),
       ok
   end.

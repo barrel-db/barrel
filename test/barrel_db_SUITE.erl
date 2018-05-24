@@ -67,7 +67,7 @@ end_per_suite(Config) ->
 
 get_db(_Config) ->
   BarrelId = <<"someid">>,
-  {error, not_found} = barrel:barrel_infos(BarrelId),
+  {error, db_not_found} = barrel:barrel_infos(BarrelId),
   ok = barrel:create_barrel(BarrelId, #{}),
   #{ updated_seq := 0, docs_count := 0 } = barrel:barrel_infos(BarrelId),
   ok = barrel:delete_barrel(BarrelId).
