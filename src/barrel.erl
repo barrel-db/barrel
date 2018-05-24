@@ -51,12 +51,12 @@
 -type prop() :: binary().
 
 -type query_options() :: #{
-  order_by := order_by_key |order_by_value,
-  equal_to := prop(),
-  start_at := prop(),
-  next_to := prop(),
-  end_at := prop(),
-  previous_to := prop()
+  order_by => order_by_key |order_by_value,
+  equal_to => prop(),
+  start_at => prop(),
+  next_to => prop(),
+  end_at => prop(),
+  previous_to => prop()
 }.
 
 
