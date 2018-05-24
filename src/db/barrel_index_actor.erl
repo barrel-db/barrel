@@ -130,7 +130,7 @@ handle_info({'EXIT', Updater, Reason}, State = #{ updater := Updater }) ->
   #{ name := DbName, mod := Mod, modstate := ModState, indexed_seq := StartSeq } = State,
   _ = lager:info("index updater for db=~p exited with reason=~p~n", [DbName, Reason]),
   {ok, NewUpdater} = barrel_index_updater:start_link(self(), DbName, Mod, ModState, StartSeq),
-  {noreply, #{ updater => NewUpdater }};
+  {noreply, State#{ updater => NewUpdater }};
 
 handle_info(_Info, State) ->
   {noreply, State}.

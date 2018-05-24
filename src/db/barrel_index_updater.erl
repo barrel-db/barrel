@@ -53,12 +53,29 @@ handle_call(_Msg, _From, State) -> {noreply, State}.
 handle_cast(_Msg, State) -> {noreply, State}.
 
 handle_info({changes, Stream, Changes, _Seq}, State = #{ stream := Stream, last_seq := LastSeq }) ->
-  IndexedSeq = process_changes(Changes, LastSeq, State),
+  IndexedSeq = handle_changes(Changes, State),
   NewState = update_state(IndexedSeq, LastSeq, State),
   {noreply, NewState};
 handle_info(_Info, State) ->
   {noreply, State}.
 
+
+handle_changes(Changes, State = #{ db_name := DbName, last_seq := LastSeq }) ->
+  try
+    process_changes(Changes, State)
+  catch
+    exit:pmap_timeout ->
+       _ = lager:warning("index timeout db=~p", [DbName]),
+      LastSeq;
+    exit:Reason ->
+      _ = lager:error("index error db=~p error=~p", [DbName, Reason]),
+      LastSeq
+  end.
+
+num_worker() ->
+  application:get_env(barrel, index_threads, 16).
+worker_timeout() ->
+  application:get_env(barrel, index_timeout, 5000).
 
 
 update_state(Seq, Seq, State) -> State;
@@ -66,26 +83,37 @@ update_state(Seq, _LastSeq, #{ parent := Parent} = State) ->
   Parent ! {updated, Seq},
   State#{ last_seq => Seq }.
 
-process_changes([], LastSeq, _State) ->
-  LastSeq;
-process_changes([Change | Rest], LastSeq, #{ mod := Mod, modstate := ModState } = State) ->
-  #{ <<"id">> := DocId, <<"seq">> := Seq, <<"doc">> := Doc } = Change,
-  OldPaths = case Mod:get_ilog(DocId, ModState) of
-          {ok, Paths} -> Paths;
-          not_found -> []
-        end,
-  %% analyze the doc and compare to the old index
-  NewPaths = barrel_index:analyze(Doc),
-  {Added, Removed} = barrel_index:diff(NewPaths, OldPaths),
+process_changes(Changes, #{ mod := Mod, modstate := ModState, last_seq := LastSeq } = State) ->
+  Worker =
+    fun(Change) ->
+      #{ <<"id">> := DocId, <<"seq">> := Seq, <<"doc">> := Doc } = Change,
+      OldPaths = case Mod:get_ilog(DocId, ModState) of
+                   {ok, Paths} -> Paths;
+                   not_found -> []
+                 end,
+      %% analyze the doc and compare to the old index
+      NewPaths = barrel_index:analyze(Doc),
+      Diff = barrel_index:diff(NewPaths, OldPaths),
+      {NewPaths, Diff, DocId, Seq}
+    end,
+  Results = barrel_lib:pmap(Worker, Changes, num_worker(), worker_timeout()),
   Batch = Mod:get_batch(ModState),
-  %% prepare commit
-  _ = log(DocId, NewPaths, Batch),
+  IndexedSeq = process_diffs(Results, LastSeq, State),
+  Mod:commit(Batch, ModState),
+  IndexedSeq.
+
+
+process_diffs([Change | Rest], LastSeq, State) ->
+  #{ mod := Mod, modstate := ModState } = State,
+  {NewPaths, {Added, Removed}, DocId, Seq} = Change,
+  Batch = Mod:get_batch(ModState),
   ok = insert(Added, DocId, Batch),
   ok = unindex(Removed, DocId, Batch),
+  _ = log(DocId, NewPaths, Batch),
   Mod:commit(Batch, ModState),
-  process_changes(Rest, erlang:max(LastSeq, Seq), State).
-
-
+  process_diffs(Rest, erlang:max(LastSeq, Seq), State);
+process_diffs([], LastSeq, _State) ->
+  LastSeq.
 
 insert([], _DocId, _Batch) ->
   ok;
