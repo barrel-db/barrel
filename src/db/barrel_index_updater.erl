@@ -23,7 +23,8 @@
   init/1,
   handle_call/3,
   handle_cast/2,
-  handle_info/2
+  handle_info/2,
+  terminate/2
 ]).
 
 -define(INDEX_INTERVAL, 100).
@@ -58,6 +59,10 @@ handle_info({changes, Stream, Changes, _Seq}, State = #{ stream := Stream, last_
   {noreply, NewState};
 handle_info(_Info, State) ->
   {noreply, State}.
+
+terminate(_Reason, #{ stream := Stream }) ->
+  barrel_db_stream_mgr:unsubscribe(Stream, self()),
+  ok.
 
 
 handle_changes(Changes, State = #{ db_name := DbName, last_seq := LastSeq }) ->
