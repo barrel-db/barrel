@@ -41,3 +41,6 @@
   application:get_env(barrel, worker_shutdown_timeout, 30000)).
 
 
+-define(db_reader_pool(Name), {p, l, {barrel_db_reader_pool, Name}}).
+-define(db_reader_sup, {n, l, {barrel_db_reader_sup, Name}}).
+-define(db_reader(Name, Id), {n, l, {barrel_db_reader, {Name, Id}}}).
