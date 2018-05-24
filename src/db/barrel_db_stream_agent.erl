@@ -84,11 +84,16 @@ fetch_changes(#{barrel := Name } = Stream, SubRef, Subscriber, Since) ->
               {ok,  {Acc1, erlang:max(Seq, LastSeq), N+1}}
           end
       end,
-      {Changes, LastSeq, _} = try Mod:fold_changes(Since, WrapperFun, {[], Since, 0}, Snapshot)
-                              after Mod:release_snapshot(Snapshot)
-                              end,
-      %% send changes
-      send_changes(lists:reverse(Changes), LastSeq, Stream, Subscriber),
+      Acc0 = {[], Since, 0},
+      LastSeq = try
+                  fold_changes(Since, WrapperFun, Acc0, Stream, Subscriber, Mod, BState)
+                catch
+                  C:E ->
+                    %% for now we ignore the errors. It's most probably a race condition and should be handled
+                    %% before it's happening
+                    lager:debug("folding changes error: stream=~p, error=~~:~p", [Stream, C, E]),
+                    Since
+                end,
       %% register last seq
       _ = barrel_db_stream_mgr:next(Stream, SubRef, LastSeq),
       _ = sbroker:async_ask_r(?db_stream_broker),
@@ -113,3 +118,17 @@ change_with_doc(Change, DocId, Rev, Mod, State, true) ->
   end;
 change_with_doc(Change, _, _, _, _, _) ->
   Change.
+
+
+
+
+fold_changes(Since, WrapperFun, Acc, Stream, Subscriber, Mod, ModState) ->
+  Snapshot = Mod:get_snapshot(ModState),
+  {Changes, LastSeq, _} = try Mod:fold_changes(Since, WrapperFun, Acc, Snapshot)
+                          after Mod:release_snapshot(Snapshot)
+                          end,
+  send_changes(lists:reverse(Changes), LastSeq, Stream, Subscriber),
+  LastSeq.
+
+
+
