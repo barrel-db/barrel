@@ -97,7 +97,7 @@ init([DbName, DbPid, Mod, ModState]) ->
 
 handle_call({refresh, UpdatedSeq}, From, State = #{ indexed_seq := IndexedSeq }) when IndexedSeq < UpdatedSeq ->
   #{ waiters := Waiters } = State,
-  Waiters2 = Waiters ++ [From],
+  Waiters2 = Waiters ++ [{From, UpdatedSeq}],
   {noreply, State#{ waiters => Waiters2 }};
 handle_call({refresh, _UpdateSeq}, _From, State) ->
   {reply, ok, State};
@@ -113,8 +113,12 @@ handle_info({updated, IndexedSeq}, State) ->
       {noreply, State#{ indexed_seq => IndexedSeq }};
     Waiters ->
       set_indexed_seq(IndexedSeq, State),
-      notify(Waiters, ok),
-      {noreply, State#{ indexed_seq => IndexedSeq, waiters => []}}
+      {ToNotify, Waiters2} = lists:partition(
+        fun({_From, Seq}) -> Seq =< IndexedSeq end,
+        Waiters
+      ),
+      notify(ToNotify, ok),
+      {noreply, State#{ indexed_seq => IndexedSeq, waiters => Waiters2}}
   end;
 
 handle_info({'EXIT', DbPid, Reason}, State = #{ db := DbPid }) ->
@@ -123,18 +127,17 @@ handle_info({'EXIT', DbPid, Reason}, State = #{ db := DbPid }) ->
   {stop, normal, State};
 
 handle_info({'EXIT', Updater, Reason}, State = #{ updater := Updater }) ->
-  #{ db := DbPid, name := DbName, indexed_seq := StartSeq } = State,
+  #{ name := DbName, mod := Mod, modstate := ModState, indexed_seq := StartSeq } = State,
   _ = lager:info("index updater for db=~p exited with reason=~p~n", [DbName, Reason]),
-  {ok, NewUpdater} = barrel_index_updater:start_link(self(), DbName, DbPid, StartSeq),
+  {ok, NewUpdater} = barrel_index_updater:start_link(self(), DbName, Mod, ModState, StartSeq),
   {noreply, #{ updater => NewUpdater }};
 
 handle_info(_Info, State) ->
   {noreply, State}.
 
-
 notify([], _Msg) -> ok;
-notify([Waiter | Rest], Msg) ->
-  gen_server:reply(Waiter, Msg),
+notify([{To, _} | Rest], Msg) ->
+  gen_server:reply(To, Msg),
   notify(Rest, Msg).
 
 
