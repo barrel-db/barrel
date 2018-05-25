@@ -91,7 +91,7 @@ fetch_changes(#{barrel := Name } = Stream, SubRef, Subscriber, Since) ->
                   C:E ->
                     %% for now we ignore the errors. It's most probably a race condition and should be handled
                     %% before it's happening
-                    _ = lager:debug("folding changes error: stream=~p, error=~~:~p", [Stream, C, E]),
+                    _ = lager:debug("folding changes error: stream=~p, error=~p:~p", [Stream, C, E]),
                     Since
                 end,
       %% register last seq
