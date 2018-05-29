@@ -43,13 +43,13 @@ new(#{ id := Id } = RevInfo) -> #{ Id => RevInfo }.
 add(RevInfo, Tree) ->
   #{id := Id, parent := Parent} = RevInfo,
   case maps:is_key(Id, Tree) of
-    true -> error({badrev, already_exists});
+    true -> exit({badrev, already_exists});
     false -> ok
   end,
   case maps:is_key(Parent, Tree) of
     true -> ok;
     false when Parent =:= <<"">> -> ok;
-    false -> error({badrev, missing_parent})
+    false -> exit({badrev, missing_parent})
   end,
   Tree#{ Id => RevInfo }.
 
@@ -128,7 +128,7 @@ winning_revision(Tree) ->
                        true -> ActiveCount1;
                         false -> ActiveCount1 + 1
                      end,
-      {[RevInfo#{ deleted => is_deleted(RevInfo) }| Acc], ActiveCount2 }
+      {[RevInfo#{ deleted => Deleted }| Acc], ActiveCount2 }
     end, {[], 0}, Tree),
 
   SortedRevInfos = lists:sort(
@@ -235,8 +235,8 @@ add_test() ->
   
   ?assert(barrel_revtree:contains(<<"4-four">>, NewTree)),
   ?assertEqual(<<"3-three">>, barrel_revtree:parent(<<"4-four">>, NewTree)),
-  ?assertError({badrev, already_exists}, barrel_revtree:add(NewRev, NewTree)),
-  ?assertError({badrev, missing_parent},
+  ?assertExit({badrev, already_exists}, barrel_revtree:add(NewRev, NewTree)),
+  ?assertExit({badrev, missing_parent},
                barrel_revtree:add(#{ id => <<"6-six">>, parent => <<"5-five">>}, NewTree)).
 
 leafs_test() ->

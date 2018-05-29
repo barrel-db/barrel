@@ -84,26 +84,50 @@ merge_revtrees([Op | Rest], State) ->
   #{ id := DocId } = Record = op_record(Op),
   case get_cached(DocId, State) of
     {DocId, DocInfo} ->
-      State2 = MergeFun(Record, DocInfo, From, State),
+      State2 = try
+                 MergeFun(Record, DocInfo, From, State)
+               catch
+                 exit:Error ->
+                   reply(From, {error, DocId, Error}),
+                   State
+               end,
       merge_revtrees(Rest, State2);
     false ->
       [Rev | _] = maps:get(revs, Record, [<<>>]),
       case fetch_docinfo(DocId, State) of
         {ok, DocInfo} ->
-          State2 = MergeFun(Record, DocInfo, From, cache(DocInfo, State)),
+          State2 = try
+                     MergeFun(Record, DocInfo, From, cache(DocInfo, State))
+                   catch
+                     exit:Error ->
+                       reply(From, {error, DocId, Error}),
+                       State
+                   end,
           merge_revtrees(Rest, State2);
         {error, not_found} ->
           case OpType of
             merge when Rev =:= <<>> ->
               %% create or add a revision
               DocInfo = new_docinfo(DocId),
-              State2 = MergeFun(Record, DocInfo, From, State),
+              State2 = try
+                         MergeFun(Record, DocInfo, From, State)
+                       catch
+                         exit:Error ->
+                           reply(From, {error, DocId, Error}),
+                           State
+                       end,
               merge_revtrees(Rest, State2);
             merge ->
               reply(From, {error, DocId, not_found});
             merge_with_conflict ->
               DocInfo = new_docinfo(DocId),
-              State2 = MergeFun(Record, DocInfo, From, State),
+              State2 = try
+                         MergeFun(Record, DocInfo, From, State)
+                       catch
+                         exit:Error ->
+                           reply(From, {error, DocId, Error}),
+                           State
+                       end,
               merge_revtrees(Rest, State2);
             purge ->
               reply(From, {ok, DocId, purged})
@@ -121,12 +145,14 @@ merge_revtrees([], State) ->
   update_db_state(State),
   State.
 
+
 merge_revtree(Record, #{ deleted := true } = DocInfo, From,  #{ db_ref := Db} = State) ->
   #{ id := DocId, seq := OldSeq, revtree := RevTree } = DocInfo,
   #{ revs := [Rev | _ ], deleted := NewDeleted, doc := Doc } = Record,
-  case Rev =:= <<>> andalso not NewDeleted of
+  case Rev =:= <<"">> andalso not NewDeleted of
     true ->
       {WinningRev, _Branched, _Conflict} = barrel_revtree:winning_revision(RevTree),
+      _ = lager:info("update deleted doc id=~p rev=~p~n", [DocId, WinningRev]),
       {Gen, _}  = barrel_doc:parse_revision(WinningRev),
       NewRevHash = barrel_doc:revision_hash(Doc, WinningRev, false),
       NewRev = << (integer_to_binary(Gen+1))/binary, "-", NewRevHash/binary  >>,
@@ -142,7 +168,7 @@ merge_revtree(Record, #{ deleted := true } = DocInfo, From,  #{ db_ref := Db} = 
                     end,
       case WriteResult of
         ok ->
-          reply(From, {ok, DocId, WinningRev}),
+          reply(From, {ok, DocId, NewRev}),
           update_db_state(State1),
           barrel_event:notify(Db, db_updated),
           cache(DocInfo2, State1);
@@ -164,7 +190,7 @@ merge_revtree(Record, #{ deleted := true } = DocInfo, From,  #{ db_ref := Db} = 
 merge_revtree(Record, DocInfo, From,  #{ db_ref := Db} = State) ->
   #{ id := DocId, seq := OldSeq, revtree := RevTree } = DocInfo,
   #{ revs := [Rev | _ ], deleted := NewDeleted, hash := RevHash, doc := Doc } = Record,
-
+  _ = lager:info("update  doc id=~p rev=~p, deleted=~p revtree=~p~n", [DocId, Rev, NewDeleted, RevTree]),
   {Gen, _}  = barrel_doc:parse_revision(Rev),
   {DocInfo2, Rev2, Seq, NewState} = case Rev of
                                       <<"">> when map_size(RevTree) =:= 0  ->

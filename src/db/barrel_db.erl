@@ -224,6 +224,8 @@ append_writes_summary({error, DocId, read_error}, Results) ->
   [{error, {read_error, DocId}} | Results];
 append_writes_summary({error, DocId, write_error}, Results) ->
   [{error, {write_error, DocId}} | Results];
+append_writes_summary({error, DocId, {bad_rev, _}=BadRev}, Results) ->
+  [{error, {BadRev, DocId}} | Results];
 append_writes_summary(Other, __Results) ->
   erlang:error({undefined, Other}).
 

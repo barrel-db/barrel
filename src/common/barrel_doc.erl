@@ -73,10 +73,10 @@ parse_revision(<<"">>) -> {0, <<"">>};
 parse_revision(Rev) when is_binary(Rev) ->
   case binary:split(Rev, <<"-">>) of
     [BinPos, Hash] -> {binary_to_integer(BinPos), Hash};
-    _ -> error(bad_rev)
+    _ -> exit({bad_rev, bad_format})
   end;
 parse_revision(Rev) when is_list(Rev) -> parse_revision(list_to_binary(Rev));
-parse_revision(Rev) -> error({bad_rev, Rev}).
+parse_revision(_Rev) -> exit({bad_rev, bad_format}).
 
 parse_revisions(#{ <<"revisions">> := Revisions}) ->
   case Revisions of
