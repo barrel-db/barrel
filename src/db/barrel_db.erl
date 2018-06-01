@@ -287,6 +287,8 @@ do_for_ref(DbRef, Fun) ->
       case barrel_pm:whereis_name(DbRef) of
         Pid when is_pid(Pid) ->
           Fun(Pid);
+        {badrpc,nodedown} ->
+          {error, db_not_found};
         undefined ->
           case barrel_db_sup:start_db(DbRef) of
             {ok, undefined} ->
