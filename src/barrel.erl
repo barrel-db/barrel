@@ -36,6 +36,11 @@
 
 -export([query/5]).
 
+-export([
+  subscribe_changes/2, subscribe_changes/3, subscribe_changes/4,
+  unsubscribe_change/1, unsubscribe_change/2, unsubscribe_change/3
+]).
+
 
 -type barrel_create_options() :: #{}.
 -type barrel_name() :: binary().
@@ -59,6 +64,12 @@
   previous_to => prop()
 }.
 
+-type changes_options() :: #{
+  interval => non_neg_integer(),
+  since => non_neg_integer()
+}.
+
+-type stream() :: term().
 
 %% @doc create a barrel, (note: for now the options is an empty map)
 -spec create_barrel(Name :: barrel_name(), Options :: barrel_create_options()) -> ok | {error, any()}.
@@ -211,3 +222,53 @@ delete_local_doc(Barrel, DocId) ->
 query(Barrel, Path, Fun, Acc, Options) ->
   barrel_index:query(Barrel, Path, Fun, Acc, Options).
 
+
+%% @doc subscribe to the changes of a barrel.
+-spec subscribe_changes(Name, Options) -> Stream when
+  Name :: barrel_name(),
+  Options :: changes_options(),
+  Stream :: stream().
+subscribe_changes(Barrel, Options) ->
+  subscribe_changes(Barrel, self(), Options).
+
+-spec subscribe_changes(Name, Pid, Options) -> Stream when
+  Name :: barrel_name(),
+  Pid :: pid(),
+  Options :: changes_options(),
+  Stream :: stream().
+subscribe_changes(Barrel, Pid, Options) ->
+  Since = maps:get(since, Options, 0),
+  Interval = maps:get(interval, Options, 100),
+  Stream = #{ barrel => Barrel, interval => Interval},
+  ok = barrel_db_stream_mgr:subscribe(Stream, Pid, Since),
+  {ok, Stream}.
+
+-spec subscribe_changes(Node, Name, Pid, Options) -> Stream when
+  Node :: atom(),
+  Name :: barrel_name(),
+  Pid :: pid(),
+  Options :: changes_options(),
+  Stream :: stream().
+subscribe_changes(Node, Barrel, Pid, Options) ->
+  Since = maps:get(since, Options, 0),
+  Interval = maps:get(interval, Options, 100),
+  Stream = #{ barrel => Barrel, interval => Interval},
+  ok = barrel_db_stream_mgr:subscribe(Node, Stream, Pid, Since),
+  {ok, Stream}.
+
+%% @doc unsubsccribe from the changes
+-spec unsubscribe_change(Stream :: stream()) -> ok.
+unsubscribe_change(Stream) ->
+  unsubscribe_change(Stream, self()).
+
+-spec unsubscribe_change(Stream :: stream(), Pid :: pid()) -> ok.
+unsubscribe_change(Stream, Pid) ->
+  barrel_db_stream_mgr:unsubscribe(Stream, Pid).
+
+-spec unsubscribe_change(Node :: atom(), Stream :: stream(), Pid :: pid()) -> ok.
+unsubscribe_change(Node, Stream, Pid) ->
+  barrel_db_stream_mgr:unsubscribe(Node, Stream, Pid).
+  
+  
+  
+  
