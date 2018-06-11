@@ -51,7 +51,12 @@
   docs_count := non_neg_integer()
 }.
 
--type fetch_options() :: map().
+-type fetch_options() :: #{
+  history => boolean(),
+  max_history => non_neg_integer(),
+  rev => barrel_doc:revid(),
+  ancestors => [barrel_doc:revid()]
+}.
 
 -type prop() :: binary().
 
