@@ -149,17 +149,14 @@ query(Barrel, Path0, Fun, Acc, Options) ->
 do_query(FoldFun, Path, Start, End, Limit, UserFun, UserAcc, {Mod, ModState}) ->
   Snapshot = Mod:get_snapshot(ModState),
   WrapperFun =
-  fun(#{ id := DocId, revtree := RevTree }=DI, Acc) ->
+  fun
+    (#{ deleted := true }, _Acc) -> skip;
+    (#{ id := DocId, revtree := RevTree }, Acc) ->
     {Rev, _, _} = barrel_revtree:winning_revision(RevTree),
-    {ok, Doc0} = Mod:get_revision(DocId, Rev, Snapshot),
-    Doc1 = maybe_add_deleted(DI, Doc0#{<<"_rev">> => Rev}),
-    UserFun(Doc1, Acc)
+    {ok, Doc} = Mod:get_revision(DocId, Rev, Snapshot),
+    UserFun(Doc, Acc)
   end,
   Mod:FoldFun(Path, Start, End, Limit, WrapperFun, UserAcc, Snapshot).
-
-maybe_add_deleted(#{ deleted := true }, Doc) -> Doc#{ <<"_deleted">> => true };
-maybe_add_deleted(_, Doc) -> Doc.
-
 
 
 start_at(#{ start_at := Start }, Path) -> {true, Path ++ [Start]};

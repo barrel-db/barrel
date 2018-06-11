@@ -97,7 +97,13 @@ process_changes(Changes, #{ mod := Mod, modstate := ModState, last_seq := LastSe
                    not_found -> []
                  end,
       %% analyze the doc and compare to the old index
-      NewPaths = barrel_index:analyze(Doc),
+      NewPaths = case Doc of
+                   null ->
+                     %% doc has been deleted, no revision is stored
+                     [];
+                   _ ->
+                     barrel_index:analyze(Doc)
+                 end,
       Diff = barrel_index:diff(NewPaths, OldPaths),
       {NewPaths, Diff, DocId, Seq}
     end,
