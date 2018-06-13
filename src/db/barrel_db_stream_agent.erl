@@ -54,7 +54,7 @@ fetch_changes(#{barrel := Name } = Stream, SubRef, Subscriber, Since) ->
       ok = barrel_db_stream_mgr:next(Stream, SubRef, Since),
       _ = sbroker:async_ask_r(?db_stream_broker);
     {Mod, BState}  ->
-      Snapshot = Mod:get_snapshot(BState),
+      %%Snapshot = Mod:get_snapshot(BState),
       %%Snapshot = BState,
       WrapperFun =
       fun
@@ -74,7 +74,7 @@ fetch_changes(#{barrel := Name } = Stream, SubRef, Subscriber, Since) ->
                        <<"changes">> => Changes},
           Change = change_with_doc(
             change_with_deleted(Change0, Deleted),
-            DocId, Rev, Mod, Snapshot, IncludeDoc
+            DocId, Rev, Mod, BState, IncludeDoc
           ),
           Acc1 = [Change | Acc0],
           if
@@ -123,10 +123,7 @@ change_with_doc(Change, _, _, _, _, _) ->
 
 
 fold_changes(Since, WrapperFun, Acc, Stream, Subscriber, Mod, ModState) ->
-  Snapshot = Mod:get_snapshot(ModState),
-  {Changes, LastSeq, _} = try Mod:fold_changes(Since, WrapperFun, Acc, Snapshot)
-                          after Mod:release_snapshot(Snapshot)
-                          end,
+  {Changes, LastSeq, _} = Mod:fold_changes(Since, WrapperFun, Acc, ModState),
   send_changes(lists:reverse(Changes), LastSeq, Stream, Subscriber),
   LastSeq.
 

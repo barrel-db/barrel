@@ -83,6 +83,9 @@ multiple_docs(_Config) ->
   30 = length(IdsA),
   25 = length(IdsB),
 
+
+  {ok, #{ <<"test">> := << "a">> }} = barrel:fetch_doc(<<"test">>, lists:nth(1, IdsA), #{}),
+
   All = barrel:query(
     <<"test">>,
     <<"/id">>,

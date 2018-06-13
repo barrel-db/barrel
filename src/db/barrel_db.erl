@@ -428,6 +428,7 @@ code_change(_OldVsn, State, Data, _Extra) ->
 %% states
 
 writeable({call, From}, {write_changes, Entries}, Data) ->
+  lager:info("write changes=~p~n", [Entries]),
   _ = notify_writer(Entries, Data),
   {next_state, writing, Data#{ pending => []}, [{reply, From, ok}]};
 
@@ -451,7 +452,6 @@ writing(info, {set_last_indexed_seq, Seq}, #{ mod := Mod, state := State0 } = Da
 writing(info, {set_state, State}, #{ mod := Mod, pending := Pending, write_batch_size := BatchSize } = Data) ->
   ok = Mod:save_state(State),
   ok = maybe_notify_changes(State, Data),
-  
   case Pending of
     [] ->
       NewData = Data#{ state => State },
@@ -499,7 +499,11 @@ filter_pending([Job | Rest], N, Acc) ->
 
 
 notify_writer(Pending, #{ writer := Writer }) ->
-  Writer ! {store, Pending}.
+  Entries = barrel_lib:group_by(
+    Pending,
+    fun(#write_op{doc=#{ id := Id }}) -> Id end
+  ),
+  Writer ! {store, Entries}.
 
 do_fetch_doc(DocId, Options, {Mod, State}) ->
   UserRev = maps:get(rev, Options, <<"">>),

@@ -41,21 +41,33 @@ init([DbPid, DbRef, Mod, DbState]) ->
 loop(State) ->
   receive
     {store, Entries} ->
-      NewState = merge_revtrees(Entries, State),
+      NewState = process_entries(Entries, State),
       loop(NewState)
   end.
 
-get_cached(Id, #{ cache := Cache }) ->
-  lists:keyfind(Id, 1, Cache).
 
-cache(#{ id := Id } = Doc, #{ cache := Cache0 } = State) ->
-  Cache1 = lists:keystore(Id, 1, Cache0, {Id, Doc}),
-  State#{ cache => Cache1 }.
-
-remove_cached(Id, #{ cache := Cache0 } = State) ->
-  Cache1 = lists:keydelete(Id, 1, Cache0),
-  State#{ cache => Cache1 }.
-
+process_entries(Entries, State) ->
+  _ = lager:info("process entries=~p~n", [Entries]),
+  dict:fold(
+    fun(DocId, Ops, State1) ->
+      case fetch_docinfo(DocId, State) of
+        {ok, DI} ->
+          merge_revtrees(Ops, DI, State1);
+        {error, not_found} ->
+          DI = new_docinfo(DocId),
+          merge_revtrees(Ops, DI, State1);
+        Error ->
+          _ = lager:error(
+            "error reading doc db=~p id=~p error=~p~n",
+            [maps:get(db_ref, State), DocId, Error]
+          ),
+          _ = [reply(From, {error, DocId, read_error}) || #write_op{from=From} <- Ops],
+          State1
+      end
+    end,
+    State,
+    Entries
+  ).
 
 make_op(Type, Record, From) ->
   #write_op{type=Type, doc=Record, from=From}.
@@ -77,71 +89,32 @@ new_docinfo(DocId) ->
     deleted => false,
     revtree => barrel_revtree:new()}.
 
-merge_revtrees([Op | Rest], State) ->
+merge_revtrees([Op | Rest], DocInfo, State) ->
+  #{ seq := Seq } = DocInfo,
   From = op_from(Op),
   OpType = op_type(Op),
   MergeFun = merge_fun(OpType),
-  #{ id := DocId } = Record = op_record(Op),
-  case get_cached(DocId, State) of
-    {DocId, DocInfo} ->
-      State2 = try
-                 MergeFun(Record, DocInfo, From, State)
-               catch
-                 exit:Error ->
-                   reply(From, {error, DocId, Error}),
-                   State
-               end,
-      merge_revtrees(Rest, State2);
-    false ->
-      [Rev | _] = maps:get(revs, Record, [<<>>]),
-      case fetch_docinfo(DocId, State) of
-        {ok, DocInfo} ->
-          State2 = try
-                     MergeFun(Record, DocInfo, From, cache(DocInfo, State))
-                   catch
-                     exit:Error ->
-                       reply(From, {error, DocId, Error}),
-                       State
-                   end,
-          merge_revtrees(Rest, State2);
-        {error, not_found} ->
-          case OpType of
-            merge when Rev =:= <<>> ->
-              %% create or add a revision
-              DocInfo = new_docinfo(DocId),
-              State2 = try
-                         MergeFun(Record, DocInfo, From, State)
-                       catch
-                         exit:Error ->
-                           reply(From, {error, DocId, Error}),
-                           State
-                       end,
-              merge_revtrees(Rest, State2);
-            merge ->
-              reply(From, {error, DocId, not_found});
-            merge_with_conflict ->
-              DocInfo = new_docinfo(DocId),
-              State2 = try
-                         MergeFun(Record, DocInfo, From, State)
-                       catch
-                         exit:Error ->
-                           reply(From, {error, DocId, Error}),
-                           State
-                       end,
-              merge_revtrees(Rest, State2);
-            purge ->
-              reply(From, {ok, DocId, purged})
-          end;
-        Error ->
-          _ = lager:error(
-            "error reading doc db=~p id=~p error=~p~n",
-            [maps:get(db_ref, State), DocId, Error]
-          ),
-          reply(From, {error, DocId, read_error}),
-          merge_revtrees(Rest, State)
-      end
+  #{ id := DocId,
+     revs := [Rev | _] } = Record = op_record(Op),
+  case {Seq, OpType} of
+    {0, merge} when Rev =/= <<>> ->
+      reply(From, {error, DocId, not_found}),
+      merge_revtrees(Rest, DocInfo, State);
+    {0, purge} ->
+      reply(From, {ok, DocId, purged}),
+      merge_revtrees(Rest, DocInfo, State);
+    {_, _} ->
+      {DocInfo2,  State2} = try
+                              MergeFun(Record, DocInfo, From, State)
+                            catch
+                              exit:Error ->
+                                reply(From, {error, DocId, Error}),
+                                {DocInfo, State}
+                            end,
+      merge_revtrees(Rest, DocInfo2, State2)
+
   end;
-merge_revtrees([], State) ->
+merge_revtrees([], _, State) ->
   update_db_state(State),
   State.
 
@@ -152,7 +125,6 @@ merge_revtree(Record, #{ deleted := true } = DocInfo, From,  #{ db_ref := Db} = 
   case Rev =:= <<"">> andalso not NewDeleted of
     true ->
       {WinningRev, _Branched, _Conflict} = barrel_revtree:winning_revision(RevTree),
-      _ = lager:info("update deleted doc id=~p rev=~p~n", [DocId, WinningRev]),
       {Gen, _}  = barrel_doc:parse_revision(WinningRev),
       NewRevHash = barrel_doc:revision_hash(Doc, WinningRev, false),
       NewRev = << (integer_to_binary(Gen+1))/binary, "-", NewRevHash/binary  >>,
@@ -171,26 +143,25 @@ merge_revtree(Record, #{ deleted := true } = DocInfo, From,  #{ db_ref := Db} = 
           reply(From, {ok, DocId, NewRev}),
           update_db_state(State1),
           barrel_event:notify(Db, db_updated),
-          cache(DocInfo2, State1);
+          {DocInfo2, State1};
         WriteError  ->
           _ = lager:error(
             "error writing doc db=~p id=~p error=~p~n",
             [Db, DocId, WriteError]
           ),
           reply(From, {error, DocId, write_error}),
-          State
+          {DocInfo, State}
       end;
     false when Rev /= <<>> ->
       reply(From, {error, DocId, not_found}),
-      State;
+      {DocInfo, State};
     false ->
       reply(From, {error, DocId, {conflict, revision_conflict}}),
-      State
+      {DocInfo, State}
   end;
 merge_revtree(Record, DocInfo, From,  #{ db_ref := Db} = State) ->
   #{ id := DocId, seq := OldSeq, revtree := RevTree } = DocInfo,
   #{ revs := [Rev | _ ], deleted := NewDeleted, hash := RevHash, doc := Doc } = Record,
-  _ = lager:info("update  doc id=~p rev=~p, deleted=~p revtree=~p~n", [DocId, Rev, NewDeleted, RevTree]),
   {Gen, _}  = barrel_doc:parse_revision(Rev),
   {DocInfo2, Rev2, Seq, NewState} = case Rev of
                                       <<"">> when map_size(RevTree) =:= 0  ->
@@ -241,17 +212,17 @@ merge_revtree(Record, DocInfo, From,  #{ db_ref := Db} = State) ->
           reply(From, {ok, DocId, Rev2}),
           update_db_state(NewState),
           barrel_event:notify(Db, db_updated),
-          cache(DocInfo2, NewState);
+          {DocInfo2, NewState};
         WriteError  ->
           _ = lager:error(
             "error writing doc db=~p id=~p error=~p~n",
             [Db, DocId, WriteError]
           ),
           reply(From, {error, DocId, write_error}),
-          State
+          {DocInfo, State}
       end;
     false ->
-      State
+      {DocInfo, State}
   end.
 
 merge_revtree_with_conflict(Record, DocInfo, From, #{ db_ref := Db} = State) ->
@@ -293,17 +264,17 @@ merge_revtree_with_conflict(Record, DocInfo, From, #{ db_ref := Db} = State) ->
           reply(From, {ok, DocId, LeafRev}),
           update_db_state(NewState),
           barrel_event:notify(Db, db_updated),
-          cache(DocInfo2, NewState);
+          {DocInfo2, NewState};
         WriteError  ->
           _ = lager:error(
             "error writing doc db=~p id=~p error=~p~n",
             [Db, DocId, WriteError]
           ),
           reply(From, {error, DocId, write_error}),
-          State
+          {DocInfo, State}
       end;
     false ->
-      State
+      {DocInfo, State}
   end.
 
 find_parent([RevId | Rest], RevTree, Acc) ->
@@ -325,14 +296,14 @@ purge(_Record, DocInfo, From, #{ db_ref := Db} = State) ->
   case purge_doc(DocId, Seq, Revisions, State) of
     ok ->
       reply(From, {ok, DocId, purged}),
-      remove_cached(DocId, State);
+      {new_docinfo(DocId), State};
     WriteError ->
       _ = lager:error(
         "error purging doc db=~p id=~p error=~p~n",
         [Db, DocId, WriteError]
       ),
       reply(From, {error, DocId, {write_error, WriteError}}),
-      State
+      {DocInfo,State}
   end.
   
 update_db_state(#{ db_pid := DbPid, db_state := DbState }) ->
@@ -343,8 +314,9 @@ update_state(#{ db_state := DbState } = State, Inc) ->
   #{ updated_seq := Seq, docs_count := DocsCount } = DbState,
   NewSeq = Seq + 1,
   DocsCount2 = DocsCount + Inc,
-  {NewSeq, State#{ db_state => DbState#{updated_seq => NewSeq,
-                                        docs_count => DocsCount2} }}.
+  NewState = State#{ db_state => DbState#{updated_seq => NewSeq,
+                               docs_count => DocsCount2} },
+  {NewSeq, NewState}.
 
 add_revision(DocId, RevId, Body, #{ db_mod := Mod, db_state := DbState }) ->
   Mod:add_revision(DocId, RevId, Body, DbState).
@@ -368,3 +340,5 @@ reply({To, Tag}, Reply) when is_pid(To) ->
   catch
     _:_ -> ok
   end.
+
+

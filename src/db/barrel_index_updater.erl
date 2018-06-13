@@ -41,6 +41,8 @@ init([Parent, DbName, Mod, ModState, StartSeq]) ->
   Stream = #{ barrel => DbName, interval => Interval, include_doc => true},
   ok = barrel_db_stream_mgr:subscribe(Stream, self(), StartSeq),
 
+  _ = lager:info("subscribed stream=~p, since=~p", [Stream, StartSeq]),
+
   {ok, #{parent => Parent,
          db_name => DbName,
          mod => Mod,
@@ -122,6 +124,7 @@ process_diffs([Change | Rest], LastSeq, State) ->
   ok = unindex(Removed, DocId, Batch),
   _ = log(DocId, NewPaths, Batch),
   Mod:commit(Batch, ModState),
+  %% doc has been deleted, no revision is stored
   process_diffs(Rest, erlang:max(LastSeq, Seq), State);
 process_diffs([], LastSeq, _State) ->
   LastSeq.

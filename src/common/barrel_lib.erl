@@ -19,6 +19,7 @@
   hex_to_binary/1
 ]).
 
+-export([group_by/2]).
 
 %% imported from attic
 %% TODO: check if we really need such functions
@@ -193,6 +194,16 @@ os_cmd(Command) ->
         _     -> os:cmd(Command)
       end
   end.
+
+
+-spec group_by(list(), function()) -> dict:dict().
+group_by(L, F) ->
+  lists:foldr(
+    fun({K, V}, D) -> dict:append(K, V, D) end,
+    dict:new(),
+    [{F(X), X} || X <- L]
+  ).
+
 
 
 -ifdef(TEST).
