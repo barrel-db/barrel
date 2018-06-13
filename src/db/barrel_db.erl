@@ -161,7 +161,7 @@ await_response(DbPid, Tag) ->
     {Tag, Resp} -> Resp;
     {'DOWN', MRef, _, _, Reason} ->
       erlang:error({worker_down, Reason})
-  after 5000 ->
+  after 15000 ->
     erlang:error(timeout)
   end.
 
