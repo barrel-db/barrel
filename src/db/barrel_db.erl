@@ -378,7 +378,7 @@ init([Name, create, Options]) ->
                     writer => Writer,
                     indexer => Indexer,
                     write_batch_size => BatchSize,
-                    pending => []},
+                    pending => queue:new()},
           
           gen_statem:enter_loop(?MODULE, [], writeable, Data, {via, barrel_pm, Name});
         {Error, _} ->
@@ -405,7 +405,7 @@ init([Name, open, _Options]) ->
                     writer => Writer,
                     indexer => Indexer,
                     write_batch_size => BatchSize,
-                    pending => []},
+                    pending => queue:new()},
           gen_statem:enter_loop(?MODULE, [], writeable, Data, {via, barrel_pm, Name});
         {Error, _} ->
           proc_lib:init_ack({error, Error}),
@@ -430,7 +430,7 @@ code_change(_OldVsn, State, Data, _Extra) ->
 
 writeable({call, From}, {write_changes, Entries}, Data) ->
   _ = notify_writer(Entries, Data),
-  {next_state, writing, Data#{ pending => []}, [{reply, From, ok}]};
+  {next_state, writing, Data#{ pending => queue:new()}, [{reply, From, ok}]};
 
 writeable(info, {set_last_indexed_seq, Seq}, #{ mod := Mod, state := State0 } = Data) ->
   State1 = State0#{ indexed_seq => Seq },
@@ -443,7 +443,7 @@ writeable(EventType, Event, Data) ->
   handle_event(EventType, Event, writeable, Data).
 
 writing({call, From}, {write_changes, Entries}, #{ pending := Pending } = Data) ->
-  Pending2 = Pending ++ Entries,
+  Pending2 = queue:in(Entries, Pending),
   {keep_state, Data#{ pending => Pending2}, [{reply, From, ok}]};
 writing(info, {set_last_indexed_seq, Seq}, #{ mod := Mod, state := State0 } = Data) ->
   State1 = State0#{ indexed_seq => Seq },
@@ -452,18 +452,29 @@ writing(info, {set_last_indexed_seq, Seq}, #{ mod := Mod, state := State0 } = Da
 writing(info, {set_state, State}, #{ mod := Mod, pending := Pending, write_batch_size := BatchSize } = Data) ->
   ok = Mod:save_state(State),
   ok = maybe_notify_changes(State, Data),
-  case Pending of
-    [] ->
-      NewData = Data#{ state => State },
-      {next_state, writeable, NewData};
-    _ ->
-      {ToSend, Pending2} = filter_pending(Pending, BatchSize, []),
+  case maybe_write(Pending, BatchSize, []) of
+    {ok, Pending2, Batch} ->
       NewData = Data#{ state => State,  pending => Pending2 },
-      _ = notify_writer(ToSend, NewData),
-      {keep_state, NewData}
+      _ = notify_writer(Batch, NewData),
+      {keep_state, NewData};
+    false ->
+      NewData = Data#{ state => State },
+      {next_state, writeable, NewData}
   end;
 writing(EventType, Event, Data) ->
   handle_event(EventType, Event, writing, Data).
+
+maybe_write(Pending, BatchSize, Acc) when length(Acc) < BatchSize ->
+  case queue:out(Pending) of
+    {{value, Entries}, Pending2} ->
+      maybe_write(Pending2, BatchSize, Acc ++ Entries);
+    {empty, Pending2} when Acc =/= [] ->
+      {ok, Pending2, Acc};
+    {empty, _Pending2} ->
+      false
+  end;
+maybe_write(Pending, _BatchSize, Acc) ->
+  {ok, Pending, Acc}.
 
 handle_event({call, From}, infos, _State, #{ state := State } = Data) ->
   {keep_state, Data, [{reply, From, State}]};
@@ -489,14 +500,6 @@ handle_event(_EventType, Event, _State, #{ db_ref := DbRef } = Data) ->
 maybe_notify_changes(State, #{ state := State }) -> ok;
 maybe_notify_changes(_NewState, _Data) ->
   ok.
-
-filter_pending([], _N, Acc) ->
-  {lists:reverse(Acc), []};
-filter_pending(Pending, N, Acc) when N =< 0 ->
-  {lists:reverse(Acc), Pending};
-filter_pending([Job | Rest], N, Acc) ->
-  filter_pending(Rest, N - 1, [Job | Acc]).
-
 
 notify_writer(Pending, #{ writer := Writer }) ->
   Entries = barrel_lib:group_by(
