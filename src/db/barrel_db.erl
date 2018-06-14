@@ -207,9 +207,10 @@ await_response_loop(MRef, Tag, Results, NumEntries) ->
       await_response_loop(MRef, Tag, Results2, NumEntries - 1);
     {'DOWN', MRef, _, _, _} ->
       erlang:exit(db_down)
-  after 5000 ->
+  after 15000 ->
     erlang:exit(timeout)
   end.
+
 
 
 append_writes_summary({ok, DocId, purged}, Results) ->
