@@ -32,7 +32,7 @@ cleantest:
 dialyzer:
 	@$(REBAR) dialyzer
 
-test: cleantest dialyzer
+test: cleantest
 	@$(REBAR) eunit
 	@$(EPMD) -daemon
 	@$(REBAR) ct --sname=barrel_test
