@@ -96,12 +96,10 @@ init([DbName, DbPid, Mod, ModState]) ->
 
 
 handle_call({refresh, UpdatedSeq}, From, State = #{ indexed_seq := IndexedSeq }) when IndexedSeq < UpdatedSeq ->
-  _ = lager:info("refresh update_seq=~p, indexed_seq=~p~n", [UpdatedSeq, IndexedSeq]),
   #{ waiters := Waiters } = State,
   Waiters2 = Waiters ++ [{From, UpdatedSeq}],
   {noreply, State#{ waiters => Waiters2 }};
 handle_call({refresh, _UpdateSeq}, _From, State) ->
-  _ = lager:info("refresh ok: update_seq=~p~n", [_UpdateSeq]),
   {reply, ok, State};
 handle_call(_Msg, _From, State) ->
   {reply, bad_call, State}.
