@@ -152,11 +152,8 @@ do_query(FoldFun, Path, Start, End, Limit, UserFun, UserAcc, {Mod, ModState}) ->
   fun
     (#{ deleted := true }, _Acc) ->
       skip;
-    (#{ id := DocId, revtree := RevTree }, Acc) ->
-      _ = lager:info("list doc=~p~n", [DocId]),
-    {Rev, _, _} = barrel_revtree:winning_revision(RevTree),
+    (#{ id := DocId, rev := Rev }, Acc) ->
     {ok, Doc} = Mod:get_revision(DocId, Rev, Snapshot),
-      _ = lager:info("listed docid=~p~n, doc=~p", [DocId, Doc]),
     UserFun(Doc#{ <<"_rev">> => Rev }, Acc)
   end,
   Mod:FoldFun(Path, Start, End, Limit, WrapperFun, UserAcc, Snapshot).

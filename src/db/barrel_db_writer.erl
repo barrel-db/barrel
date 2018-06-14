@@ -129,7 +129,7 @@ merge_revtree(Record, #{ deleted := true } = DocInfo, From,  #{ db_ref := Db} = 
       NewRev = << (integer_to_binary(Gen+1))/binary, "-", NewRevHash/binary  >>,
       RevInfo = #{  id => NewRev,  parent => WinningRev, deleted => false },
       RevTree2 = barrel_revtree:add(RevInfo, RevTree),
-      DocInfo2 = DocInfo#{ deleted => false, revtree => RevTree2 },
+      DocInfo2 = DocInfo#{ rev => NewRev, deleted => false, revtree => RevTree2 },
       {NewSeq, State1} = update_state(State, 1),
       WriteResult = case add_revision(DocId, NewRev, Doc, State1) of
                       ok ->
@@ -167,7 +167,8 @@ merge_revtree(Record, DocInfo, From,  #{ db_ref := Db} = State) ->
                                         NewRev = << "1-", RevHash/binary  >>,
                                         RevInfo = #{  id => NewRev, parent => <<>> },
                                         RevTree1 = barrel_revtree:add(RevInfo, RevTree),
-                                        DocInfo1 = DocInfo#{ revtree => RevTree1 },
+                                        {WinningRev, _, _} = barrel_revtree:winning_revision(RevTree1),
+                                        DocInfo1 = DocInfo#{ rev => WinningRev, revtree => RevTree1 },
                                         {NewSeq, State1} = update_state(State, 1),
                                         {DocInfo1#{ seq := NewSeq }, NewRev, NewSeq, State1};
                                       <<"">> ->
@@ -179,12 +180,16 @@ merge_revtree(Record, DocInfo, From,  #{ db_ref := Db} = State) ->
                                             NewRev = << (integer_to_binary(Gen+1))/binary, "-", RevHash/binary  >>,
                                             RevInfo = #{  id => NewRev, parent => Rev, deleted => NewDeleted },
                                             RevTree2 = barrel_revtree:add(RevInfo, RevTree),
+                                            {WinningRev, _, _} = barrel_revtree:winning_revision(RevTree2),
                                             DocInfo1 = case NewDeleted of
                                                          false ->
-                                                           DocInfo#{ deleted => false, revtree => RevTree2 };
+                                                           DocInfo#{ rev => WinningRev,
+                                                                     deleted => false,
+                                                                     revtree => RevTree2 };
                                                          true ->
-                                                           DocInfo#{deleted => barrel_doc:is_deleted(RevTree2),
-                                                                    revtree => RevTree2 }
+                                                           DocInfo#{ rev => WinningRev,
+                                                                     deleted => barrel_doc:is_deleted(RevTree2),
+                                                                     revtree => RevTree2 }
                                                        end,
                                             {NewSeq, State1} = case maps:get(deleted, DocInfo1) of
                                                                  false -> update_state(State, 0);
@@ -242,9 +247,10 @@ merge_revtree_with_conflict(Record, DocInfo, From, #{ db_ref := Db} = State) ->
     Path
   ),
 
+  {WinningRev, _, _} = barrel_revtree:winning_revision(RevTree2),
   %% update DocInfo, we always find is the doc is deleted there
   %% since we could have only updated an internal branch
-  DocInfo2 = DocInfo#{ revtree => RevTree2, deleted => barrel_doc:is_deleted(RevTree2) },
+  DocInfo2 = DocInfo#{ rev => WinningRev, revtree => RevTree2, deleted => barrel_doc:is_deleted(RevTree2) },
 
   %% update current state and increase new seq if needed
   DocsCountInc = docs_count_inc(DocInfo2, DocInfo),

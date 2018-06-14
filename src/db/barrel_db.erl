@@ -509,8 +509,7 @@ do_fetch_doc(DocId, Options, {Mod, State}) ->
   case Mod:fetch_docinfo(DocId, State) of
     {ok, #{ deleted := true }} when UserRev =:= <<>> ->
       {error, not_found};
-    {ok, #{ revtree := RevTree}} ->
-      {WinningRev, _, _} = barrel_revtree:winning_revision(RevTree),
+    {ok, #{ rev := WinningRev, revtree := RevTree}} ->
       Rev = case UserRev of
               <<"">> -> WinningRev;
               _ -> UserRev
