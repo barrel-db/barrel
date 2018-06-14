@@ -47,7 +47,6 @@ loop(State) ->
 
 
 process_entries(Entries, State) ->
-  _ = lager:info("process entries=~p~n", [Entries]),
   dict:fold(
     fun(DocId, Ops, State1) ->
       case fetch_docinfo(DocId, State) of

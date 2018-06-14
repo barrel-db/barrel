@@ -428,7 +428,6 @@ code_change(_OldVsn, State, Data, _Extra) ->
 %% states
 
 writeable({call, From}, {write_changes, Entries}, Data) ->
-  lager:info("write changes=~p~n", [Entries]),
   _ = notify_writer(Entries, Data),
   {next_state, writing, Data#{ pending => []}, [{reply, From, ok}]};
 
