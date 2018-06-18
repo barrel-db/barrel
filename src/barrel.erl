@@ -66,7 +66,8 @@
   start_at => prop(),
   next_to => prop(),
   end_at => prop(),
-  previous_to => prop()
+  previous_to => prop(),
+  include_deleted => true | false
 }.
 
 -type changes_options() :: #{
