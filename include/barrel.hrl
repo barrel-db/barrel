@@ -10,9 +10,9 @@
 
 %% jobs limit
 -define(JOBS_QUEUE_LIMIT, 128).
--define(JOBS_QUEUE_TIMEOUT, 5000).
+-define(JOBS_QUEUE_TIMEOUT, 15000).
 -define(JOBS_IDLE_MIN_LIMIT, 32).
--define(JOBS_IDLE_MAX_LIMIT, 128).
+-define(JOBS_IDLE_MAX_LIMIT, 1000).
 
 -define(barrel(Name), {n, l, {barrel, Name}}).
 -define(store(Name), {n, l, {barrel_storage, Name}}).
