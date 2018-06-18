@@ -21,7 +21,7 @@
   split_path/1, split_path/2,
   diff/2,
   analyze/1,
-  do_query/8
+  do_query/9
 ]).
 
 -export([short/1]).
@@ -125,6 +125,7 @@ query(Barrel, Path0, Fun, Acc, Options) ->
   DecodedPath = decode_path(Path1, []),
   OrderBy = maps:get(order_by, Options, order_by_key),
   Limit = limit(Options),
+  IncludeDeleted = maps:get(include_deleted, Options, false),
   {Path, {StartInclusive, StartPath}, {EndInclusive, EndPath}} = case maps:find(equal_to, Options) of
                                  {ok, EqualTo} ->
                                    {DecodedPath ++ [EqualTo], {true, undefined}, {true, undefined}};
@@ -142,19 +143,26 @@ query(Barrel, Path0, Fun, Acc, Options) ->
                      end,
   Command = {query,
              FoldFun, ByFun(Path),
-             {StartInclusive, ByFun(StartPath)}, {EndInclusive, ByFun(EndPath)}, Limit, Fun, Acc},
+             {StartInclusive, ByFun(StartPath)}, {EndInclusive, ByFun(EndPath)}, Limit, IncludeDeleted, Fun, Acc},
   barrel_db:do_command(Barrel, Command).
 
 
-do_query(FoldFun, Path, Start, End, Limit, UserFun, UserAcc, {Mod, ModState}) ->
+do_query(FoldFun, Path, Start, End, Limit, IncludeDeleted, UserFun, UserAcc, {Mod, ModState}) ->
   Snapshot = Mod:get_snapshot(ModState),
   WrapperFun =
   fun
-    (#{ deleted := true }, _Acc) ->
+    (#{ id := DocId, rev := Rev, deleted := true }, Acc) when IncludeDeleted =:= true ->
+      case  Mod:get_revision(DocId, Rev, Snapshot) of
+        {ok, Doc} ->
+          UserFun(Doc#{ <<"_rev">> => Rev, <<"_deleted">> => true }, Acc);
+        {error, not_found} ->
+          UserFun(#{ <<"id">> => DocId, <<"_rev">> => Rev, <<"_deleted">> => true }, Acc)
+      end;
+    (#{ deleted := true }, _Acc)  ->
       skip;
     (#{ id := DocId, rev := Rev }, Acc) ->
-    {ok, Doc} = Mod:get_revision(DocId, Rev, Snapshot),
-    UserFun(Doc#{ <<"_rev">> => Rev }, Acc)
+      {ok, Doc} = Mod:get_revision(DocId, Rev, Snapshot),
+      UserFun(Doc#{ <<"_rev">> => Rev }, Acc)
   end,
   Mod:FoldFun(Path, Start, End, Limit, WrapperFun, UserAcc, Snapshot).
 

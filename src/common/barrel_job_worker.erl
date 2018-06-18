@@ -90,8 +90,8 @@ handle_requestd(Req, From, Name, State) ->
                       {Mod, get_local_doc, [DocId, ModState]};
                     {delete_local_doc, DocId} ->
                       {Mod, delete_local_doc, [DocId, ModState]};
-                    {query, FoldFun, Path, Start, End, Limit, UserFun, UserAcc} ->
-                      {barrel_index, do_query, [FoldFun, Path, Start, End, Limit, UserFun, UserAcc, {Mod, ModState}]}
+                    {query, FoldFun, Path, Start, End, Limit, IncludeDeleted, UserFun, UserAcc} ->
+                      {barrel_index, do_query, [FoldFun, Path, Start, End, Limit, IncludeDeleted, UserFun, UserAcc, {Mod, ModState}]}
                   end,
             (catch do_exec(MFA))
         end,
