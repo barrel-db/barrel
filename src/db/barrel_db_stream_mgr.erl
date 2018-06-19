@@ -57,7 +57,7 @@ init([]) ->
 
 %% subscribe to a databa
 
-handle_call({next, Stream, SubRef, LastSeq},  {FromPid, _Tag},
+handle_call({next, Stream, SubRef, LastSeq},  _From,
             State = #{ streams := Streams0, monitors := Monitors0}) ->
   case maps:find(Stream, Streams0) of
     {ok, Subs0} ->
@@ -65,7 +65,7 @@ handle_call({next, Stream, SubRef, LastSeq},  {FromPid, _Tag},
       Subs1 = lists:keyreplace(SubRef, 1, Subs0, {SubRef, Sub#{ since => LastSeq }}),
       Streams1 = Streams0#{ Stream => Subs1 },
       Monitors1 = maps:filter(fun
-                                (MRef, Pid) when Pid =:= FromPid ->
+                                (MRef, MStream) when MStream =:= {Stream, SubRef} ->
                                   erlang:demonitor(MRef, [flush]),
                                   false;
                                 (_, _) ->
@@ -103,7 +103,7 @@ handle_call({unsubscribe, Stream, Pid}, _From, State = #{ streams := Streams0 })
         [] ->
           {reply, ok, State};
         [{SubRef, Sub}] ->
-          #{ timer := T } = Sub,
+          #{ pid := Pid, timer := T } = Sub,
           _ = timer:cancel(T),
           Streams1 = case lists:keydelete(SubRef, 1, Subs) of
                        [] -> maps:remove(Stream, Streams0);
@@ -145,12 +145,16 @@ handle_info({trigger_fetch, Stream, SubRef}, State = #{ streams := Streams}) ->
 
 handle_down_agent(MonitorRef, Monitors, Streams) ->
   {{Stream, SubRef}, Monitors1} = maps:take(MonitorRef, Monitors),
-  SubStreams = maps:get(Stream, Streams),
-  case lists:keyfind(SubRef, 1, SubStreams) of
-    {_, #{pid := Pid, since := Since}} ->
-      _ = enqueue_stream(Stream, SubRef, Pid, Since),
-      Monitors1;
-    false ->
+  case maps:find(Stream, Streams) of
+    {ok, SubStreams} ->
+      case lists:keyfind(SubRef, 1, SubStreams) of
+        {_, #{pid := Pid, since := Since}} ->
+          _ = enqueue_stream(Stream, SubRef, Pid, Since),
+          Monitors1;
+        false ->
+          Monitors1
+      end;
+    error ->
       Monitors1
   end.
 
