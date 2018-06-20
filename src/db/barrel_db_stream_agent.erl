@@ -54,6 +54,14 @@ fetch_changes(#{barrel := Name } = Stream, SubRef, Subscriber, Since) ->
       ok = barrel_db_stream_mgr:next(Stream, SubRef, Since),
       _ = sbroker:async_ask_r(?db_stream_broker);
     {Mod, BState}  ->
+      Since1 = case Since of
+                 now ->
+                   {ok, UpdatedSeq} = barrel_db:updated_seq(Name),
+                   UpdatedSeq;
+                 _ ->
+                   Since
+               end,
+      _ = lager:info("fetch changes stream=~p since=~p~n", [Stream, Since1]),
       %%Snapshot = Mod:get_snapshot(BState),
       %%Snapshot = BState,
       WrapperFun =
@@ -76,6 +84,7 @@ fetch_changes(#{barrel := Name } = Stream, SubRef, Subscriber, Since) ->
             change_with_deleted(Change0, Deleted),
             DocId, Rev, Mod, BState, IncludeDoc
           ),
+          _ = lager:info("got a change stream=~p change=~p~n", [Stream, Change]),
           Acc1 = [Change | Acc0],
           if
             N >= 100 ->
@@ -84,15 +93,15 @@ fetch_changes(#{barrel := Name } = Stream, SubRef, Subscriber, Since) ->
               {ok,  {Acc1, erlang:max(Seq, LastSeq), N+1}}
           end
       end,
-      Acc0 = {[], Since, 0},
+      Acc0 = {[], Since1, 0},
       LastSeq = try
-                  fold_changes(Since, WrapperFun, Acc0, Stream, Subscriber, Mod, BState)
+                  fold_changes(Since1, WrapperFun, Acc0, Stream, Subscriber, Mod, BState)
                 catch
                   C:E ->
                     %% for now we ignore the errors. It's most probably a race condition and should be handled
                     %% before it's happening
                     _ = lager:debug("folding changes error: stream=~p, error=~p:~p", [Stream, C, E]),
-                    Since
+                    Since1
                 end,
       %% register last seq
       _ = barrel_db_stream_mgr:next(Stream, SubRef, LastSeq),
@@ -104,6 +113,7 @@ fetch_changes(#{barrel := Name } = Stream, SubRef, Subscriber, Since) ->
 send_changes([], _LastSeq, _Stream, _Subscriber) ->
   ok;
 send_changes(Changes, LastSeq, Stream, Subscriber) ->
+  _ = lager:info("send changes=~p lastseq=~p, stream=~p~n", [Changes, LastSeq, Stream]),
   Subscriber ! {changes, Stream, Changes, LastSeq},
   ok.
 

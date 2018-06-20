@@ -25,12 +25,14 @@
 ]).
 
 -export([
-  basic/1
+  basic/1,
+  since_now/1
 ]).
 
 all() ->
   [
-    basic
+    basic,
+    since_now
   ].
 
 init_per_suite(Config) ->
@@ -76,5 +78,49 @@ basic(_Config) ->
   ok = barrel:delete_barrel(BarrelId),
   ok.
 
-  
+since_now(_Config) ->
+  BarrelId = <<"testdb">>,
+  Batch = [
+    {create, #{ <<"id">> => <<"a">>, <<"k">> => <<"v">>}},
+    {create, #{ <<"id">> => <<"b">>, <<"k">> => <<"v2">>}}
+  ],
+  ok = barrel:create_barrel(BarrelId, #{}),
+  timer:sleep(100),
+  [{ok, <<"a">>, RevA },
+    {ok, <<"b">> ,RevB }] = barrel_db:write_changes(BarrelId, Batch),
+  timer:sleep(200),
+  Stream = #{ barrel => BarrelId, interval => 10},
+  ok = barrel_db_stream_mgr:subscribe(Stream, self(), now),
+  timer:sleep(100),
+  Batch1 = [
+    {create, #{ <<"id">> => <<"c">>, <<"k">> => <<"v3">>}}
+  ],
+  [{ok, <<"c">>, RevC }] = barrel_db:write_changes(BarrelId, Batch1),
+  timer:sleep(200),
+  receive
+    {changes, Stream, Changes, LastSeq} ->
+      3 = LastSeq,
+      [#{ <<"id">> := <<"c">>, <<"rev">> := RevC }] = Changes,
+      ok
+  after 5000 ->
+    erlang:error(timeout)
+  end,
+  ok = barrel_db_stream_mgr:unsubscribe(Stream, self()),
+  ok = barrel_db_stream_mgr:subscribe(Stream, self(), 0),
+  receive
+    {changes, Stream, Change1, LastSeq1} ->
+      3 = LastSeq1,
+      [#{ <<"id">> := <<"a">>, <<"rev">> := RevA },
+        #{ <<"id">> := <<"b">>, <<"rev">> := RevB },
+        #{ <<"id">> := <<"c">>, <<"rev">> := RevC }] = Change1,
+      ok
+  after 5000 ->
+    erlang:error(timeout)
+  end,
+  ok = barrel_db_stream_mgr:unsubscribe(Stream, self()),
+  timer:sleep(200),
+  ok = barrel:delete_barrel(BarrelId),
+  ok.
+
+
   
