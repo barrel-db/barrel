@@ -61,17 +61,21 @@ handle_call({next, Stream, SubRef, LastSeq},  _From,
             State = #{ streams := Streams0, monitors := Monitors0}) ->
   case maps:find(Stream, Streams0) of
     {ok, Subs0} ->
-      {_, Sub} = lists:keyfind(SubRef, 1, Subs0),
-      Subs1 = lists:keyreplace(SubRef, 1, Subs0, {SubRef, Sub#{ since => LastSeq }}),
-      Streams1 = Streams0#{ Stream => Subs1 },
-      Monitors1 = maps:filter(fun
-                                (MRef, MStream) when MStream =:= {Stream, SubRef} ->
-                                  erlang:demonitor(MRef, [flush]),
-                                  false;
-                                (_, _) ->
-                                  true
-                              end, Monitors0),
-      {reply, ok, State#{ streams => Streams1, monitors => Monitors1 }};
+      case lists:keyfind(SubRef, 1, Subs0) of
+        {_, Sub} ->
+          Subs1 = lists:keyreplace(SubRef, 1, Subs0, {SubRef, Sub#{ since => LastSeq }}),
+          Streams1 = Streams0#{ Stream => Subs1 },
+          Monitors1 = maps:filter(fun
+                                    (MRef, MStream) when MStream =:= {Stream, SubRef} ->
+                                      erlang:demonitor(MRef, [flush]),
+                                      false;
+                                    (_, _) ->
+                                      true
+                                  end, Monitors0),
+          {reply, ok, State#{ streams => Streams1, monitors => Monitors1 }};
+        false ->
+          {reply, ok, State}
+      end;
     error ->
       {reply, {error, unknown_stream}, State}
   end;
