@@ -93,7 +93,9 @@ update_state(Seq, _LastSeq, #{ parent := Parent} = State) ->
 process_changes(Changes, #{ mod := Mod, modstate := ModState, last_seq := LastSeq } = State) ->
   Worker =
     fun(Change) ->
-      #{ <<"id">> := DocId, <<"seq">> := Seq, <<"doc">> := Doc } = Change,
+      lager:error("got change=~p~n", [Change]),
+      #{ <<"id">> := DocId, <<"seq">> := BinSeq, <<"doc">> := Doc } = Change,
+      Seq = barrel_db_stream_agent:bin_to_seq(BinSeq),
       OldPaths = case Mod:get_ilog(DocId, ModState) of
                    {ok, Paths} -> Paths;
                    not_found -> []

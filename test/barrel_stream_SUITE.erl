@@ -66,7 +66,7 @@ basic(_Config) ->
   timer:sleep(200),
   receive
     {changes, Stream, Changes, LastSeq} ->
-      2 = LastSeq,
+      2 = barrel_db_stream_agent:bin_to_seq(LastSeq),
       [#{ <<"id">> := <<"a">>, <<"rev">> := RevA },
        #{ <<"id">> := <<"b">>, <<"rev">> := RevB }] = Changes,
       ok
@@ -99,7 +99,7 @@ since_now(_Config) ->
   timer:sleep(200),
   receive
     {changes, Stream, Changes, LastSeq} ->
-      3 = LastSeq,
+      3 = barrel_db_stream_agent:bin_to_seq(LastSeq),
       [#{ <<"id">> := <<"c">>, <<"rev">> := RevC }] = Changes,
       ok
   after 5000 ->
@@ -109,7 +109,7 @@ since_now(_Config) ->
   ok = barrel_db_stream_mgr:subscribe(Stream, self(), 0),
   receive
     {changes, Stream, Change1, LastSeq1} ->
-      3 = LastSeq1,
+      3 = barrel_db_stream_agent:bin_to_seq(LastSeq1),
       [#{ <<"id">> := <<"a">>, <<"rev">> := RevA },
         #{ <<"id">> := <<"b">>, <<"rev">> := RevB },
         #{ <<"id">> := <<"c">>, <<"rev">> := RevC }] = Change1,
@@ -122,5 +122,3 @@ since_now(_Config) ->
   ok = barrel:delete_barrel(BarrelId),
   ok.
 
-
-  

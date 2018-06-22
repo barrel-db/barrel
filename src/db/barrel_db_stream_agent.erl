@@ -25,6 +25,8 @@
   handle_info/2
 ]).
 
+-export([bin_to_seq/1]).
+
 
 -include("barrel.hrl").
 
@@ -59,11 +61,8 @@ fetch_changes(#{barrel := Name } = Stream, SubRef, Subscriber, Since) ->
                    {ok, UpdatedSeq} = barrel_db:updated_seq(Name),
                    UpdatedSeq;
                  _ ->
-                   Since
+                   bin_to_seq(Since)
                end,
-      _ = lager:info("fetch changes stream=~p since=~p~n", [Stream, Since1]),
-      %%Snapshot = Mod:get_snapshot(BState),
-      %%Snapshot = BState,
       WrapperFun =
       fun
         (DI, {Acc0, LastSeq, N}) ->
@@ -77,14 +76,13 @@ fetch_changes(#{barrel := Name } = Stream, SubRef, Subscriber, Since) ->
                       true -> barrel_revtree:history(Rev, RevTree)
                     end,
           Change0 = #{ <<"id">> => DocId,
-                       <<"seq">> => Seq,
+                       <<"seq">> => seq_to_bin(Seq, BState),
                        <<"rev">> => Rev,
                        <<"changes">> => Changes},
           Change = change_with_doc(
             change_with_deleted(Change0, Deleted),
             DocId, Rev, Mod, BState, IncludeDoc
           ),
-          _ = lager:info("got a change stream=~p change=~p~n", [Stream, Change]),
           Acc1 = [Change | Acc0],
           if
             N >= 100 ->
@@ -101,13 +99,29 @@ fetch_changes(#{barrel := Name } = Stream, SubRef, Subscriber, Since) ->
                     %% for now we ignore the errors. It's most probably a race condition and should be handled
                     %% before it's happening
                     _ = lager:debug("folding changes error: stream=~p, error=~p:~p", [Stream, C, E]),
-                    Since1
+                    seq_to_bin(Since1, BState)
                 end,
       %% register last seq
       _ = barrel_db_stream_mgr:next(Stream, SubRef, LastSeq),
       _ = sbroker:async_ask_r(?db_stream_broker),
       ok
   end.
+
+
+seq_to_bin(Seq, #{ id := Id }) ->
+  SeqBin = integer_to_binary(Seq),
+  Padding = << << $0 >> || _ <- lists:seq(1, 16 - size(SeqBin)) >>,
+  << Id/binary, "-", Padding/binary, SeqBin/binary >>.
+
+bin_to_seq(Seq) when is_integer(Seq) ->
+  Seq;
+bin_to_seq(Bin) when is_binary(Bin) ->
+  case binary:split(Bin, <<"-">>) of
+    [_NodeId, BinSeq] -> binary_to_integer(BinSeq);
+    [_] -> erlang:error(badarg)
+  end;
+bin_to_seq(_) ->
+  erlang:error(badarg).
 
 
 send_changes([], _LastSeq, _Stream, _Subscriber) ->
@@ -134,8 +148,9 @@ change_with_doc(Change, _, _, _, _, _) ->
 
 fold_changes(Since, WrapperFun, Acc, Stream, Subscriber, Mod, ModState) ->
   {Changes, LastSeq, _} = Mod:fold_changes(Since, WrapperFun, Acc, ModState),
-  send_changes(lists:reverse(Changes), LastSeq, Stream, Subscriber),
-  LastSeq.
+  LastSeqBin = seq_to_bin(LastSeq, ModState),
+  send_changes(lists:reverse(Changes), LastSeqBin, Stream, Subscriber),
+  LastSeqBin.
 
 
 

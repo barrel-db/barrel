@@ -64,6 +64,9 @@ uniqid(float)     -> <<Id:128>> = uuid:get_v4(), Id * 1.0;
 uniqid(_) -> error(badarg).
 
 
+
+
+
 to_hex([]) -> [];
 to_hex(Bin) when is_binary(Bin) ->
   << <<(to_digit(H)),(to_digit(L))>> || <<H:4,L:4>> <= Bin >>;

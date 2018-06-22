@@ -48,7 +48,7 @@ seq() ->
   erlang:unique_integer([monotonic, positive]) band 16#ffff.
 
 %%
-%% n.b. - unique_id_62/0 and friends pulled from riak
+%% n.b. - ≈/0 and friends pulled from riak
 %%
 
 %% @doc Convert an integer to its string representation in the given

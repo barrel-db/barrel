@@ -137,17 +137,23 @@ tabname(StoreName, DbId) ->
     barrel_lib:to_list(StoreName) ++ [$_|barrel_lib:to_list(DbId)]
   ).
 
+barrel_id() ->
+  barrel_lib:to_hex(uuid:get_v4()).
+
 init_barrel(StoreName, Name) ->
   Tab = tabname(StoreName, Name),
   case memstore:open(Tab, []) of
     ok ->
+      Id = barrel_id(),
       Barrel  = #{store => StoreName,
                   name => Name,
                   tab => Tab,
+                  id => Id,
                   indexed_seq => 0,
                   updated_seq => 0,
                   docs_count => 0 },
-      _ = memstore:write_batch(Tab, [{put, '$update_seq', 0},
+      _ = memstore:write_batch(Tab, [{put, 'id', Id},
+                                     {put, '$update_seq', 0},
                                      {put, 'indexed_seq', 0},
                                      {put, '$docs_count', 0}]),
       {ok, Barrel};
