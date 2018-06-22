@@ -127,7 +127,6 @@ bin_to_seq(_) ->
 send_changes([], _LastSeq, _Stream, _Subscriber) ->
   ok;
 send_changes(Changes, LastSeq, Stream, Subscriber) ->
-  _ = lager:info("send changes=~p lastseq=~p, stream=~p~n", [Changes, LastSeq, Stream]),
   Subscriber ! {changes, Stream, Changes, LastSeq},
   ok.
 

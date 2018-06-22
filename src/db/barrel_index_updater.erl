@@ -41,7 +41,7 @@ init([Parent, DbName, Mod, ModState, StartSeq]) ->
   Stream = #{ barrel => DbName, interval => Interval, include_doc => true},
   ok = barrel_db_stream_mgr:subscribe(Stream, self(), StartSeq),
 
-  _ = lager:info("subscribed stream=~p, since=~p", [Stream, StartSeq]),
+  _ = lager:info("index subscribed stream=~p, since=~p", [Stream, StartSeq]),
 
   {ok, #{parent => Parent,
          db_name => DbName,
@@ -93,7 +93,6 @@ update_state(Seq, _LastSeq, #{ parent := Parent} = State) ->
 process_changes(Changes, #{ mod := Mod, modstate := ModState, last_seq := LastSeq } = State) ->
   Worker =
     fun(Change) ->
-      lager:error("got change=~p~n", [Change]),
       #{ <<"id">> := DocId, <<"seq">> := BinSeq, <<"doc">> := Doc } = Change,
       Seq = barrel_db_stream_agent:bin_to_seq(BinSeq),
       OldPaths = case Mod:get_ilog(DocId, ModState) of
