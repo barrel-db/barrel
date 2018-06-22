@@ -25,7 +25,10 @@
   handle_info/2
 ]).
 
--export([bin_to_seq/1]).
+-export([
+  seq_to_bin/2,
+  bin_to_seq/1
+]).
 
 
 -include("barrel.hrl").
