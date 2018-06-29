@@ -119,7 +119,7 @@ short(S) when is_binary(S) -> S;
 short(S) -> S.
 
 query(Barrel, Path0, Fun, Acc, Options) ->
-  ok = barrel_index_actor:refresh(Barrel),
+  %%ok = barrel_index_actor:refresh(Barrel),
 
   Path1 = normalize_path(Path0),
   DecodedPath = decode_path(Path1, []),

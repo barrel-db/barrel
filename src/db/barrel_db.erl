@@ -141,21 +141,27 @@ do_command(Name, Req) ->
     {error, _} = Error ->
       Error;
     {Mod, ModState} ->
-      MFA = case Req of
-              {fetch_doc, DocId, Options} ->
-                {barrel_db, do_fetch_doc, [DocId, Options, {Mod, ModState}]};
-              {revsdiff, DocId, RevIds} ->
-                {barrel_db, do_revsdiff, [DocId, RevIds, {Mod, ModState}]};
-              {put_local_doc, DocId, Doc} ->
-                {Mod, put_local_doc, [DocId, Doc, ModState]};
-              {get_local_doc, DocId} ->
-                {Mod, get_local_doc, [DocId, ModState]};
-              {delete_local_doc, DocId} ->
-                {Mod, delete_local_doc, [DocId, ModState]};
-              {query, FoldFun, Path, Start, End, Limit, IncludeDeleted, UserFun, UserAcc} ->
-                {barrel_index, do_query, [FoldFun, Path, Start, End, Limit, IncludeDeleted, UserFun, UserAcc, {Mod, ModState}]}
-            end,
-      (catch barrel_lib:do_exec(MFA))
+      case is_updated(ModState) of
+        true ->
+          MFA = case Req of
+                  {fetch_doc, DocId, Options} ->
+                    {barrel_db, do_fetch_doc, [DocId, Options, {Mod, ModState}]};
+                  {revsdiff, DocId, RevIds} ->
+                    {barrel_db, do_revsdiff, [DocId, RevIds, {Mod, ModState}]};
+                  {put_local_doc, DocId, Doc} ->
+                    {Mod, put_local_doc, [DocId, Doc, ModState]};
+                  {get_local_doc, DocId} ->
+                    {Mod, get_local_doc, [DocId, ModState]};
+                  {delete_local_doc, DocId} ->
+                    {Mod, delete_local_doc, [DocId, ModState]};
+                  {query, FoldFun, Path, Start, End, Limit, IncludeDeleted, UserFun, UserAcc} ->
+                    {barrel_index, do_query, [FoldFun, Path, Start, End, Limit, IncludeDeleted, UserFun, UserAcc, {Mod, ModState}]}
+                end,
+          (catch barrel_lib:do_exec(MFA));
+        false ->
+          timer:sleep(100),
+          do_command(Name, Req)
+      end
   end.
 
 await_response(DbPid, Tag) ->
@@ -298,10 +304,10 @@ do_for_ref(DbRef, Fun) ->
             {ok, undefined} ->
               {error, db_not_found};
             {ok, Pid} ->
-              ok = barrel_index_actor:refresh(DbRef),
+              %ok = barrel_index_actor:refresh(DbRef),
               Fun(Pid);
             {error, {already_started, Pid}} ->
-              ok = barrel_index_actor:refresh(DbRef),
+              %ok = barrel_index_actor:refresh(DbRef),
               Fun(Pid);
             Err = {error, _} ->
               Err;
@@ -333,6 +339,12 @@ get_state(Name) ->
     Name,
     fun(DbPid) -> gen_statem:call(DbPid, get_state) end
   ).
+
+
+is_updated( #{ updated_seq := UpdatedSeq, indexed_seq := IndexedSeq}) when UpdatedSeq > IndexedSeq ->
+  false;
+is_updated(_) ->
+  true.
 
 updated_seq(DbPid) when is_pid(DbPid) ->
   try gen_statem:call(DbPid, updated_seq)
@@ -371,14 +383,14 @@ init([Name, create, Options]) ->
           barrel_pm:register_name(Name, self()),
           process_flag(trap_exit, true),
           {ok, Writer} = barrel_db_writer:start_link(Name, Mod, State),
-          {ok, Indexer} = barrel_index_actor:start_link(Name, self(), Mod, State),
+          %{ok, Indexer} = barrel_index_actor:start_link(Name, self(), Mod, State),
           proc_lib:init_ack({ok, self()}),
           Data = #{ store => Store,
                     name => Name,
                     mod => Mod,
                     state => State,
                     writer => Writer,
-                    indexer => Indexer,
+                    %indexer => Indexer,
                     pending => []},
           
           gen_statem:enter_loop(?MODULE, [], writeable, Data, {via, barrel_pm, Name});
@@ -396,14 +408,14 @@ init([Name, open, _Options]) ->
           barrel_pm:register_name(Name, self()),
           process_flag(trap_exit, true),
           {ok, Writer} = barrel_db_writer:start_link(Name, Mod, State),
-          {ok, Indexer} = barrel_index_actor:start_link(Name, self(), Mod, State),
+          %{ok, Indexer} = barrel_index_actor:start_link(Name, self(), Mod, State),
           proc_lib:init_ack({ok, self()}),
           Data = #{ store => Store,
                     name => Name,
                     mod => Mod,
                     state => State,
                     writer => Writer,
-                    indexer => Indexer,
+                    %indexer => Indexer,
                     pending => []},
           gen_statem:enter_loop(?MODULE, [], writeable, Data, {via, barrel_pm, Name});
         {Error, _} ->
@@ -476,9 +488,9 @@ handle_event({call, From}, delete, _State, #{ store := Store, name := Name }) ->
 handle_event(info, {'EXIT', Pid, Reason}, _State, #{ db_ref := DbRef, writer := Pid } = Data) ->
   _ = lager:error("writer exitded. db=~p reason=~p~n", [DbRef, Reason]),
   {stop, normal, Data#{writer => nil}};
-handle_event(info, {'EXIT', Pid, Reason}, _State, #{ db_ref := DbRef, indexer := Pid } = Data) ->
-  _ = lager:error("indexer exitded. db=~p reason=~p~n", [DbRef, Reason]),
-  {stop, normal, Data#{writer => nil}};
+%handle_event(info, {'EXIT', Pid, Reason}, _State, #{ db_ref := DbRef, indexer := Pid } = Data) ->
+%  _ = lager:error("indexer exitded. db=~p reason=~p~n", [DbRef, Reason]),
+%  {stop, normal, Data#{writer => nil}};
 handle_event(_EventType, Event, _State, #{ db_ref := DbRef } = Data) ->
   _ = lager:warning("db got unknown name=~p, event=~p", [DbRef, Event]),
   {keep_state, Data}.
@@ -569,4 +581,3 @@ do_revsdiff(DocId, RevIds, {Mod, State}) ->
     Error ->
       Error
   end.
-  

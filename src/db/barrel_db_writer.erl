@@ -47,26 +47,31 @@ loop(State) ->
 
 
 process_entries(Entries, State) ->
-  dict:fold(
-    fun(DocId, Ops, State1) ->
-      case fetch_docinfo(DocId, State) of
+  {ToIndex, NewState} = dict:fold(
+    fun(DocId, Ops, {ToIndex1, State1}) ->
+      case fetch_docinfo(DocId, State1) of
         {ok, DI} ->
-          merge_revtrees(Ops, DI, State1);
+          {DI2, State2} = merge_revtrees(Ops, DI, State1),
+          ToIndex2 = [{DI2, DI} | ToIndex1],
+          {ToIndex2, State2};
         {error, not_found} ->
           DI = new_docinfo(DocId),
-          merge_revtrees(Ops, DI, State1);
+          {DI2, State2} = merge_revtrees(Ops, DI, State1),
+          ToIndex2 = [{DI2, DI} | ToIndex1],
+          {ToIndex2, State2};
         Error ->
           _ = lager:error(
             "error reading doc db=~p id=~p error=~p~n",
-            [maps:get(db_ref, State), DocId, Error]
+            [maps:get(db_ref, State1), DocId, Error]
           ),
           _ = [reply(From, {error, DocId, read_error}) || #write_op{from=From} <- Ops],
-          State1
+          {ToIndex1, State1}
       end
     end,
-    State,
+    {[], State},
     Entries
-  ).
+  ),
+  process_diffs(lists:reverse(ToIndex), new_batch(NewState), NewState).
 
 make_op(Type, Record, From) ->
   #write_op{type=Type, doc=Record, from=From}.
@@ -84,9 +89,56 @@ merge_fun(purge) ->
 
 new_docinfo(DocId) ->
   #{id => DocId,
+    rev => <<"">>,
     seq => 0,
     deleted => false,
     revtree => barrel_revtree:new()}.
+
+new_batch(#{ db_mod := Mod, db_state := ModState }) ->  Mod:get_batch(ModState).
+
+commit_batch(Batch, #{ db_mod := Mod, db_state := ModState }) ->
+  Mod:commit(Batch, ModState).
+
+process_diffs([{#{ rev := Rev}, #{rev := Rev }} | Rest], Batch, State) ->
+  process_diffs(Rest, Batch, State);
+process_diffs([{#{ id := DocId, rev := NewRev }, #{ rev := OldRev}} | Rest], Batch, State) ->
+  NewDoc = fetch_revision(DocId, NewRev, State),
+  OldDoc = fetch_revision(DocId, OldRev, State),
+  {Added, Removed} = barrel_index:diff(NewDoc, OldDoc),
+  ok = insert(Added, DocId, Batch),
+  ok = unindex(Removed, DocId, Batch),
+  process_diffs(Rest, Batch, State);
+process_diffs([], Batch, #{ db_pid := DbPid, db_state := DbState } = State) ->
+  commit_batch(Batch, State),
+  #{ updated_seq := UpdatedSeq} =  DbState,
+  NewState = State#{ db_state => DbState#{ indexed_seq => UpdatedSeq}},
+  barrel_db:set_last_indexed_seq(DbPid, UpdatedSeq),
+  NewState.
+
+insert([], _DocId, _Batch) ->
+  ok;
+insert([Path | Rest], DocId, Batch) ->
+  _ = insert(Path, DocId, fwd, Batch),
+  _ = insert(lists:reverse(Path), DocId, fwd, Batch),
+  insert(Rest, DocId, Batch).
+
+unindex([], _DocId, _Batch) ->
+  ok;
+unindex([Path | Rest], DocId, Batch) ->
+  _ = unindex(Path, DocId, fwd, Batch),
+  _ = unindex(lists:reverse(Path), DocId, fwd, Batch),
+  unindex(Rest, DocId, Batch).
+
+
+insert(Path, DocId, Type, #{ mod := Mod } = Batch) ->
+  Mod:insert(Path, DocId, Type, Batch).
+
+unindex(Path, DocId, Type, #{ mod := Mod } = Batch) ->
+  Mod:unindex(Path, DocId, Type, Batch).
+
+
+
+
 
 merge_revtrees([Op | Rest], DocInfo, State) ->
   #{ seq := Seq } = DocInfo,
@@ -113,9 +165,9 @@ merge_revtrees([Op | Rest], DocInfo, State) ->
       merge_revtrees(Rest, DocInfo2, State2)
 
   end;
-merge_revtrees([], _, State) ->
+merge_revtrees([], DocInfo, State) ->
   update_db_state(State),
-  State.
+  {DocInfo, State}.
 
 
 merge_revtree(Record, #{ deleted := true } = DocInfo, From,  #{ db_ref := Db} = State) ->
@@ -214,7 +266,7 @@ merge_revtree(Record, DocInfo, From,  #{ db_ref := Db} = State) ->
       case WriteResult of
         ok ->
           reply(From, {ok, DocId, Rev2}),
-          update_db_state(NewState),
+          update_db_state(NewState#{ indexed_seq => Seq }),
           barrel_event:notify(Db, db_updated),
           {DocInfo2, NewState};
         WriteError  ->
@@ -322,6 +374,13 @@ update_state(#{ db_state := DbState } = State, Inc) ->
   NewState = State#{ db_state => DbState#{updated_seq => NewSeq,
                                docs_count => DocsCount2} },
   {NewSeq, NewState}.
+
+fetch_revision(_, <<"">>, _) -> #{};
+fetch_revision(DocId, RevId, #{ db_mod := Mod, db_state := DbState }) ->
+  case Mod:get_revision(DocId, RevId, DbState) of
+    {ok, NewDoc} -> NewDoc;
+    _ -> #{}
+  end.
 
 add_revision(DocId, RevId, Body, #{ db_mod := Mod, db_state := DbState }) ->
   Mod:add_revision(DocId, RevId, Body, DbState).
