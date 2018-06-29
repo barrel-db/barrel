@@ -21,6 +21,8 @@
 
 -export([group_by/2]).
 
+-export([do_exec/1]).
+
 %% imported from attic
 %% TODO: check if we really need such functions
 -export([
@@ -207,6 +209,14 @@ group_by(L, F) ->
     [{F(X), X} || X <- L]
   ).
 
+do_exec({F, A}) ->
+  erlang:apply(F, A);
+do_exec({M, F, A}) ->
+  erlang:apply(M, F, A);
+do_exec(F) when is_function(F) ->
+  F();
+do_exec(_) ->
+  erlang:error(badarg).
 
 
 -ifdef(TEST).

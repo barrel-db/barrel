@@ -33,7 +33,7 @@
 
 -export([
   write_changes_async/2,  write_changes_async/3,
-  await_response/1
+  await_response/1, await_response/2
 ]).
 
 -export([
@@ -134,25 +134,28 @@ get_local_doc(DbRef, DocId) ->
 delete_local_doc(DbRef, DocId) ->
   do_command(DbRef, {delete_local_doc, DocId}).
 
-do_command({Name, Node}, Cmd) ->
-  Tag = make_ref(),
-  From = {self(), Tag},
-  case sbroker:ask({?jobs_broker, Node}) of
-    {go, _Ref, WorkerPid, _RelativeTime, _SojournTime} ->
-      barrel_job_worker:handle_request(WorkerPid, From, Cmd, Name),
-      await_response(WorkerPid, Tag);
-    {drop, _N} ->
-      {error, dropped}
-  end;
-do_command(Name, Cmd) ->
-  Tag = make_ref(),
-  From = {self(), Tag},
-  case sbroker:ask(?jobs_broker) of
-    {go, _Ref, WorkerPid, _RelativeTime, _SojournTime} ->
-      barrel_job_worker:handle_request(WorkerPid, From, Cmd, Name),
-      await_response(WorkerPid, Tag);
-    {drop, _N} ->
-      {error, dropped}
+do_command({Name, Node}, Req) ->
+  rpc:call(Node, barrel_db, do_command, [Name, Req]);
+do_command(Name, Req) ->
+  case get_state(Name) of
+    {error, _} = Error ->
+      Error;
+    {Mod, ModState} ->
+      MFA = case Req of
+              {fetch_doc, DocId, Options} ->
+                {barrel_db, do_fetch_doc, [DocId, Options, {Mod, ModState}]};
+              {revsdiff, DocId, RevIds} ->
+                {barrel_db, do_revsdiff, [DocId, RevIds, {Mod, ModState}]};
+              {put_local_doc, DocId, Doc} ->
+                {Mod, put_local_doc, [DocId, Doc, ModState]};
+              {get_local_doc, DocId} ->
+                {Mod, get_local_doc, [DocId, ModState]};
+              {delete_local_doc, DocId} ->
+                {Mod, delete_local_doc, [DocId, ModState]};
+              {query, FoldFun, Path, Start, End, Limit, IncludeDeleted, UserFun, UserAcc} ->
+                {barrel_index, do_query, [FoldFun, Path, Start, End, Limit, IncludeDeleted, UserFun, UserAcc, {Mod, ModState}]}
+            end,
+      (catch barrel_lib:do_exec(MFA))
   end.
 
 await_response(DbPid, Tag) ->
@@ -370,14 +373,12 @@ init([Name, create, Options]) ->
           {ok, Writer} = barrel_db_writer:start_link(Name, Mod, State),
           {ok, Indexer} = barrel_index_actor:start_link(Name, self(), Mod, State),
           proc_lib:init_ack({ok, self()}),
-          BatchSize = application:get_env(barrel, write_batch_size, ?WRITE_BATCH_SIZE),
           Data = #{ store => Store,
                     name => Name,
                     mod => Mod,
                     state => State,
                     writer => Writer,
                     indexer => Indexer,
-                    write_batch_size => BatchSize,
                     pending => queue:new()},
           
           gen_statem:enter_loop(?MODULE, [], writeable, Data, {via, barrel_pm, Name});
@@ -397,14 +398,12 @@ init([Name, open, _Options]) ->
           {ok, Writer} = barrel_db_writer:start_link(Name, Mod, State),
           {ok, Indexer} = barrel_index_actor:start_link(Name, self(), Mod, State),
           proc_lib:init_ack({ok, self()}),
-          BatchSize = application:get_env(barrel, write_batch_size, ?WRITE_BATCH_SIZE),
           Data = #{ store => Store,
                     name => Name,
                     mod => Mod,
                     state => State,
                     writer => Writer,
                     indexer => Indexer,
-                    write_batch_size => BatchSize,
                     pending => queue:new()},
           gen_statem:enter_loop(?MODULE, [], writeable, Data, {via, barrel_pm, Name});
         {Error, _} ->
@@ -430,7 +429,7 @@ code_change(_OldVsn, State, Data, _Extra) ->
 
 writeable({call, From}, {write_changes, Entries}, Data) ->
   _ = notify_writer(Entries, Data),
-  {next_state, writing, Data#{ pending => queue:new()}, [{reply, From, ok}]};
+  {next_state, writing, Data#{ pending => []}, [{reply, From, ok}]};
 
 writeable(info, {set_last_indexed_seq, Seq}, #{ mod := Mod, state := State0 } = Data) ->
   State1 = State0#{ indexed_seq => Seq },
@@ -443,38 +442,26 @@ writeable(EventType, Event, Data) ->
   handle_event(EventType, Event, writeable, Data).
 
 writing({call, From}, {write_changes, Entries}, #{ pending := Pending } = Data) ->
-  Pending2 = queue:in(Entries, Pending),
+  Pending2 = Pending ++ Entries,
   {keep_state, Data#{ pending => Pending2}, [{reply, From, ok}]};
 writing(info, {set_last_indexed_seq, Seq}, #{ mod := Mod, state := State0 } = Data) ->
   State1 = State0#{ indexed_seq => Seq },
   ok = Mod:save_state(State1),
   {keep_state, Data#{ state => State1}};
-writing(info, {set_state, State}, #{ mod := Mod, pending := Pending, write_batch_size := BatchSize } = Data) ->
+writing(info, {set_state, State}, #{ mod := Mod, pending := Pending } = Data) ->
   ok = Mod:save_state(State),
   ok = maybe_notify_changes(State, Data),
-  case maybe_write(Pending, BatchSize, []) of
-    {ok, Pending2, Batch} ->
-      NewData = Data#{ state => State,  pending => Pending2 },
-      _ = notify_writer(Batch, NewData),
-      {keep_state, NewData};
-    false ->
+  case Pending of
+    [] ->
       NewData = Data#{ state => State },
-      {next_state, writeable, NewData}
+      {next_state, writeable, NewData};
+    _ ->
+      NewData = Data#{ state => State,  pending => [] },
+      _ = notify_writer(Pending, NewData),
+      {keep_state, NewData}
   end;
 writing(EventType, Event, Data) ->
   handle_event(EventType, Event, writing, Data).
-
-maybe_write(Pending, BatchSize, Acc) when length(Acc) < BatchSize ->
-  case queue:out(Pending) of
-    {{value, Entries}, Pending2} ->
-      maybe_write(Pending2, BatchSize, Acc ++ Entries);
-    {empty, Pending2} when Acc =/= [] ->
-      {ok, Pending2, Acc};
-    {empty, _Pending2} ->
-      false
-  end;
-maybe_write(Pending, _BatchSize, Acc) ->
-  {ok, Pending, Acc}.
 
 handle_event({call, From}, infos, _State, #{ state := State } = Data) ->
   {keep_state, Data, [{reply, From, State}]};
