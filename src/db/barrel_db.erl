@@ -379,7 +379,7 @@ init([Name, create, Options]) ->
                     state => State,
                     writer => Writer,
                     indexer => Indexer,
-                    pending => queue:new()},
+                    pending => []},
           
           gen_statem:enter_loop(?MODULE, [], writeable, Data, {via, barrel_pm, Name});
         {Error, _} ->
@@ -404,7 +404,7 @@ init([Name, open, _Options]) ->
                     state => State,
                     writer => Writer,
                     indexer => Indexer,
-                    pending => queue:new()},
+                    pending => []},
           gen_statem:enter_loop(?MODULE, [], writeable, Data, {via, barrel_pm, Name});
         {Error, _} ->
           proc_lib:init_ack({error, Error}),
