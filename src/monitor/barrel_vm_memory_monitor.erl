@@ -316,10 +316,10 @@ get_process_memory_using_strategy(erlang, _State) ->
 get_total_memory_from_os() ->
   try
     get_total_memory(os:type())
-  catch _:Error:Stacktrace ->
+  catch _:Error ->
     _ = lager:warning(
-      "Failed to get total system memory: ~n~p~n~p~n",
-      [Error, Stacktrace]),
+      "Failed to get total system memory: ~n~p~n~n",
+      [Error]),
     unknown
   end.
 
