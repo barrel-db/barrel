@@ -78,15 +78,6 @@ init([]) ->
              type => worker,
              module => [barrel_statistics]
            },
-           
-           
-           %% main jobs supervisor
-           #{id => barrel_jobs_sup,
-             start => {barrel_jobs_sup, start_link, []},
-             restart => permanent,
-             shutdown => infinity,
-             type => supervisor,
-             modules => [barrel_jobs_sup]},
 
            %% barrel event server
            #{id => barrel_event,
@@ -98,8 +89,8 @@ init([]) ->
            },
 
            %% stores supervisor
-           #{id => barrel_store_sup,
-             start => {barrel_store_sup, start_link, []},
+           #{id => barrel_store_provider_sup,
+             start => {barrel_store_provider_sup, start_link, []},
              restart => permanent,
              shutdown => infinity,
              type => supervisor,

@@ -155,10 +155,20 @@ doc_without_meta(Doc) ->
     Doc
   ).
 
+make_record(Doc0 = #{ <<"id">> := Id = << ?LOCAL_DOC_PREFIX, _/binary >> }) ->
+  Deleted = maps:get(<<"deleted">>, Doc0, false),
+  Rev = maps:get(<<"_rev">>, Doc0, <<>>),
+  Doc1 = doc_without_meta(Doc0),
+  #{id => Id,
+    ref => erlang:make_ref(),
+    deleted => Deleted,
+    revs => [Rev],
+    doc => Doc1};
 make_record(#{ <<"id">> := Id, <<"doc">> := Doc0, <<"history">> := History }) ->
   Deleted = maps:get(<<"deleted">>, Doc0, false),
   Doc1 = doc_without_meta(Doc0),
   #{id => Id,
+    ref => erlang:make_ref(),
     revs => History,
     deleted => Deleted,
     doc => Doc1};
@@ -172,11 +182,19 @@ make_record(Doc0) ->
        end,
   Doc1 = doc_without_meta(Doc0),
   Hash = revision_hash(Doc1, Rev, Deleted),
+  Revs = case Rev of
+           <<"">> -> [<< "1-", Hash/binary>> ];
+           _ ->
+             {Gen, _}  = barrel_doc:parse_revision(Rev),
+             [<< (integer_to_binary(Gen +1))/binary, "-", Hash/binary >>, Rev]
+         end,
   #{id => Id,
-    revs => [Rev],
+    ref => erlang:make_ref(),
+    revs => Revs,
     deleted => Deleted,
     hash => Hash,
     doc => Doc1}.
+
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
 

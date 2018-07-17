@@ -15,23 +15,26 @@
 -module(barrel_storage).
 -author("benoitc").
 
--export([
-  start_link/3,
-  has_barrel/2,
-  create_barrel/3,
-  delete_barrel/2,
-  open_barrel/2,
-  find_barrel/1,
-  get_default/0,
-  all_stores/0,
-  close_barrel/2
-]).
+%% barrel API
 
+%% doc api
 -export([
-  init/1,
-  handle_call/3,
-  handle_cast/2,
-  terminate/2
+  docs_count/1,
+  del_docs_count/1,
+  updated_seq/1,
+  get_doc_infos/2,
+  get_revision/3,
+  write_docs_infos/4,
+  write_revision/4,
+  commit/1,
+  fold_changes/5,
+  fold_docs/4,
+  indexed_seq/1,
+  set_indexed_seq/2,
+  get_local_doc/2,
+  drop_barrel/1,
+  close_barrel/1,
+  terminate_barrel/1
 ]).
 
 
@@ -42,7 +45,59 @@
 -include_lib("stdlib/include/ms_transform.hrl").
 
 
+docs_count(#{ engine := {Mod, State} }) ->
+  Mod:docs_count(State).
 
+del_docs_count(#{ engine := {Mod, State} }) ->
+  Mod:del_docs_count(State).
+
+updated_seq(#{ engine := {Mod, State} }) ->
+  Mod:updated_seq(State).
+
+indexed_seq(#{ engine := {Mod, State} }) ->
+  Mod:indexed_seq(State).
+
+get_local_doc(#{ engine := {Mod, State} }, DocId) ->
+  Mod:get_local_doc(State, DocId).
+
+get_doc_infos(#{ engine := {Mod, State} }, DocId) ->
+  Mod:get_doc_infos(DocId, State).
+
+get_revision(_, _, <<"">>) -> #{};
+get_revision(#{ engine := {Mod, State} }, DocId, Rev) ->
+  Mod:get_revision(DocId, Rev, State).
+
+
+write_revision(#{ engine := {Mod, State} }, DocId, Rev, Body) ->
+  Mod:write_revision(DocId, Rev, Body, State).
+
+write_docs_infos(#{ engine := {Mod, State} } = Db, DIPairs, LocalDocs, PurgedIdsRevs) ->
+  {ok, NState} = Mod:write_docs_infos(DIPairs, LocalDocs, PurgedIdsRevs, State),
+  {ok, Db#{ engine => {Mod, NState}}}.
+
+commit(#{ engine := {Mod, State} } = Db) ->
+  NState = Mod:commit(State),
+  Db#{ engine => {Mod, NState} }.
+
+set_indexed_seq(#{ engine := {Mod, State} } = Db, Seq) ->
+  {ok, NState} =  Mod:set_indexed_seq(Seq, State),
+  Db#{ engine => {Mod, NState}}.
+
+
+fold_docs(#{ engine := {Mod, State} }, Fun, Acc, Options) ->
+  Mod:fold_docs(Fun, Acc, Options, State).
+
+fold_changes(#{ engine := {Mod, State} }, Since, Fun, Acc, Options) ->
+  Mod:fold_changes(Since, Fun, Acc, Options, State).
+
+drop_barrel(#{ engine := {Mod, State} }) ->
+  Mod:drop_barrel(State).
+
+close_barrel(#{ engine := {Mod, State} }) ->
+  Mod:close_barrel(State).
+
+terminate_barrel(#{ engine := {Mod, State} }) ->
+  Mod:terminate_barrel(State).
 
 default_dir() ->
   filename:join([?DATA_DIR, node()]).
@@ -52,129 +107,3 @@ data_dir() ->
   Dir = application:get_env(barrel, data_dir, default_dir()),
   _ = filelib:ensure_dir(filename:join([".", Dir, "dummy"])),
   Dir.
-
-has_barrel(Store, Name) ->
-  gen_server:call(?via_store(Store), {has_barrel, Name}).
-
-create_barrel(Store, Name, Options) ->
-  gen_server:call(?via_store(Store), {create_barrel, Name, Options}).
-
-delete_barrel(Store, Name) ->
-  gen_server:call(?via_store(Store), {delete_barrel, Name}).
-
-close_barrel(Store, Name) ->
-  gen_server:call(?via_store(Store), {close_barrel, Name}).
-
-open_barrel(Store, Name) ->
-  gen_server:call(?via_store(Store), {open_barrel, Name}).
-
-
-get_default() ->
-  get_default_1(barrel_store_sup:all_stores()).
-
-get_default_1([]) -> {error, no_stores};
-get_default_1(Stores) ->
-  case lists:member(default, Stores) of
-    true -> default;
-    false ->
-      [Default | _] = Stores,
-      Default
-  end.
-  
-
-find_barrel(Name) ->
-  fold_stores(
-    fun ({Store, _Pid}, Acc) ->
-      case barrel_storage:has_barrel(Store, Name) of
-        true ->
-          {stop, {ok, Store}};
-        false ->
-          {ok, Acc}
-      end
-    end,
-    error
-  ).
-
-all_stores() ->
-  fold_stores(
-    fun({Name, _}, Acc) -> {ok, [Name | Acc]} end,
-    []
-  ).
-
-
--spec fold_stores(fun(({term(), pid()}, any()) -> {ok, any()} | {stop, any()}), any()) -> any().
-fold_stores(Fun, Acc) ->
-  Res =  gproc:select({l,n}, [{{{n, l, {barrel_storage, '_'}}, '_','_'},[],['$_'] }]),
-  fold_stores_1(Res, Fun, Acc).
-
-fold_stores_1([{{n, l, {barrel_storage, Name}}, Pid, _} | Rest], Fun, Acc0) ->
-  case Fun({Name, Pid}, Acc0) of
-    {ok, Acc1} -> fold_stores_1(Rest, Fun, Acc1);
-    {stop, StopAcc} -> StopAcc
-  end;
-fold_stores_1([], _Fun, Acc) ->
-  Acc.
-
-%% start a storage
-start_link(Name, Mod, Options) ->
-  proc_lib:start_link(?MODULE, init, [[Name, Mod, Options]]).
-
-
-init([Name, Mod, Options]) ->
-  case init_storage(Name, Mod, Options) of
-    {ok, ModState} ->
-      process_flag(trap_exit, true),
-      %% register the store and return
-      gproc:register_name(?store(Name), self()),
-      proc_lib:init_ack({ok, self()}),
-      %% enter in  the storage process loop
-      State = #{
-        name => Name,
-        mod => Mod,
-        modstate => ModState
-      },
-      gen_server:enter_loop(?MODULE, [], State);
-    Error ->
-      _ = lager:error("error while initializing storage ~p~n", [Name]),
-      erlang:error(Error)
-  end.
-
-handle_call({has_barrel, Name}, _From, #{ mod := Mod, modstate := ModState} = State) ->
-  Reply = try_exec(Mod, has_barrel, [Name, ModState]),
-  {reply, Reply, State};
-
-handle_call({create_barrel, Name, Options}, _From, #{ mod := Mod, modstate := ModState} = State) ->
-  {Reply, NewModState} = try_exec(Mod, create_barrel, [Name, Options, ModState]),
-  {reply, {Reply, Mod}, State#{ modstate => NewModState}};
-
-handle_call({open_barrel, Name}, _From, #{ mod := Mod, modstate := ModState} = State) ->
-  Reply = try_exec(Mod, open_barrel, [Name, ModState]),
-  {reply, {Reply, Mod}, State};
-
-handle_call({delete_barrel, Name}, _From, #{ mod := Mod, modstate := ModState} = State) ->
-  {Reply, NewModState} = try_exec(Mod, delete_barrel, [Name, ModState]),
-  {reply, Reply, State#{ modstate => NewModState}};
-handle_call({close_barrel, Name}, _From, #{  mod := Mod, modstate := ModState} = State) ->
-  {Reply, NewModState} = try_exec(Mod, close_barrel, [Name, ModState]),
-  {reply, Reply, State#{ modstate => NewModState}};
-
-handle_call(_Msg, _From, State) ->
-  {reply, bad_call, State}.
-
-handle_cast(_Msg, State) ->
-  {noreply, State}.
-
-terminate(Reason, #{ mod := Mod, modstate := ModState}) ->
-  Mod:terminate(Reason, ModState).
-
-init_storage(Name, Mod, Options) ->
-  try Mod:init(Name, Options)
-  catch
-    error:Error -> Error
-  end.
-
-try_exec(M, F, A) ->
-  try erlang:apply(M, F, A)
-  catch
-    error:Error -> Error
-  end.

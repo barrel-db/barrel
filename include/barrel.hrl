@@ -19,6 +19,9 @@
 -define(via_store(Name), {via, gproc, {n, l, {barrel_storage, Name}}}).
 
 
+-define(store_provider(Name), {n, l, {barrel_store_provider, Name}}).
+
+
 -define(index(Name), {n, l, {barrel_index, Name}}).
 
 -define(STREAMS, barrel_db_streams).
@@ -29,6 +32,8 @@
   from :: {pid(), reference()}
 }).
 
+
+-define(LOCAL_DOC_PREFIX, "_local").
 
 
 -define(MIN_ITEM_COUNT, 100).
@@ -44,3 +49,6 @@
 -define(db_reader_pool(Name), {p, l, {barrel_db_reader_pool, Name}}).
 -define(db_reader_sup(Name), {n, l, {barrel_db_reader_sup, Name}}).
 -define(db_reader(Name, Id), {n, l, {barrel_db_reader, {Name, Id}}}).
+
+
+-define(BARREL_CALL(From, Req), {'$BARREL_CALL', From, Req}).

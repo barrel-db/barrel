@@ -11,13 +11,13 @@
 %% WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 %% License for the specific language governing permissions and limitations under
 %% the License.
--module(barrel_store_sup).
+-module(barrel_store_provider_sup).
 -behaviour(supervisor).
 -author("benoitc").
 
 %% API
 -export([
-  start_store/3,
+  start_store/3, start_store/4,
   stop_store/1,
   all_stores/0
 ]).
@@ -27,8 +27,11 @@
 %% supervisor callback
 -export([init/1]).
 
-start_store(Name, Mod, Options) ->
-  Spec = store_spec(Name, Mod, Options),
+start_store(Name, Mod, Args) ->
+  start_store(Name, Mod, Mod, Args).
+
+start_store(Name, Mod, IMod, Args) ->
+  Spec = store_spec(Name, Mod, IMod, Args),
   supervisor:start_child(?MODULE, Spec).
 
 stop_store(Name) ->
@@ -42,6 +45,7 @@ stop_store(Name) ->
 all_stores() ->
   [Id || {Id, _Child, _Type, _Modules} <- supervisor:which_children(?MODULE)].
 
+
 start_link() ->
   supervisor:start_link({local, ?MODULE}, ?MODULE, []).
 
@@ -49,7 +53,10 @@ init([]) ->
   Stores = application:get_env(barrel, stores, []),
   _ = empty_stores_warning(Stores),
   Specs = lists:map(
-    fun({Name, Mod, Options}) -> store_spec(Name, Mod, Options) end,
+    fun
+      ({Name, Mod, Args}) -> store_spec(Name, Mod, Mod, Args);
+      ({Name, Mod, IMod, Args}) -> store_spec(Name, Mod, IMod, Args)
+    end,
     Stores
   ),
   SupFlags = #{strategy => one_for_one,
@@ -57,16 +64,16 @@ init([]) ->
                period => 10},
   {ok, {SupFlags, Specs}}.
 
-store_spec(Name, Mod, Options) ->
+store_spec(Name, Mod, IMod, Args) ->
   #{id => Name,
-    start => {barrel_storage, start_link, [Name, Mod, Options]},
+    start => {barrel_store_provider, start_link, [Name, Mod, IMod, Args]},
     restart => permanent,
     shutdown => 5000,
     type => worker,
     modules => [Mod]}.
 
 empty_stores_warning([]) ->
-  _ = lager:warning("no storage setup.~n", []),
+  _ = lager:notice("no storage setup.~n", []),
   ok;
 empty_stores_warning(_) ->
   ok.

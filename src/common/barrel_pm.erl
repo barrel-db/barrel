@@ -25,8 +25,6 @@
 -include("barrel.hrl").
 
 
-whereis_name({Name, Node}) ->
-  rpc:call(Node, gproc, whereis_name, [?barrel(Name)]);
 whereis_name(Name) ->
   gproc:whereis_name(?barrel(Name)).
 
@@ -35,6 +33,5 @@ register_name(Name, Pid) ->
 
 unregister_name(Name) ->
   gproc:unregister_name(?barrel(Name)).
-
 
 

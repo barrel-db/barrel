@@ -20,7 +20,7 @@
 %% API
 -export([
   start_link/0,
-  start_db/1, start_db/3,
+  start_db/1, start_db/2,
   stop_db/1
 ]).
 
@@ -30,14 +30,14 @@ start_link() ->
   supervisor:start_link({local, ?MODULE}, ?MODULE, []).
 
 start_db(DbRef) ->
-  start_db(DbRef, open, #{}).
+  start_db(DbRef, #{}).
 
-start_db({DbRef, Node}, StartType, Options) ->
-  _ = lager:info("start db: ref=~p on node:~p, type=~p, options=~p", [DbRef, Node, StartType, Options]),
-  supervisor:start_child({?MODULE, Node}, [DbRef, StartType, Options]);
-start_db(DbRef, StartType, Options) ->
-  _ = lager:info("start db: ref=~p, type=~p, options=~p", [DbRef, StartType, Options]),
-  supervisor:start_child(?MODULE, [DbRef, StartType, Options]).
+start_db({DbRef, Node}, Options) ->
+  _ = lager:info("start db: ref=~p on node:~p, options=~p", [DbRef, Node, Options]),
+  supervisor:start_child({?MODULE, Node}, [DbRef, Options]);
+start_db(DbRef, Options) ->
+  _ = lager:info("start db: ref=~p, options=~p", [DbRef, Options]),
+  supervisor:start_child(?MODULE, [DbRef, Options]).
 
 stop_db(DbPid) ->
   Node = node(),
@@ -54,7 +54,7 @@ init([]) ->
                intensity => 0,
                period => 1},
   Spec = #{id => barrel_db,
-           start => {barrel_db, start_link, []},
+           start => {barrel_db_actor, start_link, []},
            restart => temporary,
            shutdown => 5000},
   {ok, {SupFlags, [Spec]}}.

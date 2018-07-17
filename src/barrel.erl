@@ -18,7 +18,7 @@
 %% API
 -export([
   create_barrel/2,
-  delete_barrel/1,
+  drop_barrel/1,
   barrel_infos/1
 ]).
 
@@ -28,10 +28,7 @@
   delete_doc/3,
   purge_doc/2,
   save_docs/2,
-  delete_docs/2,
-  save_local_doc/3,
-  delete_local_doc/2,
-  get_local_doc/2
+  delete_docs/2
 ]).
 
 -export([query/5]).
@@ -82,10 +79,10 @@
 create_barrel(Name, Options) ->
   barrel_db:create_barrel(Name, Options).
 
-%% @doc delete a barrel
--spec delete_barrel(Name :: barrel_name()) -> ok.
-delete_barrel(Name) ->
-  barrel_db:delete_barrel(Name).
+%% @doc drop a barrel
+-spec drop_barrel(Name :: barrel_name()) -> ok.
+drop_barrel(Name) ->
+  barrel_db:drop_barrel(Name).
   
 %% @doc return barrel_infos.
 -spec barrel_infos(Name :: barrel_name()) -> barrel_infos().
@@ -120,13 +117,9 @@ fetch_doc(DbRef, DocId, Options) ->
   DocError :: not_found | {conflict, revision_conflict} | {conflict, doc_exists},
   SaveResult :: {ok, DocId , RevId} | {error, {DocError, DocId}} | {error, db_not_found}.
 save_doc(Barrel, Doc) ->
-  [Res] = save_doc1(Barrel, Doc),
+  {ok, [Res]} = barrel_db:update_docs(Barrel, [Doc], #{}, interactive_edit),
   Res.
 
-save_doc1(Barrel, Doc = #{ <<"_rev">> := _Rev}) ->
-  barrel_db:write_changes(Barrel, [{replace, Doc}]);
-save_doc1(Barrel,  Doc)  ->
-  barrel_db:write_changes(Barrel, [{create, Doc}]).
 
 %% @doc delete a document, it doesn't delete the document from the filesystem
 %% but instead create a tombstone that allows barrel to replicate a deletion.
@@ -137,14 +130,18 @@ save_doc1(Barrel,  Doc)  ->
   DocError :: not_found | {conflict, revision_conflict} | {conflict, doc_exists},
   DeleteResult :: {ok, DocId , RevId} | {error, {DocError, DocId}} | {error, db_not_found}.
 delete_doc(Barrel, DocId, Rev) ->
-  [Res] = barrel_db:write_changes(Barrel, [{delete, DocId, Rev}]),
+  {ok, [Res]} =  barrel_db:update_docs(
+    Barrel,
+    [#{ <<"id">> => DocId, <<"_rev">> => Rev, <<"_deleted">> => true}],
+    #{}, interactive_edit
+  ),
   Res.
 
 %% @doc delete a document from the filesystem. This delete completely
 %% document locally. The deletion won't be replicated and will not crete an event.
 -spec purge_doc(Name :: barrel_name(), DocId :: barrel_doc:docid()) -> ok | {error, term()}.
 purge_doc(Barrel, DocId) ->
-  [Res] = barrel_db:write_changes(Barrel, [{purge, DocId}]),
+  {ok, [Res]} = barrel_db:write_changes(Barrel, [{purge, DocId}]),
   Res.
 
 %% @doc likee save_doc but create or replace multiple docs at once.
@@ -155,16 +152,9 @@ purge_doc(Barrel, DocId) ->
   RevId :: barrel_doc:revid(),
   DocError :: not_found | {conflict, revision_conflict} | {conflict, doc_exists},
   SaveResult :: {ok, DocId , RevId} | {error, {DocError, DocId}} | {error, db_not_found},
-  SaveResults :: [SaveResult].
+  SaveResults :: {ok, [SaveResult]}.
 save_docs(Barrel, Docs) ->
-  Batch = lists:map(
-    fun
-      (Doc = #{ <<"_rev">> := _}) -> {replace, Doc};
-      (Doc) -> {create, Doc}
-    end,
-    Docs
-  ),
-  barrel_db:write_changes(Barrel, Batch).
+  barrel_db:update_docs(Barrel, Docs, #{}, interactive_edit).
 
 %% @doc delete multiple docs
 -spec delete_docs(Name, DocsOrDocsRevId) -> SaveResults when
@@ -174,44 +164,17 @@ save_docs(Barrel, Docs) ->
   RevId :: barrel_doc:revid(),
   DocError :: not_found | {conflict, revision_conflict} | {conflict, doc_exists},
   SaveResult :: {ok, DocId , RevId} | {error, {DocError, DocId}} | {error, db_not_found},
-  SaveResults :: [SaveResult].
+  SaveResults :: {ok, [SaveResult]}.
 delete_docs(Barrel, DocsOrDocsRevId) ->
-  Batch = lists:map(
+  Docs = lists:map(
     fun
-      (#{ <<"id">> := _, <<"_deleted">> := true, <<"_rev">> := _}=Doc) -> {replace, Doc};
-      ({DocId, Rev})-> {delete, DocId, Rev};
+      (#{ <<"id">> := _, <<"_deleted">> := true, <<"_rev">> := _ }=Doc) -> Doc;
+      ({DocId, Rev})-> #{ <<"id">> => DocId, <<"_rev">> => Rev, <<"_deleted">> => true };
       (_) -> erlang:error(badarg)
     end,
     DocsOrDocsRevId
   ),
-  barrel_db:write_changes(Barrel, Batch).
-
-%% @doc create or replace a local document. A local document has no revision and is
-%% not replicated. It's generally intented for local usage. It's used by the
-%% replication to store its state?
--spec save_local_doc(Name, DocId, Doc) -> SaveLocalResult when
-  Name :: barrel_name(),
-  Doc :: barrel_doc:doc(),
-  DocId :: barrel_doc:docid(),
-  SaveLocalResult:: ok | {error, db_not_found} | {error, term()}.
-save_local_doc(Barrel, DocId, Doc) ->
-  barrel_db:put_local_doc(Barrel, DocId, Doc).
-
-%% @doc fetch a local document
--spec get_local_doc(Name, DocId) -> GetLocalDocResult when
-  Name :: barrel_name(),
-  DocId :: barrel_doc:docid(),
-  GetLocalDocResult :: {ok, Doc :: barrel_doc:doc()} | {error, db_not_found} | {error, term()}.
-get_local_doc(Barrel, DocId) ->
-  barrel_db:get_local_doc(Barrel, DocId).
-
-%% @doc delete a local document
--spec delete_local_doc(Name, DocId) -> SaveLocalResult when
-  Name :: barrel_name(),
-  DocId :: barrel_doc:docid(),
-  SaveLocalResult:: ok | {error, db_not_found} | {error, term()}.
-delete_local_doc(Barrel, DocId) ->
-  barrel_db:delete_local_doc(Barrel, DocId).
+  save_docs(Barrel, Docs).
 
 
 %% @doc query the barrel indexes

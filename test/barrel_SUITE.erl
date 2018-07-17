@@ -35,8 +35,7 @@ all() ->
 
 init_per_suite(Config) ->
   {ok, _} = application:ensure_all_started(barrel),
-  {ok, _} = barrel_store_sup:start_store(default, barrel_memory_storage, #{}),
-
+  {ok, _} = barrel_store_provider_sup:start_store(default, barrel_memory_storage, #{}),
   Config.
 
 init_per_testcase(_, Config) ->
@@ -44,7 +43,7 @@ init_per_testcase(_, Config) ->
   Config.
 
 end_per_testcase(_, _Config) ->
-  ok = barrel:delete_barrel(<<"test">>),
+  ok = barrel:drop_barrel(<<"test">>),
   ok.
 
 end_per_suite(Config) ->
@@ -58,13 +57,13 @@ save_doc(_Config) ->
   {ok, #{ <<"_rev">> := Rev } = Doc1} = barrel:fetch_doc(<<"test">>, <<"a">>, #{}),
   {ok, <<"a">>, Rev2} = barrel:save_doc(<<"test">>, Doc1#{ <<"v">> => 2 }),
   {ok, #{ <<"_rev">> := Rev2} } = barrel:fetch_doc(<<"test">>, <<"a">>, #{}),
-  {error, {{conflict, revision_conflict}, <<"a">>}} =  barrel:save_doc(<<"test">>, Doc1#{ <<"v">> => 2 }),
-  {error, {{conflict, doc_exists}, <<"a">>}} = barrel:save_doc(<<"test">>, Doc0),
+  conflict =  barrel:save_doc(<<"test">>, Doc1#{ <<"v">> => 2 }),
+  conflict = barrel:save_doc(<<"test">>, Doc0),
   ok.
 
 update_non_existing_doc(_Config) ->
   Doc0 = #{ <<"id">> => <<"a">>, <<"v">> => 1, <<"_rev">> => <<"1-AAAAAAAAAAA">>},
-  {error, {not_found, <<"a">>}} = barrel:save_doc(<<"test">>, Doc0).
+  conflict = barrel:save_doc(<<"test">>, Doc0).
 
 delete_doc(_Config) ->
   Doc0 = #{ <<"id">> => <<"a">>, <<"v">> => 1},
@@ -82,7 +81,9 @@ save_docs(_Config) ->
     #{ <<"id">> => <<"a">>, <<"v">> => 1},
     #{ <<"id">> => <<"b">>, <<"v">> => 1}
   ],
-  [{ok, <<"a">>, _Rev1},
-   {ok, <<"b">>, _Rev2}] = barrel:save_docs(<<"test">>, Docs),
+  {ok, [
+    {ok, <<"a">>, _Rev1},
+    {ok, <<"b">>, _Rev2}
+  ]} = barrel:save_docs(<<"test">>, Docs),
   ok.
   

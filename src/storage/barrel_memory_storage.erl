@@ -1,424 +1,332 @@
-%% Copyright (c) 2018. Benoit Chesneau
-%%
-%% Licensed under the Apache License, Version 2.0 (the "License"); you may not
-%% use this file except in compliance with the License. You may obtain a copy of
-%% the License at
-%%
-%%    http://www.apache.org/licenses/LICENSE-2.0
-%%
-%% Unless required by applicable law or agreed to in writing, software
-%% distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
-%% WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
-%% License for the specific language governing permissions and limitations under
-%% the License.
-
+%%%-------------------------------------------------------------------
+%%% @author benoitc
+%%% @copyright (C) 2018, <COMPANY>
+%%% @doc
+%%%
+%%% @end
+%%% Created : 04. Jul 2018 22:18
+%%%-------------------------------------------------------------------
 -module(barrel_memory_storage).
 -author("benoitc").
 
 %% API
-
 -export([
   init/2,
   terminate/2,
-  create_barrel/3,
-  open_barrel/2,
-  delete_barrel/2,
-  has_barrel/2,
-  close_barrel/2
+  handle_call/3,
+  handle_cast/2
 ]).
 
-%% documents
 -export([
+  init_barrel/3,
+  terminate_barrel/1,
+  drop_barrel/1,
+  close_barrel/1,
+  list_barrels/1
+]).
+
+-export([
+  write_docs_infos/4,
+  write_revision/4,
+  get_doc_infos/2,
   get_revision/3,
-  add_revision/4,
-  delete_revision/3,
-  delete_revisions/3,
-  fetch_docinfo/2,
-  write_docinfo/5,
-  purge_doc/4
+  docs_count/1,
+  del_docs_count/1,
+  updated_seq/1,
+  commit/1,
+  fold_docs/4,
+  fold_changes/4,
+  indexed_seq/1,
+  set_indexed_seq/2,
+  get_local_doc/2
 ]).
 
-
-%% local documents
--export([
-  put_local_doc/3,
-  get_local_doc/2,
-  delete_local_doc/2
-]).
-
--export([
-  get_snapshot/1,
-  release_snapshot/1
-]).
-
--export([
-  save_state/1,
-  get_indexed_seq/1,
-  set_indexed_seq/2
-]).
-
--export([fold_changes/4]).
-
--export([
-  index_path/3,
-  unindex_path/3,
-  index_reverse_path/3,
-  unindex_reverse_path/3
-]).
-
--export([
-  get_batch/1,
-  get_ilog/2,
-  commit/2
-]).
-
--export([
-  fold_path/7,
-  fold_reverse_path/7
-]).
-
--include("barrel.hrl").
 -include_lib("stdlib/include/ms_transform.hrl").
 
-%%
-%% -- storage behaviour
-%%
+-define(DB, barrel_ets_db).
+-define(IDX, barrel_ets_idx).
 
-init(StoreName, _Options) ->
-  {ok, #{ store => StoreName, barrels => #{} } }.
-
-terminate(_, _) -> ok.
+-record(ikey, {key :: term(),
+               seqno :: non_neg_integer(),
+               type :: put | delete }).
 
 
-create_barrel(Name, Options, #{ store := StoreName, barrels := Barrels } = State) ->
-  case maps:is_key(Name, Barrels) of
-    true ->
-      {{error, already_exists}, State};
-    false ->
-      Tab = tabname(StoreName, Name),
-      case memstore:open(Tab, []) of
-        ok ->
-          case init_barrel(StoreName, Name) of
-            {ok, Barrel} ->
-              NewState = State#{ barrels => Barrels#{ Name => Options } },
-              {{ok, Barrel}, NewState};
-            Error ->
-              {Error, State}
-          end;
-        Error ->
-          {Error, State}
-      end
-  end.
+
+init_barrel(Store, Name, Options = #{ create := true }) ->
+  Db = new_tab(?DB),
+  Idx = case maps:get(index_strategy, Options, consistent) of
+          none -> undefined;
+          _ -> new_tab(?IDX)
+        end,
+  Barrel =
+    #{name => Name,
+      store => Store,
+      db => Db,
+      idx => Idx,
+      updated_seq => 0,
+      indexed_seq => 0,
+      docs_count => 0,
+      del_docs_count => 0,
+      commit_ts => 1,
+      read_ts => 0},
+
+  ok = barrel_store_provider:call(Store, {reg_barrel, Name, self()}),
+
+  {ok, Barrel};
+init_barrel(_, _, _) ->
+  {error, not_found}.
+
+terminate_barrel(#{ name := Name, store := Store }) ->
+  barrel_store_provider:call(Store, {unreg_barrel, Name}).
+
+drop_barrel(Barrel) ->
+  terminate_barrel(Barrel).
+
+close_barrel(_Barrel) ->
+  ok.
 
 
-open_barrel(Name,  #{ store := StoreName, barrels := Barrels }) ->
-  case maps:is_key(Name, Barrels) of
-    true ->
-      Barrel = init_barrel(StoreName, Name),
-      {ok, Barrel};
-    false ->
-      {error, not_found}
-  end.
+list_barrels(#{ store := Store }) ->
+  barrel_store_provider:call(Store, list_barrels).
 
-delete_barrel(Name, #{ store := StoreName, barrels := Barrels } = State) ->
-  Tab = tabname(StoreName, Name),
-  _ =  memstore:close(Tab),
-  NewState = State#{ barrels => maps:remove(Name, Barrels) },
-  {ok, NewState}.
 
-close_barrel(Name, State) ->
-  delete_barrel(Name, State).
-  
-has_barrel(Name, #{ barrels := Barrels } ) ->
-  maps:is_key(Name, Barrels).
 
-tabname(StoreName, DbId) ->
-  list_to_atom(
-    barrel_lib:to_list(StoreName) ++ [$_|barrel_lib:to_list(DbId)]
+new_tab(Name) ->
+  ets:new(
+    Name,
+    [ordered_set, public, {read_concurrency, true}, {write_concurrency, true}]
   ).
 
-barrel_id() ->
-  barrel_lib:to_hex(uuid:get_v4()).
+docs_count(#{ docs_count := Count }) -> Count.
 
-init_barrel(StoreName, Name) ->
-  Tab = tabname(StoreName, Name),
-  case memstore:open(Tab, []) of
-    ok ->
-      Id = barrel_id(),
-      Barrel  = #{store => StoreName,
-                  name => Name,
-                  tab => Tab,
-                  id => Id,
-                  indexed_seq => 0,
-                  updated_seq => 0,
-                  docs_count => 0 },
-      _ = memstore:write_batch(Tab, [{put, 'id', Id},
-                                     {put, '$update_seq', 0},
-                                     {put, 'indexed_seq', 0},
-                                     {put, '$docs_count', 0}]),
-      {ok, Barrel};
-    Error ->
-      Error
-  end.
+del_docs_count(#{ del_docs_count := Count }) -> Count.
 
-save_state(#{ tab := Tab, updated_seq := Seq, docs_count := Count, indexed_seq := ISeq}) ->
-  _ = memstore:write_batch(Tab, [{put, '$update_seq', Seq},
-                                 {put, 'indexed_seq', ISeq},
-                                 {put, '$docs_count', Count}]),
+updated_seq(#{ updated_seq := Seq }) -> Seq.
+
+indexed_seq(#{ indexed_seq := Seq }) -> Seq.
+
+set_indexed_seq(Seq, State) -> {ok, State#{ indexed_seq => Seq }}.
+
+get_local_doc(DocId, State) ->
+  fetch({local, DocId}, State).
+
+
+get_doc_infos(DocId, State) ->
+  fetch({docs, DocId}, State).
+
+get_revision(DocId, Rev, State) ->
+  fetch({rev, DocId, Rev}, State).
+
+%% TODO: we could have one ETS table / store.
+write_revision(DocId, Rev, Body, #{ db := Db, commit_ts := Ts }) ->
+  RevKey = #ikey{ key = {rev, DocId, Rev}, seqno=Ts, type=put },
+  ets:insert(Db, {RevKey, Body}),
   ok.
 
-
-get_indexed_seq(#{tab := Tab}) ->
-  case ets:lookup(Tab, '$indexed_seq') of
-    [] -> 0;
-    [{_, Seq}] -> Seq
-  end.
-
-
-set_indexed_seq(Seq, #{tab := Tab}) -> ets:insert(Tab, {'$indexed_seq', Seq}).
-
-%%
-%% -- document storage API
-%%
-
-
-%% documents
-
-get_revision(DocId, Rev, #{ tab := Tab } = State) ->
-  case memstore:get(Tab, {r, DocId, Rev}, read_options(State)) of
-    {ok, Doc} -> {ok, Doc};
-    not_found ->
-      {error, not_found}
-  end.
-
-add_revision(DocId, RevId, Body, #{ tab := Tab }) ->
-  memstore:put(Tab, {r, DocId, RevId}, Body).
-
-delete_revision(DocId, RevId, #{ tab := Tab }) ->
-  memstore:delete(Tab, {r, DocId, RevId}).
-
-delete_revisions(DocId, RevIds, #{ tab := Tab }) ->
-  _ = [memstore:delete(Tab, {r, DocId, RevId}) || RevId <- RevIds],
-  ok.
-
-fetch_docinfo(DocId, #{ tab := Tab } = State) ->
-  case memstore:get(Tab, {d, DocId}, read_options(State)) of
-    {ok, Doc} -> {ok, Doc};
-    not_found -> {error, not_found}
-  end.
-
-%% TODO: that part should be atomic, maybe we should add a transaction log
-write_docinfo(DocId, NewSeq, OldSeq, DocInfo, #{ tab := Tab }) ->
-  case write_action(NewSeq, OldSeq) of
-    new ->
-      memstore:write_batch(
-        Tab,
-        [{put, {d, DocId}, DocInfo},
-         {put, {c, NewSeq}, DocInfo}]
-      );
-    replace ->
-      memstore:write_batch(
-        Tab,
-        [{put, {d, DocId}, DocInfo},
-         {put, {c, NewSeq}, DocInfo},
-         {delete, {c, OldSeq}}]
-      );
-    edit ->
-      memstore:put(Tab, {d, DocId}, DocInfo)
-  end.
-
-write_action(_Seq, nil) -> new;
-write_action(nil, _Seq) -> edit;
-write_action(Seq, Seq) -> edit;
-write_action(_, _) -> replace.
-
-purge_doc(DocId, LastSeq, Revisions, #{ tab := Tab }) ->
-  Batch = lists:foldl(
-    fun(RevId, Batch1) ->
-      [{delete, {r, DocId, RevId}} | Batch1]
-        end,
-    [{delete, {c, LastSeq}}, {delete, {d, DocId}}],
-    Revisions
+write_docs_infos(DIPairs, LocalRecords, PurgedIdRevs, #{ db := Db, commit_ts := Ts } = State) ->
+  #{ db := Db, commit_ts := Ts, docs_count := DocsCount0, del_docs_count := DelDocsCount0 } = State,
+  {Batch0, Seqs, DocsCount, DelDocsCount} = lists:foldl(
+    fun({NewDI, OldDI}, {Acc, AccSeq, Count, DelCount}) ->
+      case {NewDI, OldDI} of
+        {#{ id := Id, seq := Seq }=DI, not_found} ->
+          IdKey = #ikey{ key = {docs, Id}, seqno=Ts, type=put},
+          SeqKey = #ikey{ key = {seq, Seq}, seqno=Ts, type=put},
+          {[{IdKey, DI}, {SeqKey, DI} | Acc], [Seq | AccSeq], Count + 1, DelCount};
+        {#{ id := Id, seq := Seq }=DI, #{ seq := OldSeq }} ->
+          IdKey = #ikey{ key = {docs, Id}, seqno=Ts, type=put},
+          SeqKey = #ikey{ key = {seq, Seq}, seqno=Ts, type=put},
+          RemSeqKey = #ikey{ key = {seq, OldSeq}, seqno=Ts, type=delete},
+          {Count1, DelCount1}= count(NewDI, OldDI, Count, DelCount),
+          {[{IdKey, DI}, {SeqKey, DI}, {RemSeqKey, undefined} | Acc], [Seq | AccSeq], Count1, DelCount1};
+        {not_found, #{ id := Id, seq := Seq }} ->
+          IdKey = #ikey{ key = {docs, Id}, seqno=Ts, type=delete},
+          SeqKey = #ikey{ key = {seq, Seq}, seqno=Ts, type=delete},
+          {Count1, DelCount1} = count(NewDI, OldDI, Count, DelCount),
+          {[{IdKey, undefined}, {SeqKey, undefined} | Acc], AccSeq, Count1, DelCount1}
+      end
+    end,
+    {[], [], DocsCount0, DelDocsCount0},
+    DIPairs
   ),
-  memstore:write_batch(Tab, Batch).
+  Batch = lists:foldl(
+            fun({Id, Rev}, Acc) ->
+                RevKey = #ikey{ key = {rev, Id, Rev}, seqno=Ts, type=delete },
+                [{RevKey, undefined} | Acc]
+            end,
+            Batch0,
+            PurgedIdRevs
+           ),
+  FinalBatch = lists:foldl(
+    fun(Record, Batch1) ->
+      #{ id := Id, del := Del} = Record,
+      {Type, Val} = case Del of
+                      true -> {delete, undefined};
+                      false -> {put, Record}
+                    end,
+      LocalKey = #ikey{ key = {local, Id}, seqno = Ts, type = Type },
+      [{LocalKey, Val} | Batch1]
+    end,
+    Batch,
+    LocalRecords
+  ),
 
-%% local documents
+  UpdatedSeq = lists:max(Seqs),
+  ets:insert(Db, FinalBatch),
 
-put_local_doc(DocId, Doc, #{ tab := Tab }) ->
-  memstore:put(Tab, {l, DocId}, Doc).
+  NewState = State#{ updated_seq := UpdatedSeq, docs_count := DocsCount, del_docs_count := DelDocsCount },
+  {ok, NewState}.
 
-get_local_doc(DocId, #{ tab := Tab } = State) ->
-  case memstore:get(Tab, {l, DocId}, read_options(State)) of
-    {ok, Doc} -> {ok, Doc};
-    not_found -> {error, not_found}
+
+commit(#{ commit_ts := Ts } = State) ->
+  State#{ read_ts => Ts, commit_ts => Ts + 1 }.
+
+
+count(#{ deleted := true }, #{ deleted := false }, Count, DelCount) -> {Count - 1, DelCount + 1};
+count(#{ deleted := false }, #{ deleted := true }, Count, DelCount) -> {Count + 1, DelCount -1};
+count(not_found, #{ deleted := true },  Count, DelCount) -> {Count, DelCount -1};
+count(not_found, #{ deleted := false }, Count, DelCount) -> {Count -1, DelCount};
+count(_, _, Count, DelCount) -> {Count, DelCount}.
+
+
+fold_docs(Fun, Acc, Options, #{ db := Db } = State) ->
+  {Dir, Limit} = limit(Options),
+  MS = fold_db_ms(docs, Options#{dir => Dir}, State),
+  case Dir of
+    fwd ->
+      traverse(ets:select(Db, MS, 1), undefined, Fun, Acc, Limit);
+    rev ->
+      traverse_reverse(ets:select_reverse(Db, MS, 1), undefined, Fun, Acc, Limit)
   end.
 
-delete_local_doc(DocId, #{ tab := Tab }) ->
-  memstore:delete(Tab, {l, DocId}).
+
+fold_changes(Since, Fun, Acc, #{ db := Db } = State) ->
+  MS = fold_db_ms(seq, #{dir => fwd, next_to => Since}, State),
+  traverse(ets:select(Db, MS, 1), undefined, Fun, Acc, 1 bsl 64 - 1).
 
 
-get_snapshot(#{ tab := Tab } = State) ->
-  Snapshot = memstore:new_snapshot(Tab),
-  State#{ snapshot => Snapshot}.
+%% MVCC helpers
 
-release_snapshot(#{ snapshot := Snapshot }) ->
-  memstore:release_snapshot(Snapshot);
-release_snapshot(_) ->
-  ok.
-
-read_options(#{ snapshot := Snapshot }) -> [{snapshot, Snapshot}];
-read_options(_) -> [].
-
-fold_changes(Since, Fun, Acc, State) ->
-  Tab = maps:get(tab, State),
-  {ok, Itr} = memstore:iterator(Tab, read_options(State)),
-  try fold_changes_loop(memstore:iterator_move(Itr, {seek, {c, Since + 1}}), Itr, Fun, Acc)
-  after memstore:iterator_close(Itr)
+fetch(Key, #{ db := Db, read_ts := TS }=_State) ->
+  MS = ets:fun2ms(fun({#ikey{key=K, seqno=S }, _}=KV) when K =:= Key, S =< TS -> KV end),
+  case ets:select_reverse(Db, MS, 1) of
+    '$end_of_table' ->
+      not_found;
+    {[{#ikey{type=delete}, _}], _} -> not_found;
+    {[{_, Val}], _} -> {ok, Val}
   end.
 
-fold_changes_loop({ok, {c, _Seq}, DocInfo}, Itr, Fun, Acc0) ->
-  case Fun(DocInfo, Acc0) of
+traverse(_, _, _, Acc, 0) ->
+  Acc;
+traverse('$end_of_table', undefined, _, Acc, _) ->
+  Acc;
+traverse('$end_of_table', {Key, Val}, Fun, Acc, _Limit) ->
+  case Fun(Key, Val, Acc) of
+    {ok, Acc1} -> Acc1;
+    {stop, Acc1} -> Acc1;
+    stop -> Acc;
+    ok -> Acc;
+    skip -> Acc
+  end;
+traverse({[{Key, Val}], Cont}, undefined, Fun, Acc, Limit) ->
+  traverse(ets:select(Cont), {Key, Val}, Fun, Acc, Limit);
+traverse({[{Key, Val}], Cont}, {Key, _}, Fun, Acc, Limit) ->
+  traverse(ets:select(Cont), {Key, Val}, Fun, Acc, Limit);
+traverse({[{NextKey, NextVal}], Cont}, {Key, Val}, Fun, Acc, Limit) ->
+  case Fun(Key, Val, Acc) of
     {ok, Acc1} ->
-      fold_changes_loop(memstore:iterator_move(Itr, next), Itr, Fun, Acc1);
+      traverse(ets:select(Cont), {NextKey, NextVal}, Fun, Acc1, Limit - 1);
     {stop, Acc1} ->
-      Acc1
-  end;
-fold_changes_loop(_Else, _, _, Acc) ->
-  Acc.
+      Acc1;
+    stop ->
+      Acc;
+    ok ->
+      traverse(ets:select(Cont), {NextKey, NextVal}, Fun, Acc, Limit - 1);
+    skip ->
+      traverse(ets:select(Cont), {NextKey, NextVal}, Fun, Acc, Limit)
+  end.
 
-
-get_batch(_) ->
-  barrel_memory_index:new_batch().
-
-get_ilog(DocId, State) ->
-  barrel_memory_index:get_log(DocId, State).
-
-
-commit(Batch, State) ->
-  barrel_memory_index:commit(Batch, State).
-
-index_path(Path, DocId, #{ tab := Tab }) ->
-  memstore:write_batch(Tab, [{put, {i, Path, DocId}, <<>>}]).
-
-index_reverse_path(Path, DocId, #{ tab := Tab }) ->
-  memstore:write_batch(Tab, [{put, {ri, Path, DocId}, <<>>}]).
-
-unindex_path(Path, DocId, #{ tab := Tab }) ->
-  memstore:write_batch(Tab, [{delete, {i, Path, DocId}}]).
-
-unindex_reverse_path(Path, DocId, #{ tab := Tab }) ->
-  memstore:write_batch(Tab, [{delete, {ri, Path, DocId}}]).
-
-
-
-
-
-
-
-fold_path(Path, Start, End, Limit, Fun, Acc, State) ->
-  fold_path_1(i, Path, Start, End, Limit, Fun, Acc, State).
-
-fold_reverse_path(Path, Start, End, Limit, Fun, Acc, State) ->
-  fold_path_1(ri, Path, Start, End, Limit, Fun, Acc, State).
-
-
-fold_path_1(Prefix, Path, {StartInclusive, Start}, {EndInclusive, End}, Limit, Fun, Acc, State) ->
-  Tab = maps:get(tab, State),
-  {ok, Itr} = memstore:iterator(Tab, read_options(State)),
-  {Seek, Inclusive, Next, InBoundFun, Max} = case Limit of
-                                       {limit_to_last, N} ->
-                                         {Key, Inc} = case End of
-                                                 undefined ->
-                                                   [Last | Rest] = lists:reverse(Path),
-                                                   EndKey = lists:reverse([last(Last) | Rest]),
-                                                   {{seek_for_prev, {Prefix, EndKey, <<>>}}, true};
-                                                 _  ->
-                                                   {{seek, {Prefix, End, <<>>}}, EndInclusive}
-                                               end,
-                                         {Key, Inc,
-                                          fun() -> memstore:iterator_move(Itr, prev) end,
-                                          in_bound_fun(Start, StartInclusive, prev),
-                                          N};
-                                       {limit_to_first, N} ->
-                                         Key = case Start of
-                                                 undefined -> {Prefix, Path, <<>>};
-                                                 _  -> {Prefix, Start, <<>>}
-                                               end,
-
-                                         {{seek, Key}, StartInclusive,
-                                          fun() -> memstore:iterator_move(Itr, next) end,
-                                          in_bound_fun(End, EndInclusive, next),
-                                          N};
-                                       undefined ->
-                                         Key = case Start of
-                                                 undefined -> {Prefix, Path, <<>>};
-                                                 _  -> {Prefix, Start, <<>>}
-                                               end,
-                                         {{seek, Key}, StartInclusive,
-                                          fun() -> memstore:iterator_move(Itr, next) end,
-                                          in_bound_fun(End, EndInclusive, next),
-                                          undefined}
-                                     end,
-  First = case {Inclusive, memstore:iterator_move(Itr, Seek)} of
-             {false, {ok, _, _}} -> Next();
-             {_, First0} -> First0
-           end,
-  try fold_path_loop(First, Next, Prefix, Path, InBoundFun, Max, Fun, Acc, State)
-  after memstore:iterator_close(Itr)
+traverse_reverse(_, _, _, Acc, 0) ->
+  Acc;
+traverse_reverse('$end_of_table', undefined, _, Acc, _) ->
+  Acc;
+traverse_reverse('$end_of_table', _, _, Acc, _) ->
+  Acc;
+traverse_reverse({[{Key, _Val}], Cont}, Key, Fun, Acc, Limit) ->
+  traverse_reverse(ets:select(Cont), Key, Fun, Acc, Limit);
+traverse_reverse({[{Key, Val}], Cont}, _, Fun, Acc, Limit) ->
+  case Fun(Key, Val, Acc) of
+    {ok, Acc1} ->
+      traverse(ets:select(Cont), Key, Fun, Acc1, Limit - 1);
+    {stop, Acc1} ->
+      Acc1;
+    stop ->
+      Acc;
+    ok ->
+      traverse_reverse(ets:select(Cont), Key, Fun, Acc, Limit - 1);
+    skip ->
+      traverse_reverse(ets:select(Cont), Key, Fun, Acc, Limit)
   end.
 
 
-last(Last) when is_binary(Last) ->
-  << Last/binary, 0 >>;
-last(Last) when is_integer(Last) ->
-  1 bsl 64 - 1.
+limit(#{ limit_to_first := L }) -> {rev, L};
+limit(#{ limit_to_last := L }) -> {fwd, L};
+limit(_) -> {fwd, 1 bsl 64 - 1}.
+
+fold_db_ms(Ident, Options, #{ read_ts := Ts }) ->
+  Rule = start_key(Options,
+                  end_key(Options,
+                          [{'=<', '$2', {const, Ts}}])
+                 ),
+  [{{#ikey{key={Ident, '$1'}, seqno='$2', type=put}, '$3'}, Rule, [{{'$1', '$3'}}]}].
 
 
-in_bound_fun(undefined, _, _) -> fun(_) -> true end;
-in_bound_fun(End, true, prev) -> fun(Key) -> (path_to_test(Key, End) >= End) end;
-in_bound_fun(End, false, prev) -> fun(Key) -> (path_to_test(Key, End) > End) end;
-in_bound_fun(End, true, next) -> fun(Key) ->  (path_to_test(Key, End) =< End) end;
-in_bound_fun(End, false,  next) -> fun(Key) -> (path_to_test(Key, End) < End) end.
+start_key(#{ start_at := Start, dir := fwd }, MS) -> [{'>=', '$1', {const, Start}} | MS];
+start_key(#{ next_to := Start, dir := fwd }, MS) -> [{'>', '$1', {const, Start}} | MS];
+start_key(#{ start_at := Start, dir := rev }, MS) -> [{'=<', '$1', {const, Start}} | MS];
+start_key(#{ next_to := Start, dir := rev }, MS) -> [{'<', '$1', {const, Start}} | MS];
+start_key(_, MS) -> MS.
+
+end_key(#{ end_at := End, dir := fwd }, MS) -> [{'=<', '$1', {const, End}} | MS];
+end_key(#{ previous_to := End, dir := fwd }, MS) -> [{'<', '$1', {const, End}} | MS];
+end_key(#{ end_at := End, dir := rev }, MS) -> [{'>=', '$1', {const, End}} | MS];
+end_key(#{ previous_to := End, dir := rev }, MS) -> [{'>', '$1', {const, End}} | MS];
+end_key(_, MS) -> MS.
 
 
-path_to_test(T, P) ->
-  lists:sublist(T, length(P)).
+%%% ==
+%%% provider API
+
+init(_StoreName, _Options) ->
+  {ok, #{}}.
+
+handle_call({reg_barrel, Name, Pid}, _From, Barrels) ->
+  {reply, ok, Barrels#{ Name => Pid }};
+
+handle_call({unreg_barrel, Name}, _From, Barrels) ->
+  Barrels2 = case maps:is_key(Name, Barrels) of
+               true -> maps:remove(Name, Barrels);
+               false -> Barrels
+             end,
+  {reply, ok, Barrels2};
+
+handle_call(list_barrels, _From, Barrels) ->
+  {reply, maps:keys(Barrels), Barrels};
+
+handle_call(_Msg, _From, Barrels) ->
+  {reply, bad_call, Barrels}.
 
 
-in_path(PA, PB) ->
-  case path_to_test(PA, PB) of
-    PB -> true;
-    _ -> false
-  end.
+handle_cast(_Msg, Barrels) ->
+  {noreply, Barrels}.
 
-dec(I) when is_integer(I) -> I - 1;
-dec(I) -> I.
 
-fold_path_loop({ok, {Prefix, Key, DocId}, <<>>}, Next, Prefix, Path, Less, Max, Fun, Acc0, State) ->
-  Max2 = dec(Max),
-  case {in_path(Key, Path), Less(Key)} of
-    {true, true}  ->
-      case fetch_docinfo(DocId, State) of
-        {ok, DI} ->
-          case Fun(DI, Acc0) of
-            {ok, Acc1} when Max2 =:= 0 ->
-              Acc1;
-            {ok, Acc1} ->
-              fold_path_loop(Next(), Next, Prefix, Path, Less, Max2, Fun, Acc1, State);
-            {skip, Acc1} ->
-              fold_path_loop(Next(), Next, Prefix, Path, Less, Max2, Fun, Acc1, State);
-            {stop, Acc1} ->
-              Acc1;
-            skip ->
-              fold_path_loop(Next(), Next, Prefix, Path, Less, Max2, Fun, Acc0, State);
-            stop ->
-              Acc0
-          end;
-        {error, not_found} ->
-          fold_path_loop(Next(), Next, Prefix, Path, Less, Max, Fun, Acc0, State)
-      end;
-    {_, _} ->
-      Acc0
-  end;
-fold_path_loop(_Else, _, _, _, _, _, _, Acc, _) ->
-  Acc.
+terminate(_, Barrels) ->
+  _ = maps:fold(
+    fun(_Name, Pid, _) ->
+      barrel_db:close_barrel(Pid)
+    end,
+    ok,
+    Barrels
+  ),
+
+  ok.
