@@ -106,6 +106,8 @@ register_name(Name, Mod) ->
       {false, gproc:where(?store_provider(Name))}
   end.
 
+
+-ifdef('OTP_RELEASE').
 init_it(Name, Mod, Args) ->
   try
     {ok, Mod:init(Name, Args)}
@@ -113,6 +115,15 @@ init_it(Name, Mod, Args) ->
     throw:R -> {ok, R};
     Class:R:S -> {'EXIT', Class, R, S}
   end.
+-else.
+init_it(Name, Mod, Args) ->
+  try
+    {ok, Mod:init(Name, Args)}
+  catch
+    throw:R -> {ok, R};
+    Class:R -> {'EXIT', Class, R, erlang:get_stacktrace()}
+  end.
+-endif.
 
 terminate_reason(error, Reason, Stacktrace) -> {Reason, Stacktrace};
 terminate_reason(exit, Reason, _Stacktrace) -> Reason.

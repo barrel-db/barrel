@@ -24,7 +24,6 @@
   system_code_change/4
 ]).
 
-
 -include("barrel.hrl").
 
 start_link(Name, Options) ->
@@ -64,6 +63,7 @@ init([Parent, Name, Options]) ->
       proc_lib:init_ack(Parent, {error, {already_started, Pid}})
   end.
 
+-ifdef('OTP_RELEASE').
 try_init_barrel(Mod, Store, Name, Options) ->
   try
     {ok, Mod:init_barrel(Store, Name, Options)}
@@ -71,7 +71,15 @@ try_init_barrel(Mod, Store, Name, Options) ->
     throw:R -> {ok, R};
     Class:R:S -> {'EXIT', Class, R, S}
   end.
-
+-else.
+try_init_barrel(Mod, Store, Name, Options) ->
+  try
+    {ok, Mod:init_barrel(Store, Name, Options)}
+  catch
+    throw:R -> {ok, R};
+    Class:R -> {'EXIT', Class, R, erlang:get_stacktrace()}
+  end.
+-endif.
 
 register_barrel(Name) ->
   try gproc:reg(?barrel(Name)), true
