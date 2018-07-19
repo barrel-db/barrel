@@ -24,7 +24,8 @@
   fetch_doc/3,
   update_docs/4,
   revsdiff/3,
-  fold_docs/4
+  fold_docs/4,
+  fold_changes/5
 ]).
 
 
@@ -70,7 +71,6 @@ fetch_doc(DbRef, DocId, Options) ->
     end
   ).
 
-
 do_fetch_doc(Db, DocId, Options) ->
   UserRev = maps:get(rev, Options, <<"">>),
   case barrel_storage:get_doc_infos(Db, DocId) of
@@ -111,7 +111,6 @@ do_fetch_doc(Db, DocId, Options) ->
     Error ->
       Error
   end.
-
 
 revsdiff(DbRef, DocId, RevIds) ->
   do_for_ref(
@@ -201,6 +200,70 @@ fold_docs_fun(#{ name := Name } = Db, UserFun, Options) ->
         end
     end
   end.
+
+
+fold_changes(DbRef, Since, UserFun, UserAcc, Options) ->
+  do_for_ref(
+    DbRef,
+    fun(Db) ->
+      fold_changes_1(Db, Since, UserFun, UserAcc, Options)
+    end
+  ).
+
+fold_changes_1(Db, Since, UserFun, UserAcc, Options) ->
+  %% get options
+  IncludeDoc = maps:get(include_doc, Options, false),
+  WithHistory = maps:get(with_history, Options, false),
+  WrapperFun =
+    fun
+      (_, DI, {Acc0, _}) ->
+        #{id := DocId,
+          seq := Seq,
+          deleted := Deleted,
+          rev := Rev,
+          revtree := RevTree } = DI,
+        Changes = case WithHistory of
+                    false -> [Rev];
+                    true -> barrel_revtree:history(Rev, RevTree)
+                  end,
+        Change0 = #{
+          <<"id">> => DocId,
+          <<"seq">> => Seq,
+          <<"rev">> => Rev,
+          <<"changes">> => Changes
+        },
+        Change = change_with_doc(
+          change_with_deleted(Change0, Deleted),
+          DocId, Rev, Db, IncludeDoc
+        ),
+        case UserFun(Change, Acc0) of
+          {ok, Acc1} ->
+            {ok, {Acc1, Seq}};
+          {stop, Acc1} ->
+            {stop, {Acc1, Seq}};
+          ok ->
+            {ok, {Acc0, Seq}};
+          stop ->
+            {stop, {Acc0, Seq}};
+          skip ->
+            skip
+        end
+    end,
+  AccIn = {UserAcc, Since},
+  {AccOut, LastSeq} = barrel_storage:fold_changes(Db, Since, WrapperFun, AccIn),
+  {ok, AccOut, LastSeq}.
+
+change_with_deleted(Change, true) -> Change#{ <<"deleted">> => true };
+change_with_deleted(Change, _) -> Change.
+
+
+change_with_doc(Change, DocId, Rev, Db, true) ->
+  case barrel_storage:get_revision(Db, DocId, Rev) of
+    {ok, Doc} -> Change#{ <<"doc">> => Doc };
+    _ -> Change#{ <<"doc">> => null }
+  end;
+change_with_doc(Change, _, _, _, _) ->
+  Change.
 
 
 update_docs(DbRef, Docs, Options, UpdateType) ->

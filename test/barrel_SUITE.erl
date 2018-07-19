@@ -23,7 +23,8 @@
   update_non_existing_doc/1,
   delete_doc/1,
   save_docs/1,
-  fold_docs/1
+  fold_docs/1,
+  fold_changes/1
 ]).
 
 all() ->
@@ -32,7 +33,8 @@ all() ->
     update_non_existing_doc,
     delete_doc,
     save_docs,
-    fold_docs
+    fold_docs,
+    fold_changes
   ].
 
 init_per_suite(Config) ->
@@ -113,7 +115,29 @@ fold_docs(_Config) ->
   [<<"a">>, <<"b">>, <<"c">>, <<"d">>, <<"e">>] = lists:reverse(Result3),
   ok.
 
-
+fold_changes(_Config) ->
+  Docs = [
+    #{ <<"id">> => <<"a">>, <<"v">> => 1},
+    #{ <<"id">> => <<"b">>, <<"v">> => 2},
+    #{ <<"id">> => <<"c">>, <<"v">> => 3},
+    #{ <<"id">> => <<"d">>, <<"v">> => 4},
+    #{ <<"id">> => <<"e">>, <<"v">> => 5}
+  ],
+  {ok, _Saved} = barrel:save_docs(<<"test">>, Docs),
+  5 = length(_Saved),
+  Fun = fun(#{ <<"id">> := Id }, Acc) -> {ok, [ Id | Acc ]} end,
+  {ok, Changes1, LastSeq1} = barrel:fold_changes(<<"test">>, 0, Fun, [], #{}),
+  5 = length(Changes1),
+  5 = LastSeq1,
+  [<<"a">>, <<"b">>, <<"c">>, <<"d">>, <<"e">>] = lists:reverse(Changes1),
+  {ok, #{ <<"_rev">> := RevC}} = barrel:fetch_doc(<<"test">>, <<"c">>, #{}),
+  {ok, _, _} = barrel:delete_doc(<<"test">>, <<"c">>, RevC),
+  {error, not_found} = barrel:fetch_doc(<<"test">>, <<"c">>, #{}),
+  {ok, Changes2, LastSeq2} = barrel:fold_changes(<<"test">>, LastSeq1, Fun, [], #{}),
+  [<<"c">>] = lists:reverse(Changes2),
+  6 = LastSeq2,
+  {ok, [], 6} = barrel:fold_changes(<<"test">>, 6, Fun, [], #{include_deleted => true}),
+  ok.
 
 
 

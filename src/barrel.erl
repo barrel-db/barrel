@@ -29,7 +29,8 @@
   purge_doc/2,
   save_docs/2,
   delete_docs/2,
-  fold_docs/4
+  fold_docs/4,
+  fold_changes/5
 ]).
 
 -export([query/5]).
@@ -74,11 +75,16 @@
   next_to => prop(),
   end_at => prop(),
   previous_to => prop(),
-  include_deleted => true | false,
+  include_deleted => boolean(),
   history => boolean(),
   max_history => non_neg_integer()
 }.
 
+
+-type fold_changes_options() :: #{
+  include_doc => true | false,
+  with_history => true | false
+}.
 
 -type changes_options() :: #{
   interval => non_neg_integer(),
@@ -191,13 +197,24 @@ delete_docs(Barrel, DocsOrDocsRevId) ->
 
 -spec fold_docs(Name, Fun, AccIn, Options) -> AccOut when
   Name :: barrel_name(),
-  AccResult :: {ok, Acc2 :: any()} | {stop, Acc2 :: any()} | {skip, Acc2 :: any()} | stop | skip,
+  AccResult :: {ok, Acc2 :: any()} | {stop, Acc2 :: any()} | {skip, Acc2 :: any()} | stop | ok | skip,
   Fun :: fun( (Doc :: barrel_doc:doc(), Acc1 :: any() ) -> AccResult ),
   AccIn :: any(),
   Options :: fold_docs_options(),
   AccOut :: any().
 fold_docs(Barrel, Fun, AccIn, Options) ->
   barrel_db:fold_docs(Barrel, Fun, AccIn, Options).
+
+-spec fold_changes(Name, Since, Fun, AccIn, Options) -> AccOut when
+  Name :: barrel_name(),
+  Since :: non_neg_integer(),
+  AccResult :: {ok, Acc2 :: any()} | {stop, Acc2 :: any()} | {skip, Acc2 :: any()} | ok | stop | skip,
+  Fun :: fun( (Doc :: barrel_doc:doc(), Acc1 :: any() ) -> AccResult ),
+  AccIn :: any(),
+  Options :: fold_changes_options(),
+  AccOut :: any().
+fold_changes(Barrel, Since, Fun, AccIn, Options) ->
+  barrel_db:fold_changes(Barrel, Since, Fun, AccIn, Options).
 
 
 %% @doc query the barrel indexes
@@ -206,7 +223,7 @@ fold_docs(Barrel, Fun, AccIn, Options) ->
 -spec query(Name, Path, Fun, AccIn, Options) -> AccOut when
   Name :: barrel_name(),
   Path :: binary(),
-  AccResult :: {ok, Acc2 :: any()} | {stop, Acc2 :: any()} | {skip, Acc2 :: any()} | stop | skip,
+  AccResult :: {ok, Acc2 :: any()} | {stop, Acc2 :: any()} | {skip, Acc2 :: any()} | ok | stop | skip,
   Fun :: fun( (Doc :: barrel_doc:doc(), Acc1 :: any() ) -> AccResult ),
   AccIn :: any(),
   Options :: query_options(),

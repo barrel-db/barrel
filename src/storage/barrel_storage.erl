@@ -27,7 +27,7 @@
   write_docs_infos/4,
   write_revision/4,
   commit/1,
-  fold_changes/5,
+  fold_changes/4,
   fold_docs/4,
   indexed_seq/1,
   set_indexed_seq/2,
@@ -87,8 +87,8 @@ set_indexed_seq(#{ engine := {Mod, State} } = Db, Seq) ->
 fold_docs(#{ engine := {Mod, State} }, Fun, Acc, Options) ->
   Mod:fold_docs(Fun, Acc, Options, State).
 
-fold_changes(#{ engine := {Mod, State} }, Since, Fun, Acc, Options) ->
-  Mod:fold_changes(Since, Fun, Acc, Options, State).
+fold_changes(#{ engine := {Mod, State} }, Since, Fun, Acc) ->
+  Mod:fold_changes(Since, Fun, Acc, State).
 
 drop_barrel(#{ engine := {Mod, State} }) ->
   Mod:drop_barrel(State).
