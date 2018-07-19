@@ -22,6 +22,7 @@
   docs_count/1,
   del_docs_count/1,
   updated_seq/1,
+  resource_id/1,
   get_doc_infos/2,
   get_revision/3,
   write_docs_infos/4,
@@ -56,6 +57,9 @@ updated_seq(#{ engine := {Mod, State} }) ->
 
 indexed_seq(#{ engine := {Mod, State} }) ->
   Mod:indexed_seq(State).
+
+resource_id(#{ engine := {Mod, State} }) ->
+  Mod:resource_id(State).
 
 get_local_doc(#{ engine := {Mod, State} }, DocId) ->
   Mod:get_local_doc(State, DocId).

@@ -146,9 +146,6 @@ handle_call(UnknownReq, From, State) ->
   reply(From, bad_call),
   State.
 
-
-
-
 try_update_docs(Client, RepRecords, LocalRecords, Policy, State) ->
   try
     do_update_docs(Client, RepRecords, LocalRecords, Policy, State)
@@ -240,7 +237,6 @@ update_local_records_rev(Records) ->
     Records
   ).
 
-
 maybe_notify(NewState, OldState) ->
   case {barrel_storage:updated_seq(NewState), barrel_storage:updated_seq(OldState)} of
     {Seq, Seq} ->
@@ -277,8 +273,9 @@ group_records([], _, _, D) ->
 
 process_entries(Entries, MergeFun, DIPairs, State) ->
   UpdatedSeq = barrel_storage:updated_seq(State),
-  {DIPairs2, _} = dict:fold(
-    fun(DocId, Updates, {Pairs, Seq}) ->
+  LastRID = barrel_storage:resource_id(State),
+  {DIPairs2, _, _} = dict:fold(
+    fun(DocId, Updates, {Pairs, Seq, Rid}) ->
       case barrel_storage:get_doc_infos(State, DocId) of
         {ok, DI0} ->
           DI1 = DI0#{ body_map => #{} },
@@ -287,18 +284,19 @@ process_entries(Entries, MergeFun, DIPairs, State) ->
                    true -> Seq + 1;
                    false -> Seq
                  end,
-          {[{DI2#{ seq => Seq2 }, DI1} | Pairs], Seq2};
+          {[{DI2#{ seq => Seq2 }, DI1} | Pairs], Seq2, Rid};
         not_found ->
-          DI = new_docinfo(DocId),
+          Rid2 = Rid + 1,
+          DI = new_docinfo(DocId, Rid2),
           DI2 = merge_revtrees(Updates, DI, MergeFun),
           Seq2 = case DI2 =/= DI of
                    true -> Seq + 1;
                    false -> Seq
                  end,
-          {[{DI2#{ seq => Seq2 }, not_found} | Pairs], Seq2}
+          {[{DI2#{ seq => Seq2 }, not_found} | Pairs], Seq2, Rid2}
       end
     end,
-    {DIPairs, UpdatedSeq},
+    {DIPairs, UpdatedSeq, LastRID},
     Entries
   ),
   DIPairs2.
@@ -308,16 +306,14 @@ merge_fun(merge) ->
 merge_fun(merge_with_conflict) ->
   fun merge_revtree_with_conflict/3.
 
-new_docinfo(DocId) ->
+new_docinfo(DocId, Rid) ->
   #{id => DocId,
     rev => <<"">>,
     seq => 0,
+    rid => Rid,
     deleted => false,
     revtree => barrel_revtree:new(),
     body_map => #{}}.
-
-
-
 
 merge_revtrees([{Record, Client, _Policy} | Rest], DocInfo, MergeFun) ->
   DocInfo2 = MergeFun(Record, DocInfo, Client),

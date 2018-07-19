@@ -38,7 +38,8 @@
   fold_changes/4,
   indexed_seq/1,
   set_indexed_seq/2,
-  get_local_doc/2
+  get_local_doc/2,
+  resource_id/1
 ]).
 
 -include_lib("stdlib/include/ms_transform.hrl").
@@ -63,6 +64,7 @@ init_barrel(Store, Name, Options = #{ create := true }) ->
       store => Store,
       db => Db,
       idx => Idx,
+      resource_id => 0,
       updated_seq => 0,
       indexed_seq => 0,
       docs_count => 0,
@@ -107,6 +109,8 @@ indexed_seq(#{ indexed_seq := Seq }) -> Seq.
 
 set_indexed_seq(Seq, State) -> {ok, State#{ indexed_seq => Seq }}.
 
+resource_id(#{ resource_id := RID }) -> RID.
+
 get_local_doc(DocId, State) ->
   fetch({local, DocId}, State).
 
@@ -125,27 +129,29 @@ write_revision(DocId, Rev, Body, #{ db := Db, commit_ts := Ts }) ->
 
 write_docs_infos(DIPairs, LocalRecords, PurgedIdRevs, #{ db := Db, commit_ts := Ts } = State) ->
   #{ db := Db, commit_ts := Ts, docs_count := DocsCount0, del_docs_count := DelDocsCount0 } = State,
-  {Batch0, Seqs, DocsCount, DelDocsCount} = lists:foldl(
-    fun({NewDI, OldDI}, {Acc, AccSeq, Count, DelCount}) ->
+  {Batch0, Seqs, Rids, DocsCount, DelDocsCount} = lists:foldl(
+    fun({NewDI, OldDI}, {Acc, AccSeq, AccRid, Count, DelCount}) ->
       case {NewDI, OldDI} of
-        {#{ id := Id, seq := Seq }=DI, not_found} ->
+        {#{ id := Id, seq := Seq, rid := RID  }=DI, not_found} ->
+          RIDKey = #ikey{ key = {rid, RID}, seqno=Ts, type=put},
           IdKey = #ikey{ key = {docs, Id}, seqno=Ts, type=put},
           SeqKey = #ikey{ key = {seq, Seq}, seqno=Ts, type=put},
-          {[{IdKey, DI}, {SeqKey, DI} | Acc], [Seq | AccSeq], Count + 1, DelCount};
+          {[{IdKey, DI}, {SeqKey, DI}, {RIDKey, Id} | Acc], [Seq | AccSeq], [RID | AccRid], Count + 1, DelCount};
         {#{ id := Id, seq := Seq }=DI, #{ seq := OldSeq }} ->
           IdKey = #ikey{ key = {docs, Id}, seqno=Ts, type=put},
           SeqKey = #ikey{ key = {seq, Seq}, seqno=Ts, type=put},
           RemSeqKey = #ikey{ key = {seq, OldSeq}, seqno=Ts, type=delete},
           {Count1, DelCount1}= count(NewDI, OldDI, Count, DelCount),
-          {[{IdKey, DI}, {SeqKey, DI}, {RemSeqKey, undefined} | Acc], [Seq | AccSeq], Count1, DelCount1};
-        {not_found, #{ id := Id, seq := Seq }} ->
+          {[{IdKey, DI}, {SeqKey, DI}, {RemSeqKey, undefined} | Acc], [Seq | AccSeq], AccRid, Count1, DelCount1};
+        {not_found, #{ id := Id, seq := Seq, rid := RID }} ->
+          RIDKey = #ikey{ key = {rid, RID}, seqno=Ts, type=delete},
           IdKey = #ikey{ key = {docs, Id}, seqno=Ts, type=delete},
           SeqKey = #ikey{ key = {seq, Seq}, seqno=Ts, type=delete},
           {Count1, DelCount1} = count(NewDI, OldDI, Count, DelCount),
-          {[{IdKey, undefined}, {SeqKey, undefined} | Acc], AccSeq, Count1, DelCount1}
+          {[{IdKey, undefined}, {SeqKey, undefined}, {RIDKey, undefined} | Acc], AccSeq, AccRid, Count1, DelCount1}
       end
     end,
-    {[], [], DocsCount0, DelDocsCount0},
+    {[], [], [], DocsCount0, DelDocsCount0},
     DIPairs
   ),
   Batch = lists:foldl(
@@ -169,13 +175,16 @@ write_docs_infos(DIPairs, LocalRecords, PurgedIdRevs, #{ db := Db, commit_ts := 
     Batch,
     LocalRecords
   ),
-
-  UpdatedSeq = lists:max(Seqs),
   ets:insert(Db, FinalBatch),
-
-  NewState = State#{ updated_seq := UpdatedSeq, docs_count := DocsCount, del_docs_count := DelDocsCount },
+  NewState = State#{updated_seq => lmax(Seqs),
+                    resource_id => lmax(Rids),
+                    docs_count => DocsCount,
+                    del_docs_count => DelDocsCount },
   {ok, NewState}.
 
+
+lmax([]) -> 0;
+lmax(L) -> lists:max(L).
 
 commit(#{ commit_ts := Ts } = State) ->
   State#{ read_ts => Ts, commit_ts => Ts + 1 }.
