@@ -11,12 +11,12 @@
     crypto,
     public_key,
     ssl,
-    memstore,
     uuid,
     gproc,
     sbroker,
     hooks,
-    ehash
+    ehash,
+    worker_pool
    ]},
   {env, [
    {vm_memory_high_watermark, 0.4},
