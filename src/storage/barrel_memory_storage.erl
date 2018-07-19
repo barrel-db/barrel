@@ -231,6 +231,7 @@ traverse('$end_of_table', Key, KeyAcc, Fun, Acc, _Limit) ->
   case Fun(Key, merge_ops(KeyAcc, []), Acc) of
     {ok, Acc1} -> Acc1;
     {stop, Acc1} -> Acc1;
+    {skip, Acc1} -> Acc1;
     stop -> Acc;
     ok -> Acc;
     skip -> Acc
@@ -245,6 +246,8 @@ traverse({[{{NextKey, _}, _}=KV], Cont}, Key, KeyAcc, Fun, Acc, Limit) ->
       traverse(ets:select(Cont), NextKey, [KV], Fun, Acc1, Limit - 1);
     {stop, Acc1} ->
       Acc1;
+    {skip, Acc1} ->
+      traverse(ets:select(Cont), NextKey, [KV], Fun, Acc1, Limit);
     stop ->
       Acc;
     ok ->
@@ -261,6 +264,7 @@ traverse_reverse('$end_of_table', Key, KeyAcc, Fun, Acc, _) ->
   case Fun(Key, merge_ops(lists:reverse(KeyAcc), []), Acc) of
     {ok, Acc1} -> Acc1;
     {stop, Acc1} -> Acc1;
+    {skip, Acc1} -> Acc1;
     stop -> Acc;
     ok -> Acc;
     skip -> Acc
@@ -273,6 +277,8 @@ traverse_reverse({[{{NextKey, _Type}, _Val}=KV], Cont}, Key, KeyAcc, Fun, Acc, L
       traverse_reverse(ets:select(Cont), NextKey, [KV], Fun, Acc1, Limit - 1);
     {stop, Acc1} ->
       Acc1;
+    {skip, Acc1} ->
+      traverse_reverse(ets:select(Cont), NextKey, [KV], Fun, Acc1, Limit);
     stop ->
       Acc;
     ok ->
