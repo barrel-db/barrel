@@ -23,7 +23,8 @@
   db_infos/1,
   fetch_doc/3,
   update_docs/4,
-  revsdiff/3
+  revsdiff/3,
+  fold_docs/4
 ]).
 
 
@@ -73,9 +74,9 @@ fetch_doc(DbRef, DocId, Options) ->
 do_fetch_doc(Db, DocId, Options) ->
   UserRev = maps:get(rev, Options, <<"">>),
   case barrel_storage:get_doc_infos(Db, DocId) of
-    {ok, #{ deleted := true }} when UserRev =:= <<>> ->
+    {ok, #{ deleted := true } = _DI} when UserRev =:= <<>> ->
       {error, not_found};
-    {ok, #{ rev := WinningRev, revtree := RevTree}} ->
+    {ok, #{ rev := WinningRev, revtree := RevTree}=_DI} ->
       Rev = case UserRev of
               <<"">> -> WinningRev;
               _ -> UserRev
@@ -152,6 +153,53 @@ do_revsdiff(Db, DocId, RevIds) ->
       {ok, RevIds, []};
     Error ->
       Error
+  end.
+
+fold_docs(DbRef, UserFun, UserAcc, Options) ->
+  do_for_ref(
+    DbRef,
+    fun(Db) ->
+      WrapperFun = fold_docs_fun(Db, UserFun, Options),
+      barrel_storage:fold_docs(Db, WrapperFun, UserAcc, Options)
+    end
+  ).
+
+fold_docs_fun(#{ name := Name } = Db, UserFun, Options) ->
+  IncludeDeleted =  maps:get(include_deleted, Options, false),
+  WithHistory = maps:get(history, Options, false),
+  MaxHistory = maps:get(max_history, Options, ?IMAX1),
+  fun(DocId, DI, Acc) ->
+    io:format("docid=~p, di=~p~n", [DocId, DI]),
+    case DI of
+      #{ deleted := true } when IncludeDeleted =/= true -> skip;
+      #{ rev := Rev, revtree := RevTree, deleted := Del } ->
+        case barrel_storage:get_revision(Db, DocId, Rev) of
+          {ok, Doc} ->
+            io:format("docid=~p, doc=~p~n", [DocId, Doc]),
+            case WithHistory of
+              false ->
+                UserFun(maybe_add_deleted(Doc#{ <<"_rev">> => Rev}, Del), Acc);
+              true ->
+                History = barrel_revtree:history(Rev, RevTree),
+                EncodedRevs = barrel_doc:encode_revisions(History),
+                Revisions = barrel_doc:trim_history(EncodedRevs, [], MaxHistory),
+                Doc1 = maybe_add_deleted(Doc#{ <<"_rev">> => Rev, <<"_revisions">> => Revisions }, Del),
+                UserFun(Doc1, Acc)
+            end;
+          not_found ->
+            _ = lager:warning(
+              "doc revision not found while folding docs: db=~p id=~p, rev=~p~n",
+              [Name, DocId, Rev]
+            ),
+            skip;
+          Error ->
+            _ = lager:error(
+              "error while folding docs: db=~p id=~p, rev=~p error=p~n",
+              [Name, DocId, Rev, Error]
+            ),
+            exit(Error)
+        end
+    end
   end.
 
 

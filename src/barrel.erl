@@ -28,7 +28,8 @@
   delete_doc/3,
   purge_doc/2,
   save_docs/2,
-  delete_docs/2
+  delete_docs/2,
+  fold_docs/4
 ]).
 
 -export([query/5]).
@@ -66,6 +67,18 @@
   previous_to => prop(),
   include_deleted => true | false
 }.
+
+-type fold_docs_options() :: #{
+  equal_to => prop(),
+  start_at => prop(),
+  next_to => prop(),
+  end_at => prop(),
+  previous_to => prop(),
+  include_deleted => true | false,
+  history => boolean(),
+  max_history => non_neg_integer()
+}.
+
 
 -type changes_options() :: #{
   interval => non_neg_integer(),
@@ -175,6 +188,16 @@ delete_docs(Barrel, DocsOrDocsRevId) ->
     DocsOrDocsRevId
   ),
   save_docs(Barrel, Docs).
+
+-spec fold_docs(Name, Fun, AccIn, Options) -> AccOut when
+  Name :: barrel_name(),
+  AccResult :: {ok, Acc2 :: any()} | {stop, Acc2 :: any()} | {skip, Acc2 :: any()} | stop | skip,
+  Fun :: fun( (Doc :: barrel_doc:doc(), Acc1 :: any() ) -> AccResult ),
+  AccIn :: any(),
+  Options :: fold_docs_options(),
+  AccOut :: any().
+fold_docs(Barrel, Fun, AccIn, Options) ->
+  barrel_db:fold_docs(Barrel, Fun, AccIn, Options).
 
 
 %% @doc query the barrel indexes

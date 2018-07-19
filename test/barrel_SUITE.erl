@@ -22,7 +22,8 @@
   save_doc/1,
   update_non_existing_doc/1,
   delete_doc/1,
-  save_docs/1
+  save_docs/1,
+  fold_docs/1
 ]).
 
 all() ->
@@ -30,7 +31,8 @@ all() ->
     save_doc,
     update_non_existing_doc,
     delete_doc,
-    save_docs
+    save_docs,
+    fold_docs
   ].
 
 init_per_suite(Config) ->
@@ -86,4 +88,32 @@ save_docs(_Config) ->
     {ok, <<"b">>, _Rev2}
   ]} = barrel:save_docs(<<"test">>, Docs),
   ok.
-  
+
+
+fold_docs(_Config) ->
+  Docs = [
+    #{ <<"id">> => <<"a">>, <<"v">> => 1},
+    #{ <<"id">> => <<"b">>, <<"v">> => 2},
+    #{ <<"id">> => <<"c">>, <<"v">> => 3},
+    #{ <<"id">> => <<"d">>, <<"v">> => 4},
+    #{ <<"id">> => <<"e">>, <<"v">> => 5}
+  ],
+  {ok, _Saved} = barrel:save_docs(<<"test">>, Docs),
+  5 = length(_Saved),
+  Fun = fun(#{ <<"id">> := Id }, Acc) -> {ok, [ Id | Acc ]} end,
+  Result1 = barrel:fold_docs(<<"test">>, Fun, [], #{}),
+  io:format("result=~p~n", [Result1]),
+  [<<"a">>, <<"b">>, <<"c">>, <<"d">>, <<"e">>] = lists:reverse(Result1),
+  {ok, #{ <<"_rev">> := RevC}} = barrel:fetch_doc(<<"test">>, <<"c">>, #{}),
+  {ok, _, _} = barrel:delete_doc(<<"test">>, <<"c">>, RevC),
+  {error, not_found} = barrel:fetch_doc(<<"test">>, <<"c">>, #{}),
+  Result2 = barrel:fold_docs(<<"test">>, Fun, [], #{}),
+  [<<"a">>, <<"b">>, <<"d">>, <<"e">>] = lists:reverse(Result2),
+  Result3 = barrel:fold_docs(<<"test">>, Fun, [], #{include_deleted => true}),
+  [<<"a">>, <<"b">>, <<"c">>, <<"d">>, <<"e">>] = lists:reverse(Result3),
+  ok.
+
+
+
+
+

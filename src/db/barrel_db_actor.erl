@@ -204,8 +204,8 @@ flush_revisions([{DI, OldDI}| Rest], Flushed, ToIndex, State) ->
   ),
   Flushed2 = [{DI2, OldDI} | Flushed],
   %%IRef = erlang:make_ref(),
-  %%wpool:cast(barrel_index_pool, {index, IRef, DI2#{ body_map => BodyMap2}, DI, State}),
-  %%ToIndex2 = [IRef | ToIndex],
+  %%wpool:cast(barrel_index_pool, {index, IRef, State, DI2#{ body_map => BodyMap2}, DI}),
+  %%ToIndex2 = [IRef | ToIndex],
   ToIndex2 = ToIndex,
   flush_revisions(Rest, Flushed2, ToIndex2, State);
 flush_revisions([], Flushed, ToIndex2, _State) ->
@@ -353,7 +353,7 @@ merge_revtree(Record, DocInfo, Client) ->
   #{ revs := Revs, deleted := NewDeleted, doc := Doc } = Record,
   case Revs of
     [NewRev] when map_size(RevTree) =:= 0  ->
-      RevInfo = #{  id => NewRev, parent => <<>>, body => Doc },
+      RevInfo = #{  id => NewRev, parent => <<>>, deleted => NewDeleted },
       RevTree1 = barrel_revtree:add(RevInfo, RevTree),
       DocInfo#{ rev => NewRev,
         revtree => RevTree1,
