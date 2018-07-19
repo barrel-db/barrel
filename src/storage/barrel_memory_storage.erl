@@ -188,20 +188,28 @@ count(not_found, #{ deleted := false }, Count, DelCount) -> {Count -1, DelCount}
 count(_, _, Count, DelCount) -> {Count, DelCount}.
 
 
-fold_docs(Fun, Acc, Options, #{ db := Db } = State) ->
+fold_docs(UserFun, UserAcc, Options, #{ db := Db } = State) ->
   {Dir, Limit} = limit(Options),
   MS = fold_db_ms(docs, Options#{dir => Dir}, State),
+  WrapperFun = fun
+                 (Key, [{put, Val}], Acc) -> UserFun(Key, Val, Acc);
+                 (_Key, [{delete, _}], _) -> skip
+               end,
   case Dir of
     fwd ->
-      traverse(ets:select(Db, MS, 1), undefined, Fun, Acc, Limit);
+      traverse(ets:select(Db, MS, 1), undefined, [], WrapperFun, UserAcc, Limit);
     rev ->
-      traverse_reverse(ets:select_reverse(Db, MS, 1), undefined, Fun, Acc, Limit)
+      traverse_reverse(ets:select_reverse(Db, MS, 1), undefined, [], WrapperFun, UserAcc, Limit)
   end.
 
 
-fold_changes(Since, Fun, Acc, #{ db := Db } = State) ->
+fold_changes(Since, UserFun, UserAcc, #{ db := Db } = State) ->
   MS = fold_db_ms(seq, #{dir => fwd, next_to => Since}, State),
-  traverse(ets:select(Db, MS, 1), undefined, Fun, Acc, 1 bsl 64 - 1).
+  WrapperFun = fun
+                 (Key, [{put, Val}], Acc) -> UserFun(Key, Val, Acc);
+                 (_Key, [{delete, _}], _) -> skip
+               end,
+  traverse(ets:select(Db, MS, 1), undefined, [], WrapperFun, UserAcc, 1 bsl 64 - 1).
 
 
 %% MVCC helpers
@@ -215,57 +223,71 @@ fetch(Key, #{ db := Db, read_ts := TS }=_State) ->
     {[{_, Val}], _} -> {ok, Val}
   end.
 
-traverse(_, _, _, Acc, 0) ->
+traverse(_, _, _, _, Acc, 0) ->
   Acc;
-traverse('$end_of_table', undefined, _, Acc, _) ->
+traverse('$end_of_table', undefined, _, _, Acc, _) ->
   Acc;
-traverse('$end_of_table', {Key, Val}, Fun, Acc, _Limit) ->
-  case Fun(Key, Val, Acc) of
+traverse('$end_of_table', Key, KeyAcc, Fun, Acc, _Limit) ->
+  case Fun(Key, merge_ops(KeyAcc, []), Acc) of
     {ok, Acc1} -> Acc1;
     {stop, Acc1} -> Acc1;
     stop -> Acc;
     ok -> Acc;
     skip -> Acc
   end;
-traverse({[{Key, Val}], Cont}, undefined, Fun, Acc, Limit) ->
-  traverse(ets:select(Cont), {Key, Val}, Fun, Acc, Limit);
-traverse({[{Key, Val}], Cont}, {Key, _}, Fun, Acc, Limit) ->
-  traverse(ets:select(Cont), {Key, Val}, Fun, Acc, Limit);
-traverse({[{NextKey, NextVal}], Cont}, {Key, Val}, Fun, Acc, Limit) ->
-  case Fun(Key, Val, Acc) of
+traverse({[{{Key, _}, _}=KV], Cont}, undefined, KeyAcc, Fun, Acc, Limit) ->
+  traverse(ets:select(Cont), Key, [KV|KeyAcc], Fun, Acc, Limit);
+traverse({[{{Key, _}, _}=KV], Cont}, Key, KeyAcc, Fun, Acc, Limit) ->
+  traverse(ets:select(Cont), Key, [KV|KeyAcc], Fun, Acc, Limit);
+traverse({[{{NextKey, _}, _}=KV], Cont}, Key, KeyAcc, Fun, Acc, Limit) ->
+  case Fun(Key, merge_ops(KeyAcc, []), Acc) of
     {ok, Acc1} ->
-      traverse(ets:select(Cont), {NextKey, NextVal}, Fun, Acc1, Limit - 1);
+      traverse(ets:select(Cont), NextKey, [KV], Fun, Acc1, Limit - 1);
     {stop, Acc1} ->
       Acc1;
     stop ->
       Acc;
     ok ->
-      traverse(ets:select(Cont), {NextKey, NextVal}, Fun, Acc, Limit - 1);
+      traverse(ets:select(Cont), NextKey, [KV], Fun, Acc, Limit - 1);
     skip ->
-      traverse(ets:select(Cont), {NextKey, NextVal}, Fun, Acc, Limit)
+      traverse(ets:select(Cont), NextKey, [KV], Fun, Acc, Limit)
   end.
 
-traverse_reverse(_, _, _, Acc, 0) ->
+traverse_reverse(_, _, _, _, Acc, 0) ->
   Acc;
-traverse_reverse('$end_of_table', undefined, _, Acc, _) ->
+traverse_reverse('$end_of_table', undefined, _, _, Acc, _) ->
   Acc;
-traverse_reverse('$end_of_table', _, _, Acc, _) ->
-  Acc;
-traverse_reverse({[{Key, _Val}], Cont}, Key, Fun, Acc, Limit) ->
-  traverse_reverse(ets:select(Cont), Key, Fun, Acc, Limit);
-traverse_reverse({[{Key, Val}], Cont}, _, Fun, Acc, Limit) ->
-  case Fun(Key, Val, Acc) of
+traverse_reverse('$end_of_table', Key, KeyAcc, Fun, Acc, _) ->
+  case Fun(Key, merge_ops(lists:reverse(KeyAcc), []), Acc) of
+    {ok, Acc1} -> Acc1;
+    {stop, Acc1} -> Acc1;
+    stop -> Acc;
+    ok -> Acc;
+    skip -> Acc
+  end;
+traverse_reverse({[{{Key, _Type},_Val}=KV], Cont}, Key, KeyAcc, Fun, Acc, Limit) ->
+  traverse_reverse(ets:select(Cont), Key, [KV | KeyAcc], Fun, Acc, Limit);
+traverse_reverse({[{{NextKey, _Type}, _Val}=KV], Cont}, Key, KeyAcc, Fun, Acc, Limit) ->
+  case Fun(Key, merge_ops(lists:reverse(KeyAcc), []), Acc) of
     {ok, Acc1} ->
-      traverse(ets:select(Cont), Key, Fun, Acc1, Limit - 1);
+      traverse_reverse(ets:select(Cont), NextKey, [KV], Fun, Acc1, Limit - 1);
     {stop, Acc1} ->
       Acc1;
     stop ->
       Acc;
     ok ->
-      traverse_reverse(ets:select(Cont), Key, Fun, Acc, Limit - 1);
+      traverse_reverse(ets:select(Cont), NextKey, [KV], Fun, Acc, Limit - 1);
     skip ->
-      traverse_reverse(ets:select(Cont), Key, Fun, Acc, Limit)
+      traverse_reverse(ets:select(Cont), NextKey, [KV], Fun, Acc, Limit)
   end.
+
+
+merge_ops([{{_Key, merge}, OP} | Rest], OPs) ->
+  merge_ops(Rest, [{merge, OP} | OPs]);
+merge_ops([{{_Key, Type}, OP} | _], OPs) ->
+  [{Type, OP} | OPs];
+merge_ops([], OPs) ->
+  OPs.
 
 
 limit(#{ limit_to_first := L }) -> {rev, L};
@@ -277,7 +299,7 @@ fold_db_ms(Ident, Options, #{ read_ts := Ts }) ->
                   end_key(Options,
                           [{'=<', '$2', {const, Ts}}])
                  ),
-  [{{#ikey{key={Ident, '$1'}, seqno='$2', type=put}, '$3'}, Rule, [{{'$1', '$3'}}]}].
+  [{{#ikey{key={Ident, '$1'}, seqno='$2', type='$3'}, '$4'}, Rule, [{{{{'$1', '$3'}}, '$4'}}]}].
 
 
 start_key(#{ start_at := Start, dir := fwd }, MS) -> [{'>=', '$1', {const, Start}} | MS];
