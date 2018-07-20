@@ -150,8 +150,7 @@ try_update_docs(Client, RepRecords, LocalRecords, Policy, State) ->
   try
     do_update_docs(Client, RepRecords, LocalRecords, Policy, State)
   catch
-    _Class:Reason:S ->
-      io:format("update error reason=~p, stack=~p~n", [Reason, S]),
+    _Class:Reason ->
       terminate(Reason, State)
   end.
 
