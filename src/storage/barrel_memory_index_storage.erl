@@ -43,14 +43,14 @@ add_mutations(Mutations, Index, CommitTs) ->
       fun(Mutation, {AddKeys, AddValues}) ->
         case Mutation of
           {add, Path, DocId} ->
-            FwdKey = Path ++ [DocId],
+            FwdKey = {Path, DocId},
             Hash = erlang:phash2(FwdKey),
             AddKeys2 = [{FwdKey, Hash} | AddKeys],
             IKey = #ikey{key=erlang:phash2(FwdKey), ts=CommitTs, type=put},
             AddValues2 = [{IKey, undefined} | AddValues],
             {AddKeys2, AddValues2};
           {delete, Path, DocId} ->
-            FwdKey = Path ++ [DocId],
+            FwdKey = {Path, DocId},
             IKey = #ikey{key=erlang:phash2(FwdKey), ts=CommitTs, type=delete},
             AddValues2 = [{IKey, undefined} | AddValues],
             {AddKeys, AddValues2}
@@ -67,67 +67,102 @@ fold(Path, Fun, Acc, Options, Db, Index, ReadTs) ->
   {Dir, Limit} = limit(Options),
   OrderBy = maps:get(order_by, Options, order_by_id),
   MS = pattern(OrderBy, Path, Options#{ dir => Dir }),
-  traverse(ets:select(Index#idx.keys, MS, 1), Fun, Acc, Db, Index, ReadTs, Limit).
+  case Dir of
+    fwd ->
+      traverse(ets:select(Index#idx.keys, MS, 1), Fun, Acc, Db, Index, ReadTs, Limit);
+    rev ->
+      traverse_reverse(ets:select_reverse(Index#idx.keys, MS, 1), Fun, Acc, Db, Index, ReadTs, Limit)
+  end.
   
   
 traverse(_, _, Acc, _, _,  _, 0) -> Acc;
 traverse('$end_of_table', _, Acc, _, _, _, _) -> Acc;
 traverse({[{Key, Hash}], Cont}, Fun, Acc, Db, Index, ReadTs, Limit ) ->
-  DocId= lists:last(Key),
+  io:format("got key=~p, hash=~p~n", [Key, Hash]),
+  {_, DocId} = Key,
   case mvcc_key(Hash, Index, ReadTs) of
     {ok, _} ->
       case barrel_memory_storage:fetch({docs, DocId}, Db, ReadTs) of
         {ok, DI} ->
           case Fun(DocId, DI, Acc) of
             {ok, Acc1} ->
-              traverse(ets:select(cont), Fun, Acc1, Db, Index, ReadTs, Limit -1);
+              traverse(ets:select(Cont), Fun, Acc1, Db, Index, ReadTs, Limit -1);
             {stop, Acc1} ->
               Acc1;
             {skip, Acc1} ->
               Acc1;
             ok ->
-              traverse(ets:select(cont), Fun, Acc, Db, Index, ReadTs, Limit -1);
+              traverse(ets:select(Cont), Fun, Acc, Db, Index, ReadTs, Limit -1);
             skip ->
-              traverse(ets:select(cont), Fun, Acc, Db, Index, ReadTs, Limit);
+              traverse(ets:select(Cont), Fun, Acc, Db, Index, ReadTs, Limit);
             stop ->
               Acc
           end;
         not_found ->
           %% race condition ?
-          traverse(ets:select(cont), Fun, Acc, Db, Index, ReadTs, Limit)
+          traverse(ets:select(Cont), Fun, Acc, Db, Index, ReadTs, Limit)
       end;
     not_found ->
       traverse(ets:select(Cont), Fun, Acc, Db, Index, ReadTs, Limit)
   end.
 
-limit(#{ limit_to_first := L }) -> {rev, L};
-limit(#{ limit_to_last := L }) -> {fwd, L};
+traverse_reverse(_, _, Acc, _, _,  _, 0) -> Acc;
+traverse_reverse('$end_of_table', _, Acc, _, _, _, _) -> Acc;
+traverse_reverse({[{Key, Hash}], Cont}, Fun, Acc, Db, Index, ReadTs, Limit ) ->
+  io:format("got key=~p, hash=~p~n", [Key, Hash]),
+  {_, DocId} = Key,
+  case mvcc_key(Hash, Index, ReadTs) of
+    {ok, _} ->
+      case barrel_memory_storage:fetch({docs, DocId}, Db, ReadTs) of
+        {ok, DI} ->
+          case Fun(DocId, DI, Acc) of
+            {ok, Acc1} ->
+              traverse_reverse(ets:select_reverse(Cont), Fun, Acc1, Db, Index, ReadTs, Limit -1);
+            {stop, Acc1} ->
+              Acc1;
+            {skip, Acc1} ->
+              Acc1;
+            ok ->
+              traverse_reverse(ets:select_reverse(Cont), Fun, Acc, Db, Index, ReadTs, Limit -1);
+            skip ->
+              traverse_reverse(ets:select_reverse(Cont), Fun, Acc, Db, Index, ReadTs, Limit);
+            stop ->
+              Acc
+          end;
+        not_found ->
+          %% race condition ?
+          traverse_reverse(ets:select_reverse(Cont), Fun, Acc, Db, Index, ReadTs, Limit)
+      end;
+    not_found ->
+      traverse_reverse(ets:select_reverse(Cont), Fun, Acc, Db, Index, ReadTs, Limit)
+  end.
+
+
+limit(#{ limit_to_first := L }) -> {fwd, L};
+limit(#{ limit_to_last := L }) -> {rev, L};
 limit(_) -> {fwd, 1 bsl 64 - 1}.
 
 
 pattern(order_by_id, Path, Options) ->
-  PathLen = length(Path),
   Rule = start_key(Options, end_key(Options, [])),
   KeyPattern = case Rule of
-                 [] -> ['_' || _I <- lists:seq(1, PathLen +1)];
-                 _ -> ['_' || _I <- lists:seq(1, PathLen)] ++ ['$1']
+                 [] -> {Path, '_'};
+                 _ -> {Path, '$1'}
                end,
-  
   [{{KeyPattern, '_'}, Rule, ['$_']}];
 pattern(order_by_key, Path, Options) ->
-  PathLen = length(Path),
   EqualTo = maps:get(equal_to, Options, false),
-  
   Rule = start_key(Options, end_key(Options, [])),
   
   KeyPattern = case {Rule, EqualTo} of
-                 {[], false} -> ['_' || _I <- lists:seq(1, PathLen + 2)];
+                 {[], false} ->
+                   {Path ++ '_', '_'};
                  {[], _} ->
-                   ['_' || _I <- lists:seq(1, PathLen)] ++ [EqualTo, '_'];
+                   {Path ++ [EqualTo], '_'};
                  {_, false} ->
-                   ['_' || _I <- lists:seq(1, PathLen)] ++ ['$1', '_'];
+                   {Path ++ ['$1'], '_'};
                  {_, _} ->
-                   ['_' || _I <- lists:seq(1, PathLen)] ++ [EqualTo, '$1', '_']
+                   {Path ++ [EqualTo, '$1'], '_'}
                end,
   [{{KeyPattern, '_'}, Rule, ['$_']}];
 pattern(order_by_value, _Path, _Options) ->
@@ -136,19 +171,15 @@ pattern(order_by_value, _Path, _Options) ->
   
 start_key(Options, MS) -> start_key(Options, '$1', MS).
 
-start_key(#{ start_at := Start, dir := fwd }, M, MS) -> [{'>=', M, {const, Start}} | MS];
-start_key(#{ next_to := Start, dir := fwd }, M, MS) -> [{'>', M, {const, Start}} | MS];
-start_key(#{ start_at := Start, dir := rev }, M, MS) -> [{'=<', M, {const, Start}} | MS];
-start_key(#{ next_to := Start, dir := rev }, M, MS) -> [{'<', M, {const, Start}} | MS];
+start_key(#{ start_at := Start }, M, MS) -> [{'>=', M, {const, Start}} | MS];
+start_key(#{ next_to := Start }, M, MS) -> [{'>', M, {const, Start}} | MS];
 start_key(_, _, MS) -> MS.
 
 
 end_key(Options, MS) -> end_key(Options, '$1', MS).
 
-end_key(#{ end_at := End, dir := fwd }, M, MS) -> [{'=<', M, {const, End}} | MS];
-end_key(#{ previous_to := End, dir := fwd }, M, MS) -> [{'<', M, {const, End}} | MS];
-end_key(#{ end_at := End, dir := rev }, M, MS) -> [{'>=', M, {const, End}} | MS];
-end_key(#{ previous_to := End, dir := rev }, M, MS) -> [{'>', M, {const, End}} | MS];
+end_key(#{ end_at := End }, M, MS) -> [{'=<', M, {const, End}} | MS];
+end_key(#{ previous_to := End }, M, MS) -> [{'<', M, {const, End}} | MS];
 end_key(_, _, MS) -> MS.
 
 

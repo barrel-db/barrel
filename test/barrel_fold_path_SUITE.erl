@@ -62,7 +62,7 @@ basic(_Suite) ->
   Docs = [
     #{ <<"id">> => <<"a">>, <<"v">> => 1, <<"o">> => #{ <<"o1">> => 1, << "o2">> => 1}}
   ],
-  [{ok, <<"a">>, Rev}] = barrel:save_docs(<<"test">>, Docs),
+  {ok, [{ok, <<"a">>, Rev}]} = barrel:save_docs(<<"test">>, Docs),
   Fun = fun(Doc, Acc) -> {ok, [Doc | Acc]} end,
   [#{ <<"id">> := <<"a">>, <<"v">> := 1, <<"_rev">> := Rev }] = barrel:fold_path(<<"test">>, <<"/id">>, Fun, [], #{}),
   ok.
@@ -74,8 +74,8 @@ multiple_docs(_Config) ->
   DocB = #{ <<"test">> => <<"b">> },
   BatchA = [DocA || _I <- lists:seq(1, 30)],
   BatchB = [DocB || _I <- lists:seq(1, 25)],
-  ResultsA = barrel:save_docs(<<"test">>, BatchA),
-  ResultsB = barrel:save_docs(<<"test">>, BatchB),
+  {ok, ResultsA} = barrel:save_docs(<<"test">>, BatchA),
+  {ok, ResultsB} = barrel:save_docs(<<"test">>, BatchB),
 
   IdsA = [Id || {ok, Id, _} <- ResultsA],
   IdsB = [Id || {ok, Id, _} <- ResultsB],
@@ -165,6 +165,9 @@ limit_at(_Config) ->
     #{ limit_to_last => 15 }
   ),
   15 = length(QL15),
+  io:format("q15=~p~n~nql15=~p~n", [Q15, QL15]),
+
+
   true = (QL15 =/= Q15),
   EL15 = [ << I:32 >> || I <- lists:seq(16, 30)],
   EL15 = QL15,
@@ -201,7 +204,7 @@ range(_Config) ->
     <<"o">>,
     Fun,
     [],
-    #{ start_at => <<"test3">> }
+    #{ start_at => <<"test3">>, order_by => order_by_key }
   ),
   C = QC,
 
@@ -211,7 +214,7 @@ range(_Config) ->
     <<"o">>,
     Fun,
     [],
-    #{ next_to => <<"test3">> }
+    #{ next_to => <<"test3">>, order_by => order_by_key}
   ),
   C1 = QC1,
 
@@ -222,7 +225,7 @@ range(_Config) ->
     <<"o">>,
     Fun,
     [],
-    #{ end_at => <<"test6">> }
+    #{ end_at => <<"test6">>, order_by => order_by_key }
   ),
   F = QF,
 
@@ -232,7 +235,7 @@ range(_Config) ->
     <<"o">>,
     Fun,
     [],
-    #{ previous_to => <<"test6">> }
+    #{ previous_to => <<"test6">>, order_by => order_by_key }
   ),
   F1 = QF1,
 
@@ -242,7 +245,7 @@ range(_Config) ->
     <<"o">>,
     Fun,
     [],
-    #{ start_at => <<"test3">>, end_at => <<"test6">> }
+    #{ start_at => <<"test3">>, end_at => <<"test6">>, order_by => order_by_key }
   ),
   FC = QFC,
 
@@ -252,7 +255,7 @@ range(_Config) ->
     <<"o">>,
     Fun,
     [],
-    #{ next_to => <<"test3">>, previous_to => <<"test6">> }
+    #{ next_to => <<"test3">>, previous_to => <<"test6">>, order_by => order_by_key }
   ),
   FC1 = QFC1,
   ok.
@@ -276,7 +279,7 @@ range_with_limit(_Config) ->
     <<"o">>,
     Fun,
     [],
-    #{ start_at => <<"test3">>, limit_to_first => 2 }
+    #{ start_at => <<"test3">>, limit_to_first => 2, order_by => order_by_key }
   ),
   C = QC,
 
@@ -286,7 +289,7 @@ range_with_limit(_Config) ->
     <<"o">>,
     Fun,
     [],
-    #{ next_to => <<"test3">>, limit_to_first => 2 }
+    #{ next_to => <<"test3">>, limit_to_first => 2, order_by => order_by_key }
   ),
   C1 = QC1,
   C3 = [<<"g">>, <<"h">>],
@@ -295,7 +298,7 @@ range_with_limit(_Config) ->
     <<"o">>,
     Fun,
     [],
-    #{ start_at => <<"test3">>, limit_to_last => 2 }
+    #{ start_at => <<"test3">>, limit_to_last => 2, order_by => order_by_key }
   ),
   C3 = QC3,
 
@@ -305,7 +308,7 @@ range_with_limit(_Config) ->
     <<"o">>,
     Fun,
     [],
-    #{ next_to => <<"test3">>, limit_to_last => 2 }
+    #{ next_to => <<"test3">>, limit_to_last => 2, order_by => order_by_key }
   ),
   C4 = QC4,
 
@@ -315,7 +318,7 @@ range_with_limit(_Config) ->
     <<"o">>,
     Fun,
     [],
-    #{ end_at => <<"test6">>, limit_to_first => 2 }
+    #{ end_at => <<"test6">>, limit_to_first => 2, order_by => order_by_key }
   ),
   F = QF,
 
@@ -325,7 +328,7 @@ range_with_limit(_Config) ->
     <<"o">>,
     Fun,
     [],
-    #{ previous_to => <<"test6">>, limit_to_first => 2 }
+    #{ previous_to => <<"test6">>, limit_to_first => 2, order_by => order_by_key }
   ),
   F1 = QF1,
 
@@ -335,7 +338,7 @@ range_with_limit(_Config) ->
     <<"o">>,
     Fun,
     [],
-    #{ end_at => <<"test6">>, limit_to_last => 2 }
+    #{ end_at => <<"test6">>, limit_to_last => 2, order_by => order_by_key }
   ),
   F2 = QF2,
 
@@ -345,49 +348,49 @@ range_with_limit(_Config) ->
     <<"o">>,
     Fun,
     [],
-    #{ previous_to => <<"test6">>, limit_to_last => 2 }
+    #{ previous_to => <<"test6">>, limit_to_last => 2, order_by => order_by_key }
   ),
   F3 = QF3,
   ok.
 
 equal_to(_Config) ->
   Batch = [
-    #{ <<"id">> => <<"a">>, <<"o">> => #{ <<"test1">> => 1 }},
-    #{ <<"id">> => <<"b">>, <<"o">> => #{ <<"test2">> => 1 }},
-    #{ <<"id">> => <<"c">>, <<"o">> => #{ <<"test3">> => 2 }},
-    #{ <<"id">> => <<"d">>, <<"o">> => #{ <<"test4">> => 2 }},
-    #{ <<"id">> => <<"e">>, <<"o">> => #{ <<"test5">> => 1 }},
-    #{ <<"id">> => <<"f">>, <<"o">> => #{ <<"test6">> => 3 }},
-    #{ <<"id">> => <<"g">>, <<"o">> => #{ <<"test7">> => 1 }},
-    #{ <<"id">> => <<"h">>, <<"o">> => #{ <<"test8">> => 1 }}
+    #{ <<"id">> => <<"a">>, <<"o">> => #{ <<"test">> => 1 }},
+    #{ <<"id">> => <<"b">>, <<"o">> => #{ <<"test">> => 1 }},
+    #{ <<"id">> => <<"c">>, <<"o">> => #{ <<"test">> => 2 }},
+    #{ <<"id">> => <<"d">>, <<"o">> => #{ <<"test">> => 2 }},
+    #{ <<"id">> => <<"e">>, <<"o">> => #{ <<"test">> => 1 }},
+    #{ <<"id">> => <<"f">>, <<"o">> => #{ <<"test">> => 3 }},
+    #{ <<"id">> => <<"g">>, <<"o">> => #{ <<"test">> => 1 }},
+    #{ <<"id">> => <<"h">>, <<"o">> => #{ <<"test">> => 1 }}
   ],
   _ = barrel:save_docs(<<"test">>, Batch),
 
   Fun = fun(#{ <<"id">> := Id }, Acc) -> {ok, [ Id | Acc ]} end,
   Q1 = barrel:fold_path(
     <<"test">>,
-    <<"o">>,
+    <<"/o/test">>,
     Fun,
     [],
-    #{ equal_to => 1}
+    #{ equal_to => 1, order_by => order_by_key}
   ),
   5 = length(Q1),
   [<<"h">>, <<"g">>,  <<"e">>,  <<"b">>, <<"a">>] = Q1,
   Q2 = barrel:fold_path(
     <<"test">>,
-    <<"o">>,
+    <<"/o/test">>,
     Fun,
     [],
-    #{ equal_to => 2}
+    #{ equal_to => 2, order_by => order_by_key}
   ),
   2 = length(Q2),
   [<<"d">>, <<"c">>] = Q2,
   Q3 = barrel:fold_path(
     <<"test">>,
-    <<"o">>,
+    <<"/o/test">>,
     Fun,
     [],
-    #{ equal_to => 3}
+    #{ equal_to => 3, order_by => order_by_key}
   ),
   1 = length(Q3),
   [<<"f">>] = Q3,
@@ -413,16 +416,16 @@ fix_range_test(_Config) ->
   _ = barrel:save_docs(<<"test">>, Batch),
   Fun = fun(#{ <<"docId">> := Id }, Acc) -> {ok, Acc ++ [Id]} end,
 
-  All = barrel:fold_path(<<"test">>, <<"docId">>, Fun, [], #{ limit_to_last => 15 }),
+  All = barrel:fold_path(<<"test">>, <<"docId">>, Fun, [], #{ limit_to_last => 15, order_by => order_by_key }),
   Ids = All,
   Nth = lists:nth(10, Ids),
   ExpectBefore = lists:sublist(Ids, 11, 5),
   Before = barrel:fold_path(
-    <<"test">>, <<"docId">>, Fun, [], #{ previous_to => Nth, limit_to_last => 10 }
+    <<"test">>, <<"docId">>, Fun, [], #{ previous_to => Nth, limit_to_last => 10, order_by => order_by_key }
   ),
   Before = ExpectBefore,
   ExpectAfter = lists:reverse(lists:sublist(Ids, 1, 9)),
   After = barrel:fold_path(
-    <<"test">>, <<"docId">>, Fun, [], #{ next_to => Nth, limit_to_first => 10 }
+    <<"test">>, <<"docId">>, Fun, [], #{ next_to => Nth, limit_to_first => 10, order_by => order_by_key }
   ),
   After = ExpectAfter.

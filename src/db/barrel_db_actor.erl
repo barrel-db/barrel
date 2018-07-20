@@ -224,7 +224,6 @@ await_for_index([], Acc, State) ->
 await_for_index([Ref | Rest], Acc, State) ->
   receive
     {Ref, Mutations} ->
-      io:format("updater pid=~p received=~p~n", [self(), Mutations]),
       await_for_index(Rest, [Mutations | Acc ], State)
   end.
 

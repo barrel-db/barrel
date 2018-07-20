@@ -307,9 +307,20 @@ update_docs(DbRef, Docs, Options, UpdateType) ->
   do_for_ref(
     DbRef,
     fun(Db) ->
-      update_docs_1(Db, Docs, Options, UpdateType)
+      Docs2 = prepare_docs(Docs, []),
+      update_docs_1(Db, Docs2, Options, UpdateType)
     end
   ).
+
+prepare_docs([Doc = #{ <<"id">> := _Id } | Rest], Acc) ->
+  prepare_docs(Rest, [Doc | Acc]);
+prepare_docs([Doc | Rest], Acc) ->
+  Doc2 = Doc#{ <<"id">> => barrel_id:binary_id(62)},
+  prepare_docs(Rest, [Doc2 | Acc]);
+prepare_docs([], Acc) ->
+  lists:reverse(Acc).
+
+
 
 
 update_docs_1(Db, Docs, Options, interactive_edit) ->

@@ -230,7 +230,7 @@ fold_changes(Since, UserFun, UserAcc, #{ db := Db } = State) ->
   traverse(ets:select(Db, MS, 1), undefined, [], WrapperFun, UserAcc, 1 bsl 64 - 1).
 
 
-fold_path(Path, UserFun, UserAcc, Options, #{ db := Db, index := Index, read_ts := ReadTs } ) ->
+fold_path(Path, UserFun, UserAcc, Options, #{ db := Db, idx := Index, read_ts := ReadTs } ) ->
   barrel_memory_index_storage:fold(Path, UserFun, UserAcc, Options, Db, Index, ReadTs).
 
 
