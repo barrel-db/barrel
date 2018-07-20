@@ -89,6 +89,14 @@ init([]) ->
            },
 
            %% stores supervisor
+           #{id => barrel_index_pool,
+             start => {barrel_index_pool, start_link, []},
+             restart => permanent,
+             shutdown => infinity,
+             type => supervisor,
+             modules => [barrel_index_pool]},
+
+           %% stores supervisor
            #{id => barrel_store_provider_sup,
              start => {barrel_store_provider_sup, start_link, []},
              restart => permanent,

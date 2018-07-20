@@ -6,7 +6,7 @@
 %%% @end
 %%% Created : 22. Apr 2018 14:46
 %%%-------------------------------------------------------------------
--module(barrel_query_SUITE).
+-module(barrel_fold_path_SUITE).
 -author("benoitc").
 
 %% API
@@ -41,7 +41,7 @@ all() ->
 
 init_per_suite(Config) ->
   {ok, _} = application:ensure_all_started(barrel),
-  {ok, _} = barrel_store_sup:start_store(default, barrel_memory_storage, #{}),
+  {ok, _} = barrel_store_provider_sup:start_store(default, barrel_memory_storage, #{}),
   
   Config.
 
@@ -50,7 +50,7 @@ init_per_testcase(_, Config) ->
   Config.
 
 end_per_testcase(_, _Config) ->
-  ok = barrel:delete_barrel(<<"test">>),
+  ok = barrel:drop_barrel(<<"test">>),
   ok.
 
 end_per_suite(Config) ->
@@ -64,7 +64,7 @@ basic(_Suite) ->
   ],
   [{ok, <<"a">>, Rev}] = barrel:save_docs(<<"test">>, Docs),
   Fun = fun(Doc, Acc) -> {ok, [Doc | Acc]} end,
-  [#{ <<"id">> := <<"a">>, <<"v">> := 1, <<"_rev">> := Rev }] = barrel:query(<<"test">>, <<"/id">>, Fun, [], #{}),
+  [#{ <<"id">> := <<"a">>, <<"v">> := 1, <<"_rev">> := Rev }] = barrel:fold_path(<<"test">>, <<"/id">>, Fun, [], #{}),
   ok.
 
 
@@ -86,7 +86,7 @@ multiple_docs(_Config) ->
 
   {ok, #{ <<"test">> := << "a">> }} = barrel:fetch_doc(<<"test">>, lists:nth(1, IdsA), #{}),
 
-  All = barrel:query(
+  All = barrel:fold_path(
     <<"test">>,
     <<"/id">>,
     fun(#{ <<"id">> := Id }, Acc) -> {ok, [Id | Acc]} end,
@@ -95,7 +95,7 @@ multiple_docs(_Config) ->
   ),
   55 = length(All),
 
-  All20 = barrel:query(
+  All20 = barrel:fold_path(
     <<"test">>,
     <<"/id">>,
     fun(#{ <<"id">> := Id }, Acc) -> {ok, [Id | Acc]} end,
@@ -104,7 +104,7 @@ multiple_docs(_Config) ->
   ),
   20 = length(All20),
 
-  All40 = barrel:query(
+  All40 = barrel:fold_path(
     <<"test">>,
     <<"/id">>,
     fun(#{ <<"id">> := Id }, Acc) -> {ok, [Id | Acc]} end,
@@ -114,7 +114,7 @@ multiple_docs(_Config) ->
 
   40 = length(All40),
 
-  QAll = barrel:query(
+  QAll = barrel:fold_path(
     <<"test">>,
     <<"test/a">>,
     fun(#{ <<"id">> := Id }, Acc) -> {ok, [Id | Acc]} end,
@@ -123,7 +123,7 @@ multiple_docs(_Config) ->
   ),
   30 = length(QAll),
 
-  Q15 = barrel:query(
+  Q15 = barrel:fold_path(
     <<"test">>,
     <<"test/a">>,
     fun(#{ <<"id">> := Id}, Acc) -> {ok, [Id | Acc]} end,
@@ -132,7 +132,7 @@ multiple_docs(_Config) ->
   ),
   15 = length(Q15),
 
-  QBAll = barrel:query(
+  QBAll = barrel:fold_path(
     <<"test">>,
     <<"test/b">>,
     fun(#{ <<"id">> := Id }, Acc) -> {ok, [Id | Acc]} end,
@@ -145,7 +145,7 @@ limit_at(_Config) ->
   Batch = [#{ <<"id">> => << I:32 >>} || I <- lists:seq(1, 30)],
   _ = barrel:save_docs(<<"test">>, Batch),
 
-  Q15 = barrel:query(
+  Q15 = barrel:fold_path(
     <<"test">>,
     <<"id">>,
     fun(#{ <<"id">> := Id}, Acc) -> {ok, [Id | Acc]} end,
@@ -157,7 +157,7 @@ limit_at(_Config) ->
   E15 = [ << I:32 >> || I <- lists:seq(1, 15)],
   E15 = lists:reverse(Q15),
 
-  QL15 = barrel:query(
+  QL15 = barrel:fold_path(
     <<"test">>,
     <<"id">>,
     fun(#{ <<"id">> := Id}, Acc) -> {ok, [Id | Acc]} end,
@@ -185,7 +185,7 @@ range(_Config) ->
 
   Fun = fun(#{ <<"id">> := Id }, Acc) -> {ok, [ Id | Acc ]} end,
   All = [<<"h">>, <<"g">>, <<"f">>, <<"e">>, <<"d">>, <<"c">>, <<"b">>, <<"a">>],
-  QAll = barrel:query(
+  QAll = barrel:fold_path(
     <<"test">>,
     <<"o">>,
     Fun,
@@ -196,7 +196,7 @@ range(_Config) ->
   All = QAll,
 
   C = [<<"h">>, <<"g">>, <<"f">>, <<"e">>, <<"d">>, <<"c">>],
-  QC = barrel:query(
+  QC = barrel:fold_path(
     <<"test">>,
     <<"o">>,
     Fun,
@@ -206,7 +206,7 @@ range(_Config) ->
   C = QC,
 
   C1 = [<<"h">>, <<"g">>, <<"f">>, <<"e">>, <<"d">>],
-  QC1 = barrel:query(
+  QC1 = barrel:fold_path(
     <<"test">>,
     <<"o">>,
     Fun,
@@ -217,7 +217,7 @@ range(_Config) ->
 
 
   F = [<<"f">>, <<"e">>, <<"d">>, <<"c">>, <<"b">>, <<"a">>],
-  QF = barrel:query(
+  QF = barrel:fold_path(
     <<"test">>,
     <<"o">>,
     Fun,
@@ -227,7 +227,7 @@ range(_Config) ->
   F = QF,
 
   F1 = [<<"e">>, <<"d">>, <<"c">>, <<"b">>, <<"a">>],
-  QF1 = barrel:query(
+  QF1 = barrel:fold_path(
     <<"test">>,
     <<"o">>,
     Fun,
@@ -237,7 +237,7 @@ range(_Config) ->
   F1 = QF1,
 
   FC = [<<"f">>, <<"e">>, <<"d">>, <<"c">>],
-  QFC = barrel:query(
+  QFC = barrel:fold_path(
     <<"test">>,
     <<"o">>,
     Fun,
@@ -247,7 +247,7 @@ range(_Config) ->
   FC = QFC,
 
   FC1 = [<<"e">>, <<"d">>],
-  QFC1 = barrel:query(
+  QFC1 = barrel:fold_path(
     <<"test">>,
     <<"o">>,
     Fun,
@@ -271,7 +271,7 @@ range_with_limit(_Config) ->
   _ = barrel:save_docs(<<"test">>, Batch),
   Fun = fun(#{ <<"id">> := Id }, Acc) -> {ok, [ Id | Acc ]} end,
   C = [<<"d">>, <<"c">>],
-  QC = barrel:query(
+  QC = barrel:fold_path(
     <<"test">>,
     <<"o">>,
     Fun,
@@ -281,7 +281,7 @@ range_with_limit(_Config) ->
   C = QC,
 
   C1 = [<<"e">>, <<"d">>],
-  QC1 = barrel:query(
+  QC1 = barrel:fold_path(
     <<"test">>,
     <<"o">>,
     Fun,
@@ -290,7 +290,7 @@ range_with_limit(_Config) ->
   ),
   C1 = QC1,
   C3 = [<<"g">>, <<"h">>],
-  QC3 = barrel:query(
+  QC3 = barrel:fold_path(
     <<"test">>,
     <<"o">>,
     Fun,
@@ -300,7 +300,7 @@ range_with_limit(_Config) ->
   C3 = QC3,
 
   C4 = [<<"g">>, <<"h">>],
-  QC4 = barrel:query(
+  QC4 = barrel:fold_path(
     <<"test">>,
     <<"o">>,
     Fun,
@@ -310,7 +310,7 @@ range_with_limit(_Config) ->
   C4 = QC4,
 
   F = [ <<"b">>, <<"a">> ],
-  QF = barrel:query(
+  QF = barrel:fold_path(
     <<"test">>,
     <<"o">>,
     Fun,
@@ -320,7 +320,7 @@ range_with_limit(_Config) ->
   F = QF,
 
   F1 = [<<"b">>, <<"a">>],
-  QF1 = barrel:query(
+  QF1 = barrel:fold_path(
     <<"test">>,
     <<"o">>,
     Fun,
@@ -330,7 +330,7 @@ range_with_limit(_Config) ->
   F1 = QF1,
 
   F2 = [ <<"e">>, <<"f">>],
-  QF2 = barrel:query(
+  QF2 = barrel:fold_path(
     <<"test">>,
     <<"o">>,
     Fun,
@@ -340,7 +340,7 @@ range_with_limit(_Config) ->
   F2 = QF2,
 
   F3 = [<<"d">>, <<"e">>],
-  QF3 = barrel:query(
+  QF3 = barrel:fold_path(
     <<"test">>,
     <<"o">>,
     Fun,
@@ -364,7 +364,7 @@ equal_to(_Config) ->
   _ = barrel:save_docs(<<"test">>, Batch),
 
   Fun = fun(#{ <<"id">> := Id }, Acc) -> {ok, [ Id | Acc ]} end,
-  Q1 = barrel:query(
+  Q1 = barrel:fold_path(
     <<"test">>,
     <<"o">>,
     Fun,
@@ -373,7 +373,7 @@ equal_to(_Config) ->
   ),
   5 = length(Q1),
   [<<"h">>, <<"g">>,  <<"e">>,  <<"b">>, <<"a">>] = Q1,
-  Q2 = barrel:query(
+  Q2 = barrel:fold_path(
     <<"test">>,
     <<"o">>,
     Fun,
@@ -382,7 +382,7 @@ equal_to(_Config) ->
   ),
   2 = length(Q2),
   [<<"d">>, <<"c">>] = Q2,
-  Q3 = barrel:query(
+  Q3 = barrel:fold_path(
     <<"test">>,
     <<"o">>,
     Fun,
@@ -413,16 +413,16 @@ fix_range_test(_Config) ->
   _ = barrel:save_docs(<<"test">>, Batch),
   Fun = fun(#{ <<"docId">> := Id }, Acc) -> {ok, Acc ++ [Id]} end,
 
-  All = barrel:query(<<"test">>, <<"docId">>, Fun, [], #{ limit_to_last => 15 }),
+  All = barrel:fold_path(<<"test">>, <<"docId">>, Fun, [], #{ limit_to_last => 15 }),
   Ids = All,
   Nth = lists:nth(10, Ids),
   ExpectBefore = lists:sublist(Ids, 11, 5),
-  Before = barrel:query(
+  Before = barrel:fold_path(
     <<"test">>, <<"docId">>, Fun, [], #{ previous_to => Nth, limit_to_last => 10 }
   ),
   Before = ExpectBefore,
   ExpectAfter = lists:reverse(lists:sublist(Ids, 1, 9)),
-  After = barrel:query(
+  After = barrel:fold_path(
     <<"test">>, <<"docId">>, Fun, [], #{ next_to => Nth, limit_to_first => 10 }
   ),
   After = ExpectAfter.

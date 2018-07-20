@@ -30,10 +30,9 @@
   save_docs/2,
   delete_docs/2,
   fold_docs/4,
-  fold_changes/5
+  fold_changes/5,
+  fold_path/5
 ]).
-
--export([query/5]).
 
 -export([
   subscribe_changes/2, subscribe_changes/3, subscribe_changes/4,
@@ -220,7 +219,7 @@ fold_changes(Barrel, Since, Fun, AccIn, Options) ->
 %% @doc query the barrel indexes
 %%
 %% To query all docs just pass "/" or "/id"
--spec query(Name, Path, Fun, AccIn, Options) -> AccOut when
+-spec fold_path(Name, Path, Fun, AccIn, Options) -> AccOut when
   Name :: barrel_name(),
   Path :: binary(),
   AccResult :: {ok, Acc2 :: any()} | {stop, Acc2 :: any()} | {skip, Acc2 :: any()} | ok | stop | skip,
@@ -228,8 +227,8 @@ fold_changes(Barrel, Since, Fun, AccIn, Options) ->
   AccIn :: any(),
   Options :: query_options(),
   AccOut :: any().
-query(Barrel, Path, Fun, Acc, Options) ->
-  barrel_index:query(Barrel, Path, Fun, Acc, Options).
+fold_path(Barrel, Path, Fun, Acc, Options) ->
+  barrel_db:fold_path(Barrel, Path, Fun, Acc, Options).
 
 
 %% @doc subscribe to the changes of a barrel.

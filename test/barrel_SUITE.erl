@@ -61,13 +61,13 @@ save_doc(_Config) ->
   {ok, #{ <<"_rev">> := Rev } = Doc1} = barrel:fetch_doc(<<"test">>, <<"a">>, #{}),
   {ok, <<"a">>, Rev2} = barrel:save_doc(<<"test">>, Doc1#{ <<"v">> => 2 }),
   {ok, #{ <<"_rev">> := Rev2} } = barrel:fetch_doc(<<"test">>, <<"a">>, #{}),
-  conflict =  barrel:save_doc(<<"test">>, Doc1#{ <<"v">> => 2 }),
-  conflict = barrel:save_doc(<<"test">>, Doc0),
+  {error, {conflict, revision_conflict}} =  barrel:save_doc(<<"test">>, Doc1#{ <<"v">> => 2 }),
+  {error, {conflict, doc_exists}} = barrel:save_doc(<<"test">>, Doc0),
   ok.
 
 update_non_existing_doc(_Config) ->
   Doc0 = #{ <<"id">> => <<"a">>, <<"v">> => 1, <<"_rev">> => <<"1-AAAAAAAAAAA">>},
-  conflict = barrel:save_doc(<<"test">>, Doc0).
+  {error, {conflict, revision_conflict}}  = barrel:save_doc(<<"test">>, Doc0).
 
 delete_doc(_Config) ->
   Doc0 = #{ <<"id">> => <<"a">>, <<"v">> => 1},

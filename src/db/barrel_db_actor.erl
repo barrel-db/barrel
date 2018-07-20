@@ -150,7 +150,8 @@ try_update_docs(Client, RepRecords, LocalRecords, Policy, State) ->
   try
     do_update_docs(Client, RepRecords, LocalRecords, Policy, State)
   catch
-    _Class:Reason ->
+    _Class:Reason:S ->
+      io:format("update error reason=~p, stack=~p~n", [Reason, S]),
       terminate(Reason, State)
   end.
 
@@ -185,10 +186,12 @@ do_update_docs(Client, RepRecords, LocalRecords0, Policy, #{ name := Name } = St
   _ = [To ! {done, self()} || To <- Clients],
   FinalState.
 
+flush_revisions([{DI, DI}| Rest], Flushed, ToIndex, State) ->
+  flush_revisions(Rest, Flushed, ToIndex, State);
 flush_revisions([{DI, OldDI}| Rest], Flushed, ToIndex, State) ->
   {BodyMap, DI2} = maps:take(body_map, DI),
   #{ id := Id, rev := WinningRev } = DI2,
-  _BodyMap2 = maps:filter(
+  BodyMap2 = maps:filter(
     fun
       (Rev, Doc) when Rev =/= WinningRev ->
         barrel_storage:write_revision(State, Id, Rev, Doc),
@@ -200,20 +203,29 @@ flush_revisions([{DI, OldDI}| Rest], Flushed, ToIndex, State) ->
     BodyMap
   ),
   Flushed2 = [{DI2, OldDI} | Flushed],
-  %%IRef = erlang:make_ref(),
-  %%wpool:cast(barrel_index_pool, {index, IRef, State, DI2#{ body_map => BodyMap2}, DI}),
-  %%ToIndex2 = [IRef | ToIndex],
-  ToIndex2 = ToIndex,
+  IRef = erlang:make_ref(),
+  wpool:cast(barrel_index_pool, {index, IRef, State, DI2#{ body_map => BodyMap2}, OldDI}),
+  ToIndex2 = [IRef | ToIndex],
   flush_revisions(Rest, Flushed2, ToIndex2, State);
-flush_revisions([], Flushed, ToIndex2, _State) ->
-  ok = await_for_index(ToIndex2),
-  {Flushed, ToIndex2 /= [] }.
+flush_revisions([], Flushed, ToIndex, State) ->
+  ok = maybe_await_index(ToIndex, State),
+  {Flushed, ToIndex /= [] }.
+
+
+maybe_await_index([], _State) -> ok;
+maybe_await_index(ToIndex, State) ->
+  await_for_index(ToIndex, [], State).
 
 %% TODO: add timeout ?
-await_for_index([]) -> ok;
-await_for_index(ToIndex) ->
+await_for_index([], Acc, State) ->
+  Mutations = lists:flatten(Acc),
+  ok = barrel_storage:add_mutations(State, Mutations),
+  ok;
+await_for_index([Ref | Rest], Acc, State) ->
   receive
-    Ref -> await_for_index(ToIndex -- [Ref])
+    {Ref, Mutations} ->
+      io:format("updater pid=~p received=~p~n", [self(), Mutations]),
+      await_for_index(Rest, [Mutations | Acc ], State)
   end.
 
 update_local_records_rev(Records) ->
@@ -277,23 +289,28 @@ process_entries(Entries, MergeFun, DIPairs, State) ->
   {DIPairs2, _, _} = dict:fold(
     fun(DocId, Updates, {Pairs, Seq, Rid}) ->
       case barrel_storage:get_doc_infos(State, DocId) of
-        {ok, DI0} ->
+        {ok, #{ seq := OldSeq } = DI0} ->
           DI1 = DI0#{ body_map => #{} },
           DI2 = merge_revtrees(Updates, DI1, MergeFun),
           Seq2 = case DI2 =/= DI1 of
-                   true -> Seq + 1;
-                   false -> Seq
+                   true ->
+                     Seq + 1;
+                   false -> OldSeq
                  end,
           {[{DI2#{ seq => Seq2 }, DI1} | Pairs], Seq2, Rid};
         not_found ->
           Rid2 = Rid + 1,
           DI = new_docinfo(DocId, Rid2),
           DI2 = merge_revtrees(Updates, DI, MergeFun),
-          Seq2 = case DI2 =/= DI of
-                   true -> Seq + 1;
-                   false -> Seq
-                 end,
-          {[{DI2#{ seq => Seq2 }, not_found} | Pairs], Seq2, Rid2}
+          case DI2 =/= DI of
+            true ->
+              Seq2 = Seq +1,
+              {[{DI2#{ seq => Seq2 }, not_found} | Pairs], Seq2, Rid2};
+    
+            false ->
+              {[{not_found, not_found} | Pairs], Seq, Rid2}
+  
+          end
       end
     end,
     {DIPairs, UpdatedSeq, LastRID},
@@ -341,7 +358,7 @@ merge_revtree(Record, #{ deleted := true } = DocInfo, From) ->
       };
     false ->
       %% revision conflict
-      send_result(From, Record, conflict),
+      send_result(From, Record, {error, {conflict, revision_conflict}}),
       DocInfo
   end;
 merge_revtree(Record, DocInfo, Client) ->
@@ -357,7 +374,7 @@ merge_revtree(Record, DocInfo, Client) ->
         body_map => BodyMap#{ NewRev => Doc} };
     [_NewRev] ->
       %% doc exists, we will create a new branch
-      send_result(Client, Record, conflict),
+      send_result(Client, Record, {error, {conflict, doc_exists}}),
       DocInfo;
     [NewRev, Rev | _] ->
       case barrel_revtree:is_leaf(Rev, RevTree) of
@@ -378,7 +395,7 @@ merge_revtree(Record, DocInfo, Client) ->
                 body_map => BodyMap#{ NewRev => Doc} }
           end;
         false ->
-          send_result(Client, Record, conflict),
+          send_result(Client, Record, {error, {conflict, revision_conflict}}),
           DocInfo
       end
   end.

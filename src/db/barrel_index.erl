@@ -18,7 +18,6 @@
 
 %% API
 -export([
-  split_path/1, split_path/2,
   diff/2,
   analyze/1,
   do_query/9
@@ -29,24 +28,6 @@
 -export([query/5]).
 
 -define(STRING_PRECISION, 100).
--define(N_SEGMENTS, 3).
-
-
-%% @doc split a path in subitems. used to create partial paths
--spec split_path(list()) -> [list()].
-split_path(Path) -> split_path_1(Path, ?N_SEGMENTS, [], []).
-
--spec split_path(list(), non_neg_integer()) -> [list()].
-split_path(Path, N) -> split_path_1(Path, N, [], []).
-
-split_path_1(Path, N, Prefix0, Segments0) when length(Path) >= N ->
-  {Segment, Rest} = lists:split(N, Path),
-  [_ | Last ] = Segment,
-  Segments1 = [[Prefix0, Segment] | Segments0],
-  Prefix1 = Prefix0 ++ [lists:nth(1, Segment)],
-  split_path_1(Last ++ Rest, N, Prefix1, Segments1);
-split_path_1(_, _, _, Segments) ->
-  Segments.
 
 %% %% @doc get the operations maintenance to do between
 %% 2 instances of a document
@@ -76,11 +57,11 @@ analyze(D) ->
       (<<"_attachments">>, _V, Acc) ->
         Acc;
       (K, V, Acc) when is_map(V) ->
-        object(V, [<<"$">>, K], Acc);
+        object(V, [<<"$">>, K], [[<<"$">>, K] | Acc]);
       (K, V, Acc) when is_list(V) ->
-        array(V, [<<"$">>, K], Acc);
+        array(V, [<<"$">>, K], [[<<"$">>, K] | Acc]);
       (K, V, Acc) ->
-        [[<<"$">>, K, short(V)] | Acc]
+        [[<<"$">>, K] , [<<"$">>, K, short(V)] | Acc]
     end,
     [],
     D
@@ -90,11 +71,11 @@ object(Obj, Root, Acc0) ->
   maps:fold(
     fun
       (K, V, Acc) when is_map(V) ->
-        object(V, Root ++ [K], Acc);
+        object(V, Root ++ [K], [Root ++ [K] | Acc]);
       (K, V, Acc) when is_list(V) ->
-        array(V, Root ++ [K], Acc);
+        array(V, Root ++ [K], [Root ++ [K] | Acc]);
       (K, V, Acc) ->
-        [Root ++ [K, V] | Acc]
+        [Root ++ [K], Root ++ [K, V] | Acc]
     end,
     Acc0,
     Obj
@@ -103,13 +84,13 @@ object(Obj, Root, Acc0) ->
 array(Arr, Root,  Acc) -> array(Arr, Root, 0, Acc).
 
 array([Item | Rest], Root, Idx, Acc0) when is_map(Item) ->
-  Acc1 = object(Item, Root ++ [Idx], Acc0),
+  Acc1 = object(Item, Root ++ [Idx], [Root ++ [Idx] | Acc0]),
   array(Rest, Root, Idx + 1, Acc1);
 array([Item | Rest], Root, Idx, Acc0) when is_list(Item) ->
-  Acc1 = array(Item, Root ++ [Idx], Acc0),
+  Acc1 = array(Item, Root ++ [Idx], [Root ++ [Idx] | Acc0]),
   array(Rest, Root, Idx + 1, Acc1);
 array([Item | Rest], Root, Idx, Acc0) ->
-  Acc1 = [Root ++ [Idx, Item] | Acc0 ],
+  Acc1 = [Root ++ [Idx], Root ++ [Idx, Item] | Acc0 ],
   array(Rest, Root, Idx +1, Acc1);
 array([], _Root, _Idx, Acc) ->
   Acc.
@@ -226,25 +207,46 @@ decode_path(<<Codepoint/utf8, Rest/binary>>, [Current|Done]) ->
 
 analyze_test() ->
   Expected = [
-    [<<"$">>, <<"a">>, 1],
-    [<<"$">>, <<"b">>, <<"2">>],
-    [<<"$">>, <<"c">>, <<"a">>, 1],
-    [<<"$">>, <<"c">>, <<"b">>, 0, <<"a">>],
-    [<<"$">>, <<"c">>, <<"b">>, 1, <<"b">>],
-    [<<"$">>, <<"c">>, <<"b">>, 2, <<"c">>],
-    [<<"$">>, <<"c">>, <<"c">>, <<"a">>, 1],
-    [<<"$">>, <<"c">>, <<"c">>, <<"b">>, 2],
-    [<<"$">>, <<"d">>, 0, <<"a">>],
-    [<<"$">>, <<"d">>, 1, <<"b">>],
-    [<<"$">>, <<"d">>, 2, <<"c">>],
-    [<<"$">>, <<"e">>, 0, <<"a">>, 1],
-    [<<"$">>, <<"e">>, 1, <<"b">>, 2]
-  ],
+               [<<"$">>, <<"a">>],
+               [<<"$">>, <<"a">>, 1],
+               [<<"$">>, <<"b">>],
+               [<<"$">>, <<"b">>, <<"2">>],
+               [<<"$">>, <<"c">>],
+               [<<"$">>, <<"c">>, <<"a">>],
+               [<<"$">>, <<"c">>, <<"a">>, 1],
+               [<<"$">>, <<"c">>, <<"b">>],
+               [<<"$">>, <<"c">>, <<"b">>, 0],
+               [<<"$">>, <<"c">>, <<"b">>, 0, <<"a">>],
+               [<<"$">>, <<"c">>, <<"b">>, 1],
+               [<<"$">>, <<"c">>, <<"b">>, 1, <<"b">>],
+               [<<"$">>, <<"c">>, <<"b">>, 2],
+               [<<"$">>, <<"c">>, <<"b">>, 2, <<"c">>],
+               [<<"$">>, <<"c">>, <<"c">>],
+               [<<"$">>, <<"c">>, <<"c">>, <<"a">>],
+               [<<"$">>, <<"c">>, <<"c">>, <<"a">>, 1],
+               [<<"$">>, <<"c">>, <<"c">>, <<"b">>],
+               [<<"$">>, <<"c">>, <<"c">>, <<"b">>, 2],
+               [<<"$">>, <<"d">>],
+               [<<"$">>, <<"d">>, 0],
+               [<<"$">>, <<"d">>, 0, <<"a">>],
+               [<<"$">>, <<"d">>, 1],
+               [<<"$">>, <<"d">>, 1, <<"b">>],
+               [<<"$">>, <<"d">>, 2],
+               [<<"$">>, <<"d">>, 2, <<"c">>],
+               [<<"$">>, <<"e">>],
+               [<<"$">>, <<"e">>, 0],
+               [<<"$">>, <<"e">>, 0, <<"a">>],
+               [<<"$">>, <<"e">>, 0, <<"a">>, 1],
+               [<<"$">>, <<"e">>, 1],
+               [<<"$">>, <<"e">>, 1, <<"b">>],
+               [<<"$">>, <<"e">>, 1, <<"b">>, 2]
+             
+             ],
   ?assertEqual(Expected, lists:sort(analyze(?doc))).
 
 analyze_long_text_test() ->
   A = lists:sort(analyze(?doc2)),
-  [P1, P2] = A,
+  [_, P1, _, P2] = A,
   ?assertEqual([<<"$">>, <<"a">>, 1], P1),
   [<<"$">>, <<"text">>, PartialText] = P2,
   ?assertEqual(100, byte_size(PartialText)).
@@ -258,22 +260,8 @@ diff_test() ->
            <<"b">> => [0, 1, 3],
            <<"d">> => #{ <<"a">> => 1}},
   {Added, Removed} = diff(New, Old),
-  ?assertEqual([[<<"$">>,<<"c">>,<<"a">>,1]], Removed),
-  ?assertEqual([[<<"$">>,<<"d">>,<<"a">>,1],[<<"$">>,<<"b">>,2,3]], Added).
-
-
-split_path_test() ->
-  Path = [<<"$">>, <<"c">>, <<"b">>, 0, <<"a">>],
-  ExpectedForward = [
-    [[<<"$">>, <<"c">>], [<<"b">>, 0, <<"a">>]],
-    [[<<"$">>], [<<"c">>, <<"b">>, 0]],
-    [[], [<<"$">>, <<"c">>, <<"b">>]]
-  ],
-  ?assertEqual(ExpectedForward, split_path(Path)),
-  ExpectedForward1 = [
-    [[<<"$">>], [<<"c">>, <<"b">>, 0, <<"a">>]],
-    [[], [<<"$">>, <<"c">>, <<"b">>, 0]]
-  ],
-  ?assertEqual(ExpectedForward1, split_path(Path, 4)).
+  ?assertEqual([[<<"$">>,<<"c">>], [<<"$">>,<<"c">>,<<"a">>], [<<"$">>,<<"c">>,<<"a">>,1]], lists:sort(Removed)),
+  ?assertEqual([[<<"$">>,<<"b">>,2], [<<"$">>,<<"b">>,2,3],
+                [<<"$">>,<<"d">>],[<<"$">>,<<"d">>,<<"a">>],[<<"$">>,<<"d">>,<<"a">>,1]], lists:sort(Added)).
 
 -endif.

@@ -27,9 +27,11 @@
   get_revision/3,
   write_docs_infos/4,
   write_revision/4,
+  add_mutations/2,
   commit/1,
   fold_changes/4,
   fold_docs/4,
+  fold_path/5,
   indexed_seq/1,
   set_indexed_seq/2,
   get_local_doc/2,
@@ -79,6 +81,9 @@ write_docs_infos(#{ engine := {Mod, State} } = Db, DIPairs, LocalDocs, PurgedIds
   {ok, NState} = Mod:write_docs_infos(DIPairs, LocalDocs, PurgedIdsRevs, State),
   {ok, Db#{ engine => {Mod, NState}}}.
 
+add_mutations(#{ engine := {Mod, State} }, Mutations) ->
+  Mod:add_mutations(Mutations, State).
+
 commit(#{ engine := {Mod, State} } = Db) ->
   NState = Mod:commit(State),
   Db#{ engine => {Mod, NState} }.
@@ -93,6 +98,9 @@ fold_docs(#{ engine := {Mod, State} }, Fun, Acc, Options) ->
 
 fold_changes(#{ engine := {Mod, State} }, Since, Fun, Acc) ->
   Mod:fold_changes(Since, Fun, Acc, State).
+
+fold_path(#{ engine := {Mod, State} }, Path, Fun, Acc, Options) ->
+  Mod:fold_path(Path, Fun, Acc, Options, State).
 
 drop_barrel(#{ engine := {Mod, State} }) ->
   Mod:drop_barrel(State).

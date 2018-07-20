@@ -25,7 +25,8 @@
   update_docs/4,
   revsdiff/3,
   fold_docs/4,
-  fold_changes/5
+  fold_changes/5,
+  fold_path/5
 ]).
 
 
@@ -264,6 +265,42 @@ change_with_doc(Change, DocId, Rev, Db, true) ->
   end;
 change_with_doc(Change, _, _, _, _) ->
   Change.
+
+
+fold_path(DbRef, Path0, UserFun, UserAcc, Options) ->
+  Path1 = normalize_path(Path0),
+  DecodedPath = decode_path(Path1, []),
+  do_for_ref(
+    DbRef,
+    fun(Db) ->
+      WrapperFun = fold_docs_fun(Db, UserFun, Options),
+      barrel_storage:fold_path(Db, DecodedPath, WrapperFun, UserAcc, Options)
+    end
+  ).
+
+normalize_path(<<>>) -> <<"/id">>;
+normalize_path(<<"/">>) -> <<"/id">>;
+normalize_path(<< "/", _/binary >> = P) ->  P;
+normalize_path(P) ->  <<"/", P/binary >>.
+
+decode_path(<<>>, Acc) ->
+  [ << "$" >> | lists:reverse(Acc)];
+decode_path(<< $/, Rest/binary >>, Acc) ->
+  decode_path(Rest, [<<>> |Acc]);
+decode_path(<< $[, Rest/binary >>, Acc) ->
+  decode_path(Rest, [<<>> |Acc]);
+decode_path(<< $], Rest/binary >>, [BinInt | Acc] ) ->
+  case (catch binary_to_integer(BinInt)) of
+    {'EXIT', _} ->
+      erlang:error(bad_path);
+    Int ->
+      decode_path(Rest, [Int | Acc])
+  end;
+decode_path(<<Codepoint/utf8, Rest/binary>>, []) ->
+  decode_path(Rest, [<< Codepoint/utf8 >>]);
+decode_path(<<Codepoint/utf8, Rest/binary>>, [Current|Done]) ->
+  decode_path(Rest, [<< Current/binary, Codepoint/utf8 >> | Done]).
+
 
 
 update_docs(DbRef, Docs, Options, UpdateType) ->

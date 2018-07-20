@@ -33,14 +33,18 @@
   docs_count/1,
   del_docs_count/1,
   updated_seq/1,
+  add_mutations/2,
   commit/1,
   fold_docs/4,
   fold_changes/4,
   indexed_seq/1,
   set_indexed_seq/2,
   get_local_doc/2,
-  resource_id/1
+  resource_id/1,
+  fold_path/5
 ]).
+
+-export([fetch/3]).
 
 -include_lib("stdlib/include/ms_transform.hrl").
 
@@ -49,7 +53,7 @@
 
 -record(ikey, {key :: term(),
                seqno :: non_neg_integer(),
-               type :: put | delete }).
+               type :: put | delete | merge }).
 
 
 
@@ -57,7 +61,7 @@ init_barrel(Store, Name, Options = #{ create := true }) ->
   Db = new_tab(?DB),
   Idx = case maps:get(index_strategy, Options, consistent) of
           none -> undefined;
-          _ -> new_tab(?IDX)
+          _ -> barrel_memory_index_storage:new()
         end,
   Barrel =
     #{name => Name,
@@ -132,6 +136,8 @@ write_docs_infos(DIPairs, LocalRecords, PurgedIdRevs, #{ db := Db, commit_ts := 
   {Batch0, Seqs, Rids, DocsCount, DelDocsCount} = lists:foldl(
     fun({NewDI, OldDI}, {Acc, AccSeq, AccRid, Count, DelCount}) ->
       case {NewDI, OldDI} of
+        {not_found, not_found} ->
+          {Acc, AccSeq, AccRid, Count, DelCount};
         {#{ id := Id, seq := Seq, rid := RID  }=DI, not_found} ->
           RIDKey = #ikey{ key = {rid, RID}, seqno=Ts, type=put},
           IdKey = #ikey{ key = {docs, Id}, seqno=Ts, type=put},
@@ -186,6 +192,9 @@ write_docs_infos(DIPairs, LocalRecords, PurgedIdRevs, #{ db := Db, commit_ts := 
 lmax([]) -> 0;
 lmax(L) -> lists:max(L).
 
+add_mutations(Mutations, #{ idx := Index, commit_ts := CommiTs }) ->
+  barrel_memory_index_storage:add_mutations(Mutations, Index, CommiTs).
+
 commit(#{ commit_ts := Ts } = State) ->
   State#{ read_ts => Ts, commit_ts => Ts + 1 }.
 
@@ -221,10 +230,17 @@ fold_changes(Since, UserFun, UserAcc, #{ db := Db } = State) ->
   traverse(ets:select(Db, MS, 1), undefined, [], WrapperFun, UserAcc, 1 bsl 64 - 1).
 
 
+fold_path(Path, UserFun, UserAcc, Options, #{ db := Db, index := Index, read_ts := ReadTs } ) ->
+  barrel_memory_index_storage:fold(Path, UserFun, UserAcc, Options, Db, Index, ReadTs).
+
+
 %% MVCC helpers
 
-fetch(Key, #{ db := Db, read_ts := TS }=_State) ->
-  MS = ets:fun2ms(fun({#ikey{key=K, seqno=S }, _}=KV) when K =:= Key, S =< TS -> KV end),
+fetch(Key, #{ db := Db, read_ts := ReadTs }=_State) ->
+  fetch(Key, Db, ReadTs).
+
+fetch(Key, Db, ReadTs) ->
+  MS = ets:fun2ms(fun({#ikey{key=K, seqno=S }, _}=KV) when K =:= Key, S =< ReadTs -> KV end),
   case ets:select_reverse(Db, MS, 1) of
     '$end_of_table' ->
       not_found;
@@ -296,7 +312,6 @@ traverse_reverse({[{{NextKey, _Type}, _Val}=KV], Cont}, Key, KeyAcc, Fun, Acc, L
       traverse_reverse(ets:select(Cont), NextKey, [KV], Fun, Acc, Limit)
   end.
 
-
 merge_ops([{{_Key, merge}, OP} | Rest], OPs) ->
   merge_ops(Rest, [{merge, OP} | OPs]);
 merge_ops([{{_Key, Type}, OP} | _], OPs) ->
@@ -328,7 +343,6 @@ end_key(#{ previous_to := End, dir := fwd }, MS) -> [{'<', '$1', {const, End}} |
 end_key(#{ end_at := End, dir := rev }, MS) -> [{'>=', '$1', {const, End}} | MS];
 end_key(#{ previous_to := End, dir := rev }, MS) -> [{'>', '$1', {const, End}} | MS];
 end_key(_, MS) -> MS.
-
 
 %%% ==
 %%% provider API
