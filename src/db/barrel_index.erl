@@ -18,14 +18,10 @@
 
 %% API
 -export([
-  diff/2,
-  analyze/1,
-  do_query/9
+  diff/2
 ]).
 
 -export([short/1]).
-
--export([query/5]).
 
 -define(STRING_PRECISION, 100).
 
@@ -98,90 +94,6 @@ array([], _Root, _Idx, Acc) ->
 short(<< S:100/binary, _/binary >>) -> S;
 short(S) when is_binary(S) -> S;
 short(S) -> S.
-
-query(Barrel, Path0, Fun, Acc, Options) ->
-  %%ok = barrel_index_actor:refresh(Barrel),
-
-  Path1 = normalize_path(Path0),
-  DecodedPath = decode_path(Path1, []),
-  OrderBy = maps:get(order_by, Options, order_by_key),
-  Limit = limit(Options),
-  IncludeDeleted = maps:get(include_deleted, Options, false),
-  {Path, {StartInclusive, StartPath}, {EndInclusive, EndPath}} = case maps:find(equal_to, Options) of
-                                 {ok, EqualTo} ->
-                                   {DecodedPath ++ [EqualTo], {true, undefined}, {true, undefined}};
-                                 error ->
-                                   Start = start_at(Options, DecodedPath),
-                                   End = end_at(Options, DecodedPath),
-                                   {DecodedPath, Start, End}
-                               end,
-  {FoldFun, ByFun} = case OrderBy of
-                       order_by_key ->
-                         {fold_path, fun(P) -> P end};
-                       order_by_value ->
-                         {fold_reverse_path, fun lists:reverse/1}
-
-                     end,
-  Command = {query,
-             FoldFun, ByFun(Path),
-             {StartInclusive, ByFun(StartPath)}, {EndInclusive, ByFun(EndPath)}, Limit, IncludeDeleted, Fun, Acc},
-  barrel_db:do_command(Barrel, Command).
-
-
-do_query(FoldFun, Path, Start, End, Limit, IncludeDeleted, UserFun, UserAcc, {Mod, ModState}) ->
-  Snapshot = Mod:get_snapshot(ModState),
-  WrapperFun =
-  fun
-    (#{ id := DocId, rev := Rev, deleted := true }, Acc) when IncludeDeleted =:= true ->
-      case  Mod:get_revision(DocId, Rev, Snapshot) of
-        {ok, Doc} ->
-          UserFun(Doc#{ <<"_rev">> => Rev, <<"_deleted">> => true }, Acc);
-        {error, not_found} ->
-          UserFun(#{ <<"id">> => DocId, <<"_rev">> => Rev, <<"_deleted">> => true }, Acc)
-      end;
-    (#{ deleted := true }, _Acc)  ->
-      skip;
-    (#{ id := DocId, rev := Rev }, Acc) ->
-      {ok, Doc} = Mod:get_revision(DocId, Rev, Snapshot),
-      UserFun(Doc#{ <<"_rev">> => Rev }, Acc)
-  end,
-  Mod:FoldFun(Path, Start, End, Limit, WrapperFun, UserAcc, Snapshot).
-
-
-start_at(#{ start_at := Start }, Path) -> {true, Path ++ [Start]};
-start_at(#{ next_to := Start }, Path) -> {false, Path ++ [Start]};
-start_at(_, _) -> {true, undefined}.
-
-end_at(#{ end_at := End }, Path) -> {true, Path ++ [End]};
-end_at(#{ previous_to := End }, Path) -> {false, Path ++ [End]};
-end_at(_, _) -> {true, undefined}.
-
-limit(#{ limit_to_first := L }) -> {limit_to_first, L};
-limit(#{ limit_to_last:= L }) -> {limit_to_last, L};
-limit(_) -> undefined.
-
-normalize_path(<<>>) -> <<"/id">>;
-normalize_path(<<"/">>) -> <<"/id">>;
-normalize_path(<< "/", _/binary >> = P) ->  P;
-normalize_path(P) ->  <<"/", P/binary >>.
-
-decode_path(<<>>, Acc) ->
-  [ << "$" >> | lists:reverse(Acc)];
-decode_path(<< $/, Rest/binary >>, Acc) ->
-  decode_path(Rest, [<<>> |Acc]);
-decode_path(<< $[, Rest/binary >>, Acc) ->
-  decode_path(Rest, [<<>> |Acc]);
-decode_path(<< $], Rest/binary >>, [BinInt | Acc] ) ->
-  case (catch binary_to_integer(BinInt)) of
-    {'EXIT', _} ->
-      erlang:error(bad_path);
-    Int ->
-      decode_path(Rest, [Int | Acc])
-  end;
-decode_path(<<Codepoint/utf8, Rest/binary>>, []) ->
-  decode_path(Rest, [<< Codepoint/utf8 >>]);
-decode_path(<<Codepoint/utf8, Rest/binary>>, [Current|Done]) ->
-  decode_path(Rest, [<< Current/binary, Codepoint/utf8 >> | Done]).
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
