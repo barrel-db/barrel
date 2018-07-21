@@ -67,17 +67,24 @@ fold(Path, Fun, Acc, Options, Db, Index, ReadTs) ->
   {Dir, Limit} = limit(Options),
   OrderBy = maps:get(order_by, Options, order_by_id),
   MS = pattern(OrderBy, Path, Options#{ dir => Dir }),
-  case Dir of
-    fwd ->
-      traverse(ets:select(Index#idx.keys, MS, 1), Fun, Acc, Db, Index, ReadTs, Limit);
-    rev ->
-      traverse_reverse(ets:select_reverse(Index#idx.keys, MS, 1), Fun, Acc, Db, Index, ReadTs, Limit)
-  end.
+  {First, Next} = case Dir of
+                    fwd ->
+                      {
+                        ets:select(Index#idx.keys, MS, 1),
+                        fun(Cont) -> ets:select_reverse(Cont) end
+                      };
+                    rev ->
+                      {
+                        ets:select_reverse(Index#idx.keys, MS, 1),
+                        fun(Cont) -> ets:select_reverse(Cont) end
+                      }
+                  end,
+  traverse(First, Next, Fun, Acc, Db, Index, ReadTs, Limit).
   
   
-traverse(_, _, Acc, _, _,  _, 0) -> Acc;
-traverse('$end_of_table', _, Acc, _, _, _, _) -> Acc;
-traverse({[{Key, Hash}], Cont}, Fun, Acc, Db, Index, ReadTs, Limit ) ->
+traverse(_, _, _, Acc, _, _,  _, 0) -> Acc;
+traverse('$end_of_table', _, _, Acc, _, _, _, _) -> Acc;
+traverse({[{Key, Hash}], Cont}, Next, Fun, Acc, Db, Index, ReadTs, Limit ) ->
   io:format("got key=~p, hash=~p~n", [Key, Hash]),
   {_, DocId} = Key,
   case mvcc_key(Hash, Index, ReadTs) of
@@ -86,56 +93,26 @@ traverse({[{Key, Hash}], Cont}, Fun, Acc, Db, Index, ReadTs, Limit ) ->
         {ok, DI} ->
           case Fun(DocId, DI, Acc) of
             {ok, Acc1} ->
-              traverse(ets:select(Cont), Fun, Acc1, Db, Index, ReadTs, Limit -1);
+              traverse(Next(Cont), Next, Fun, Acc1, Db, Index, ReadTs, Limit -1);
             {stop, Acc1} ->
               Acc1;
             {skip, Acc1} ->
               Acc1;
             ok ->
-              traverse(ets:select(Cont), Fun, Acc, Db, Index, ReadTs, Limit -1);
+              traverse(Next(Cont), Next, Fun, Acc, Db, Index, ReadTs, Limit -1);
             skip ->
-              traverse(ets:select(Cont), Fun, Acc, Db, Index, ReadTs, Limit);
+              traverse(Next(Cont), Next, Fun, Acc, Db, Index, ReadTs, Limit);
             stop ->
               Acc
           end;
         not_found ->
           %% race condition ?
-          traverse(ets:select(Cont), Fun, Acc, Db, Index, ReadTs, Limit)
+          traverse(Next(Cont), Next, Fun, Acc, Db, Index, ReadTs, Limit)
       end;
     not_found ->
-      traverse(ets:select(Cont), Fun, Acc, Db, Index, ReadTs, Limit)
+      traverse(Next(Cont), Next, Fun, Acc, Db, Index, ReadTs, Limit)
   end.
 
-traverse_reverse(_, _, Acc, _, _,  _, 0) -> Acc;
-traverse_reverse('$end_of_table', _, Acc, _, _, _, _) -> Acc;
-traverse_reverse({[{Key, Hash}], Cont}, Fun, Acc, Db, Index, ReadTs, Limit ) ->
-  io:format("got key=~p, hash=~p~n", [Key, Hash]),
-  {_, DocId} = Key,
-  case mvcc_key(Hash, Index, ReadTs) of
-    {ok, _} ->
-      case barrel_memory_storage:fetch({docs, DocId}, Db, ReadTs) of
-        {ok, DI} ->
-          case Fun(DocId, DI, Acc) of
-            {ok, Acc1} ->
-              traverse_reverse(ets:select_reverse(Cont), Fun, Acc1, Db, Index, ReadTs, Limit -1);
-            {stop, Acc1} ->
-              Acc1;
-            {skip, Acc1} ->
-              Acc1;
-            ok ->
-              traverse_reverse(ets:select_reverse(Cont), Fun, Acc, Db, Index, ReadTs, Limit -1);
-            skip ->
-              traverse_reverse(ets:select_reverse(Cont), Fun, Acc, Db, Index, ReadTs, Limit);
-            stop ->
-              Acc
-          end;
-        not_found ->
-          %% race condition ?
-          traverse_reverse(ets:select_reverse(Cont), Fun, Acc, Db, Index, ReadTs, Limit)
-      end;
-    not_found ->
-      traverse_reverse(ets:select_reverse(Cont), Fun, Acc, Db, Index, ReadTs, Limit)
-  end.
 
 
 limit(#{ limit_to_first := L }) -> {fwd, L};
