@@ -85,7 +85,6 @@ fold(Path, Fun, Acc, Options, Db, Index, ReadTs) ->
 traverse(_, _, _, Acc, _, _,  _, 0) -> Acc;
 traverse('$end_of_table', _, _, Acc, _, _, _, _) -> Acc;
 traverse({[{Key, Hash}], Cont}, Next, Fun, Acc, Db, Index, ReadTs, Limit ) ->
-  io:format("got key=~p, hash=~p~n", [Key, Hash]),
   {_, DocId} = Key,
   case mvcc_key(Hash, Index, ReadTs) of
     {ok, _} ->
