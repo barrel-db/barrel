@@ -27,7 +27,7 @@
   save_doc/2,
   delete_doc/3,
   purge_doc/2,
-  save_docs/2,
+  save_docs/2,  save_docs/3,
   delete_docs/2,
   fold_docs/4,
   fold_changes/5,
@@ -89,6 +89,10 @@
 -type changes_options() :: #{
   interval => non_neg_integer(),
   since => non_neg_integer()
+}.
+
+-type save_options() :: #{
+  all_or_nothing => boolean()
 }.
 
 -type stream() :: term().
@@ -173,7 +177,19 @@ purge_doc(Barrel, DocId) ->
   SaveResult :: {ok, DocId , RevId} | {error, {DocError, DocId}} | {error, db_not_found},
   SaveResults :: {ok, [SaveResult]}.
 save_docs(Barrel, Docs) ->
-  barrel_db:update_docs(Barrel, Docs, #{}, interactive_edit).
+  save_docs(Barrel, Docs, #{}).
+
+-spec save_docs(Name, Docs, Options) -> SaveResults when
+  Name :: barrel_name(),
+  Docs :: [barrel_doc:doc()],
+  Options :: save_options(),
+  DocId :: barrel_doc:docid(),
+  RevId :: barrel_doc:revid(),
+  DocError :: not_found | {conflict, revision_conflict} | {conflict, doc_exists},
+  SaveResult :: {ok, DocId , RevId} | {error, {DocError, DocId}} | {error, db_not_found},
+  SaveResults :: {ok, [SaveResult]}.
+save_docs(Barrel, Docs, Options) ->
+  barrel_db:update_docs(Barrel, Docs, Options, interactive_edit).
 
 
 -spec save_replicated_docs(Name, Docs) -> SaveResult when
