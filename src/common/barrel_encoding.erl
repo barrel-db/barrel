@@ -635,10 +635,8 @@ encode_float_ascending_test() ->
 %% == helpers
 
 test_encode_decode([{Encoded, Value} | Rest], Enc, Dec) ->
-  io:format("test ~p vs ~p~n", [Encoded, Value]),
   Encoded = Enc(<<>>, Value),
   {Value, <<>>} = Dec(Enc(<<>>, Value)),
-  io:format("tested ~p vs ~p~n", [Encoded, Value]),
   test_encode_decode(Rest, Enc, Dec);
 test_encode_decode([], _Enc, _Dec) ->
   ok.

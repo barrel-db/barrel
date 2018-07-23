@@ -169,13 +169,11 @@ fold_docs_fun(#{ name := Name } = Db, UserFun, Options) ->
   WithHistory = maps:get(history, Options, false),
   MaxHistory = maps:get(max_history, Options, ?IMAX1),
   fun(DocId, DI, Acc) ->
-    io:format("docid=~p, di=~p~n", [DocId, DI]),
     case DI of
       #{ deleted := true } when IncludeDeleted =/= true -> skip;
       #{ rev := Rev, revtree := RevTree, deleted := Del } ->
         case barrel_storage:get_revision(Db, DocId, Rev) of
           {ok, Doc} ->
-            io:format("docid=~p, doc=~p~n", [DocId, Doc]),
             case WithHistory of
               false ->
                 UserFun(maybe_add_deleted(Doc#{ <<"_rev">> => Rev}, Del), Acc);
