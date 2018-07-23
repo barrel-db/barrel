@@ -125,8 +125,8 @@ fetch_doc(DbRef, DocId, Options) ->
   Doc :: barrel_doc:doc(),
   DocId :: barrel_doc:docid(),
   RevId :: barrel_doc:revid(),
-  DocError :: not_found | {conflict, revision_conflict} | {conflict, doc_exists},
-  SaveResult :: {ok, DocId , RevId} | {error, {DocError, DocId}} | {error, db_not_found}.
+  DocError :: {conflict, revision_conflict} | {conflict, doc_exists},
+  SaveResult :: {ok, DocId , RevId} | {error, DocError} | {error, db_not_found},
 save_doc(Barrel, Doc) ->
   {ok, [Res]} = barrel_db:update_docs(Barrel, [Doc], #{}, interactive_edit),
   Res.
@@ -138,8 +138,8 @@ save_doc(Barrel, Doc) ->
   Name :: barrel_name(),
   DocId :: barrel_doc:docid(),
   RevId :: barrel_doc:revid(),
-  DocError :: not_found | {conflict, revision_conflict} | {conflict, doc_exists},
-  DeleteResult :: {ok, DocId , RevId} | {error, {DocError, DocId}} | {error, db_not_found}.
+  DocError :: {conflict, revision_conflict} | {conflict, doc_exists},
+  SaveResult :: {ok, DocId , RevId} | {error, DocError} | {error, db_not_found},
 delete_doc(Barrel, DocId, Rev) ->
   {ok, [Res]} =  barrel_db:update_docs(
     Barrel,
@@ -161,8 +161,8 @@ purge_doc(Barrel, DocId) ->
   Docs :: [barrel_doc:doc()],
   DocId :: barrel_doc:docid(),
   RevId :: barrel_doc:revid(),
-  DocError :: not_found | {conflict, revision_conflict} | {conflict, doc_exists},
-  SaveResult :: {ok, DocId , RevId} | {error, {DocError, DocId}} | {error, db_not_found},
+  DocError :: {conflict, revision_conflict} | {conflict, doc_exists},
+  SaveResult :: {ok, DocId , RevId} | {error, DocError} | {error, db_not_found},
   SaveResults :: {ok, [SaveResult]}.
 save_docs(Barrel, Docs) ->
   save_docs(Barrel, Docs, #{}).
@@ -173,8 +173,8 @@ save_docs(Barrel, Docs) ->
   Options :: save_options(),
   DocId :: barrel_doc:docid(),
   RevId :: barrel_doc:revid(),
-  DocError :: not_found | {conflict, revision_conflict} | {conflict, doc_exists},
-  SaveResult :: {ok, DocId , RevId} | {error, {DocError, DocId}} | {error, db_not_found},
+  DocError :: {conflict, revision_conflict} | {conflict, doc_exists},
+  SaveResult :: {ok, DocId , RevId} | {error, DocError} | {error, db_not_found},
   SaveResults :: {ok, [SaveResult]}.
 save_docs(Barrel, Docs, Options) ->
   barrel_db:update_docs(Barrel, Docs, Options, interactive_edit).
@@ -193,8 +193,8 @@ save_replicated_docs(Barrel, Docs) ->
   DocsOrDocsRevId :: [ barrel_doc:doc() | {barrel_doc:docid(), barrel_doc:revid()}],
   DocId :: barrel_doc:docid(),
   RevId :: barrel_doc:revid(),
-  DocError :: not_found | {conflict, revision_conflict} | {conflict, doc_exists},
-  SaveResult :: {ok, DocId , RevId} | {error, {DocError, DocId}} | {error, db_not_found},
+  DocError :: {conflict, revision_conflict} | {conflict, doc_exists},
+  SaveResult :: {ok, DocId , RevId} | {error, DocError} | {error, db_not_found},
   SaveResults :: {ok, [SaveResult]}.
 delete_docs(Barrel, DocsOrDocsRevId) ->
   Docs = lists:map(
