@@ -13,7 +13,6 @@
     ssl,
     uuid,
     gproc,
-    sbroker,
     hooks,
     ehash,
     worker_pool
