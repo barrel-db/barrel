@@ -150,8 +150,7 @@ try_update_docs(Client, RepRecords, LocalRecords, Policy, State) ->
   try
     do_update_docs(Client, RepRecords, LocalRecords, Policy, State)
   catch
-    _Class:Reason:S ->
-      io:format("stacktrace = ~p~n", [S]),
+    _Class:Reason ->
       terminate(Reason, State)
   end.
 
@@ -189,7 +188,6 @@ do_update_docs(Client, RepRecords, LocalRecords0, Policy, #{ name := Name } = St
 flush_revisions([{DI, DI}| Rest], Flushed, ToIndex, State) ->
   flush_revisions(Rest, Flushed, ToIndex, State);
 flush_revisions([{DI, OldDI}| Rest], Flushed, ToIndex, State) ->
-  io:format("flush revision di = ~p~n", [DI]),
   {BodyMap, DI2} = maps:take(body_map, DI),
   #{ id := Id, rev := WinningRev } = DI2,
   BodyMap2 = maps:filter(
@@ -404,7 +402,7 @@ merge_revtree_with_conflict(Record, DocInfo, _Client) ->
   #{ revtree := RevTree, body_map := BodyMap } = DocInfo,
   #{ revs := [LeafRev | Revs],  deleted := NewDeleted, doc := Doc  } = Record,
   %% Find the point where this doc's history branches from the current rev:
-  {_MergeType, [Parent | Path]} = find_parent(Revs, RevTree, []),
+  {_MergeType, [Parent | _Path]} = find_parent(Revs, RevTree, []),
   %% merge path in the revision tree
   {_, RevTree2} = lists:foldl(
     fun(RevId, {P, Tree}) ->
