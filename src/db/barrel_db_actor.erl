@@ -402,7 +402,7 @@ merge_revtree_with_conflict(Record, DocInfo, _Client) ->
   #{ revtree := RevTree, body_map := BodyMap } = DocInfo,
   #{ revs := [LeafRev | Revs],  deleted := NewDeleted, doc := Doc  } = Record,
   %% Find the point where this doc's history branches from the current rev:
-  {_MergeType, [Parent | _Path]} = find_parent(Revs, RevTree, []),
+  {Parent, Path} = find_parent(Revs, RevTree, []),
   %% merge path in the revision tree
   {_, RevTree2} = lists:foldl(
     fun(RevId, {P, Tree}) ->
@@ -411,10 +411,8 @@ merge_revtree_with_conflict(Record, DocInfo, _Client) ->
       {RevId, barrel_revtree:add(RevInfo, Tree)}
     end,
     {Parent, RevTree},
-    [LeafRev | Revs]
+    [LeafRev | Path]
   ),
-  
-  
   {WinningRev, _, _} = barrel_revtree:winning_revision(RevTree2),
   %% update DocInfo, we always find is the doc is deleted there
   %% since we could have only updated an internal branch
@@ -425,13 +423,16 @@ merge_revtree_with_conflict(Record, DocInfo, _Client) ->
     body_map => BodyMap#{ LeafRev => Doc }
   }.
 
+
 find_parent([RevId | Rest], RevTree, Acc) ->
   case barrel_revtree:contains(RevId, RevTree) of
-    true -> {extend, [RevId | Acc]};
-    false -> find_parent(Rest, RevTree, [RevId | Acc])
+    true ->
+      {RevId, Rest};
+    false ->
+      find_parent(Rest, RevTree, [RevId | Acc])
   end;
 find_parent([], _RevTree, Acc) ->
-  {new_branch, [<<"">> | Acc]}.
+  {<<"">>, lists:reverse(Acc)}.
 
 -compile({inline, [send_result/3]}).
 -spec send_result(Client :: pid(), Record :: #{ ref := reference() }, Result :: term()) -> ok.
