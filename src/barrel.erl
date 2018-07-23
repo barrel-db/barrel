@@ -31,7 +31,8 @@
   delete_docs/2,
   fold_docs/4,
   fold_changes/5,
-  fold_path/5
+  fold_path/5,
+  save_replicated_docs/2
 ]).
 
 -export([
@@ -173,6 +174,14 @@ purge_doc(Barrel, DocId) ->
   SaveResults :: {ok, [SaveResult]}.
 save_docs(Barrel, Docs) ->
   barrel_db:update_docs(Barrel, Docs, #{}, interactive_edit).
+
+
+-spec save_replicated_docs(Name, Docs) -> SaveResult when
+  Name :: barrel_name(),
+  Docs :: [barrel_doc:doc()],
+  SaveResult :: ok.
+save_replicated_docs(Barrel, Docs) ->
+  barrel_db:update_docs(Barrel, Docs, #{}, replicated_changes).
 
 %% @doc delete multiple docs
 -spec delete_docs(Name, DocsOrDocsRevId) -> SaveResults when

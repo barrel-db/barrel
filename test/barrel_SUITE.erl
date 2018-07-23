@@ -21,6 +21,7 @@
 -export([
   save_doc/1,
   update_non_existing_doc/1,
+  replicate_none_existing_doc/1,
   delete_doc/1,
   save_docs/1,
   fold_docs/1,
@@ -31,6 +32,7 @@ all() ->
   [
     save_doc,
     update_non_existing_doc,
+    replicate_none_existing_doc,
     delete_doc,
     save_docs,
     fold_docs,
@@ -66,8 +68,18 @@ save_doc(_Config) ->
   ok.
 
 update_non_existing_doc(_Config) ->
-  Doc0 = #{ <<"id">> => <<"a">>, <<"v">> => 1, <<"_rev">> => <<"1-AAAAAAAAAAA">>},
+  Doc0 = #{ <<"id">> => <<"a">>, <<"v">> => 1, <<"_rev">> => <<"1-76d70d853c9fcf1f83a6b4b6cf3776633d28f480cb0dd7ee8b68d5bfc434360a">>},
   {error, {conflict, revision_conflict}}  = barrel:save_doc(<<"test">>, Doc0).
+
+
+replicate_none_existing_doc(_Config) ->
+  Doc = #{ <<"id">> => <<"a">>, <<"v">> => 1},
+  RepDoc = #{ <<"id">> => <<"a">>,
+              <<"history">> => [<<"1-76d70d853c9fcf1f83a6b4b6cf3776633d28f480cb0dd7ee8b68d5bfc434360a">>],
+              <<"doc">> => Doc},
+  ok = barrel:save_replicated_docs(<<"test">>, [RepDoc]),
+  {ok, #{ <<"_rev">> := Rev} } = barrel:fetch_doc(<<"test">>, <<"a">>, #{}),
+  Rev = <<"1-76d70d853c9fcf1f83a6b4b6cf3776633d28f480cb0dd7ee8b68d5bfc434360a">>.
 
 delete_doc(_Config) ->
   Doc0 = #{ <<"id">> => <<"a">>, <<"v">> => 1},

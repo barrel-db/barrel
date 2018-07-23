@@ -126,11 +126,11 @@ winning_revision(Tree) ->
       Deleted = is_deleted(RevInfo),
       ActiveCount2 = case Deleted of
                        true -> ActiveCount1;
-                        false -> ActiveCount1 + 1
+                       false -> ActiveCount1 + 1
                      end,
       {[RevInfo#{ deleted => Deleted }| Acc], ActiveCount2 }
     end, {[], 0}, Tree),
-
+  
   SortedRevInfos = lists:sort(
     fun(#{ id := RevIdA, deleted := DeletedA }, #{ id := RevIdB, deleted := DeletedB }) ->
       % sort descending by {not deleted, rev}

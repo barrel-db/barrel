@@ -150,7 +150,8 @@ try_update_docs(Client, RepRecords, LocalRecords, Policy, State) ->
   try
     do_update_docs(Client, RepRecords, LocalRecords, Policy, State)
   catch
-    _Class:Reason ->
+    _Class:Reason:S ->
+      io:format("stacktrace = ~p~n", [S]),
       terminate(Reason, State)
   end.
 
@@ -188,6 +189,7 @@ do_update_docs(Client, RepRecords, LocalRecords0, Policy, #{ name := Name } = St
 flush_revisions([{DI, DI}| Rest], Flushed, ToIndex, State) ->
   flush_revisions(Rest, Flushed, ToIndex, State);
 flush_revisions([{DI, OldDI}| Rest], Flushed, ToIndex, State) ->
+  io:format("flush revision di = ~p~n", [DI]),
   {BodyMap, DI2} = maps:take(body_map, DI),
   #{ id := Id, rev := WinningRev } = DI2,
   BodyMap2 = maps:filter(
@@ -411,8 +413,10 @@ merge_revtree_with_conflict(Record, DocInfo, _Client) ->
       {RevId, barrel_revtree:add(RevInfo, Tree)}
     end,
     {Parent, RevTree},
-    Path
+    [LeafRev | Revs]
   ),
+  
+  
   {WinningRev, _, _} = barrel_revtree:winning_revision(RevTree2),
   %% update DocInfo, we always find is the doc is deleted there
   %% since we could have only updated an internal branch
@@ -430,7 +434,6 @@ find_parent([RevId | Rest], RevTree, Acc) ->
   end;
 find_parent([], _RevTree, Acc) ->
   {new_branch, [<<"">> | Acc]}.
-
 
 -compile({inline, [send_result/3]}).
 -spec send_result(Client :: pid(), Record :: #{ ref := reference() }, Result :: term()) -> ok.

@@ -320,9 +320,6 @@ prepare_docs([Doc | Rest], Acc) ->
 prepare_docs([], Acc) ->
   lists:reverse(Acc).
 
-
-
-
 update_docs_1(Db, Docs, Options, interactive_edit) ->
   %% create records to store
   Records0 = [barrel_doc:make_record(Doc) || Doc <- Docs],
@@ -358,7 +355,17 @@ update_docs_1(Db, Docs, Options, interactive_edit) ->
     fun(#{ ref := Ref }) -> maps:get(Ref, ResultsMap) end,
     Records1
   ),
-  {ok, UpdateResults}.
+  {ok, UpdateResults};
+
+update_docs_1(Db, Docs, Options, replicated_changes) ->
+  %% create records to store
+  Records = [barrel_doc:make_record(Doc) || Doc <- Docs],
+  %% group records by ID
+  RecordsBuckets = group_records(Records),
+  %% do writes
+  {ok, _} = write_and_commit(Db, RecordsBuckets, [], merge_with_conflict, Options),
+  ok.
+  
 
 new_revs(RecordsBuckets) ->
   lists:foldl(
