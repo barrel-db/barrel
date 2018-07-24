@@ -33,6 +33,7 @@ init([Parent, Name, Options]) ->
   case register_barrel(Name) of
     true ->
       process_flag(trap_exit, true),
+      %%process_flag(message_queue_data, off_heap),
       Store = maps:get(store, Options, barrel_store_provider:default()),
       Mod = barrel_store_provider:get_provider_module(Store),
       case try_init_barrel(Mod, Store, Name, Options) of
@@ -155,14 +156,17 @@ try_update_docs(Client, RepRecords, LocalRecords, Policy, State) ->
   end.
 
 
-do_update_docs(Client, RepRecords, LocalRecords0, Policy, #{ name := Name } = State0) ->
-  Entries0 = group_records(RepRecords, Client, Policy, dict:new()),
-  {Clients, Entries, LocalRecords} = case LocalRecords0 of
-                                       [] ->
-                                         collect_docs([Client], Entries0, Policy);
-                                       _ ->
-                                         {[Client], Entries0, LocalRecords0}
-                                     end,
+do_update_docs(Client, RepRecords, LocalRecords, Policy, #{ name := Name } = State0) ->
+  Entries = group_records(RepRecords, Client, Policy, dict:new()),
+  %%{Clients, Entries, LocalRecords} = case LocalRecords0 of
+  %%                                     [] ->
+  %%                                       TRef = erlang:send_after(1, self(), timeout),
+  %%                                       collect_docs([Client], Entries0, Policy, TRef);
+  %%                                     _ ->
+  %%                                       {[Client], Entries0, LocalRecords0}
+  %%                                   end,
+  Clients = [Client],
+  
   LocalRecords12 = update_local_records_rev([{Client, LocalRecord} || LocalRecord <- LocalRecords]),
 
   MergeFun = merge_fun(Policy),
@@ -256,17 +260,22 @@ maybe_notify(NewState, OldState) ->
       ok
   end.
 
-collect_docs(Clients,  Entries0, Policy) ->
-  receive
-    {update_docs, Client, RepRecords, [], Policy} ->
-      Entries1 = group_records(RepRecords, Client, Policy, Entries0),
-      collect_docs([Client | Clients], Entries1, Policy);
-    {update_docs, Client, RepRecords, LocalRecords, Policy} ->
-      Entries1 = group_records(RepRecords, Client, Policy, Entries0),
-      {[Client | Clients], Entries1, LocalRecords}
-  after 0 ->
-    {Clients, Entries0, []}
-  end.
+
+%%collect_docs(Clients,  Entries0, Policy, TRef) ->
+%%  receive
+%%    {update_docs, Client, RepRecords, [], Policy} ->
+%%      Entries1 = group_records(RepRecords, Client, Policy, Entries0),
+%%      collect_docs([Client | Clients], Entries1, Policy, TRef);
+%%    {update_docs, Client, RepRecords, LocalRecords, Policy} ->
+%%      Entries1 = group_records(RepRecords, Client, Policy, Entries0),
+%%      _ = erlang:cancel_timer(TRef),
+%%      {[Client | Clients], Entries1, LocalRecords};
+%%    timeout ->
+%%      {Clients, Entries0, []}
+%%  after 0 ->
+%%    _ = erlang:cancel_timer(TRef),
+%%    {Clients, Entries0, []}
+%%  end.
 
 group_records([Group | Rest], Client, Policy, D) ->
   [#{ id := Id } |_ ] = Group,
