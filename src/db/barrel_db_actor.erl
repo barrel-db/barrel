@@ -26,6 +26,20 @@
 
 -include("barrel.hrl").
 
+-ifdef('OTP_RELEASE').
+-define(TRY_FUN(Fun), try Fun()
+                      catch
+                        throw:R -> {ok, R};
+                        Class:R:S -> {'EXIT', Class, R, S}
+                      end).
+-else.
+-define(TRY_FUN(Fun), try Fun()
+                  catch
+                    throw:R -> {ok, R};
+                    Class:R -> {'EXIT', Class, R, erlang:get_stacktrace()}
+                  end).
+-endif.
+
 start_link(Name, Options) ->
   proc_lib:start_link(?MODULE, init, [[self(), Name, Options]]).
 
@@ -64,23 +78,12 @@ init([Parent, Name, Options]) ->
       proc_lib:init_ack(Parent, {error, {already_started, Pid}})
   end.
 
--ifdef('OTP_RELEASE').
 try_init_barrel(Mod, Store, Name, Options) ->
-  try
-    {ok, Mod:init_barrel(Store, Name, Options)}
-  catch
-    throw:R -> {ok, R};
-    Class:R:S -> {'EXIT', Class, R, S}
-  end.
--else.
-try_init_barrel(Mod, Store, Name, Options) ->
-  try
-    {ok, Mod:init_barrel(Store, Name, Options)}
-  catch
-    throw:R -> {ok, R};
-    Class:R -> {'EXIT', Class, R, erlang:get_stacktrace()}
-  end.
--endif.
+  ?TRY_FUN(
+    fun() ->
+      {ok, Mod:init_barrel(Store, Name, Options)}
+    end
+  ).
 
 register_barrel(Name) ->
   try gproc:reg(?barrel(Name)), true
@@ -93,11 +96,20 @@ terminate_reason(error, Reason, Stacktrace) -> {Reason, Stacktrace};
 terminate_reason(exit, Reason, _Stacktrace) -> Reason.
 
 
-writer_loop(State = #{ parent := Parent }) ->
+writer_loop(State = #{ parent := Parent, name := Name }) ->
   receive
     {update_docs, Client, RepRecords, LocalRecords, Policy} ->
-      NewState = try_update_docs(Client, RepRecords, LocalRecords, Policy, State),
-      writer_loop(NewState);
+      case try_update_docs(Client, RepRecords, LocalRecords, Policy, State) of
+        {ok, NewState} when is_map(NewState) ->
+          writer_loop(NewState);
+        {ok, {error, Reason}} ->
+          terminate(Reason, State);
+        {'EXIT', Class, Reason, Stacktrace} ->
+          io:format("error, barrel=~p reason=~p, stacktrace=~p~n", [Name, Reason, Stacktrace]),
+          gproc:unreg(?barrel(Name)),
+          _ = (catch barrel_storage:terminate_barrel(State)),
+          erlang:raise(Class, Reason, Stacktrace)
+      end;
     {set_indexed_seq, Seq} ->
       NewState = barrel_storage:set_indexed_seq(State, Seq),
       writer_loop(NewState);
@@ -148,12 +160,12 @@ handle_call(UnknownReq, From, State) ->
   State.
 
 try_update_docs(Client, RepRecords, LocalRecords, Policy, State) ->
-  try
-    do_update_docs(Client, RepRecords, LocalRecords, Policy, State)
-  catch
-    _Class:Reason ->
-      terminate(Reason, State)
-  end.
+  ?TRY_FUN(
+    fun() ->
+      {ok, do_update_docs(Client, RepRecords, LocalRecords, Policy, State)}
+    end
+  ).
+
 
 
 do_update_docs(Client, RepRecords, LocalRecords, Policy, #{ name := Name } = State0) ->
