@@ -16,7 +16,7 @@
 
 
 start_link() ->
-  PoolSize = application:get_env(barrel, index_workers, 128),
+  PoolSize = application:get_env(barrel, index_workers, 4),
   PoolOptions = [
     {overrun_warning, 5000},
     {overrun_handler, {barrel_lib, report_overrun}},
