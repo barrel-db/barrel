@@ -333,7 +333,8 @@ set_mem_limits(State, MemLimit) ->
       ?LOG_WARNING(
         "You are using a 32-bit version of Erlang: you may run into "
         "memory address~n"
-        "space exhaustion or statistic counters overflow.~n"),
+        "space exhaustion or statistic counters overflow.~n", []
+      ),
       ok;
     _ ->
       ok
