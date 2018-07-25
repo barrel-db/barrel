@@ -52,6 +52,8 @@
 %% for tests
 -export([parse_line_linux/1, parse_mem_limit/1]).
 
+-include("barrel_logger.hrl").
+
 -define(SERVER, ?MODULE).
 
 -record(state, {total_memory,
@@ -88,17 +90,18 @@ get_total_memory() ->
         {ok, ParsedTotal} ->
           ParsedTotal;
         {error, parse_error} ->
-          _ = lager:warning(
+          ?LOG_WARNING(
             "The override value for the total memmory available is "
             "not a valid value: ~p, getting total from the system.~n",
-            [Value]),
+            [Value]
+          ),
           get_total_memory_from_os()
       end;
     undefined ->
       get_total_memory_from_os()
   end.
 
--spec get_vm_limit() -> non_neg_integer().
+ -spec get_vm_limit() -> non_neg_integer().
 get_vm_limit() -> get_vm_limit(os:type()).
 
 -spec get_check_interval() -> non_neg_integer().
@@ -168,7 +171,7 @@ get_memory_calculation_strategy() ->
     legacy -> erlang; %% backwards compatibility
     rss -> rss;
     UnsupportedValue ->
-      _ = lager:warning(
+      ?LOG_WARNING(
         "Unsupported value '~p' for vm_memory_calculation_strategy. "
         "Supported values: (allocated|erlang|legacy|rss). "
         "Defaulting to 'rss'",
@@ -263,7 +266,7 @@ get_cached_process_memory_and_limit() ->
   try
     gen_server:call(?MODULE, get_cached_process_memory_and_limit, infinity)
   catch exit:{noproc, Error} ->
-    _ = lager:warning("Memory monitor process not yet started: ~p~n", [Error]),
+    _ = ?LOG_WARNING("Memory monitor process not yet started: ~p~n", [Error]),
     ProcessMemory = get_process_memory_uncached(),
     {ProcessMemory, infinity}
   end.
@@ -317,16 +320,17 @@ get_total_memory_from_os() ->
   try
     get_total_memory(os:type())
   catch _:Error ->
-    _ = lager:warning(
+    ?LOG_WARNING(
       "Failed to get total system memory: ~n~p~n~n",
-      [Error]),
+      [Error]
+    ),
     unknown
   end.
 
 set_mem_limits(State, MemLimit) ->
   case erlang:system_info(wordsize) of
     4 ->
-      _ = lager:warning(
+      ?LOG_WARNING(
         "You are using a 32-bit version of Erlang: you may run into "
         "memory address~n"
         "space exhaustion or statistic counters overflow.~n"),
@@ -340,12 +344,13 @@ set_mem_limits(State, MemLimit) ->
         case State of
           #state { total_memory = undefined,
                    memory_limit = undefined } ->
-            _ = lager:warning(
+            ?LOG_WARNING(
               "Unknown total memory size for your OS ~p. "
               "Assuming memory size is ~p MiB (~p bytes).~n",
               [os:type(),
                trunc(?MEMORY_SIZE_FOR_UNKNOWN_OS/?ONE_MiB),
-               ?MEMORY_SIZE_FOR_UNKNOWN_OS]),
+               ?MEMORY_SIZE_FOR_UNKNOWN_OS]
+            ),
             ok;
           _ ->
             ok
@@ -356,19 +361,20 @@ set_mem_limits(State, MemLimit) ->
   UsableMemory =
     case get_vm_limit() of
       Limit when Limit < TotalMemory ->
-        _ = lager:warning(
+        ?LOG_WARNING(
           "Only ~p MiB (~p bytes) of ~p MiB (~p bytes) memory usable due to "
           "limited address space.~n"
           "Crashes due to memory exhaustion are possible - see~n"
           "http://www.rabbitmq.com/memory.html#address-space~n",
           [trunc(Limit/?ONE_MiB), Limit, trunc(TotalMemory/?ONE_MiB),
-           TotalMemory]),
+           TotalMemory]
+        ),
         Limit;
       _ ->
         TotalMemory
     end,
   MemLim = interpret_limit(parse_mem_limit(MemLimit), UsableMemory),
-  _ = lager:info(
+  ?LOG_INFO(
     "Memory high watermark set to ~p MiB (~p bytes)"
     " of ~p MiB (~p bytes) total~n",
     [trunc(MemLim/?ONE_MiB), MemLim,
@@ -387,14 +393,14 @@ parse_mem_limit({absolute, Limit}) ->
   case barrel_resource_monitor_misc:parse_information_unit(Limit) of
     {ok, ParsedLimit} -> {absolute, ParsedLimit};
     {error, parse_error} ->
-      _ = lager:error("Unable to parse vm_memory_high_watermark value ~p", [Limit]),
+      ?LOG_ERROR("Unable to parse vm_memory_high_watermark value ~p", [Limit]),
       ?DEFAULT_VM_MEMORY_HIGH_WATERMARK
   end;
 parse_mem_limit(Limit) when is_list(Limit) ->
   case barrel_resource_monitor_misc:parse_information_unit(Limit) of
     {ok, ParsedLimit} -> {absolute, ParsedLimit};
     {error, parse_error} ->
-      _ = lager:error("Unable to parse vm_memory_high_watermark value ~p", [Limit]),
+      ?LOG_ERROR("Unable to parse vm_memory_high_watermark value ~p", [Limit]),
       ?DEFAULT_VM_MEMORY_HIGH_WATERMARK
   end;
 parse_mem_limit(MemLimit) when is_integer(MemLimit) ->
@@ -402,13 +408,13 @@ parse_mem_limit(MemLimit) when is_integer(MemLimit) ->
 parse_mem_limit(MemLimit) when is_float(MemLimit), MemLimit =< ?MAX_VM_MEMORY_HIGH_WATERMARK ->
   MemLimit;
 parse_mem_limit(MemLimit) when is_float(MemLimit), MemLimit > ?MAX_VM_MEMORY_HIGH_WATERMARK ->
-  _ = lager:warning(
+  ?LOG_WARNING(
     "Memory high watermark of ~p is above the allowed maximum, falling back to ~p~n",
     [MemLimit, ?MAX_VM_MEMORY_HIGH_WATERMARK]
   ),
   ?MAX_VM_MEMORY_HIGH_WATERMARK;
 parse_mem_limit(MemLimit) ->
-  _ = lager:warning(
+  ?LOG_WARNING(
     "Memory high watermark of ~p is invalid, defaulting to ~p~n",
     [MemLimit, ?DEFAULT_VM_MEMORY_HIGH_WATERMARK]
   ),
@@ -430,7 +436,7 @@ internal_update(State0 = #state{memory_limit = MemLimit,
   State1#state{alarmed = NewAlarmed}.
 
 emit_update_info(AlarmState, MemUsed, MemLimit) ->
-  _ = lager:info(
+  ?LOG_INFO(
     "vm_memory_high_watermark ~p. Memory used:~p allowed:~p~n",
     [AlarmState, MemUsed, MemLimit]),
   ok.
@@ -467,9 +473,10 @@ get_linux_pagesize() ->
   case re:run(CmdOutput, "^[0-9]+", [{capture, first, list}]) of
     {match, [Match]} -> list_to_integer(Match);
     _ ->
-      _ = lager:warning(
+      ?LOG_WARNING(
         "Failed to get memory page size, using 4096:~n~p~n",
-        [CmdOutput]),
+        [CmdOutput]
+      ),
       4096
   end.
 

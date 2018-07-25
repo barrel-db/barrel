@@ -27,6 +27,8 @@
 %% supervisor callback
 -export([init/1]).
 
+-include("barrel_logger.hrl").
+
 start_store(Name, Mod, Args) ->
   start_store(Name, Mod, Mod, Args).
 
@@ -73,7 +75,7 @@ store_spec(Name, Mod, IMod, Args) ->
     modules => [Mod]}.
 
 empty_stores_warning([]) ->
-  _ = lager:notice("no storage setup.~n", []),
+  ?LOG_WARNING("no storage setup.~n", []),
   ok;
 empty_stores_warning(_) ->
   ok.

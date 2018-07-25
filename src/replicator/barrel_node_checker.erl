@@ -25,10 +25,11 @@
 ]).
 
 
--define(TAB, barrel_checked_nodes).
-
+-include_lib("barrel_logger.hrl").
 -include_lib("stdlib/include/ms_transform.hrl").
 
+
+-define(TAB, barrel_checked_nodes).
 
 -export([worker/1]).
 
@@ -108,7 +109,7 @@ handle_info({'DOWN', _MRef, process, Pid, _Reason}, State) ->
   NewState = process_is_down(Pid, State),
   {noreply, NewState};
 handle_info({'EXIT', Pid, Reason}, State) ->
-  _ = lager:error(
+  ?LOG_ERROR(
     "~s: worker ~p, exited with reason ~p~n",
     [?MODULE_STRING, Pid, Reason]
   ),
@@ -164,7 +165,7 @@ worker_exited(Worker, State = #{ nodes := Nodes, workers := Workers}) ->
       State#{ nodes => Nodes2, workers => Workers2 };
     error ->
       %% should never happen
-      _ = lager:warning(
+      ?LOG_WARNING(
         "~s: unknown worker ~p exited.~n",
         [?MODULE_STRING, Worker]
       ),

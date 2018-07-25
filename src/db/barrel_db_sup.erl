@@ -26,6 +26,8 @@
 
 -export([init/1]).
 
+-include("barrel_logger.hrl").
+
 start_link() ->
   supervisor:start_link({local, ?MODULE}, ?MODULE, []).
 
@@ -33,10 +35,10 @@ start_db(DbRef) ->
   start_db(DbRef, #{}).
 
 start_db({DbRef, Node}, Options) ->
-  _ = lager:info("start db: ref=~p on node:~p, options=~p", [DbRef, Node, Options]),
+  ?LOG_INFO("start db: ref=~p on node:~p, options=~p", [DbRef, Node, Options]),
   supervisor:start_child({?MODULE, Node}, [DbRef, Options]);
 start_db(DbRef, Options) ->
-  _ = lager:info("start db: ref=~p, options=~p", [DbRef, Options]),
+  ?LOG_INFO("start db: ref=~p, options=~p", [DbRef, Options]),
   supervisor:start_child(?MODULE, [DbRef, Options]).
 
 stop_db(DbPid) ->

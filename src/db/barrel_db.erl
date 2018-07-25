@@ -36,6 +36,7 @@
 
 
 -include("barrel.hrl").
+-include("barrel_logger.hrl").
 
 -define(WRITE_BATCH_SIZE, 128).
 
@@ -185,13 +186,13 @@ fold_docs_fun(#{ name := Name } = Db, UserFun, Options) ->
                 UserFun(Doc1, Acc)
             end;
           not_found ->
-            _ = lager:warning(
+            ?LOG_WARNING(
               "doc revision not found while folding docs: db=~p id=~p, rev=~p~n",
               [Name, DocId, Rev]
             ),
             skip;
           Error ->
-            _ = lager:error(
+            ?LOG_ERROR(
               "error while folding docs: db=~p id=~p, rev=~p error=p~n",
               [Name, DocId, Rev, Error]
             ),

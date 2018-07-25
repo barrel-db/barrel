@@ -25,6 +25,7 @@
 ]).
 
 -include("barrel.hrl").
+-include("barrel_logger.hrl").
 
 -ifdef('OTP_RELEASE').
 -define(TRY_FUN(Fun), try Fun()
@@ -79,11 +80,13 @@ init([Parent, Name, Options]) ->
   end.
 
 try_init_barrel(Mod, Store, Name, Options) ->
-  ?TRY_FUN(
-    fun() ->
-      {ok, Mod:init_barrel(Store, Name, Options)}
-    end
-  ).
+  try
+    {ok, Mod:init_barrel(Store, Name, Options)}
+  catch
+    throw:R -> {ok, R};
+    ?WITH_STACKTRACE(Class, R, StackTrace)
+      {'EXIT', Class, R, StackTrace}
+  end.
 
 register_barrel(Name) ->
   try gproc:reg(?barrel(Name)), true
@@ -120,7 +123,7 @@ writer_loop(State = #{ parent := Parent, name := Name }) ->
     {system, From, Req} ->
       sys:handle_system_msg(Req, From, Parent, ?MODULE, [], State);
     Message ->
-      error_logger:format(
+      ?LOG_ERROR(
         "** ~s: unexpected message (ignored): ~tw~n",
         [?MODULE_STRING, Message]
       ),
@@ -143,29 +146,26 @@ system_code_change(Misc, _, _, _) ->
 
 
 handle_call(drop_barrel, From, #{ name := Name} = State) ->
-  _ = lager:info("drop barrel=~p~n", [Name]),
+  ?LOG_INFO("drop barrel=~p~n", [Name]),
   gproc:unreg(?barrel(Name)),
   _ = barrel_storage:drop_barrel(State),
   reply(From, ok),
   exit(normal);
 handle_call(close_barrel, From, #{ name := Name} = State) ->
-  _ = lager:info("close barrel=~p~n", [Name]),
+  ?LOG_INFO("close barrel=~p~n", [Name]),
   gproc:unreg(?barrel(Name)),
   _ = barrel_storage:close_barrel(State),
   reply(From, ok),
-  exit(normal);
-handle_call(UnknownReq, From, State) ->
-  _ = lager:debug("~s: unnown req=~p, state=~p~n", [UnknownReq, State]),
-  reply(From, bad_call),
-  State.
+  exit(normal).
 
 try_update_docs(Client, RepRecords, LocalRecords, Policy, State) ->
-  ?TRY_FUN(
-    fun() ->
-      {ok, do_update_docs(Client, RepRecords, LocalRecords, Policy, State)}
-    end
-  ).
-
+  try
+    {ok, do_update_docs(Client, RepRecords, LocalRecords, Policy, State)}
+  catch
+    throw:R -> {ok, R};
+    ?WITH_STACKTRACE(Class, R, StackTrace)
+      {'EXIT', Class, R, StackTrace}
+  end.
 
 
 do_update_docs(Client, RepRecords, LocalRecords, Policy, #{ name := Name } = State0) ->

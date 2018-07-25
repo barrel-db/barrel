@@ -26,6 +26,7 @@
         , delete/1
         ]).
 
+-include("barrel_logger.hrl").
 
 -record(st, { repid       ::binary()
             , session_id  ::binary()  % replication session (history) id
@@ -152,7 +153,7 @@ read_last_seq(Db, RepId) ->
     {error, not_found} ->
       0;
     Other ->
-      _ = lager:error("replication cannot read checkpoint on ~p: ~p", [Db, Other]),
+      ?LOG_ERROR("replication cannot read checkpoint on ~p: ~p", [Db, Other]),
       0
   end.
 

@@ -14,12 +14,14 @@
 %% the License.
 
 -module(barrel_replicate_alg).
--author("Bernard Notarianni").
+
 
 %% gen_server API
 -export([
   replicate/4
 ]).
+
+-include("barrel_logger.hrl").
 
 replicate(Source, Target, Changes, Metrics) ->
   {ok, Metrics2} = lists:foldl(fun(C, {ok, Acc}) ->
@@ -73,7 +75,7 @@ write_doc(Target, Doc, History, Deleted, Metrics) ->
       Metrics3 = barrel_replicate_metrics:update_times(doc_write_times, Time, Metrics2),
       Metrics3;
     {_, Error} ->
-      _ = lager:error(
+      ?LOG_ERROR(
         "replicate write error on dbid=~p for docid=~p: ~w",
         [Target, maps:get(<<"id">>, Doc, undefined), Error]
       ),

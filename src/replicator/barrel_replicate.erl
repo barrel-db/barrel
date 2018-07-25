@@ -24,6 +24,7 @@
 ]).
 
 
+-include("barrel_logger.hrl").
 -include_lib("stdlib/include/ms_transform.hrl").
 
 -define(DEFAULT_CONFIG, "replication.config").
@@ -104,7 +105,7 @@ handle_cast(_Msg, State) ->
   {noreply, State}.
 
 handle_info({'DOWN', _MRef, process, Pid, Reason}, State) ->
-  _ = lager:info("[~s] replication down pid=~p reason=~p",[?MODULE_STRING, Pid, Reason]),
+  ?LOG_INFO("[~s] replication down pid=~p reason=~p",[?MODULE_STRING, Pid, Reason]),
   _ = task_is_down(Pid),
   {noreply, State};
 
@@ -113,7 +114,7 @@ handle_info(init_config, State) ->
   {noreply, State2};
 
 handle_info(Info, State) ->
-  _ = lager:error("[~s] received an unknown message, exiting ~p", [?MODULE_STRING, Info]),
+  ?LOG_ERROR("[~s] received an unknown message, exiting ~p", [?MODULE_STRING, Info]),
   {stop, normal, State}.
 
 terminate(_Reason, _State) ->

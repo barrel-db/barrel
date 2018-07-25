@@ -39,6 +39,8 @@
   system_terminate/4
 ]).
 
+-include("barrel_logger.hrl").
+
 
 fetch_docs(Node, DbName, Fun, Acc, DocIds, Options) ->
   Ref = cast(Node, self(), {fetch_docs, DbName, DocIds, Options}),
@@ -108,7 +110,7 @@ update_docs(Node, DbName, Batch, Options) ->
           erlang:demonitor(MRef, [flush]),
           Reply;
         {'DOWN', MRef, process, _, Error} ->
-          _ = lager:error(
+          ?LOG_ERROR(
             "~s: remote update task on ~p with ~p down: ~p~n",
             [?MODULE_STRING, Node, DbName, Error]
           ),
@@ -148,7 +150,7 @@ await_changes({Ref, _Node, Pid}=Stream, Timeout) ->
       unsubscribe_changes(Stream),
       erlang:error(timeout);
     Error ->
-      _ = lager:error("~s: remote chnages feed timeout~n", [Error]),
+      ?LOG_ERROR("~s: remote chnages feed timeout~n", [Error]),
       erlang:error(timeout)
   end.
 
@@ -446,7 +448,7 @@ system_continue(_, _, {loop, State}) ->
 
 -spec system_terminate(any(), _, _, _) -> no_return().
 system_terminate(Reason, _, _, {loop, State}) ->
-  _ = lager:info(
+  ?LOG_INFO(
     "sytem terminate ~p~n", [State]
   ),
   exit(Reason).

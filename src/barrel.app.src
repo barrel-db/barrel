@@ -7,7 +7,6 @@
    [kernel,
     stdlib,
     sasl,
-    lager,
     crypto,
     public_key,
     ssl,

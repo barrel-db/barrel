@@ -30,6 +30,8 @@
   code_change/3
 ]).
 
+-include("barrel_logger.hrl").
+
 -define(DEFAULT_CONFIG, "BARREL_TS").
 -define(DEFAULT_INTERVAL, 1000).
 -define(ALLOWABLE_DOWNTIME, 2592000000).
@@ -54,12 +56,6 @@ init([]) ->
   {ok, LastTs} = barrel_ts:read_timestamp(),
   Now = barrel_ts:curr_time_millis(),
   TimeSinceLastRun = Now - LastTs,
-  
-  _ = lager:debug(
-    "timestamp: now: ~p, last: ~p, delta: ~p~n, allowable_downtime: ~p",
-    [Now, LastTs, TimeSinceLastRun, AllowableDowntime]
-  ),
-  
   %% restart if we detected a clock change
   ok = check_for_clock_error(Now >= LastTs, TimeSinceLastRun < AllowableDowntime),
   
@@ -84,10 +80,10 @@ handle_info(persist, State = #{ ts := OldTs } ) ->
       ok = persist_ts(Ts),
       {noreply, NewState};
     false ->
-      _ = lager:error(
-            "~s: system running backwards, failing storing timestamp~n",
-            [?MODULE_STRING]
-           ),
+      ?LOG_ERROR(
+        "~s: system running backwards, failing storing timestamp~n",
+        [?MODULE_STRING]
+      ),
       {stop, clock_running_backwards, State}
   end;
 
@@ -162,13 +158,13 @@ get_interval() ->
 
 check_for_clock_error(true, true) -> ok;
 check_for_clock_error(false, _) ->
-  _ = lager:error(
+  ?LOG_ERROR(
     "~s: system running backwards, failing startup of time service~n",
     [?MODULE_STRING]
   ),
   exit(clock_running_backwards);
 check_for_clock_error(_, false) ->
-  _ = lager:error(
+  ?LOG_ERROR(
     "~s: system clock too far advanced, failing startup of time service~n",
     [?MODULE_STRING]
   ),
@@ -276,7 +272,7 @@ get_if_hw(IfName) ->
       HwAddr = proplists:get_value(hwaddr, IfProps),
       case HwAddr of
         undefined ->
-          _ = lager:error(
+          ?LOG_ERROR(
             "~s: invalid interface name '~p' setup for the object id server",
             [?MODULE_STRING, IfName]
           ),

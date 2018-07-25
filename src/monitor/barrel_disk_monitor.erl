@@ -41,6 +41,8 @@
          get_max_check_interval/0, set_max_check_interval/1,
          get_disk_free/0]).
 
+-include("barrel_logger.hrl").
+
 -define(SERVER, ?MODULE).
 -define(DEFAULT_MIN_DISK_CHECK_INTERVAL, 100).
 -define(DEFAULT_MAX_DISK_CHECK_INTERVAL, 10000).
@@ -146,7 +148,7 @@ handle_call(get_disk_free_limit, _From, State = #state{limit = Limit}) ->
   {reply, Limit, State};
 
 handle_call({set_disk_free_limit, _}, _From, #state{enabled = false} = State) ->
-  _ = lager:info("Cannot set disk free limit: "
+  ?LOG_INFO("Cannot set disk free limit: "
              "disabled disk free space monitoring", []),
   {reply, ok, State};
 
@@ -199,7 +201,7 @@ dir() -> barrel_storage:data_dir().
 set_disk_limits(State, Limit0) ->
   Limit = interpret_limit(Limit0),
   State1 = State#state { limit = Limit },
-  _ = lager:info("Disk free limit set to ~pMB~n", [trunc(Limit / 1000000)]),
+  ?LOG_INFO("Disk free limit set to ~pMB~n", [trunc(Limit / 1000000)]),
   internal_update(State1).
 
 internal_update(State = #state { limit   = Limit,
@@ -255,15 +257,16 @@ interpret_limit(Absolute) ->
   case barrel_resource_monitor_misc:parse_information_unit(Absolute) of
     {ok, ParsedAbsolute} -> ParsedAbsolute;
     {error, parse_error} ->
-      _ = lager:error("Unable to parse disk_free_limit value ~p",
-                       [Absolute]),
+      ?LOG_ERROR("Unable to parse disk_free_limit value ~p",
+                 [Absolute]),
       ?DEFAULT_DISK_FREE_LIMIT
   end.
 
 emit_update_info(StateStr, CurrentFree, Limit) ->
-  _ = lager:info(
+  ?LOG_INFO(
     "Free disk space is ~s. Free bytes: ~p. Limit: ~p~n",
-    [StateStr, CurrentFree, Limit]).
+    [StateStr, CurrentFree, Limit]
+  ).
 
 start_timer(State) ->
   State#state{timer = erlang:send_after(interval(State), self(), update)}.
@@ -285,12 +288,12 @@ enable(#state{dir = Dir, interval = Interval, limit = Limit, retries = Retries}
   case {catch get_disk_free(Dir),
         barrel_vm_memory_monitor:get_total_memory()} of
     {N1, N2} when is_integer(N1), is_integer(N2) ->
-      _ = lager:info("Enabling free disk space monitoring~n", []),
+      ?LOG_INFO("Enabling free disk space monitoring~n", []),
       start_timer(set_disk_limits(State, Limit));
     Err ->
-      _ = lager:info("Free disk space monitor encountered an error "
-                      "(e.g. failed to parse output from OS tools): ~p, retries left: ~s~n",
-                      [Err, Retries]),
+      ?LOG_INFO("Free disk space monitor encountered an error "
+                "(e.g. failed to parse output from OS tools): ~p, retries left: ~s~n",
+                [Err, Retries]),
       _ = timer:send_after(Interval, self(), try_enable),
       State#state{enabled = false}
   end.

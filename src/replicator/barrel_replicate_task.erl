@@ -43,7 +43,7 @@
   system_terminate/4
 ]).
 
-
+-include("barrel_logger.hrl").
 
 -record(st, {
   id          ::binary()  % replication id
@@ -265,7 +265,7 @@ loop_changes(State = #st{id=Id, stream=Stream, parent=Parent, status=Status}) ->
       try handle_change(Change, State)
       catch
         _:Reason ->
-          _ = lager:error(
+          ?LOG_ERROR(
             "~s: error while processing the change ~p, replication stopped: ~p .~n",
             [?MODULE_STRING, Change, Reason]
           ),
@@ -274,7 +274,7 @@ loop_changes(State = #st{id=Id, stream=Stream, parent=Parent, status=Status}) ->
           wait_for_source(State#st{ stream = nil})
       end;
     {nodedown, _Node}=Ev when Status =:= paused ->
-      _ = lager:warning(
+      ?LOG_WARNING(
         "replication ~p (~p) received unexpected ~p event on state ~p~n.",
         [Id, Status, Ev, loop_changes]
       ),
@@ -284,7 +284,7 @@ loop_changes(State = #st{id=Id, stream=Stream, parent=Parent, status=Status}) ->
       ok = stop_stream_worker(Stream),
       proc_lib:hibernate(?MODULE, loop_changes, [State#st{stream=nil, status=paused}]);
     {nodeup, _Node}=Ev when Status =:= active ->
-      _ = lager:warning(
+      ?LOG_WARNING(
         "replication ~p (~p) received unexpected ~p event on state ~p~n.",
         [Id, Status, Ev, loop_changes]
       ),
@@ -309,14 +309,14 @@ loop_changes(State = #st{id=Id, stream=Stream, parent=Parent, status=Status}) ->
         Request, From, Parent, ?MODULE, [],
         {loop_changes, State});
     Other ->
-      _ = lager:error("~s: got unexpected message: ~p~n", [?MODULE_STRING, Other]),
+      ?LOG_ERROR("~s: got unexpected message: ~p~n", [?MODULE_STRING, Other]),
       cleanup_and_exit(State, {unexpected_message, Other})
   end.
 
 handle_event(Event, StateFun, #st{id=Id, parent=Parent, status=Status}=State) ->
   case Event of
     {nodedown, _Node}=Ev when Status =:= paused ->
-      _ = lager:warning(
+      ?LOG_WARNING(
         "replication ~p (~p) received ~p event on state ~p~n.",
         [Id, Status, Ev, StateFun]
       ),
@@ -325,7 +325,7 @@ handle_event(Event, StateFun, #st{id=Id, parent=Parent, status=Status}=State) ->
       alarm_handler:set_alarm({{barrel_replication_task, Id}, paused}),
       proc_lib:hibernate(?MODULE, wait_for_resume, [StateFun, State#st{stream=nil, status=paused}]);
     {nodeup, _Node}=Ev when Status =:= active ->
-      _ = lager:warning(
+      ?LOG_WARNING(
         "resumed replication ~p (~p) received ~p event. next state: ~p~n.",
         [Id, Status, Ev, StateFun]
       ),
@@ -345,7 +345,7 @@ handle_event(Event, StateFun, #st{id=Id, parent=Parent, status=Status}=State) ->
         Request, From, Parent, ?MODULE, [],
         {StateFun, State});
     Other ->
-      _ = lager:error("~s: got unexpected message: ~p~n", [?MODULE_STRING, Other]),
+      ?LOG_ERROR("~s: got unexpected message: ~p~n", [?MODULE_STRING, Other]),
       cleanup_and_exit(State, {unexpected_message, Other})
   end.
 
@@ -400,7 +400,7 @@ handle_get_state({FromPid, FromTag}, State) ->
 
 -spec handle_stream_exit(_, _) -> no_return().
 handle_stream_exit(Reason, #st{ id = RepId, keepalive = KeepAlive } = State) ->
-  _ = lager:info(
+  ?LOG_INFO(
     "~s, ~p change stream exited:~p~n~p~n~n",
     [?MODULE_STRING, RepId, Reason, State]
   ),
@@ -417,7 +417,7 @@ system_continue(_, _, {StateFun, State}) ->
 
 -spec system_terminate(any(), _, _, _) -> no_return().
 system_terminate(Reason, _, _, {_, State}) ->
-  _ = lager:info("sytem terminate ~p~n", [State]),
+  ?LOG_INFO("sytem terminate ~p~n", [State]),
   terminate(Reason, State).
 
 system_code_change(Misc, _, _, _) ->
@@ -432,7 +432,6 @@ terminate(Reason, State) ->
     checkpoint = Checkpoint
   } = State,
   _ = gproc:unreg(replication_key(RepId)),
-  _ = lager:debug( "~s (~p} terminated: ~p", [?MODULE_STRING, RepId, Reason]),
   _ = barrel_replicate_metrics:update_task(Metrics),
   %% try to write the checkpoint if we can
   (catch barrel_replicate_checkpoint:write_checkpoint(Checkpoint)),
