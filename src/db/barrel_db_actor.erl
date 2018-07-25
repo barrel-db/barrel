@@ -130,6 +130,7 @@ writer_loop(State = #{ parent := Parent, name := Name }) ->
       writer_loop(State)
   end.
 
+-spec terminate(any(), map()) -> no_return().
 terminate(Reason, #{ name := Name } = State) ->
   gproc:unreg(?barrel(Name)),
    _ = (catch barrel_storage:terminate_barrel(State)),
@@ -145,6 +146,7 @@ system_code_change(Misc, _, _, _) ->
   {ok, Misc}.
 
 
+-spec handle_call(any(), pid(), map()) -> no_return().
 handle_call(drop_barrel, From, #{ name := Name} = State) ->
   ?LOG_INFO("drop barrel=~p~n", [Name]),
   gproc:unreg(?barrel(Name)),
@@ -456,7 +458,7 @@ find_parent([], _RevTree, Acc) ->
   {<<"">>, lists:reverse(Acc)}.
 
 -compile({inline, [send_result/3]}).
--spec send_result(Client :: pid(), Record :: #{ ref := reference() }, Result :: term()) -> ok.
+-spec send_result(Client :: pid(), Record :: map(), Result :: any()) -> ok.
 send_result(Client, #{ ref := Ref }, Result) ->
   try Client ! {result, self(), {Ref, Result}} of
     _ ->
@@ -467,7 +469,7 @@ send_result(Client, #{ ref := Ref }, Result) ->
 
 
 -compile({inline, [reply/2]}).
--spec reply({Pid :: pid(), Tag :: reference()}, Resp :: term()) -> ok.
+-spec reply({Pid :: pid(), Tag :: reference()}, Resp :: any()) -> ok.
 reply({FromPid, Tag}, Resp) ->
   try FromPid ! {Tag, Resp} of
     _ ->

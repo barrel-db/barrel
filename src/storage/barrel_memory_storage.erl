@@ -52,8 +52,8 @@
 -define(IDX, barrel_ets_idx).
 
 -record(ikey, {key :: term(),
-               seqno :: non_neg_integer(),
-               type :: put | delete | merge }).
+               seqno :: atom() | non_neg_integer(),
+               type :: atom() | put | delete | merge }).
 
 
 

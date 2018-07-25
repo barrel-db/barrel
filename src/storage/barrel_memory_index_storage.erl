@@ -27,7 +27,7 @@
 
 -record(ikey, {key :: term(),
                ts :: non_neg_integer(),
-               type :: put | delete }).
+               type :: atom() }).
 
 
 
