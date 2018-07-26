@@ -132,7 +132,7 @@ pattern(order_by_key, Path, Options) ->
   
   KeyPattern = case {Rule, EqualTo} of
                  {[], false} ->
-                   {Path ++ '_', '_'};
+                   {Path , '_'};
                  {[], _} ->
                    {Path ++ [EqualTo], '_'};
                  {_, false} ->
