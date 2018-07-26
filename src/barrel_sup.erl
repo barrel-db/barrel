@@ -88,13 +88,22 @@ init([]) ->
              modules => [barrel_event]
            },
 
-           %% stores supervisor
+           %% index pool supervisor
            #{id => barrel_index_pool,
              start => {barrel_index_pool, start_link, []},
              restart => permanent,
              shutdown => infinity,
              type => supervisor,
              modules => [barrel_index_pool]},
+
+           %% fetch pool supervisor
+           #{id => barrel_fetch_pool,
+             start => {barrel_fetch_pool, start_link, []},
+             restart => permanent,
+             shutdown => infinity,
+             type => supervisor,
+             modules => [barrel_fetch_pool]},
+
 
            %% stores supervisor
            #{id => barrel_store_provider_sup,

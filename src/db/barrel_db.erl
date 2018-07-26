@@ -55,16 +55,8 @@ db_infos(DbRef) ->
     end
   ).
 
-fetch_doc(DbRef, DocId = << ?LOCAL_DOC_PREFIX, _/binary >>, _Options) ->
-  do_for_ref(
-    DbRef,
-    fun(Db) ->
-      case barrel_storage:get_local_doc(Db, DocId) of
-        {ok, #{ doc := Doc }} -> Doc;
-        not_found -> {error, not_found}
-      end
-    end);
-
+fetch_doc(Db, DocId, Options) when is_map(Db) ->
+  do_fetch_doc(Db, DocId, Options);
 fetch_doc(DbRef, DocId, Options) ->
   do_for_ref(
     DbRef,
@@ -73,6 +65,11 @@ fetch_doc(DbRef, DocId, Options) ->
     end
   ).
 
+do_fetch_doc (Db, DocId = << ?LOCAL_DOC_PREFIX, _/binary >>, _Options) ->
+  case barrel_storage:get_local_doc(Db, DocId) of
+    {ok, #{ doc := Doc }} -> Doc;
+    not_found -> {error, not_found}
+  end;
 do_fetch_doc(Db, DocId, Options) ->
   UserRev = maps:get(rev, Options, <<"">>),
   case barrel_storage:get_doc_infos(Db, DocId) of

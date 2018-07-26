@@ -25,7 +25,8 @@
   delete_doc/1,
   save_docs/1,
   fold_docs/1,
-  fold_changes/1
+  fold_changes/1,
+  fetch_docs/1
 ]).
 
 all() ->
@@ -36,7 +37,8 @@ all() ->
     delete_doc,
     save_docs,
     fold_docs,
-    fold_changes
+    fold_changes,
+    fetch_docs
   ].
 
 init_per_suite(Config) ->
@@ -151,5 +153,37 @@ fold_changes(_Config) ->
   {ok, [], 6} = barrel:fold_changes(<<"test">>, 6, Fun, [], #{include_deleted => true}),
   ok.
 
-
+fetch_docs(_Config) ->
+  Docs = [
+           #{ <<"id">> => <<"a">>, <<"v">> => 1},
+           #{ <<"id">> => <<"b">>, <<"v">> => 2},
+           #{ <<"id">> => <<"c">>, <<"v">> => 3},
+           #{ <<"id">> => <<"d">>, <<"v">> => 4},
+           #{ <<"id">> => <<"e">>, <<"v">> => 5}
+         ],
+  {ok, [
+    {ok, <<"a">>, RevA},
+    {ok, <<"b">>, RevB},
+    {ok, <<"c">>, RevC},
+    {ok, <<"d">>, RevD},
+    {ok, <<"e">>, RevE}
+    
+  ]} = barrel:save_docs(<<"test">>, Docs),
+  
+  {ok, [
+    {ok, #{ <<"id">> := <<"a">>, <<"v">> := 1, <<"_rev">> := RevA}},
+    {ok, #{ <<"id">> := <<"b">>, <<"v">> := 2, <<"_rev">> := RevB}},
+    {ok, #{ <<"id">> := <<"c">>, <<"v">> := 3, <<"_rev">> := RevC}},
+    {ok, #{ <<"id">> := <<"d">>, <<"v">> := 4, <<"_rev">> := RevD}},
+    {ok, #{ <<"id">> := <<"e">>, <<"v">> := 5, <<"_rev">> := RevE}}
+  ]} = barrel:fetch_docs(<<"test">>, [<<"a">>, <<"b">>, <<"c">>, <<"d">>, <<"e">>], #{}),
+  
+  
+  {ok, [
+    {ok, #{ <<"id">> := <<"e">>, <<"v">> := 5, <<"_rev">> := RevE}},
+    {ok, #{ <<"id">> := <<"c">>, <<"v">> := 3, <<"_rev">> := RevC}},
+    {ok, #{ <<"id">> := <<"a">>, <<"v">> := 1, <<"_rev">> := RevA}}
+  ]} = barrel:fetch_docs(<<"test">>, [<<"e">>, <<"c">>, <<"a">>], #{}),
+  
+  ok.
 

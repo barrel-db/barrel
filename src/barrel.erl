@@ -24,6 +24,7 @@
 
 -export([
   fetch_doc/3,
+  fetch_docs/3,
   save_doc/2,
   delete_doc/3,
   purge_doc/2,
@@ -49,6 +50,14 @@
   max_history => non_neg_integer(),
   rev => barrel_doc:revid(),
   ancestors => [barrel_doc:revid()]
+}.
+
+-type fetch_docs_options() :: #{
+  history => boolean(),
+  max_history => non_neg_integer(),
+  rev => barrel_doc:revid(),
+  ancestors => [barrel_doc:revid()],
+  timeout => non_neg_integer()
 }.
 
 -type prop() :: binary().
@@ -110,6 +119,48 @@ barrel_infos(DbRef) ->
 fetch_doc(DbRef, DocId, Options) ->
   barrel_db:fetch_doc(DbRef, DocId, Options).
 
+
+%% @doc retrieve a batch of documents
+-spec fetch_docs(Name, DocIds, Options) -> FetchResults when
+  Name :: barrel_name(),
+  DocIds :: [barrel_doc:docid()],
+  Options :: fetch_docs_options(),
+  FetchResult :: {ok, Doc :: barrel_doc:doc()} | {error, not_found} | {error, term()},
+  FetchResults :: {ok, [FetchResult]} | {error, timeout}.
+fetch_docs(Name, DocIds, Options) ->
+  Self = self(),
+  Timeout = maps:get(timeout, Options, 5000),
+  barrel_db:do_for_ref(
+    Name,
+    fun(Db) ->
+      Refs = lists:foldr(
+        fun(DocId, Acc) ->
+          Ref = erlang:make_ref(),
+          wpool:cast(barrel_fetch_pool, {fetch_doc, {Self, Ref}, Db, DocId, Options}),
+          [Ref | Acc]
+        end,
+        [],
+        DocIds
+      ),
+      try
+        Res = await_fetch_docs(Refs, Timeout),
+        {ok, Res}
+      catch
+        exit:timeout -> {error, timeout}
+      end
+    end
+  ).
+
+await_fetch_docs([], _) -> [];
+await_fetch_docs([Ref | Next], Timeout) ->
+  receive
+    {Ref, Res} ->
+      [Res | await_fetch_docs(Next, Timeout)]
+  after Timeout ->
+    exit(Timeout)
+  end.
+  
+  
 
 %% @doc create or replace a doc.
 %% Barrel will try to create a document if no `rev' property is passed to the document
