@@ -112,6 +112,8 @@ all_or_nothing(_Config) ->
   {ok, <<"a">>, Rev1} = barrel:save_doc(<<"test">>, Doc0),
   {ok, [{ok, <<"a">>, Rev2}]} = barrel:save_docs(<<"test">>, [Doc0#{ <<"_rev">> => Rev1}], #{ all_or_nothing => true}),
   true = (Rev2 =/= Rev1),
+  Doc1 = #{ <<"id">> => <<"b">>, <<"v">> => 1},
+  {ok, [{ok, <<"b">>, _RevB}]} = barrel:save_docs(<<"test">>, [Doc1], #{ all_or_nothing => true}),
   ok.
 
 fold_docs(_Config) ->
