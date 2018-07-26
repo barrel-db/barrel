@@ -96,7 +96,7 @@ traverse({[{Key, Hash}], Cont}, Next, Fun, Acc, Db, Index, ReadTs, Limit ) ->
             {stop, Acc1} ->
               Acc1;
             {skip, Acc1} ->
-              Acc1;
+              traverse(Next(Cont), Next, Fun, Acc1, Db, Index, ReadTs, Limit);
             ok ->
               traverse(Next(Cont), Next, Fun, Acc, Db, Index, ReadTs, Limit -1);
             skip ->
@@ -160,8 +160,8 @@ end_key(_, _, MS) -> MS.
 
 
 mvcc_key(Key, Index, ReadTs) ->
-  IKey = #ikey{key = Key, ts = (ReadTs + 1)},
-  case ets:prev(Index#idx.versions, IKey) of
-    #ikey{ key = Key, type = put}=MVCCKey -> {ok, MVCCKey};
+  MS = ets:fun2ms(fun({#ikey{key=K, ts=Ts}, _Val}=KV) when K =:= Key, Ts =< ReadTs -> KV end),
+  case ets:select(Index#idx.versions, MS, 1) of
+    {[{#ikey{key=Key, type=put}=MVCCKey, _}], _} -> {ok, MVCCKey};
     _ -> not_found
   end.
