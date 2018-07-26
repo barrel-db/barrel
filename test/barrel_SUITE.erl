@@ -24,6 +24,7 @@
   replicate_none_existing_doc/1,
   delete_doc/1,
   save_docs/1,
+  all_or_nothing/1,
   fold_docs/1,
   fold_changes/1,
   fetch_docs/1
@@ -36,6 +37,7 @@ all() ->
     replicate_none_existing_doc,
     delete_doc,
     save_docs,
+    all_or_nothing,
     fold_docs,
     fold_changes,
     fetch_docs
@@ -105,6 +107,12 @@ save_docs(_Config) ->
   ]} = barrel:save_docs(<<"test">>, Docs),
   ok.
 
+all_or_nothing(_Config) ->
+  Doc0 = #{ <<"id">> => <<"a">>, <<"v">> => 1},
+  {ok, <<"a">>, Rev1} = barrel:save_doc(<<"test">>, Doc0),
+  {ok, [{ok, <<"a">>, Rev2}]} = barrel:save_docs(<<"test">>, [Doc0#{ <<"_rev">> => Rev1}], #{ all_or_nothing => true}),
+  true = (Rev2 =/= Rev1),
+  ok.
 
 fold_docs(_Config) ->
   Docs = [

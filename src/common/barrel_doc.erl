@@ -174,7 +174,7 @@ make_record(#{ <<"id">> := Id, <<"doc">> := Doc0, <<"history">> := History }) ->
     doc => Doc1};
 make_record(Doc0) ->
   Deleted = maps:get(<<"_deleted">>, Doc0, false),
-  Rev = maps:get(<<"_rev">>, Doc0, <<>>),
+  Rev = maps:get(<<"_rev">>, Doc0, <<"">>),
   Id = case maps:find(<<"id">>, Doc0) of
          {ok, DocId} -> DocId;
          error ->
