@@ -13,7 +13,6 @@
 -export([
   new/0,
   add_mutations/3,
-  mvcc_key/3,
   fold/7
 ]).
 
@@ -22,9 +21,6 @@
 -define(KEYS, barrel_memory_storage_idx_keys).
 -define(VERSIONS, barrel_memory_storage_idx_versions).
 
--record(idx, {keys,
-              versions}).
-
 -record(ikey, {key :: term(),
                ts :: non_neg_integer(),
                type :: atom() }).
@@ -32,116 +28,158 @@
 
 
 new() ->
-  Keys = ets:new(?KEYS, [ordered_set, public, {read_concurrency, true}, {write_concurrency, true}]),
-  Versions = ets:new(?VERSIONS, [ordered_set, public, {read_concurrency, true}, {write_concurrency, true}]),
-  #idx{keys=Keys, versions=Versions}.
+ ets:new(?KEYS, [ordered_set, public, {read_concurrency, true}, {write_concurrency, true}]).
 
 
 add_mutations(Mutations, Index, CommitTs) ->
-  {BatchKeys, BatchValues} =
+  Batch =
     lists:foldl(
-      fun(Mutation, {AddKeys, AddValues}) ->
+      fun(Mutation, AddKeys) ->
         case Mutation of
           {add, Path, DocId} ->
             FwdKey = {Path, DocId},
-            Hash = erlang:phash2(FwdKey),
-            AddKeys2 = [{FwdKey, Hash} | AddKeys],
-            IKey = #ikey{key=erlang:phash2(FwdKey), ts=CommitTs, type=put},
-            AddValues2 = [{IKey, undefined} | AddValues],
-            {AddKeys2, AddValues2};
+            IKey = #ikey{key=FwdKey, ts=CommitTs, type=put},
+            [{IKey, undefined} | AddKeys];
           {delete, Path, DocId} ->
             FwdKey = {Path, DocId},
-            IKey = #ikey{key=erlang:phash2(FwdKey), ts=CommitTs, type=delete},
-            AddValues2 = [{IKey, undefined} | AddValues],
-            {AddKeys, AddValues2}
+            IKey = #ikey{key=FwdKey, ts=CommitTs, type=delete},
+           [{IKey, undefined} | AddKeys]
         end
       end,
-      {[], []},
+      [],
       Mutations
     ),
-  ets:insert(Index#idx.keys, BatchKeys),
-  ets:insert(Index#idx.versions, BatchValues),
+  ets:insert(Index, Batch),
   ok.
 
 fold(Path, Fun, Acc, Options, Db, Index, ReadTs) ->
   {Dir, Limit} = limit(Options),
   OrderBy = maps:get(order_by, Options, order_by_id),
-  MS = pattern(OrderBy, Path, Options#{ dir => Dir }),
-  {First, Next} = case Dir of
-                    fwd ->
-                      {
-                        ets:select(Index#idx.keys, MS, 1),
-                        fun(Cont) -> ets:select_reverse(Cont) end
-                      };
-                    rev ->
-                      {
-                        ets:select_reverse(Index#idx.keys, MS, 1),
-                        fun(Cont) -> ets:select_reverse(Cont) end
-                      }
-                  end,
-  traverse(First, Next, Fun, Acc, Db, Index, ReadTs, Limit).
+  MS = pattern(OrderBy, Path, ReadTs, Options#{ dir => Dir }),
+  {First, SkipFun} = case Dir of
+                       fwd ->
+                         {
+                           ets:select(Index, MS, 1),
+                           fun skip/1
+                         };
+                       rev ->
+                         {
+                           ets:select_reverse(Index, MS, 1),
+                           fun skip_reverse/1
+                         }
+                     end,
+  traverse(First, SkipFun, Fun, Acc, Db, Index, ReadTs, Limit).
   
   
 traverse(_, _, _, Acc, _, _,  _, 0) -> Acc;
 traverse('$end_of_table', _, _, Acc, _, _, _, _) -> Acc;
-traverse({[{Key, Hash}], Cont}, Next, Fun, Acc, Db, Index, ReadTs, Limit ) ->
-  {_, DocId} = Key,
-  case mvcc_key(Hash, Index, ReadTs) of
-    {ok, _} ->
+traverse(Found0, Skip, Fun, Acc, Db, Index, ReadTs, Limit ) ->
+  case Skip(Found0) of
+    {'$end_of_table', undefined} ->
+      Acc;
+    {Next, {#ikey{key=Key}, _}} ->
+      {_, DocId} = Key,
       case barrel_memory_storage:fetch({docs, DocId}, Db, ReadTs) of
         {ok, DI} ->
           case Fun(DocId, DI, Acc) of
             {ok, Acc1} ->
-              traverse(Next(Cont), Next, Fun, Acc1, Db, Index, ReadTs, Limit -1);
+              traverse(Next, Skip, Fun, Acc1, Db, Index, ReadTs, Limit -1);
             {stop, Acc1} ->
               Acc1;
             {skip, Acc1} ->
-              traverse(Next(Cont), Next, Fun, Acc1, Db, Index, ReadTs, Limit);
+              traverse(Next, Skip, Fun, Acc1, Db, Index, ReadTs, Limit);
             ok ->
-              traverse(Next(Cont), Next, Fun, Acc, Db, Index, ReadTs, Limit -1);
+              traverse(Next, Skip, Fun, Acc, Db, Index, ReadTs, Limit -1);
             skip ->
-              traverse(Next(Cont), Next, Fun, Acc, Db, Index, ReadTs, Limit);
+              traverse(Next, Skip, Fun, Acc, Db, Index, ReadTs, Limit);
             stop ->
               Acc
           end;
         not_found ->
           %% race condition ?
-          traverse(Next(Cont), Next, Fun, Acc, Db, Index, ReadTs, Limit)
-      end;
-    not_found ->
-      traverse(Next(Cont), Next, Fun, Acc, Db, Index, ReadTs, Limit)
+          traverse(Next, Skip, Fun, Acc, Db, Index, ReadTs, Limit)
+      end
+      
   end.
 
 
+skip({[{#ikey{key=Key}, _}=Current], Cont}) ->
+  skip(ets:select(Cont), Key, Current).
 
-limit(#{ limit_to_first := L }) -> {fwd, L};
+skip('$end_of_table', _Key, {IKey, _}=Previous) ->
+  case IKey#ikey.type of
+    delete ->
+      {'$end_of_table', undefined};
+    put ->
+      {'$end_of_table', Previous}
+  end;
+skip({[{#ikey{key=Key}, _}=Current], Cont}, Key, _Previous) ->
+  skip(ets:select(Cont), Key, Current);
+
+skip({[{#ikey{key=Key}, _}=Current], Cont}=Next, _OldKey, {IKey, _}=Previous) ->
+  case IKey#ikey.type of
+    delete ->
+      skip(ets:select(Cont), Key, Current);
+    put ->
+      {Next, Previous}
+  end.
+
+skip_reverse({[{#ikey{key=Key, type=put}, _}=Found], Cont}) ->
+  skip_reverse(ets:select_reverse(Cont), Key, Found);
+skip_reverse({[{#ikey{key=Key, type=delete}, _}], Cont}) ->
+  skip_reverse(ets:select_reverse(Cont), Key, undefined).
+
+
+skip_reverse({[{#ikey{key=Key}, _}], Cont}, Key, Found) ->
+  skip_reverse(ets:select_reverse(Cont), Key, Found);
+skip_reverse({[{#ikey{key=Key, type=delete}, _}], Cont}, _Key, undefined) ->
+  skip_reverse(ets:select_reverse(Cont), Key, undefined);
+skip_reverse({[{#ikey{key=Key}, _}=Found], Cont}, _Key, undefined) ->
+  skip_reverse(ets:select_reverse(Cont), Key, Found);
+skip_reverse(Next, _Key, Found) ->
+  {Next, Found}.
+  
+  
+  limit(#{ limit_to_first := L }) -> {fwd, L};
 limit(#{ limit_to_last := L }) -> {rev, L};
 limit(_) -> {fwd, 1 bsl 64 - 1}.
 
 
-pattern(order_by_id, Path, Options) ->
-  Rule = start_key(Options, end_key(Options, [])),
-  KeyPattern = case Rule of
-                 [] -> {Path, '_'};
-                 _ -> {Path, '$1'}
+pattern(order_by_id, Path, ReadTs, Options) ->
+  {KeyPattern, Rule} = case start_key(Options, end_key(Options, [])) of
+                 [] ->
+                   P = #ikey{key={Path, '_'}, ts='$1', type='_'},
+                   R = [{'=<', '$1', ReadTs}],
+                   {P, R};
+                 R0 ->
+                   P = #ikey{key={Path, '$1'}, ts='$2', type='_'},
+                   R1 = R0 ++ [{'=<', '$2', ReadTs}],
+                   {P, R1}
                end,
   [{{KeyPattern, '_'}, Rule, ['$_']}];
-pattern(order_by_key, Path, Options) ->
+pattern(order_by_key, Path, ReadTs, Options) ->
   EqualTo = maps:get(equal_to, Options, false),
-  Rule = start_key(Options, end_key(Options, [])),
-  
-  KeyPattern = case {Rule, EqualTo} of
-                 {[], false} ->
-                   {Path , '_'};
-                 {[], _} ->
-                   {Path ++ [EqualTo], '_'};
-                 {_, false} ->
-                   {Path ++ ['$1'], '_'};
-                 {_, _} ->
-                   {Path ++ [EqualTo, '$1'], '_'}
-               end,
+  Rule0 = start_key(Options, end_key(Options, [])),
+  {KeyPattern, Rule} = case {Rule0, EqualTo} of
+                         {[], false} ->
+                           P = #ikey{key={Path, '_'}, ts='$1', type='_'},
+                           R = [{'=<', '$1', ReadTs}],
+                           {P, R};
+                         {[], _} ->
+                           P = #ikey{key={Path ++ [EqualTo], '_'}, ts='$1', type='_'},
+                           R = [{'=<', '$1', ReadTs}],
+                           {P, R};
+                         {_, false} ->
+                           P = #ikey{key={Path ++ ['$1'], '_'}, ts='$2', type='_'},
+                           R1 = Rule0 ++ [{'=<', '$2', ReadTs}],
+                           {P, R1};
+                         {_, _} ->
+                           P = #ikey{key={Path ++ [EqualTo, '$1'], '_'}, ts='$2', type='_'},
+                           R1 = Rule0 ++ [{'=<', '$2', ReadTs}],
+                           {P, R1}
+                       end,
   [{{KeyPattern, '_'}, Rule, ['$_']}];
-pattern(order_by_value, _Path, _Options) ->
+pattern(order_by_value, _Path, _ReadTs, _Options) ->
   erlang:error(not_implemented).
 
   
@@ -157,11 +195,3 @@ end_key(Options, MS) -> end_key(Options, '$1', MS).
 end_key(#{ end_at := End }, M, MS) -> [{'=<', M, {const, End}} | MS];
 end_key(#{ previous_to := End }, M, MS) -> [{'<', M, {const, End}} | MS];
 end_key(_, _, MS) -> MS.
-
-
-mvcc_key(Key, Index, ReadTs) ->
-  MS = ets:fun2ms(fun({#ikey{key=K, ts=Ts}, _Val}=KV) when K =:= Key, Ts =< ReadTs -> KV end),
-  case ets:select(Index#idx.versions, MS, 1) of
-    {[{#ikey{key=Key, type=put}=MVCCKey, _}], _} -> {ok, MVCCKey};
-    _ -> not_found
-  end.
