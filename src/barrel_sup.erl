@@ -88,6 +88,15 @@ init([]) ->
              modules => [barrel_event]
            },
 
+           %% barrel server
+           #{id => barrel_server,
+             start => {barrel_server, start_link, []},
+             restart => permanent,
+             shutdown => infinity,
+             type => worker,
+             modules => [barrel_server]
+           },
+
            %% index pool supervisor
            #{id => barrel_index_pool,
              start => {barrel_index_pool, start_link, []},
