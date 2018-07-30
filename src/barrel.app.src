@@ -14,7 +14,8 @@
     gproc,
     hooks,
     ehash,
-    worker_pool
+    worker_pool,
+    base58
    ]},
   {env, [
    {vm_memory_high_watermark, 0.4},
