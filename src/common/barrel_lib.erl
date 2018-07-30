@@ -16,7 +16,8 @@
   to_list/1,
   uniqid/0, uniqid/1,
   to_hex/1,
-  hex_to_binary/1
+  hex_to_binary/1,
+  zeropad/1
 ]).
 
 -export([group_by/2]).
@@ -66,7 +67,42 @@ uniqid(float)     -> <<Id:128>> = uuid:get_v4(), Id * 1.0;
 uniqid(_) -> error(badarg).
 
 
+zeropad(Int) when is_integer(Int) ->
+  Bin = integer_to_binary(Int),
+  zeropad(Bin, 16 - (byte_size(Bin) rem 16)).
 
+zeropad(Bin, 0) ->
+  Bin;
+zeropad(Bin, 1) ->
+  << "0",  Bin/binary >>;
+zeropad(Bin, 2) ->
+  << "0", "0", Bin/binary >>;
+zeropad(Bin, 3) ->
+  << "0", "0", "0",  Bin/binary >>;
+zeropad(Bin, 4) ->
+  << "0", "0", "0", "0", Bin/binary >>;
+zeropad(Bin, 5) ->
+  << "0", "0", "0", "0", "0",  Bin/binary >>;
+zeropad(Bin, 6) ->
+  << "0", "0", "0", "0", "0", "0",  Bin/binary >>;
+zeropad(Bin, 7) ->
+  << "0", "0", "0", "0", "0", "0", "0", Bin/binary >>;
+zeropad(Bin, 8) ->
+  << "0", "0", "0", "0", "0", "0", "0", "0",  Bin/binary >>;
+zeropad(Bin, 9) ->
+  << "0", "0", "0", "0", "0", "0", "0", "0", "0",  Bin/binary >>;
+zeropad(Bin, 10) ->
+  << "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", Bin/binary >>;
+zeropad(Bin, 11) ->
+  << "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", Bin/binary >>;
+zeropad(Bin, 12) ->
+  << "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", Bin/binary >>;
+zeropad(Bin, 13) ->
+  << "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", Bin/binary >>;
+zeropad(Bin, 14) ->
+  << "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", Bin/binary >>;
+zeropad(Bin, 15) ->
+  << "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", Bin/binary >>.
 
 
 to_hex([]) -> [];
