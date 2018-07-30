@@ -21,8 +21,8 @@
 
 start_link() ->
   {ok, NodeId} = init_nodeid(),
-  Config = [{node_id, NodeId}],
-  ok = barrel_lib:load_config(barrel_server_config, Config),
+  Config = [{nodeid, NodeId}],
+  ok = barrel_lib:load_config(barrel_config, Config),
   gen_server:start_link({local, ?MODULE}, ?MODULE, [NodeId], []).
 
 init([NodeId]) ->
