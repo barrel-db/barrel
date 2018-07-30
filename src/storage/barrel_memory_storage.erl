@@ -28,6 +28,7 @@
 -export([
   write_docs_infos/4,
   write_revision/4,
+  id/1,
   get_doc_infos/2,
   get_revision/3,
   docs_count/1,
@@ -65,6 +66,7 @@ init_barrel(Store, Name, Options = #{ create := true }) ->
         end,
   Barrel =
     #{name => Name,
+      id => barrel_id(Options),
       store => Store,
       db => Db,
       idx => Idx,
@@ -91,6 +93,9 @@ drop_barrel(Barrel) ->
 close_barrel(_Barrel) ->
   ok.
 
+barrel_id(#{ id := Id }) -> Id;
+barrel_id(_) ->
+  base58:binary_to_base58(uuid:get_v4()).
 
 list_barrels(#{ store := Store }) ->
   barrel_store_provider:call(Store, list_barrels).
@@ -102,6 +107,8 @@ new_tab(Name) ->
     Name,
     [ordered_set, public, {read_concurrency, true}, {write_concurrency, true}]
   ).
+
+id(#{ id := Id }) -> Id.
 
 docs_count(#{ docs_count := Count }) -> Count.
 

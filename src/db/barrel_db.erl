@@ -47,6 +47,7 @@ db_infos(DbRef) ->
       #{
         name => Name,
         store => Store,
+        id => barrel_storage:id(Db),
         docs_count => barrel_storage:docs_count(Db),
         del_docs_count => barrel_storage:del_docs_count(Db),
         updated_seq => barrel_storage:updated_seq(Db),

@@ -19,6 +19,7 @@
 
 %% doc api
 -export([
+  id/1,
   docs_count/1,
   del_docs_count/1,
   updated_seq/1,
@@ -47,6 +48,8 @@
 
 -include_lib("stdlib/include/ms_transform.hrl").
 
+id(#{ engine := {Mod, State} }) ->
+  Mod:id(State).
 
 docs_count(#{ engine := {Mod, State} }) ->
   Mod:docs_count(State).
