@@ -40,6 +40,7 @@
 -type barrel_name() :: binary().
 -type barrel_infos() :: #{
   name := barrel_name(),
+  id := list() | binary(),
   indexed_seq := non_neg_integer(),
   updated_seq := non_neg_integer(),
   docs_count := non_neg_integer()
