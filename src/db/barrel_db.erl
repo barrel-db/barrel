@@ -529,7 +529,8 @@ decode_rid(Bin) ->
 %% TODO: put dbinfo in a template
 init([DbId, DbPath, DbOpts, Config]) ->
   process_flag(trap_exit, true),
-  {ok, Store} = open_db(DbPath, DbOpts),
+  {ok, Limiter} = rocksdb:new_rate_limiter(83886080, true),
+  {ok, Store} = open_db(DbPath, [{rate_limiter, Limiter} | DbOpts]),
   #{<<"last_rid">> := LastRid,
     <<"updated_seq">> := Updated,
     <<"docs_count">> := DocsCount,
@@ -544,6 +545,7 @@ init([DbId, DbPath, DbOpts, Config]) ->
         store=Store,
         pid=self(),
         path=DbPath,
+        limiter=Limiter,
         db_opts=DbOpts,
         conf = Config,
         last_rid = LastRid,
@@ -581,6 +583,8 @@ init_properties() ->
 
 open_db(Path, DbOpts) ->
   RetriesLeft = application:get_env(barrel, db_open_retries, 30),
+
+
   open_db(Path, DbOpts, RetriesLeft, undefined).
 
 
@@ -670,9 +674,10 @@ terminate(Reason, #db{ id = Id, store = nil }) ->
   _ = lager:info("~s, terminate closed db ~p: ~p~n", [?MODULE_STRING, Id, Reason]),
   ok;
 
-terminate(Reason, #db{ id = Id, store = Store }) ->
+terminate(Reason, #db{ id = Id, store = Store, limiter := Limiter }) ->
   %% finally close the database and return its result
   ok = rocksdb:close(Store),
+  _ = (catch rocksdb:release_rate_limiter(Limiter)),
   _ = lager:info("terminate db ~p: ~p~n", [Id, Reason]),
   ok.
 
