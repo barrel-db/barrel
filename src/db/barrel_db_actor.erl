@@ -424,31 +424,35 @@ merge_revtree(Record, DocInfo, Client) ->
 merge_revtree_with_conflict(Record, DocInfo, _Client) ->
   #{ revtree := RevTree, body_map := BodyMap } = DocInfo,
   #{ revs := [LeafRev|Revs] ,  deleted := NewDeleted, doc := Doc  } = Record,
-  %% Find the point where this doc's history branches from the current rev:
-  {Parent, Path} = find_parent(Revs, RevTree, []),
-  
-  %% merge path in the revision tree
-  {_, RevTree2} = lists:foldr(
-    fun(RevId, {P, Tree}) ->
-      Deleted = (NewDeleted =:= true andalso RevId =:= LeafRev),
-      RevInfo = #{ id => RevId, parent => P, deleted => Deleted },
-      
-      
-      {RevId, barrel_revtree:add(RevInfo, Tree)}
-    end,
-    {Parent, RevTree},
-    [LeafRev|Path]
-  ),
-  {WinningRev, _, _} = barrel_revtree:winning_revision(RevTree2),
-  %% update DocInfo, we always find is the doc is deleted there
-  %% since we could have only updated an internal branch
-  DocInfo#{
-    rev => WinningRev,
-    revtree => RevTree2,
-    deleted => barrel_doc:is_deleted(RevTree2),
-    body_map => BodyMap#{ LeafRev => Doc }
-  }.
 
+  case barrel_revtree:contains(LeafRev, RevTree) of
+    true -> 
+      %% revision already stored. This only happen when doing all_or_nothing.
+      %% TODO: check before sending it to writes?
+      DocInfo;
+    false ->
+      %% Find the point where this doc's history branches from the current rev:
+      {Parent, Path} = find_parent(Revs, RevTree, []),
+      %% merge path in the revision tree
+      {_, RevTree2} = lists:foldr(
+        fun(RevId, {P, Tree}) ->
+          Deleted = (NewDeleted =:= true andalso RevId =:= LeafRev),
+          RevInfo = #{ id => RevId, parent => P, deleted => Deleted },
+          {RevId, barrel_revtree:add(RevInfo, Tree)}
+        end,
+        {Parent, RevTree},
+        [LeafRev|Path]
+      ),
+      {WinningRev, _, _} = barrel_revtree:winning_revision(RevTree2),
+      %% update DocInfo, we always find is the doc is deleted there
+      %% since we could have only updated an internal branch
+      DocInfo#{
+        rev => WinningRev,
+        revtree => RevTree2,
+        deleted => barrel_doc:is_deleted(RevTree2),
+        body_map => BodyMap#{ LeafRev => Doc }
+      }
+  end.
 
 find_parent([RevId | Rest], RevTree, Acc) ->
   case barrel_revtree:contains(RevId, RevTree) of
