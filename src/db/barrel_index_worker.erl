@@ -13,7 +13,8 @@
 -export([
   init/1,
   handle_call/3,
-  handle_cast/2
+  handle_cast/2,
+  terminate/2
 ]).
 
 
@@ -34,6 +35,8 @@ handle_cast({index, Ref, Db, #{ id := DocId } = DI, OldDI}, State) ->
   {noreply, State};
 handle_cast(_Msg, State) ->
   {noreply, State}.
+
+terminate(_Reason, _State) -> ok.
 
 get_old_doc(not_found, _Db) -> #{};
 get_old_doc(#{ deleted := true}, _Db) -> #{};

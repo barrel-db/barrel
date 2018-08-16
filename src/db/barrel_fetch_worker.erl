@@ -16,7 +16,8 @@
 -export([
   init/1,
   handle_call/3,
-  handle_cast/2
+  handle_cast/2,
+  terminate/2
 ]).
 
 init([]) ->
@@ -29,6 +30,8 @@ handle_cast({fetch_doc, From, Db, DocId, Options}, St) ->
   Reply = barrel_db:fetch_doc(Db, DocId, Options),
   reply(From, Reply),
   {noreply, St}.
+
+terminate(_Reason, _State) -> ok.
 
 reply({Pid, Ref}, Reply) ->
   Pid ! {Ref, Reply}.
