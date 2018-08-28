@@ -1,0 +1,24 @@
+{"1.1.0",
+[{<<"backoff">>,{pkg,<<"backoff">>,<<"1.1.6">>},0},
+ {<<"base58">>,
+  {git,"https://github.com/aeternity/erl-base58.git",
+       {ref,"7f6e917bd7d53d005af28057a2bc424848230516"}},
+  0},
+ {<<"ehash">>,{pkg,<<"ehash">>,<<"0.2.1">>},0},
+ {<<"gproc">>,{pkg,<<"gproc">>,<<"0.8.0">>},0},
+ {<<"hooks">>,{pkg,<<"hooks">>,<<"2.0.1">>},0},
+ {<<"quickrand">>,{pkg,<<"quickrand">>,<<"1.7.3">>},1},
+ {<<"recon">>,{pkg,<<"recon">>,<<"2.3.4">>},0},
+ {<<"uuid">>,{pkg,<<"uuid_erl">>,<<"1.7.3">>},0},
+ {<<"worker_pool">>,{pkg,<<"worker_pool">>,<<"3.1.1">>},0}]}.
+[
+{pkg_hash,[
+ {<<"backoff">>, <<"83B72ED2108BA1EE8F7D1C22E0B4A00CFE3593A67DBC792799E8CCE9F42F796B">>},
+ {<<"ehash">>, <<"B3F73406C19FBA8ACE6598DB0B6252B0ECA5D8B3C0606CA7D69FAF6BAF442710">>},
+ {<<"gproc">>, <<"CEA02C578589C61E5341FCE149EA36CCEF236CC2ECAC8691FBA408E7EA77EC2F">>},
+ {<<"hooks">>, <<"1C1FF88BFDA7460D2A4C6894DFF94AD83287B7CC2B5AC0FEF808B189843F0F6B">>},
+ {<<"quickrand">>, <<"0E4FB48FAC904FE0C6E21D7E8C31A288A0700E1E81A35B38B649FC119079755D">>},
+ {<<"recon">>, <<"B406C2FCCDEAA0D94E23B5E30AE3D635A2D461E363A5C9C6316897037CF050D2">>},
+ {<<"uuid">>, <<"C5DF97D1A3D626235C2415E74053C47B2138BB863C5CD802AB5CAECB8ECC019F">>},
+ {<<"worker_pool">>, <<"A9BF27CFF366999784A3F0657F016CE3A57901490858CCA3FB3BE1208BF2110D">>}]}
+].

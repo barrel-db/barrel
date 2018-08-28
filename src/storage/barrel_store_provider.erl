@@ -61,7 +61,6 @@ call(Store, Request, Timeout) ->
 cast(Store, Request) ->
   gen_server:cast({via, gproc, ?store_provider(Store)}, Request).
 
-
 %% start a provider
 start_link(Name, Mod, IMod, Args) ->
   proc_lib:start_link(?MODULE, init_it, [self(), Name, Mod, IMod, Args]).
