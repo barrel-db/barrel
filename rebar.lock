@@ -9,6 +9,10 @@
  {<<"hooks">>,{pkg,<<"hooks">>,<<"2.0.1">>},0},
  {<<"quickrand">>,{pkg,<<"quickrand">>,<<"1.7.3">>},1},
  {<<"recon">>,{pkg,<<"recon">>,<<"2.3.4">>},0},
+ {<<"rocksdb">>,
+  {git,"git@gitlab.com:barrel-db/erlang-rocksdb.git",
+       {ref,"8e29d80034bd055e5272a4cd4a3df0a2a2bb0627"}},
+  0},
  {<<"uuid">>,{pkg,<<"uuid_erl">>,<<"1.7.3">>},0},
  {<<"worker_pool">>,{pkg,<<"worker_pool">>,<<"3.1.1">>},0}]}.
 [
