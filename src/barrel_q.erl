@@ -41,4 +41,4 @@ handle_call({enqueue, Start, Req }, _From, State) ->
   {reply, {Elapsed, Req}, State}.
 
 
-handle_cast(_Msg, State) -> {ok, State}.
+handle_cast(_Msg, State) -> {noreply, State}.

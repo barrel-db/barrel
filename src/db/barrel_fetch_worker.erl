@@ -28,7 +28,7 @@ handle_call(_Msg, _From, St) -> {reply, ok, St}.
 
 handle_cast({fetch_doc, From, Db, DocId, Options}, St) ->
   Reply = barrel_db:fetch_doc(Db, DocId, Options),
-  reply(From, Reply),
+  _ = reply(From, Reply),
   {noreply, St}.
 
 terminate(_Reason, _State) -> ok.

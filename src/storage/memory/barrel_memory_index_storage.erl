@@ -22,7 +22,7 @@
 -define(VERSIONS, barrel_memory_storage_idx_versions).
 
 -record(ikey, {key :: term(),
-               ts :: non_neg_integer(),
+               ts :: atom() | non_neg_integer(),
                type :: atom() }).
 
 
