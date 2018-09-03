@@ -16,7 +16,9 @@
   get_provider_module/1,
   get_provider_barrels/1,
   call/2, call/3,
-  cast/2
+  cast/2,
+  get_state/1,
+  name/1
 ]).
 
 -export([start_link/4]).
@@ -50,6 +52,13 @@ get_provider_module(Store) ->
 get_provider_barrels(Store) ->
   Mod = get_provider_module(Store),
   Mod:list_barrels(Store).
+
+
+get_state(Store) ->
+  sys:get_state({via, gproc, ?store_provider(Store)}).
+  
+name(Store) ->
+  {via, gproc, ?store_provider(Store)}.
 
 
 call(Store, Request) ->
