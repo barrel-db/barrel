@@ -44,6 +44,8 @@ start_link() -> supervisor:start_link({local, ?SERVER}, ?MODULE, []).
 %% Child :: {Id,StartFunc,Restart,Shutdown,Type,Modules}
 init([]) ->
   
+  ok = barrel_plugins:init(),
+  
   Specs = [%% extensions supervisor
            #{id => barrel_ext_sup,
              start => {barrel_ext_sup, start_link, []},
