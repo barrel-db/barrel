@@ -1,0 +1,18 @@
+{application, barrel_store_rocksdb,
+ [{description, "An OTP application"},
+  {vsn, "0.1.0"},
+  {registered, []},
+  {mod, { barrel_store_rocksdb_app, []}},
+  {applications,
+   [kernel,
+    stdlib,
+    barrel,
+    gproc
+   ]},
+  {env,[]},
+  {modules, []},
+
+  {maintainers, []},
+  {licenses, ["Apache 2.0"]},
+  {links, []}
+ ]}.

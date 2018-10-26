@@ -1,0 +1,16 @@
+{application, barrel_replicator,
+ [{description, "An OTP application"},
+  {vsn, "0.1.0"},
+  {registered, []},
+  {mod, { barrel_replicator_app, []}},
+  {applications,
+   [kernel,
+    barrel
+   ]},
+  {env,[]},
+  {modules, []},
+
+  {maintainers, []},
+  {licenses, ["Apache 2.0"]},
+  {links, []}
+ ]}.
