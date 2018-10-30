@@ -11,163 +11,89 @@
 
 %% API
 -export([
-  start_link/2
+  start_link/5
 ]).
 
 -export([
-  init/1
+  init/1,
+  handle_call/3,
+  handle_cast/2,
+  handle_info/2
 ]).
 
--export([
-  system_continue/3,
-  system_terminate/4,
-  system_code_change/4
-]).
 
 -include("barrel.hrl").
 -include("barrel_logger.hrl").
 
--ifdef('OTP_RELEASE').
--define(TRY_FUN(Fun), try Fun()
-                      catch
-                        throw:R -> {ok, R};
-                        Class:R:S -> {'EXIT', Class, R, S}
-                      end).
--else.
--define(TRY_FUN(Fun), try Fun()
-                  catch
-                    throw:R -> {ok, R};
-                    Class:R -> {'EXIT', Class, R, erlang:get_stacktrace()}
-                  end).
--endif.
 
-start_link(Name, Options) ->
-  proc_lib:start_link(?MODULE, init, [[self(), Name, Options]]).
 
-init([Parent, Name, Options]) ->
-  case register_barrel(Name) of
-    true ->
-      process_flag(trap_exit, true),
-      %%process_flag(message_queue_data, off_heap),
-      Store = maps:get(store, Options, barrel_store_provider:default()),
-      Mod = barrel_store_provider:get_provider_module(Store),
-      case try_init_barrel(Mod, Store, Name, Options) of
-        {ok, {ok, BarrelState}} ->
-          State = #{
-            parent => Parent,
-            store => Store,
-            name => Name,
-            updater_pid => self(),
-            engine => {Mod, BarrelState}
-          },
-          gproc:set_value(?barrel(Name), State),
-          proc_lib:init_ack({ok, self()}),
-          writer_loop(State);
-        {ok, {error, not_found}} ->
-          gproc:unreg(?barrel(Name)),
-          proc_lib:init_ack(Parent, {error, not_found}),
-          exit(normal);
-        {ok, {error, Reason}} ->
-          gproc:unreg(?barrel(Name)),
-          proc_lib:init_ack(Parent, {error, Reason}),
-          exit(Reason);
-        {'EXIT', Class, Reason, Stacktrace} ->
-          proc_lib:init_ack(Parent, {error, terminate_reason(Class, Reason, Stacktrace)}),
-          erlang:raise(Class, Reason, Stacktrace)
+start_link(DbPid, Buffer, Tid, Store, UpdatedSeq) ->
+  gen_server:start_link(?MODULE, [DbPid, Buffer, Tid, Store, UpdatedSeq], []).
+
+init([DbPid, Buffer, Tid, Store, UpdatedSeq]) ->
+  State =
+    #{db_pid => DbPid,
+      buffer => Buffer,
+      update_tasks => Tid,
+      store => Store,
+      updated_seq => UpdatedSeq
+    
+    },
+  
+  {ok, State, hibernate}.
+
+
+handle_call(_Msg, _From, State) -> {reply, ok, State}.
+
+handle_cast(_Msg, State) -> {noreply, State}.
+
+handle_info(wakup, State) ->
+  do_process_entries(State).
+
+do_process_entries(#{ db_pid := DbPid, buffer := Buffer } = State) ->
+  case fetch_entry(Buffer, 0)  of
+    {ok, {Ref, From, Timestamp, Op}} ->
+      
+      case handle_op(Op, From, State) of
+        {ok, LastSeq} ->
+          DbPid ! {updated, Ref, LastSeq},
+          do_process_entries(State#{ updated_seq => LastSeq });
+        Error ->
+          exit(Error)
+          
       end;
-    {false, Pid} ->
-      proc_lib:init_ack(Parent, {error, {already_started, Pid}})
+    hibernate ->
+      {noreply, State, hibernate}
   end.
 
-try_init_barrel(Mod, Store, Name, Options) ->
-  try
-    {ok, Mod:init_barrel(Store, Name, Options)}
-  catch
-    throw:R -> {ok, R};
-    ?WITH_STACKTRACE(Class, R, StackTrace)
-      {'EXIT', Class, R, StackTrace}
+
+%% we try to fetch the entries in loop and if nothing happen after sometimes we enter in hibernation.
+%% TODO: replace `timer:sleep/1' by a function catching a stop from the main barrel process
+fetch_entry(Buffer, Attempts) ->
+  case barrel_buffer_ets:out(Buffer) of
+    {ok, Entry} -> {ok, Entry};
+    empty ->
+      %% All numbers below chosen by guess and check against a few random benchmarks.
+      if
+        Attempts < 4 -> fetch_entry(Buffer, Attempts + 1);
+        Attempts < 10 ->
+          timer:sleep(1),
+          fetch_entry(Buffer, Attempts + 1);
+        Attempts < 100 ->
+          timer:sleep(5),
+          fetch_entry(Buffer, Attempts + 1);
+        Attempts < 200 ->
+          timer:sleep(10),
+          fetch_entry(Buffer, Attempts + 1);
+        true ->
+          hibernate
+      end
   end.
+  
+handle_op({save_docs, RepDocs, LocalDocs, Policy}, From, #{ store := Store, updated_seq := UpdatedSeq }) ->
+y
 
-register_barrel(Name) ->
-  try gproc:reg(?barrel(Name)), true
-  catch
-    error:_ ->
-      {false, gproc:where(?barrel(Name))}
-  end.
-
-terminate_reason(error, Reason, Stacktrace) -> {Reason, Stacktrace};
-terminate_reason(exit, Reason, _Stacktrace) -> Reason.
-
-
-writer_loop(State = #{ parent := Parent, name := Name }) ->
-  receive
-    {update_docs, Client, RepRecords, LocalRecords, Policy} ->
-      case try_update_docs(Client, RepRecords, LocalRecords, Policy, State) of
-        {ok, NewState} when is_map(NewState) ->
-          writer_loop(NewState);
-        {ok, {error, Reason}} ->
-          terminate(Reason, State);
-        {'EXIT', Class, Reason, Stacktrace} ->
-          io:format("error, barrel=~p reason=~p, stacktrace=~p~n", [Name, Reason, Stacktrace]),
-          gproc:unreg(?barrel(Name)),
-          _ = (catch barrel_storage:terminate_barrel(State)),
-          erlang:raise(Class, Reason, Stacktrace)
-      end;
-    {set_indexed_seq, Seq} ->
-      NewState = barrel_storage:set_indexed_seq(State, Seq),
-      writer_loop(NewState);
-    ?BARREL_CALL(From, Req) ->
-      handle_call(Req, From, State);
-    {'EXIT', Pid, Reason} when Pid =:= Parent ->
-      terminate(Reason, State);
-    {system, From, Req} ->
-      sys:handle_system_msg(Req, From, Parent, ?MODULE, [], State);
-    Message ->
-      ?LOG_ERROR(
-        "** ~s: unexpected message (ignored): ~tw~n",
-        [?MODULE_STRING, Message]
-      ),
-      writer_loop(State)
-  end.
-
--spec terminate(any(), map()) -> no_return().
-terminate(Reason, #{ name := Name } = State) ->
-  gproc:unreg(?barrel(Name)),
-   _ = (catch barrel_storage:terminate_barrel(State)),
-  exit(Reason).
-
-system_continue(_, _, State) ->
-  writer_loop(State).
-
-system_terminate(Reason, _, _, State) ->
-  terminate(Reason, State).
-
-system_code_change(Misc, _, _, _) ->
-  {ok, Misc}.
-
-
--spec handle_call(any(), pid(), map()) -> no_return().
-handle_call(drop_barrel, From, #{ name := Name} = State) ->
-  ?LOG_INFO("drop barrel=~p~n", [Name]),
-  gproc:unreg(?barrel(Name)),
-  _ = barrel_storage:drop_barrel(State),
-  reply(From, ok),
-  exit(normal);
-handle_call(close_barrel, From, #{ name := Name} = State) ->
-  ?LOG_INFO("close barrel=~p~n", [Name]),
-  gproc:unreg(?barrel(Name)),
-  _ = barrel_storage:close_barrel(State),
-  reply(From, ok),
-  exit(normal).
-
-try_update_docs(Client, RepRecords, LocalRecords, Policy, State) ->
-  try
-    {ok, do_update_docs(Client, RepRecords, LocalRecords, Policy, State)}
-  catch
-    throw:R -> {ok, R};
-    ?WITH_STACKTRACE(Class, R, StackTrace)
-      {'EXIT', Class, R, StackTrace}
-  end.
+  
 
 
 do_update_docs(Client, RepRecords, LocalRecords, Policy, #{ name := Name } = State0) ->
@@ -225,24 +151,7 @@ flush_revisions([{DI, OldDI}| Rest], Flushed, ToIndex, State) ->
   ToIndex2 = [IRef | ToIndex],
   flush_revisions(Rest, Flushed2, ToIndex2, State);
 flush_revisions([], Flushed, ToIndex, State) ->
-  ok = maybe_await_index(ToIndex, State),
   {Flushed, ToIndex /= [] }.
-
-
-maybe_await_index([], _State) -> ok;
-maybe_await_index(ToIndex, State) ->
-  await_for_index(ToIndex, [], State).
-
-%% TODO: add timeout ?
-await_for_index([], Acc, State) ->
-  Mutations = lists:flatten(Acc),
-  ok = barrel_storage:add_mutations(State, Mutations),
-  ok;
-await_for_index([Ref | Rest], Acc, State) ->
-  receive
-    {Ref, Mutations} ->
-      await_for_index(Rest, [Mutations | Acc ], State)
-  end.
 
 update_local_records_rev(Records) ->
   lists:map(
@@ -274,22 +183,6 @@ maybe_notify(NewState, OldState) ->
       ok
   end.
 
-
-%%collect_docs(Clients,  Entries0, Policy, TRef) ->
-%%  receive
-%%    {update_docs, Client, RepRecords, [], Policy} ->
-%%      Entries1 = group_records(RepRecords, Client, Policy, Entries0),
-%%      collect_docs([Client | Clients], Entries1, Policy, TRef);
-%%    {update_docs, Client, RepRecords, LocalRecords, Policy} ->
-%%      Entries1 = group_records(RepRecords, Client, Policy, Entries0),
-%%      _ = erlang:cancel_timer(TRef),
-%%      {[Client | Clients], Entries1, LocalRecords};
-%%    timeout ->
-%%      {Clients, Entries0, []}
-%%  after 0 ->
-%%    _ = erlang:cancel_timer(TRef),
-%%    {Clients, Entries0, []}
-%%  end.
 
 group_records([Group | Rest], Client, Policy, D) ->
   [#{ id := Id } |_ ] = Group,

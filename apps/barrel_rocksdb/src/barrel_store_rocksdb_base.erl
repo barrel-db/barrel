@@ -15,7 +15,7 @@
   close/1
 ]).
 
--include("barrel_store_rocksdb.hrl").
+-include("barrel_rocksdb.hrl").
 
 -define(DB_OPEN_RETRIES, 30).
 -define(DB_OPEN_RETRY_DELAY, 2000).
@@ -61,7 +61,7 @@ db_options() ->
   [
     {create_if_missing, true},
     {create_missing_column_families, true},
-    {max_open_files, 10000},
+    {max_open_files, 64},
     {allow_concurrent_memtable_write, true},
     {enable_write_thread_adaptive_yield, true},
     {bytes_per_sync, 4 bsl 20}

@@ -15,15 +15,14 @@
 ]).
 
 
--include("barrel_store_rocksdb.hrl").
+-include("barrel_rocksdb.hrl").
 
--define(CACHE, 128 * 16#100000). % 128 Mib
 -define(DB_OPEN_RETRIES, 30).
 -define(DB_OPEN_RETRY_DELAY, 2000).
 -define(TAB, barrel_rocksdb).
 -define(SERVER, barrel_rocksdb).
 
-init_barrel(Name, Config) ->
+init_barrel(Id, Config) ->
   {Shared, Cache} = maybe_init_cache(Config),
   Path = db_path(Name, Config),
   case barrel_store_rocksdb_base:open(Path, Cache) of
@@ -43,12 +42,28 @@ close_barrel(#{ ref := Ref }) ->
 db_path(Name, Config) ->
   filename:join(path(Config), db_name(Name)).
 
+hash_name(Name) ->
+  Hash = crypto:hash(sha256, barrel_lib:to_binary(Name)),
+  binary_to_list(barrel_lib:to_hex(Hash)).
+  
 
-path(#{ path := Path }) ->
-  filelib:ensure_dir(filename:join(Path, "dummy")),
-  Path;
-path(_) ->
-  Dir = filename:join([barrel_config:get(data_dir), "#rocksdb"]),
+local_name(Name) ->
+  
+  lists:flatten(["#rocksdb#", hash_name(Name)]).
+
+path(Name, #{ path := Path }) ->
+  case filelib:is_dir(Path) of
+    true ->
+      ?LOG_INFO("storage ~p is using directory ~p~n", [Name, Path]),
+      Path;
+    false ->
+      ?LOG_INFO("error initializing storage ~p: directory ~p doesn't exist.~n", [Name, Path]),
+      erlang:exit({storage_error, {directory_not_found, Path}})
+  end;
+
+path(Name, _) ->
+  Dir = filename:join([barrel_config:get(data_dir), local_name(Name)]),
+  ?LOG_INFO("storage ~p is using directory ~p~n", [Name, Dir]),
   filelib:ensure_dir(filename:join(Dir, "dummy")),
   Dir.
 
@@ -60,15 +75,16 @@ db_name(Name) ->
     barrel_lib:to_hex(crypto:hash(sha256, barrel_lib:to_binary(Name)))
   ).
 
-maybe_init_cache(#{ cache := Cache }) -> {true, Cache};
-maybe_init_cache(Config) ->
-  {ok, CacheSize} = cache_size(Config),
-  {ok, Cache} = rocksdb:new_lru_cache(CacheSize),
-  ok = rocksdb:set_strict_capacity_limit(Cache, true),
-  {false, Cache}.
+
+%% TODO: make the cache configurable
+init([Name, Config]) ->
+  Cache = barrel_shared_cache:get_cache(),
+  Path  = path(Name, Config),
+  
+  {ok, #{ path => Path, cache => Cache}}.
 
 
-cache_size(#{ cache_size := Sz }) when is_integer(Sz) ->
-  barrel_resource_monitor_misc:parse_information_unit(Sz);
-cache_size(_) ->
-  ?CACHE.
+handle_call(get_barrel, )
+
+
+

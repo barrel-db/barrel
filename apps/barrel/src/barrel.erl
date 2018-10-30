@@ -40,20 +40,16 @@
 
 %% gen_statem callbacks
 -export([
-  terminate/3,
-  code_change/4,
   init/1,
-  callback_mode/0
+  handle_call/3,
+  handle_cast/2,
+  handle_info/2,
+  terminate/2
+
 ]).
 
-%% states
--export([
-  idle/3,
-  pending/3,
-  handle_event/4
-]).
-
-
+-include("barrel.hrl").
+-include("barrel_logger.hrl").
 
 -type barrel_create_options() :: #{}.
 -type barrel_name() :: binary().
@@ -321,20 +317,79 @@ start_link(Name, StoreMod, Args) ->
 
 
 init([Parent, Name, StoreMod, Args]) ->
-  %% TODO: support Erlang 21 only?
-  case try_init_barrel(Name, StoreMod, Args) of
-    {ok, {ok, StorageState}} ->
-      Data = #{ store => StoreMod, store_state => StorageState},
-      proc_lib:init_ack({ok, self()}),
-      gen_statem:enter_loop(?MODULE, [], accep_writes, Data);
+  case register_barrel(Name) of
+    true ->
+      %% TODO: support Erlang 21 only?
+      case try_init_barrel(Name, StoreMod, Args) of
+        {ok, {ok, Store}} ->
+          ok = validate_state(Store),
+          UpdatedSeq = last_seq_(Store),
+          Buffer = barrel_buffer_ets:new(),
+          Tid = ets:new(barrel_transactions, [public, set]),
+          Writer = start_writer(Buffer, Tid, Store, UpdatedSeq),
+          State = #{name => Name,
+                    store => Store,
+                    buffer => Buffer,
+                    size => 0,
+                    writer => Writer,
+                    writer_state => iddle,
+                    transactions => Tid},
+          proc_lib:init_ack({ok, self()}),
+          gen_server:enter_loop(?MODULE, [], State);
 
-    {ok, {error, Reason}} ->
-      proc_lib:init_ack(Parent, {error, Reason}),
-      exit(Reason);
-    {'EXIT', Class, Reason, Stacktrace} ->
-      proc_lib:init_ack(Parent, {error, terminate_reason(Class, Reason, Stacktrace)}),
-      erlang:raise(Class, Reason, Stacktrace)
+        {ok, {error, Reason}} ->
+          gproc:unreg(?barrel(Name)),
+          proc_lib:init_ack(Parent, {error, Reason}),
+          exit(Reason);
+        {'EXIT', Class, Reason, Stacktrace} ->
+          proc_lib:init_ack(Parent, {error, terminate_reason(Class, Reason, Stacktrace)}),
+          erlang:raise(Class, Reason, Stacktrace)
+      end;
+    {false, Pid} ->
+      proc_lib:init_ack(Parent, {error, {already_started, Pid}})
   end.
+
+
+handle_call({save_docs, Timestamp, Docs, LocalDocs, Policy}, {Pid, _Tag} =  From, State) ->
+  #{ operations := Tid } = State,
+  Ref = erlang:make_ref(),
+  Entry  = new_entry(Ref, From, Timestamp, {save_docs, Docs, LocalDocs, Policy}),
+  Sz = erlang_term:byte_size(Entry),
+  case enqueue(Entry, Sz, Timestamp, State) of
+    {ok, NState} ->
+      ok = track_transaction(Tid, Ref, {pending, {From, Ref}, Sz, Timestamp}),
+      ok = maybe_wake_up_writer(NState),
+      {noreply, NState};
+    buffer_full ->
+      {reply, {error, buffer_full}, State}
+  end;
+
+handle_call(Request, _From, State) ->
+  ?LOG_ERROR("Unknown call request: ~p", [Request]),
+  Reply = ok,
+  {reply, Reply, State}.
+
+handle_cast(_Msg, State) ->
+  {noreply, State}.
+
+handle_info({modify_docs, From, Timestamp, Op}, State) ->
+  Entry  = new_entry(From, Timestamp, {modify_docs, Op}),
+  Tid = maps:get(operations, State),
+  ok = track_operation(Tid, Timestamp, {pending, Op}),
+  
+  
+  
+
+handle_info({updated, Ref, LastSeq}, State) ->
+  NState = untrack_process(Ref, State),
+  {noreply, NState#{ updated_seq => LastSeq }}.
+  
+
+terminate(_Reason, #{ name := Name, store := Store }) ->
+  gproc:unreg(?barrel(Name)),
+  ok = do_close_store(Store),
+  ok.
+
 
 try_init_barrel(Name, StoreMod, Args) ->
   try
@@ -346,44 +401,63 @@ try_init_barrel(Name, StoreMod, Args) ->
   end.
 
 
-callback_mode() -> state_functions.
-
-terminate(_Reason, _State, #{ engine := Engine }) ->
-  ok = close_engine(Engine),
-  ok.
-
-code_change(_OldVsn, State, Data, _Extra) ->
-  {ok, State, Data}.
-
-idle({call, From}, {save_docs, Docs}, Data) ->
-  Writer = maps:get(writer, Data),
-  Writer ! {update_docs, Docs},
-  {next_state, pending, Data};
-
-
-idle(EventType, EventContent, Data) ->
-  handle_event(EventType, idle, EventContent,Data).
-
-pending(info, {updated, LastSeq}, #{ entries := Entries, writer := Writer } = Data) ->
-  case Entries of
-    [] -> 
-      {next_state, idle, Data#{ last_seq => LastSeq }};
-    _ ->
-      Writer ! Entries,
-      {keep_state, Data#{ last_seq := LastSeq }}
-  end;
-
-
-pending(EventType, EventContent, Data) ->
-  handle_event(EventType, pending, EventContent,Data).
-
-handle_event(_EventType, _State, _Event, Data) ->
-  {stop, normal, Data}.
+%% TODO: check behaviour
+validate_state(#{ mod := Mod }) when is_atom(Mod) ->
+  ok;
+validate_state(_) ->
+  erlang:error(badarg).
 
 
 terminate_reason(error, Reason, Stacktrace) -> {Reason, Stacktrace};
 terminate_reason(exit, Reason, _Stacktrace) -> Reason.
 
 
-close_engine(#{ mod := Mod } = Engine) ->
-  Mod:close(Engine).
+register_barrel(Name) ->
+  try gproc:reg(?barrel(Name)), true
+  catch
+    error:_ ->
+      {false, gproc:where(?barrel(Name))}
+  end.
+
+do_close_store(#{ mod := Mod } = Store) ->
+  Mod:close(Store).
+
+
+last_seq_(#{ mod := Mod } = Store) ->
+  Mod:updated_seq(Store).
+
+start_writer(Buffer, Tid, Store, UpdatedSeq) ->
+  barrel_db_writer:start_link(self(), Buffer, Tid, Store, UpdatedSeq).
+
+
+maybe_wake_up_writer(#{ writer := Pid }) ->
+  case process_info(Pid, current_function) of
+    {current_function,{erlang,hibernate,3}} ->
+      Pid ! wakeup,
+      ok;
+    _ ->
+      ok
+  end.
+
+new_entry(From, Timestamp, OP) ->
+  {From, Timestamp, OP}.
+
+
+enqueue(Term, TermSize, Ts, #{ buffer := Buffer, size :=  Sz, max_size := Max} = State) ->
+  Sz2 = TermSize + Sz,
+  if
+    Sz2 =< Max ->
+      barrel_buffer_ets:in(Term, Ts, Buffer),
+      State#{ size => Sz2 };
+    true ->
+      buffer_full
+  end.
+
+untrack_process(Ref, #{ operations := Tid, size := Size} = State) ->
+  true = erlang:demonitor(Ref, [flush]),
+  [{Ref, {_, _, Sz, _}}] = ets:take(Tid, Ref),
+  State#{ size => (Size - Sz)}.
+
+track_process(Tab, Ref, State) ->
+  true = ets:insert_new(Tab, {Ref, State}),
+  ok.

@@ -1,6 +1,7 @@
 {"1.1.0",
 [{<<"backoff">>,{pkg,<<"backoff">>,<<"1.1.6">>},0},
  {<<"ehash">>,{pkg,<<"ehash">>,<<"0.2.1">>},0},
+ {<<"erlang_term">>,{pkg,<<"erlang_term">>,<<"1.7.4">>},0},
  {<<"gproc">>,{pkg,<<"gproc">>,<<"0.8.0">>},0},
  {<<"hooks">>,{pkg,<<"hooks">>,<<"2.0.1">>},0},
  {<<"quickrand">>,{pkg,<<"quickrand">>,<<"1.7.4">>},1},
@@ -13,6 +14,7 @@
 {pkg_hash,[
  {<<"backoff">>, <<"83B72ED2108BA1EE8F7D1C22E0B4A00CFE3593A67DBC792799E8CCE9F42F796B">>},
  {<<"ehash">>, <<"B3F73406C19FBA8ACE6598DB0B6252B0ECA5D8B3C0606CA7D69FAF6BAF442710">>},
+ {<<"erlang_term">>, <<"B2955E68F79E63EFC52F40E390193442FBDD3169C1C9AC5580ED6E18D41324F5">>},
  {<<"gproc">>, <<"CEA02C578589C61E5341FCE149EA36CCEF236CC2ECAC8691FBA408E7EA77EC2F">>},
  {<<"hooks">>, <<"1C1FF88BFDA7460D2A4C6894DFF94AD83287B7CC2B5AC0FEF808B189843F0F6B">>},
  {<<"quickrand">>, <<"F91F34469D6AC153B951BB34DD9C78029882426BD61E12B85E5EE465850C08ED">>},

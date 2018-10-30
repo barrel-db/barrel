@@ -1,8 +1,6 @@
--ifdef('OTP_RELEASE').
--define(WITH_STACKTRACE(T, R, S), T:R:S ->).
--else.
--define(WITH_STACKTRACE(T, R, S), T:R -> S = erlang:get_stacktrace(),).
--endif.
+-define(CACHE, 128 * 16#100000). % 128 Mib
+-define(DB_OPEN_RETRIES, 30).
+-define(DB_OPEN_RETRY_DELAY, 2000).
 
 -ifdef('OTP_RELEASE').
 -include_lib("kernel/include/logger.hrl").
