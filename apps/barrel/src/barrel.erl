@@ -113,7 +113,7 @@
 }.
 
 
-start_store(Module, Name, Options) ->
+start_store(Name, Module, Options) ->
   case erlang:function_exported(Module, init_store, 2) of
     true ->
       Module:init_store(Name, Options);
