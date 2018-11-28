@@ -45,42 +45,34 @@ start_link() ->
 %% Child :: {Id,StartFunc,Restart,Shutdown,Type,Modules}
 init([]) ->
   Specs = [
+    %% services management
+    %% TODO: put services in their own supervisor?
+    #{id => barrel_services_sup,
+      start => {barrel_services_sup, start_link, []},
+      type => supervisor},
 
-           %% extensions supervisor
-           #{id => barrel_ext_sup,
-             start => {barrel_ext_sup, start_link, []},
-             restart => permanent,
-             shutdown => infinity,
-             type => supervisor,
-             modules => [barrel_ext_sup]},
+    #{id => barrel_services,
+      start => {barrel_services, start_link, []}},
 
-           %% persist time server
-           #{
-             id => persist_time_server,
-             start => {barrel_ts, start_link, []},
-             restart => permanent,
-             shutdown => 5000,
-             type => worker,
-             modules => [barrel_flake_ts]
-           },
+    %% persist time server
+    #{
+      id => persist_time_server,
+      start => {barrel_ts, start_link, []}
+    },
 
-           %% barrel event server
-           #{id => barrel_event,
-             start => {barrel_event, start_link, []},
-             restart => permanent,
-             shutdown => infinity,
-             type => worker,
-             modules => [barrel_event]
-           },
+    %% barrel event server
+    #{id => barrel_event,
+      start => {barrel_event, start_link, []},
+      shutdown => infinity,
+      type => worker
+    },
 
-           %% safe supervisor
-           #{id => barrel_safe_sup,
-             start => {supervisor, start_link, [{local, barrel_safe_sup}, ?MODULE, safe]},
-             restart => permanent,
-             shutdown => infinity,
-             type => supervisor,
-             modules => [?MODULE]}
-    ],
+    %% safe supervisor
+    #{id => barrel_safe_sup,
+      start => {supervisor, start_link, [{local, barrel_safe_sup}, ?MODULE, safe]},
+      type => supervisor,
+      modules => [?MODULE]}
+  ],
 
   {ok, { {one_for_one, 4, 2000}, Specs} };
 
@@ -89,28 +81,18 @@ init(safe) ->
 
     %% index pool supervisor
     #{id => barrel_index_pool,
-      start => {barrel_index_pool, start_link, []},
-      restart => permanent,
-      shutdown => infinity,
-      type => supervisor,
-      modules => [barrel_index_pool]},
+      start => {barrel_index_pool, start_link, []}
+    },
 
     %% fetch pool supervisor
     #{id => barrel_fetch_pool,
-      start => {barrel_fetch_pool, start_link, []},
-      restart => permanent,
-      shutdown => infinity,
-      type => supervisor,
-      modules => [barrel_fetch_pool]},
+      start => {barrel_fetch_pool, start_link, []}
+    },
 
 
     %% barrel containers supervisor
     #{id => barrel_db_sup,
-      start => {barrel_db_sup, start_link, []},
-      restart => permanent,
-      shutdown => infinity,
-      type => supervisor,
-      modules => [barrel_db_sup]
+      start => {barrel_db_sup, start_link, []}
     }
   ],
 

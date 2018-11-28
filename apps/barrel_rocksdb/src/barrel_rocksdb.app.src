@@ -1,13 +1,13 @@
-{application, barrel_store_rocksdb,
+{application, barrel_rocksdb,
  [{description, "An OTP application"},
   {vsn, "0.1.0"},
   {registered, []},
-  {mod, { barrel_store_rocksdb_app, []}},
   {applications,
    [kernel,
     stdlib,
     barrel,
-    gproc
+    gproc,
+    rocksdb
    ]},
   {env,[]},
   {modules, []},

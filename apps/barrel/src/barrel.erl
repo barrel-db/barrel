@@ -15,6 +15,9 @@
 -module(barrel).
 -author("benoitc").
 
+%% store api
+-export([start_store/3, stop_store/1]).
+
 %% API
 -export([
   create_barrel/2,
@@ -108,6 +111,18 @@
 -type save_options() :: #{
   all_or_nothing => boolean()
 }.
+
+
+start_store(Module, Name, Options) ->
+  case erlang:function_exported(Module, init_store, 2) of
+    true ->
+      Module:init_store(Name, Options);
+    false ->
+      erlang:exit(badarg)
+  end.
+
+stop_store(Name) ->
+  barrel_services:deactivate_service(store, Name).
 
 
 %% @doc create a barrel, (note: for now the options is an empty map)
@@ -350,10 +365,10 @@ init([Parent, Name, StoreMod, Args]) ->
   end.
 
 
-handle_call({save_docs, Timestamp, Docs, LocalDocs, Policy}, {Pid, _Tag} =  From, State) ->
+handle_call({save_docs, Timestamp, Docs, LocalDocs, Policy}, From, State) ->
   #{ operations := Tid } = State,
   Ref = erlang:make_ref(),
-  Entry  = new_entry(Ref, From, Timestamp, {save_docs, Docs, LocalDocs, Policy}),
+  Entry  = new_entry(From, Timestamp, {save_docs, Docs, LocalDocs, Policy}),
   Sz = erlang_term:byte_size(Entry),
   case enqueue(Entry, Sz, Timestamp, State) of
     {ok, NState} ->
@@ -372,16 +387,16 @@ handle_call(Request, _From, State) ->
 handle_cast(_Msg, State) ->
   {noreply, State}.
 
-handle_info({modify_docs, From, Timestamp, Op}, State) ->
-  Entry  = new_entry(From, Timestamp, {modify_docs, Op}),
+handle_info({modify_docs, _From, Timestamp, Op}, State) ->
+  %Entry  = new_entry(From, Timestamp, {modify_docs, Op}),
   Tid = maps:get(operations, State),
-  ok = track_operation(Tid, Timestamp, {pending, Op}),
+  ok = track_transaction(Tid, Timestamp, {pending, Op}),
   
-  
+  {noreply, State};
   
 
 handle_info({updated, Ref, LastSeq}, State) ->
-  NState = untrack_process(Ref, State),
+  NState = untrack_transaction(Ref, State),
   {noreply, NState#{ updated_seq => LastSeq }}.
   
 
@@ -453,11 +468,11 @@ enqueue(Term, TermSize, Ts, #{ buffer := Buffer, size :=  Sz, max_size := Max} =
       buffer_full
   end.
 
-untrack_process(Ref, #{ operations := Tid, size := Size} = State) ->
+untrack_transaction(Ref, #{ operations := Tid, size := Size} = State) ->
   true = erlang:demonitor(Ref, [flush]),
   [{Ref, {_, _, Sz, _}}] = ets:take(Tid, Ref),
   State#{ size => (Size - Sz)}.
 
-track_process(Tab, Ref, State) ->
+track_transaction(Tab, Ref, State) ->
   true = ets:insert_new(Tab, {Ref, State}),
   ok.

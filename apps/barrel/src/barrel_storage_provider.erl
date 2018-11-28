@@ -4,12 +4,10 @@
 %%% @doc
 %%%
 %%% @end
-%%% Created : 26. Nov 2018 05:11
+%%% Created : 28. Nov 2018 11:26
 %%%-------------------------------------------------------------------
+-module(barrel_storage_provider).
 -author("benoitc").
 
--define(DB_OPEN_RETRIES, 30).
--define(DB_OPEN_RETRY_DELAY, 2000).
 
--define(rdb_store(Name), {n, l, {barrel_rocksdb_store, Name}}).
--define(rdb_cache(Name), {n, l, {barrel_rocksdb_cache, Name}}).
+-callback init_store(Name :: term(), Options :: any()) -> ok.

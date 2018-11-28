@@ -14,13 +14,19 @@
   to_atom/1,
   to_binary/1,
   to_list/1,
+  make_uid/0, make_uid/1,
   uniqid/0, uniqid/1,
   to_hex/1,
   hex_to_binary/1,
   zeropad/1
 ]).
 
--export([parse_information_unit/1]).
+-export([
+  validate_base64uri/1,
+  derive_safe_string/2
+]).
+
+-export([parse_size_unit/1]).
 
 -export([group_by/2]).
 
@@ -37,27 +43,78 @@
 -include("barrel.hrl").
 -include_lib("syntax_tools/include/merl.hrl").
 
+%% "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+-define(GENERATED_UID_CHARS,
+        {65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,
+         84,85,86,87,88,89,90,48,49,50,51,52,53,54,55,56,57}).
+-define(UID_CHARS, "ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890").
+-define(UID_LENGTH, 12).
+-define(BASE64_URI_CHARS,
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+  "abcdefghijklmnopqrstuvwxyz"
+  "0123456789_-=").
 
 
+-spec to_atom(atom() | list() | binary()) -> atom().
 to_atom(V) when is_atom(V) -> V;
 to_atom(V) when is_list(V) -> list_to_atom(V);
-to_atom(V) when is_binary(V) ->
-  case catch binary_to_existing_atom(V, utf8) of
-    {'EXIT', _} -> binary_to_atom(V, utf8);
-    B -> B
-  end;
+to_atom(V) when is_binary(V) -> list_to_atom(binary_to_list(V));
 to_atom(_) -> error(badarg).
 
+-spec to_binary(atom() | binary() | list() | integer()) -> binary().
 to_binary(V) when is_binary(V) -> V;
 to_binary(V) when is_list(V) -> list_to_binary(V);
 to_binary(V) when is_atom(V) -> atom_to_binary(V, utf8);
 to_binary(V) when is_integer(V) -> integer_to_binary(V);
 to_binary(_) -> error(badarg).
 
+-spec to_list(atom() | binary() | list() | integer()) -> list().
 to_list(V) when is_list(V) -> V;
 to_list(V) when is_binary(V) -> binary_to_list(V);
 to_list(V) when is_atom(V) -> atom_to_list(V);
 to_list(_) -> error(badarg).
+
+-spec make_uid() -> binary().
+make_uid() ->
+    make_uid(<<>>).
+
+-spec make_uid(atom() | binary() | string()) -> binary().
+make_uid(Prefix0) ->
+    ChrsSize = size(?GENERATED_UID_CHARS),
+    F = fun(_, R) ->
+                [element(rand:uniform(ChrsSize), ?GENERATED_UID_CHARS) | R]
+        end,
+    Prefix = to_binary(Prefix0),
+    B = list_to_binary(lists:foldl(F, "", lists:seq(1, ?UID_LENGTH))),
+    <<Prefix/binary, B/binary>>.
+
+
+-spec validate_base64uri(string()) -> boolean().
+validate_base64uri(Str) ->
+  catch
+    begin
+      [begin
+         case lists:member(C, ?BASE64_URI_CHARS) of
+           true -> ok;
+           false -> throw(false)
+         end
+       end || C <- string:to_graphemes(Str)],
+      string:is_empty(Str) == false
+    end.
+
+
+derive_safe_string(S, Num) ->
+  F = fun Take([], Acc) ->
+    string:reverse(Acc);
+    Take([G | Rem], Acc) ->
+      case lists:member(G, ?BASE64_URI_CHARS) of
+        true ->
+          Take(string:next_grapheme(Rem), [G | Acc]);
+        false ->
+          Take(string:next_grapheme(Rem), Acc)
+      end
+      end,
+  string:slice(F(string:next_grapheme(S), []), 0, Num).
 
 uniqid() -> uniqid(binary).
 
@@ -119,11 +176,11 @@ hex_to_binary(Bin) when is_binary(Bin) ->
   << <<(binary_to_integer( <<H, L>>, 16))>> || << H, L >> <= Bin >>.
 
 
--spec parse_information_unit(integer() | string()) ->
+-spec parse_size_unit(integer() | string()) ->
   {ok, integer()} | {error, parse_error}.
 
-parse_information_unit(Value) when is_integer(Value) -> {ok, Value};
-parse_information_unit(Value) when is_list(Value) ->
+parse_size_unit(Value) when is_integer(Value) -> {ok, Value};
+parse_size_unit(Value) when is_list(Value) ->
   case re:run(Value,
     "^(?<VAL>[0-9]+)(?<UNIT>kB|KB|MB|GB|kb|mb|gb|Kb|Mb|Gb|kiB|KiB|MiB|GiB|kib|mib|gib|KIB|MIB|GIB|k|K|m|M|g|G)?$",
     [{capture, all_but_first, list}]) of
