@@ -51,8 +51,8 @@
 
 ]).
 
--include("barrel.hrl").
--include("barrel_logger.hrl").
+-include_lib("barrel/include/barrel.hrl").
+-include_lib("barrel/include/barrel_logger.hrl").
 
 -type barrel_create_options() :: #{}.
 -type barrel_name() :: binary().
@@ -114,6 +114,7 @@
 
 
 start_store(Name, Module, Options) ->
+  _ = code:ensure_loaded(Module),
   case erlang:function_exported(Module, init_store, 2) of
     true ->
       Module:init_store(Name, Options);

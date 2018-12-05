@@ -23,7 +23,9 @@
 
 -export([
   validate_base64uri/1,
-  derive_safe_string/2
+  derive_safe_string/2,
+  encode_b64url/1,
+  decode_b64url/1
 ]).
 
 -export([parse_size_unit/1]).
@@ -115,6 +117,32 @@ derive_safe_string(S, Num) ->
       end
       end,
   string:slice(F(string:next_grapheme(S), []), 0, Num).
+
+
+encode_b64url(Bin) when is_binary(Bin) ->
+  << << (urlencode_digit(D)) >> || <<D>> <= base64:encode(Bin), D =/= $= >>;
+encode_b64url(L) when is_list(L) ->
+  encode_b64url(iolist_to_binary(L)).
+
+decode_b64url(Bin) when is_binary(Bin) ->
+  Bin2 = case byte_size(Bin) rem 4 of
+           % 1 -> << Bin/binary, "===" >>;
+           2 -> << Bin/binary, "==" >>;
+           3 -> << Bin/binary, "=" >>;
+           _ -> Bin
+         end,
+  base64:decode(<< << (urldecode_digit(D)) >> || <<D>> <= Bin2 >>);
+decode_b64url(L) when is_list(L) ->
+  decode_b64url(iolist_to_binary(L)).
+
+
+urlencode_digit($/) -> $_;
+urlencode_digit($+) -> $-;
+urlencode_digit(D)  -> D.
+
+urldecode_digit($_) -> $/;
+urldecode_digit($-) -> $+;
+urldecode_digit(D)  -> D.
 
 uniqid() -> uniqid(binary).
 
@@ -334,6 +362,24 @@ do_exec(_) ->
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
+
+
+b64url_test() ->
+  ?assertEqual(decode_b64url(encode_b64url(<<"foo">>)), <<"foo">>),
+  ?assertEqual(decode_b64url(encode_b64url(<<"foo1">>)), <<"foo1">>),
+  ?assertEqual(decode_b64url(encode_b64url(<<"foo12">>)), <<"foo12">>),
+  ?assertEqual(decode_b64url(encode_b64url(<<"foo123">>)), <<"foo123">>),
+  ?assertEqual(decode_b64url(encode_b64url("foo")), <<"foo">>),
+  ?assertEqual(decode_b64url(encode_b64url(["fo", "o1"])), <<"foo1">>),
+  ?assertEqual(decode_b64url(encode_b64url([255,127,254,252])), <<255,127,254,252>>),
+  % vanilla base64 produce URL unsafe output
+  ?assertNotEqual(
+    binary:match(base64:encode([255,127,254,252]), [<<"=">>, <<"/">>, <<"+">>]),
+    nomatch),
+  % this codec produce URL safe output
+  ?assertEqual(
+    binary:match(encode_b64url([255,127,254,252]), [<<"=">>, <<"/">>, <<"+">>]),
+    nomatch).
 
 pmap_test() ->
   L = [ 1, 2, 3, 4 ],

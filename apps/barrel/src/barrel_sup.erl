@@ -89,10 +89,9 @@ init(safe) ->
       start => {barrel_fetch_pool, start_link, []}
     },
 
-
-    %% barrel containers supervisor
-    #{id => barrel_db_sup,
-      start => {barrel_db_sup, start_link, []}
+    %% barrel db supervisor
+    #{id => barrel_dbs_sup,
+      start => {barrel_dbs_sup, start_link, []}
     }
   ],
 

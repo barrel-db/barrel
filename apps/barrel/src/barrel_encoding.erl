@@ -416,7 +416,7 @@ decode_nonsorting_uvarint(<< C, Rest/binary >>, V0) ->
   V1 = V0 bsl 7 + to_uint64(C band 16#7f),
   decode_nonsorting_uvarint(Rest, V1);
 decode_nonsorting_uvarint(<<>>, _) ->
-  {<<>>, 0}.
+  {0, <<>>}.
 
 
 

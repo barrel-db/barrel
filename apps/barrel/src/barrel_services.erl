@@ -27,10 +27,13 @@
 
 start_service(Spec =  #{ id := ServiceId }) ->
   case supervisor:start_child(barrel_services_sup, Spec) of
+    {ok, Pid} ->
+      {ok, Pid};
     {error, already_present} ->
       supervisor:restart_child(barrel_services_sup, ServiceId);
-    Other ->
-      Other
+    {error, {already_started, Pid}} ->
+      %% TODO: check if spec is equal
+      {ok, Pid}
   end.
 
 stop_service(Name) ->
@@ -59,7 +62,8 @@ activate_service(Type, Module, Name, Spec0) ->
 
 deactivate_service(Type, Name) ->
   _ = stop_service({Type, Name}),
-  ets:delete(?MODULE, {Type, Name}).
+  ets:delete(?MODULE, {Type, Name}),
+  ok.
 
 get_service_module(Type, Name) -> ets:lookup_element(?MODULE, {Type, Name}, 2).
 
