@@ -193,7 +193,7 @@ write_doc_infos(Ctx, DocInfos, AddCount, DelCount) ->
       rocksdb:batch_put(WB, DIKey, DIVal),
       rocksdb:batch_put(WB, SeqKey, DIVal)
     end,
-    DocInfosq
+    DocInfos
   ),
   %% update counters -)
   rocksdb:batch_merge(WB, barrel_rocksdb_keys:docs_count(BarrelId), integer_to_binary(AddCount)),
