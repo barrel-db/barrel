@@ -20,9 +20,9 @@
 
 -export([
   create_barrel/2,
-  open_barrel/2,
+  open_barrel/1,
   close_barrel/1,
-  delete_barrel/2,
+  delete_barrel/1,
   barrel_infos/1
 ]).
 
@@ -32,8 +32,7 @@
   update_docs/4,
   revsdiff/3,
   fold_docs/4,
-  fold_changes/5,
-  fold_path/5
+  fold_changes/5
 ]).
 
 
@@ -41,7 +40,7 @@
   do_for_ref/2
 ]).
 
--export([start_link/3]).
+-export([start_link/2]).
 
 -export([
   init/1,
@@ -56,37 +55,56 @@
 -define(WRITE_BATCH_SIZE, 128).
 
 
-create_barrel(Store, Id) ->
-  LockId = {{Store, Id}, self()},
-  global:trans(
-    LockId,
+-define(BAD_PROVIDER_CONFIG(Store),
+  try barrel_services:get_service_module(store, Store)
+  catch
+    error:badarg -> erlang:error(bad_provider_config)
+  end).
+
+create_barrel(Name, Params0 = #{ store_provider := Store}) ->
+  % raise an error if the store doesn't exist
+  _ = ?BAD_PROVIDER_CONFIG(Store),
+  barrel_registry:with_locked_barrel(
+    Name,
     fun() ->
-      case start_barrel(Store, Id, #{ create_barrel => true }) of
-        {ok, _Pid} -> ok;
-        {error, db_already_exists} -> {error, db_already_exists};
-        {error,{already_started, _Pid}} -> {error, db_already_exists}
+      case barrel_registry:exists(Name) of
+        true ->  {error, barrel_already_exists};
+        false ->
+          Id = barrel_registry:local_id(Name),
+          Params1 = Params0#{ id => Id },
+          case start_barrel(Name, Params1) of
+            {ok, _Pid} -> ok;
+            Error  -> Error
+          end
       end
     end
-  ).
-
-open_barrel(Store, Id) ->
-  ResourceId = {Store, Id},
+  );
+create_barrel(Name, Params) ->
+  create_barrel(Name, Params#{ store_provider => default }).
+  
+open_barrel(Name) ->
   try
-      case gproc:lookup_values(?barrel(ResourceId)) of
-        [{_Pid, Barrel}] ->
-          {ok, Barrel};
-        [] ->
-          LockId = {ResourceId, self()},
-          Res = global:trans(
-            LockId,
+      case barrel_registry:reference_of(Name) of
+        {ok, _} = OK ->
+          OK;
+        error ->
+          Res = barrel_registry:with_locked_barrel(
+            Name,
             fun() ->
-              start_barrel(Store, Id, #{})
+              case barrel_registry:config_of(Name) of
+                {ok, #{ store_provider := Store } = Params} ->
+                  _ = ?BAD_PROVIDER_CONFIG(Store),
+                  start_barrel(Name, Params);
+                error ->
+                  {error, barrel_not_found}
+              end
             end
           ),
           case Res of
-            {ok, _} -> open_barrel(Store, Id);
+            {ok, _} ->
+              open_barrel(Name);
             {error,{already_started, _}} ->
-              open_barrel(Store, Id);
+              open_barrel(Name);
             Error ->
               Error
           end
@@ -94,66 +112,65 @@ open_barrel(Store, Id) ->
   catch
     exit:Reason when Reason =:= normal ->
       timer:sleep(10),
-      open_barrel(Store, Id)
+      open_barrel(Name)
   end.
 
+close_barrel(Name) ->
+  stop_barrel(Name).
+  
 
-close_barrel(#{ name := Id, provider := {_, Store} }) ->
-  LockId = {{Store, Id}, self()},
-  global:trans(
-    LockId,
+delete_barrel(Name) ->
+  barrel_registry:with_locked_barrel(
+    Name,
     fun() ->
-      stop_barrel(Store, Id)
+      ok = stop_barrel(Name),
+      case barrel_registry:config_of(Name) of
+        {ok, #{ id := Id, store_provider := Store }} ->
+          ok = barrel_registry:delete_config(Name),
+          Mod = barrel_services:get_service_module(store, Store),
+          Mod:delete_barrel(Store, Id);
+        error ->
+          ok
+      end
     end
   ).
 
-delete_barrel(Store, Id) ->
-  LockId = {{Store, Id}, self()},
-  global:trans(
-    LockId,
-    fun() ->
-      ok = stop_barrel(Store, Id),
-      Mod = barrel_services:get_service_module(store, Store),
-      Mod:delete_barrel(Store, Id)
-    end
-  ).
+start_barrel(Name, Params) ->
+  supervisor:start_child(barrel_dbs_sup, [Name, Params]).
 
-start_barrel(StoreName, BarrelName, Options) ->
-  supervisor:start_child(barrel_dbs_sup, [StoreName, BarrelName, Options]).
-
-stop_barrel(StoreName, BarrelName) ->
-  case supervisor:terminate_child(barrel_dbs_sup, gproc:where(?barrel({StoreName, BarrelName}))) of
+stop_barrel(Name) ->
+  case supervisor:terminate_child(barrel_dbs_sup, barrel_registry:where_is(Name)) of
     ok -> ok;
     {error, simple_one_for_one} -> ok
   end.
 
-barrel_infos(#{ name := Id, provider := {Mod, Store} }) ->
+barrel_infos(#{ id := Id, store_mod := Mod, store_name := Store }) ->
   try Mod:barrel_infos(Store, Id)
   catch
     error:badarg ->
-      {error, db_not_found}
+      {error, barrel_not_found}
   end.
-  
 
 
-fetch_doc(Db, DocId, Options) when is_map(Db) ->
-  do_fetch_doc(Db, DocId, Options);
-fetch_doc(DbRef, DocId, Options) ->
-  do_for_ref(
-    DbRef,
-    fun(Db) ->
-      do_fetch_doc(Db, DocId, Options)
+with_ctx(#{ id := Id, store_mod := Mod, store_name := Store }, Fun) ->
+  {ok, Ctx} = Mod:init_ctx(Store, Id, true),
+  try Fun(Ctx)
+  after Mod:release_ctx(Ctx)
+  end.
+
+
+
+fetch_doc(#{ store_mod := Mod } = Barrel, DocId, Options) ->
+  with_ctx(
+    Barrel,
+    fun(Ctx) ->
+      do_fetch_doc(Mod, Ctx, DocId, Options)
     end
   ).
 
-do_fetch_doc (Db, DocId = << ?LOCAL_DOC_PREFIX, _/binary >>, _Options) ->
-  case barrel_storage:get_local_doc(Db, DocId) of
-    {ok, #{ doc := Doc }} -> Doc;
-    not_found -> {error, not_found}
-  end;
-do_fetch_doc(Db, DocId, Options) ->
+do_fetch_doc(Mod, Ctx, DocId, Options) ->
   UserRev = maps:get(rev, Options, <<"">>),
-  case barrel_storage:get_doc_infos(Db, DocId) of
+  case Mod:get_doc_info(Ctx, DocId) of
     {ok, #{ deleted := true } = _DI} when UserRev =:= <<>> ->
       {error, not_found};
     {ok, #{ rev := WinningRev, revtree := RevTree}=_DI} ->
@@ -164,7 +181,7 @@ do_fetch_doc(Db, DocId, Options) ->
       case maps:find(Rev, RevTree) of
         {ok, RevInfo} ->
           Del = maps:get(deleted, RevInfo, false),
-          case barrel_storage:get_revision(Db, DocId, Rev) of
+          case Mod:get_doc_revision(Ctx, DocId, Rev) of
             {ok, Doc} ->
               WithHistory = maps:get(history, Options, false),
               MaxHistory = maps:get(max_history, Options, ?IMAX1),
@@ -186,22 +203,20 @@ do_fetch_doc(Db, DocId, Options) ->
         Error ->
           Error
       end;
-    not_found ->
-      {error, not_found};
     Error ->
       Error
   end.
 
-revsdiff(DbRef, DocId, RevIds) ->
-  do_for_ref(
-    DbRef,
-    fun(Db) ->
-      do_revsdiff(Db, DocId, RevIds)
+revsdiff(#{ store_mod := Mod } = Barrel, DocId, RevIds) ->
+  with_ctx(
+    Barrel,
+    fun(Ctx) ->
+      do_revsdiff(Mod, Ctx, DocId, RevIds)
     end
   ).
 
-do_revsdiff(Db, DocId, RevIds) ->
-  case barrel_storage:get_doc_infos(Db, DocId) of
+do_revsdiff(Mod, Ctx, DocId, RevIds) ->
+  case Mod:get_doc_info(Ctx, DocId) of
     {ok, #{revtree := RevTree}} ->
       {Missing, PossibleAncestors} = lists:foldl(
         fun(RevId, {M, A} = Acc) ->
@@ -228,22 +243,22 @@ do_revsdiff(Db, DocId, RevIds) ->
           end
         end, {[], []}, RevIds),
       {ok, lists:reverse(Missing), lists:usort(PossibleAncestors)};
-    not_found ->
+    {error, not_found} ->
       {ok, RevIds, []};
     Error ->
       Error
   end.
 
-fold_docs(DbRef, UserFun, UserAcc, Options) ->
-  do_for_ref(
-    DbRef,
-    fun(Db) ->
-      WrapperFun = fold_docs_fun(Db, UserFun, Options),
-      barrel_storage:fold_docs(Db, WrapperFun, UserAcc, Options)
+fold_docs(#{ store_mod := Mod } = Barrel, UserFun, UserAcc, Options) ->
+  with_ctx(
+    Barrel,
+    fun(Ctx) ->
+      WrapperFun = fold_docs_fun(Mod, Ctx, UserFun, Options),
+      Mod:fold_docs(Ctx, WrapperFun, UserAcc, Options)
     end
   ).
 
-fold_docs_fun(#{ name := Name } = Db, UserFun, Options) ->
+fold_docs_fun(Mod, Ctx, UserFun, Options) ->
   IncludeDeleted =  maps:get(include_deleted, Options, false),
   WithHistory = maps:get(history, Options, false),
   MaxHistory = maps:get(max_history, Options, ?IMAX1),
@@ -251,7 +266,7 @@ fold_docs_fun(#{ name := Name } = Db, UserFun, Options) ->
     case DI of
       #{ deleted := true } when IncludeDeleted =/= true -> skip;
       #{ rev := Rev, revtree := RevTree, deleted := Del } ->
-        case barrel_storage:get_revision(Db, DocId, Rev) of
+        case Mod:get_doc_revision(Ctx, DocId, Rev) of
           {ok, Doc} ->
             case WithHistory of
               false ->
@@ -263,32 +278,24 @@ fold_docs_fun(#{ name := Name } = Db, UserFun, Options) ->
                 Doc1 = maybe_add_deleted(Doc#{ <<"_rev">> => Rev, <<"_revisions">> => Revisions }, Del),
                 UserFun(Doc1, Acc)
             end;
-          not_found ->
-            ?LOG_WARNING(
-              "doc revision not found while folding docs: db=~p id=~p, rev=~p~n",
-              [Name, DocId, Rev]
-            ),
+          {errorn, not_found} ->
             skip;
           Error ->
-            ?LOG_ERROR(
-              "error while folding docs: db=~p id=~p, rev=~p error=p~n",
-              [Name, DocId, Rev, Error]
-            ),
             exit(Error)
         end
     end
   end.
 
 
-fold_changes(DbRef, Since, UserFun, UserAcc, Options) ->
-  do_for_ref(
-    DbRef,
-    fun(Db) ->
-      fold_changes_1(Db, Since, UserFun, UserAcc, Options)
+fold_changes(#{ store_mod := Mod } = Barrel, Since, UserFun, UserAcc, Options) ->
+  with_ctx(
+    Barrel,
+    fun(Ctx) ->
+      fold_changes_1(Mod,Ctx, Since, UserFun, UserAcc, Options)
     end
   ).
 
-fold_changes_1(Db, Since, UserFun, UserAcc, Options) ->
+fold_changes_1(Mod, Ctx, Since, UserFun, UserAcc, Options) ->
   %% get options
   IncludeDoc = maps:get(include_doc, Options, false),
   WithHistory = maps:get(with_history, Options, false),
@@ -312,7 +319,7 @@ fold_changes_1(Db, Since, UserFun, UserAcc, Options) ->
         },
         Change = change_with_doc(
           change_with_deleted(Change0, Deleted),
-          DocId, Rev, Db, IncludeDoc
+          DocId, Rev, Mod, Ctx, IncludeDoc
         ),
         case UserFun(Change, Acc0) of
           {ok, Acc1} ->
@@ -328,143 +335,65 @@ fold_changes_1(Db, Since, UserFun, UserAcc, Options) ->
         end
     end,
   AccIn = {UserAcc, Since},
-  {AccOut, LastSeq} = barrel_storage:fold_changes(Db, Since, WrapperFun, AccIn),
+  {AccOut, LastSeq} = Mod:fold_changes(Ctx, Since + 1, WrapperFun, AccIn),
   {ok, AccOut, LastSeq}.
 
 change_with_deleted(Change, true) -> Change#{ <<"deleted">> => true };
 change_with_deleted(Change, _) -> Change.
 
-
-change_with_doc(Change, DocId, Rev, Db, true) ->
-  case barrel_storage:get_revision(Db, DocId, Rev) of
+change_with_doc(Change, DocId, Rev, Mod, Ctx, true) ->
+  case Mod:get_revision(Ctx, DocId, Rev) of
     {ok, Doc} -> Change#{ <<"doc">> => Doc };
     _ -> Change#{ <<"doc">> => null }
   end;
-change_with_doc(Change, _, _, _, _) ->
+change_with_doc(Change, _, _, _, _, _) ->
   Change.
-
-
-fold_path(DbRef, Path0, UserFun, UserAcc, Options) ->
-  Path1 = normalize_path(Path0),
-  DecodedPath = decode_path(Path1, []),
-  do_for_ref(
-    DbRef,
-    fun(Db) ->
-      WrapperFun = fold_docs_fun(Db, UserFun, Options),
-      barrel_storage:fold_path(Db, DecodedPath, WrapperFun, UserAcc, Options)
-    end
-  ).
-
-normalize_path(<<>>) -> <<"/id">>;
-normalize_path(<<"/">>) -> <<"/id">>;
-normalize_path(<< "/", _/binary >> = P) ->  P;
-normalize_path(P) ->  <<"/", P/binary >>.
-
-decode_path(<<>>, Acc) ->
-  [ << "$" >> | lists:reverse(Acc)];
-decode_path(<< $/, Rest/binary >>, Acc) ->
-  decode_path(Rest, [<<>> |Acc]);
-decode_path(<< $[, Rest/binary >>, Acc) ->
-  decode_path(Rest, [<<>> |Acc]);
-decode_path(<< $], Rest/binary >>, [BinInt | Acc] ) ->
-  case (catch binary_to_integer(BinInt)) of
-    {'EXIT', _} ->
-      erlang:error(bad_path);
-    Int ->
-      decode_path(Rest, [Int | Acc])
-  end;
-decode_path(<<Codepoint/utf8, Rest/binary>>, []) ->
-  decode_path(Rest, [<< Codepoint/utf8 >>]);
-decode_path(<<Codepoint/utf8, Rest/binary>>, [Current|Done]) ->
-  decode_path(Rest, [<< Current/binary, Codepoint/utf8 >> | Done]).
-
-
-
-update_docs(DbRef, Docs, Options, UpdateType) ->
-  do_for_ref(
-    DbRef,
-    fun(Db) ->
-      Docs2 = prepare_docs(Docs, []),
-      update_docs_1(Db, Docs2, Options, UpdateType)
-    end
-  ).
-
-prepare_docs([Doc = #{ <<"id">> := _Id } | Rest], Acc) ->
-  prepare_docs(Rest, [Doc | Acc]);
-prepare_docs([Doc | Rest], Acc) ->
-  Doc2 = Doc#{ <<"id">> => barrel_id:binary_id(62)},
-  prepare_docs(Rest, [Doc2 | Acc]);
-prepare_docs([], Acc) ->
-  lists:reverse(Acc).
-
-update_docs_1(Db, Docs, Options, interactive_edit) ->
-  %% create records to store
-  Records0 = [barrel_doc:make_record(Doc) || Doc <- Docs],
-  %% split local docs from docs that can be replicated
-  {LocalRecords, Records1} = lists:partition(
-    fun
-      (#{ id := << ?LOCAL_DOC_PREFIX, _/binary >> }) -> true;
-      (_) -> false
-    end,
-    Records0
-  ),
-
+  
+update_docs(Barrel, Docs, Options, interactive_edit) ->
   %% TODO: add native attachment support
   AllOrNothing =  maps:get(all_or_nothing, Options, false),
   WritePolicy = case AllOrNothing of
                   true -> merge_with_conflict;
                   false -> merge
                 end,
-
-  %% group records by ID
-  RecordsBuckets = group_records(Records1),
-  IdsRevs = new_revs(RecordsBuckets),
-
+  %% prepare docs
+  {Records, IdsRevs} = prepare_docs(Docs, [], #{}),  
   %% do writes
-  {ok, CommitResults} = write_and_commit(Db, RecordsBuckets, LocalRecords, WritePolicy, Options),
-  %% reorder results
+  {ok, CommitResults} = write_and_commit(Barrel, Records, WritePolicy, Options),
+  %% replace results with records and new local revisions
   ResultsMap = lists:foldl(
     fun({Key, Resp}, M) -> maps:put(Key, Resp, M) end,
     IdsRevs,
     CommitResults
   ),
+  %% reorder results
   UpdateResults = lists:map(
     fun(#{ ref := Ref }) -> maps:get(Ref, ResultsMap) end,
-    Records1
+    Records
   ),
   {ok, UpdateResults};
 
-update_docs_1(Db, Docs, Options, replicated_changes) ->
+update_docs(Barrel, Docs, Options, replicated_changes) ->
   %% create records to store
   Records = [barrel_doc:make_record(Doc) || Doc <- Docs],
-  %% group records by ID
-  RecordsBuckets = group_records(Records),
   %% do writes
-  {ok, _} = write_and_commit(Db, RecordsBuckets, [], merge_with_conflict, Options),
+  {ok, _} = write_and_commit(Barrel, Records,  merge_with_conflict, Options),
   ok.
-  
 
-new_revs(RecordsBuckets) ->
-  lists:foldl(
-    fun(Bucket, M) ->
-      lists:foldl(
-        fun(#{ id := Id, revs := [RevId | _], ref := Ref }, M1) -> M1#{ Ref => {ok, Id, RevId}} end,
-        M,
-        Bucket
-      )
-    end,
-    #{},
-    RecordsBuckets
-  ).
 
-%% TODO: this could be optimised, instead of grouping / bucket we
-group_records(Records) ->
-  RecordsGroups = barrel_lib:group_by(Records, fun(#{ id := Id }) -> Id end),
-  [Bucket || {_Id, Bucket} <- dict:to_list(RecordsGroups)].
+prepare_docs([Doc | Rest], Records, IdRevs) ->
+  #{ id := Id,
+     revs := [RevId | _],
+     ref := Ref } = Record = barrel_doc:make_record(Doc),
+  prepare_docs(Rest, [Record | Records], IdRevs#{ Ref => {ok, Id, RevId} });
+prepare_docs([], Records, IdRevs) ->
+  {lists:reverse(Records), IdRevs}.
 
-write_and_commit(#{ updater_pid := Pid }, RecordsBuckets, LocalRecords, WritePolicy, _Options) ->
-  Pid ! {update_docs, self(), RecordsBuckets, LocalRecords, WritePolicy},
+write_and_commit(#{ name := Name }, Records, WritePolicy, _Options) ->
+  Batch = [{update, self(), Record, WritePolicy} || Record <- Records],
+  Pid = barrel_registry:where_is(Name),
   MRef = erlang:monitor(process, Pid),
+  ok = gen_batch_server:cast_batch(Pid, Batch),
   try await_write_results(MRef, Pid, [])
   after erlang:demonitor(MRef, [flush])
   end.
@@ -530,27 +459,26 @@ await_req(Tag, MRef) ->
   end.
 
 
+start_link(Name, Params) ->
+  gen_batch_server:start_link({via, barrel_registry, Name}, ?MODULE, [Name, Params]).
 
-
-
-
-start_link(StoreName, BarrelName, Options) ->
-  Name = ?barrel({StoreName, BarrelName}),
-  gen_batch_server:start_link({via, gproc, Name}, ?MODULE, [StoreName, BarrelName, Options]).
-
-init([StoreName, BarrelName, Options]) ->
-  case init_(StoreName, BarrelName, Options) of
+init([Name, Params]) ->
+  case init_(Name, Params) of
     {ok, Barrel} ->
       %% we trap exit there to to handle barrel closes
       erlang:process_flag(trap_exit, true),
-      gproc:set_value(?barrel({StoreName, BarrelName}), Barrel),
+      ok = barrel_registry:store_config(Name, Params),
+      gproc:set_value(?barrel(Name), Barrel),
       {ok, Barrel};
     {error, Reason} ->
       {stop, Reason}
   end.
 
 handle_batch(Batch, State) ->
-  NewState = handle_ops(Batch, [], #{}, maps:get(updated_seq, State), State),
+  {ok, Ctx} = init_ctx(State),
+  NewState = try handle_ops(Batch, [], #{}, maps:get(updated_seq, State), Ctx, State)
+             after release_ctx(Ctx, State)
+             end,
   {ok, NewState}.
 
 terminate(_Reason, State) ->
@@ -558,12 +486,18 @@ terminate(_Reason, State) ->
   ok.
 
 
-init_(StoreName, BarrelName, #{ create_barrel := true }) ->
-  Mod = barrel_services:get_service_module(store, StoreName),
-   Mod:create_barrel(StoreName, BarrelName);
-init_(StoreName, BarrelName, _Options) ->
-  Mod = barrel_services:get_service_module(store, StoreName),
-  Mod:open_barrel(StoreName, BarrelName).
+init_(Name, #{ id := Id, store_provider := Store }) ->
+  Mod = barrel_services:get_service_module(store, Store),
+  case Mod:init_barrel(Store, Id) of
+    {ok, LastSeq} ->
+      {ok, #{ name => Name,
+              id => Id,
+              store_mod => Mod,
+              store_name => Store,
+              updated_seq => LastSeq }};
+    Error ->
+      Error
+  end.
 
 
 try_close_barrel(#{ name := BarrelName, provider := {Mod, StoreName} }) ->
@@ -574,9 +508,7 @@ try_close_barrel(#{ name := BarrelName, provider := {Mod, StoreName} }) ->
       ok
   end.
 
-
-
-handle_ops([{_, {update, From, #{id := Id} = Record, Policy}} | Rest], Clients, DocInfosMap, Seq, Barrel) ->
+handle_ops([{_, {update, From, #{id := Id} = Record, Policy}} | Rest], Clients, DocInfosMap, Seq, Ctx, Barrel) ->
   Clients2 = [From | Clients],
   case maps:find(Id, DocInfosMap) of
     {ok, {DI, OldDI}} ->
@@ -585,41 +517,47 @@ handle_ops([{_, {update, From, #{id := Id} = Record, Policy}} | Rest], Clients, 
         DI2 /= DI ->
           Seq2 = Seq +1,
           DocInfosMap2 = DocInfosMap#{ Id => { DI2#{ seq => Seq2}, OldDI }},
-          handle_ops(Rest, Clients2, DocInfosMap2, Seq2, Barrel);
+          handle_ops(Rest, Clients2, DocInfosMap2, Seq2, Ctx, Barrel);
         true ->
-          handle_ops(Rest, Clients2, DocInfosMap, Seq, Barrel)
+          handle_ops(Rest, Clients2, DocInfosMap, Seq,Ctx,  Barrel)
       end;
     error ->
-      {Status, DI} = case get_doc_info(Id, Barrel) of
-                       {ok, DI} ->
-                         {found, DI#{ body_map => #{} }};
-                       not_found ->
+      {Status, DI} = case get_doc_info(Ctx, Id, Barrel) of
+                       {ok, DI1} ->
+                         {found, DI1#{ body_map => #{} }};
+                       {error, not_found} ->
                          {not_found, new_docinfo(Id)}
-                     end,
-  
+                     end,  
       DI2 = merge_revtree(Record, DI, From, Policy),
       if
         DI2 /= DI ->
           Seq2 = Seq +1,
           Pair = case Status of
-                   found -> { DI2#{ seq => Seq }, DI };
-                   not_found -> { DI2#{ seq => Seq }, not_found }
+                   found -> { DI2#{ seq => Seq2 }, DI };
+                   not_found -> { DI2#{ seq => Seq2 }, not_found }
                  end,
           DocInfosMap2 = DocInfosMap#{ Id => Pair },
-          handle_ops(Rest, Clients2, DocInfosMap2, Seq2, Barrel);
+          handle_ops(Rest, Clients2, DocInfosMap2, Seq2, Ctx, Barrel);
         true ->
-          handle_ops(Rest, Clients2, DocInfosMap, Seq, Barrel)
+          handle_ops(Rest, Clients2, DocInfosMap, Seq, Ctx, Barrel)
       end
   end;
-handle_ops([], Clients, DocInfosMap, Seq, Barrel) ->
+handle_ops([], Clients, DocInfosMap, Seq, Ctx, Barrel) ->
   DiPairs = maps:values(DocInfosMap),
-  ok = write_docs(DiPairs, Barrel),
+  ok = maybe_write_docs(DiPairs, Ctx, Barrel),
   Barrel2 = Barrel#{ updated_seq => Seq },
   %% notify an event and eventually update the shared state
   ok = maybe_notify(Barrel2, Barrel),
+
+  
   _ = complete_batch(Clients),
   Barrel2.
 
+maybe_write_docs([], _Ctx, _Barrel) ->
+  ok;
+maybe_write_docs(DiPairs, Ctx, Barrel) ->
+  write_docs(DiPairs, Ctx, Barrel).
+  
 
 %% -----------------------------------------
 %% merge doc infos
@@ -749,16 +687,24 @@ find_parent([], _RevTree, Acc) ->
 
 maybe_notify(#{ updated_seq := Seq }, #{ updated_seq := Seq }) ->
   ok;
-maybe_notify(Barrel = #{ name := Name, provider := {_, Store} }, _) ->
-  gproc:set_value(?barrel({Store, Name}), Barrel),
+maybe_notify(Barrel = #{ name := Name }, _) ->
+  gproc:set_value(?barrel(Name), Barrel),
   barrel_event:notify(Name, db_updated).
 
 
-get_doc_info(DocId, #{ name := Name, provider := {Mod, Store} }) ->
-  Mod:get_doc_infos(Store, Name, DocId).
+init_ctx(#{ id := Id, store_mod := Mod, store_name := Store }) ->
+  Mod:init_ctx(Store, Id, false).
 
-write_docs(Pairs, #{ name := Id, provider := {Mod, Store} }) ->
-  Mod:write_docs(Store, Id, Pairs).
+release_ctx(Ctx, #{store_mod := Mod }) ->
+  Mod:release_ctx(Ctx).
+
+
+
+get_doc_info(Ctx, DocId, #{ store_mod := Mod }) ->
+  Mod:get_doc_info(Ctx, DocId).
+
+write_docs(Pairs, Ctx, #{ store_mod := Mod }) ->
+  Mod:write_docs(Ctx, Pairs).
 
 complete_batch(Pids) ->
   _ = sets:fold(fun(Pid, _) -> catch Pid ! {done, self()} end, ok, sets:from_list(Pids)).

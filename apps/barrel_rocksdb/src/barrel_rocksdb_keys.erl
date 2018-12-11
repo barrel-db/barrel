@@ -31,6 +31,7 @@
 
 -export([
   doc_info/2,
+  doc_info_max/1,
   doc_seq/2,
   decode_doc_seq/1,
   doc_seq_max/1,
@@ -89,6 +90,11 @@ doc_info(BarrelId, DocId) ->
     << (db_prefix(BarrelId))/binary, ?docs_info_suffix/binary >>,
     DocId
   ).
+
+doc_info_max(BarrelId) ->
+  << (db_prefix(BarrelId))/binary, 
+     (barrel_rocksdb_util:bytes_prefix_end(?docs_info_suffix))/binary >>.
+
 
 %% @doc document sequence key
 doc_seq(BarrelId, Seq) ->

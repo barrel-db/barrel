@@ -21,16 +21,16 @@
 %% API
 -export([
   create_barrel/2,
-  drop_barrel/1,
+  open_barrel/1,
+  close_barrel/1,
+  delete_barrel/1,
   barrel_infos/1
 ]).
 
 -export([
   fetch_doc/3,
-  fetch_docs/3,
   save_doc/2,
   delete_doc/3,
-  purge_doc/2,
   save_docs/2,  save_docs/3,
   delete_docs/2,
   fold_docs/4,
@@ -54,14 +54,15 @@
 -include_lib("barrel/include/barrel.hrl").
 -include_lib("barrel/include/barrel_logger.hrl").
 
--type barrel_create_options() :: #{}.
--type barrel_name() :: binary().
+-type barrel_create_params() :: #{
+  store_provider => atom(),
+  index_policy => list()
+}.
+
 -type barrel_infos() :: #{
-  name := barrel_name(),
-  id := list() | binary(),
-  indexed_seq := non_neg_integer(),
   updated_seq := non_neg_integer(),
-  docs_count := non_neg_integer()
+  docs_count := non_neg_integer(),
+  docs_del_count := non_neg_integer()
 }.
 
 -type fetch_options() :: #{
@@ -69,14 +70,6 @@
   max_history => non_neg_integer(),
   rev => barrel_doc:revid(),
   ancestors => [barrel_doc:revid()]
-}.
-
--type fetch_docs_options() :: #{
-  history => boolean(),
-  max_history => non_neg_integer(),
-  rev => barrel_doc:revid(),
-  ancestors => [barrel_doc:revid()],
-  timeout => non_neg_integer()
 }.
 
 -type prop() :: binary().
@@ -113,6 +106,7 @@
 }.
 
 
+
 start_store(Name, Module, Options) ->
   _ = code:ensure_loaded(Module),
   case erlang:function_exported(Module, init_store, 2) of
@@ -127,72 +121,36 @@ stop_store(Name) ->
 
 
 %% @doc create a barrel, (note: for now the options is an empty map)
--spec create_barrel(Name :: barrel_name(), Options :: barrel_create_options()) -> ok | {error, any()}.
-create_barrel(Name, Options) ->
-  barrel_db:create_barrel(Name, Options).
+-spec create_barrel(Name :: barrel_name(), Params :: barrel_create_params()) -> ok | {error, any()}.
+create_barrel(Name, Params) ->
+  barrel_db:create_barrel(Name, Params).
 
-%% @doc drop a barrel
--spec drop_barrel(Name :: barrel_name()) -> ok.
-drop_barrel(Name) ->
-  barrel_db:drop_barrel(Name).
+-spec open_barrel(Name :: barrel_name()) -> {ok, barrel()} | {error, barrel_not_found} | {error, any()}.
+open_barrel(Name) ->
+  barrel_db:open_barrel(Name).
+
+-spec close_barrel(Name :: barrel_name()) -> ok.
+close_barrel(Name) ->
+  barrel_db:close_barrel(Name).
+
+-spec delete_barrel(Name :: barrel_name()) -> ok.
+delete_barrel(Name) ->
+  barrel_db:delete_barrel(Name).
   
 %% @doc return barrel_infos.
--spec barrel_infos(Name :: barrel_name()) -> barrel_infos().
-barrel_infos(DbRef) ->
-  barrel_db:db_infos(DbRef).
+-spec barrel_infos(Barrel :: barrel()) -> barrel_infos().
+barrel_infos(Barrel) ->
+  barrel_db:barrel_infos(Barrel).
 
 
 %% @doc lookup a doc by its docid.
--spec fetch_doc(Name, DocId, Options) -> FetchResult when
-  Name :: barrel_name(),
+-spec fetch_doc(Barrel, DocId, Options) -> FetchResult when
+  Barrel :: barrel_name(),
   DocId :: barrel_doc:docid(),
   Options :: fetch_options(),
   FetchResult :: {ok, Doc :: barrel_doc:doc()} | {error, not_found} | {error, term()}.
-fetch_doc(DbRef, DocId, Options) ->
-  barrel_db:fetch_doc(DbRef, DocId, Options).
-
-
-%% @doc retrieve a batch of documents
--spec fetch_docs(Name, DocIds, Options) -> FetchResults when
-  Name :: barrel_name(),
-  DocIds :: [barrel_doc:docid()],
-  Options :: fetch_docs_options(),
-  FetchResult :: {ok, Doc :: barrel_doc:doc()} | {error, not_found} | {error, term()},
-  FetchResults :: {ok, [FetchResult]} | {error, timeout}.
-fetch_docs(Name, DocIds, Options) ->
-  Self = self(),
-  Timeout = maps:get(timeout, Options, 5000),
-  barrel_db:do_for_ref(
-    Name,
-    fun(Db) ->
-      Refs = lists:foldr(
-        fun(DocId, Acc) ->
-          Ref = erlang:make_ref(),
-          wpool:cast(barrel_fetch_pool, {fetch_doc, {Self, Ref}, Db, DocId, Options}),
-          [Ref | Acc]
-        end,
-        [],
-        DocIds
-      ),
-      try
-        Res = await_fetch_docs(Refs, Timeout),
-        {ok, Res}
-      catch
-        exit:timeout -> {error, timeout}
-      end
-    end
-  ).
-
-await_fetch_docs([], _) -> [];
-await_fetch_docs([Ref | Next], Timeout) ->
-  receive
-    {Ref, Res} ->
-      [Res | await_fetch_docs(Next, Timeout)]
-  after Timeout ->
-    exit(Timeout)
-  end.
-  
-  
+fetch_doc(Barrel, DocId, Options) ->
+  barrel_db:fetch_doc(Barrel, DocId, Options).
 
 %% @doc create or replace a doc.
 %% Barrel will try to create a document if no `rev' property is passed to the document
@@ -218,7 +176,7 @@ save_doc(Barrel, Doc) ->
 %% @doc delete a document, it doesn't delete the document from the filesystem
 %% but instead create a tombstone that allows barrel to replicate a deletion.
 -spec delete_doc(Name, DocId, RevId) -> DeleteResult when
-  Name :: barrel_name(),
+  Name :: barrel(),
   DocId :: barrel_doc:docid(),
   RevId :: barrel_doc:revid(),
   DocError :: {conflict, revision_conflict} | {conflict, doc_exists},
@@ -231,16 +189,9 @@ delete_doc(Barrel, DocId, Rev) ->
   ),
   Res.
 
-%% @doc delete a document from the filesystem. This delete completely
-%% document locally. The deletion won't be replicated and will not crete an event.
--spec purge_doc(Name :: barrel_name(), DocId :: barrel_doc:docid()) -> ok | {error, term()}.
-purge_doc(Barrel, DocId) ->
-  {ok, [Res]} = barrel_db:write_changes(Barrel, [{purge, DocId}]),
-  Res.
-
 %% @doc likee save_doc but create or replace multiple docs at once.
 -spec save_docs(Name, Docs) -> SaveResults when
-  Name :: barrel_name(),
+  Name :: barrel(),
   Docs :: [barrel_doc:doc()],
   DocId :: barrel_doc:docid(),
   RevId :: barrel_doc:revid(),
@@ -251,7 +202,7 @@ save_docs(Barrel, Docs) ->
   save_docs(Barrel, Docs, #{}).
 
 -spec save_docs(Name, Docs, Options) -> SaveResults when
-  Name :: barrel_name(),
+  Name :: barrel(),
   Docs :: [barrel_doc:doc()],
   Options :: save_options(),
   DocId :: barrel_doc:docid(),
@@ -262,9 +213,8 @@ save_docs(Barrel, Docs) ->
 save_docs(Barrel, Docs, Options) ->
   barrel_db:update_docs(Barrel, Docs, Options, interactive_edit).
 
-
 -spec save_replicated_docs(Name, Docs) -> SaveResult when
-  Name :: barrel_name(),
+  Name :: barrel(),
   Docs :: [barrel_doc:doc()],
   SaveResult :: ok.
 save_replicated_docs(Barrel, Docs) ->

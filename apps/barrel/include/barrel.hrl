@@ -1,3 +1,8 @@
+
+-type barrel_name() :: binary().
+-type barrel_config() :: map().
+-type barrel() :: map().
+
 -define(APP, barrel).
 
 
@@ -20,6 +25,14 @@
 -define(JOBS_IDLE_MAX_LIMIT, 1000).
 
 -define(barrel(Name), {n, l, {barrel, Name}}).
+
+
+
+
+
+
+
+
 -define(store(Name), {n, l, {barrel_storage, Name}}).
 -define(via_store(Name), {via, gproc, {n, l, {barrel_storage, Name}}}).
 

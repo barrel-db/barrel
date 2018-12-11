@@ -359,7 +359,6 @@ do_exec(F) when is_function(F) ->
 do_exec(_) ->
   erlang:error(badarg).
 
-
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
 

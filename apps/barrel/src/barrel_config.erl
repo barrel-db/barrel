@@ -19,15 +19,33 @@
 -include("barrel.hrl").
 -include("barrel_logger.hrl").
 
+
+get(Key) ->
+  barrel_mochiglobal:get(Key).
+
+get(Key, Default) ->
+  barrel_mochiglobal:get(Key, Default).
+
+set(Key, Value) ->
+  application:set_env(?APP, Key, Value),
+  barrel_mochiglobal:put(Key, Value).
+
+
+
+
+
 init() ->
   %% Configure data dir
   DataDir = data_dir(),
   barrel_config:set(data_dir, DataDir),
-
+  ok= barrel_registry:init(DataDir),
+  
   [env_or_default(Key, Default) ||
-    {Key, Default} <- [{fold_timeout, 5000}]
+    {Key, Default} <- [
+      {fold_timeout, 5000}
+    ]
   ],
-
+  
   ok.
 
 data_dir() ->
@@ -44,13 +62,3 @@ env_or_default(Key, Default) ->
     undefined ->
       set(Key, Default)
   end.
-
-get(Key) ->
-  barrel_mochiglobal:get(Key).
-
-get(Key, Default) ->
-  barrel_mochiglobal:get(Key, Default).
-
-set(Key, Value) ->
-  application:set_env(?APP, Key, Value),
-  barrel_mochiglobal:put(Key, Value).

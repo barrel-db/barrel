@@ -44,6 +44,7 @@ start_link() ->
 
 %% Child :: {Id,StartFunc,Restart,Shutdown,Type,Modules}
 init([]) ->
+  ok = barrel_config:init(),
   Specs = [
     %% services management
     %% TODO: put services in their own supervisor?
@@ -56,8 +57,8 @@ init([]) ->
 
     %% persist time server
     #{
-      id => persist_time_server,
-      start => {barrel_ts, start_link, []}
+      id => server,
+      start => {barrel_server, start_link, []}
     },
 
     %% barrel event server
@@ -82,11 +83,6 @@ init(safe) ->
     %% index pool supervisor
     #{id => barrel_index_pool,
       start => {barrel_index_pool, start_link, []}
-    },
-
-    %% fetch pool supervisor
-    #{id => barrel_fetch_pool,
-      start => {barrel_fetch_pool, start_link, []}
     },
 
     %% barrel db supervisor

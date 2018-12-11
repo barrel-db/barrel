@@ -41,7 +41,7 @@
 
 -export_types([doc/0, docid/0, revid/0]).
 
--include("barrel.hrl").
+-include_lib("barrel/include/barrel.hrl").
 
 
 is_deleted(Revtree) ->
@@ -157,7 +157,7 @@ doc_without_meta(Doc) ->
 
 make_record(Doc0 = #{ <<"id">> := Id = << ?LOCAL_DOC_PREFIX, _/binary >> }) ->
   Deleted = maps:get(<<"deleted">>, Doc0, false),
-  Rev = maps:get(<<"_rev">>, Doc0, <<>>),
+  Rev = maps:get(<<"_rev">>, Doc0, <<"0">>),
   Doc1 = doc_without_meta(Doc0),
   #{id => Id,
     ref => erlang:make_ref(),

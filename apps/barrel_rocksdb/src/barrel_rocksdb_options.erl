@@ -77,7 +77,7 @@ cf_options(Options) ->
     {target_file_size_multiplier, 2},
     {compression, snappy},
     {prefix_extractor, {fixed_prefix_transform, 10}},
-    {merge_operator, {bitset_merge_operator, 16000}}
+    {merge_operator, counter_merge_operator}
   ],
 
   case maps:get(cache, Options, false) of

@@ -6,7 +6,7 @@
 %%% @end
 %%% Created : 13. Jul 2017 10:51
 %%%-------------------------------------------------------------------
--module(barrel_ts).
+-module(barrel_server).
 -behaviouur(gen_server).
 %% API
 -export([
@@ -28,13 +28,12 @@
   handle_call/3,
   handle_cast/2,
   handle_info/2,
-  terminate/2,
-  code_change/3
+  terminate/2
 ]).
 
 -include("barrel_logger.hrl").
 
--define(DEFAULT_CONFIG, "BARREL_TS").
+-define(TS_FILE, "BARREL_TS").
 -define(DEFAULT_INTERVAL, 1000).
 -define(ALLOWABLE_DOWNTIME, 2592000000).
 
@@ -53,123 +52,102 @@ get_last_ts() ->
 
 init([]) ->
   process_flag(trap_exit, true),
-  AllowableDowntime = application:get_env(barrel, ts_allowable_downtime, ?ALLOWABLE_DOWNTIME),
-  {ok, LastTs} = barrel_ts:read_timestamp(),
-  Now = barrel_ts:curr_time_millis(),
-  TimeSinceLastRun = Now - LastTs,
-  %% restart if we detected a clock change
-  ok = check_for_clock_error(Now >= LastTs, TimeSinceLastRun < AllowableDowntime),
+  ok = check_for_clock_error(), %% restart if we detected a clock change
+  ok = barrel_registry:init(barrel_config:get(data_dir)),
   
-  
-  Interval = get_interval(),
-  {ok, TRef} = timer:send_interval(Interval, persist),
-  {ok, #{ tref => TRef, ts => LastTs}}.
-
+  {ok, TRef} = timer:send_interval(get_interval(), persist_time),
+  MRef = erlang:monitor(time_offset, clock_service),
+  {ok, #{ tref => TRef, clock_monitor => MRef}}.
 
 handle_call(get_ts, _From, State) ->
-  {Ts, NewState} = read_ts(State),
-  {reply, {ok, Ts}, NewState};
+  Ts  = read_timestamp(),
+  {reply, {ok, Ts}, State};
 
 handle_call(Msg, _From, State) ->
   {reply, {bad_call, Msg}, State}.
 
-handle_info(persist, State = #{ ts := OldTs } ) ->
-  Ts = curr_time_millis(),
-  case (Ts >= OldTs) of
+handle_info({'CHANGE', MRef, time_offset, clock_service, NewTimeOffset}, State = #{ clock_monitor := MRef }) ->
+  if
+    NewTimeOffset < 0 ->
+      ?LOG_ERROR("system running backward. time offset=~pß~n", [NewTimeOffset]),
+      {stop, clock_running_backwards, State};
     true ->
-      NewState = State#{ ts => Ts },
-      ok = persist_ts(Ts),
-      {noreply, NewState};
-    false ->
-      ?LOG_ERROR(
-        "~s: system running backwards, failing storing timestamp~n",
-        [?MODULE_STRING]
-      ),
-      {stop, clock_running_backwards, State}
+      %% TODO: when cluster will be setup, synchronize the time there
+      {noreply, State}
   end;
+
+handle_info(persist_time, State ) ->
+  ok = write_timestamp(),
+  {noreply, State};
 
 handle_info(_Msg, State) -> {noreply, State}.
 
 handle_cast(_Msg, State) -> {noreply, State}.
 
 terminate(_Reason, _State) ->
+  _ = barrel_registry:deinit(),
   ok.
-
-code_change(_, State, _) -> {ok, State}.
 
 
 %% ==============================
 %% internals
+-include_lib("kernel/include/file.hrl").
 
 read_timestamp() ->
-  case read_file(persist_file()) of
-    {ok, Ts} -> {ok, Ts};
-    {error, enoent} -> write_timestamp();
+  case file:read_file_info(persist_file(), [raw, {time, universal}]) of
+    {ok, #file_info{ mtime = MTime}} ->
+      Ts = to_timestamp(MTime),
+      {ok, Ts};
+    {error, enoent} ->
+      %% create an empty file
+      ok = file:write_file(persist_file(), <<>>),
+      read_timestamp();
     Error ->
       Error
   end.
 
+-spec write_timestamp() -> ok.
 write_timestamp() ->
-  write_timestamp(curr_time_millis()).
-
-write_timestamp(Ts) ->
-  ok = file:write_file(persist_file(), term_to_binary(Ts)),
-  {ok, Ts}.
+  MTime = calendar:now_to_universal_time(os:timestamp()),
+  file:write_file_info(persist_file(), #file_info{mtime=MTime}, [{time, universal}, raw]).
 
 curr_time_millis() -> erlang:system_time(millisecond).
 
-
-read_ts(#{ ts := Ts} = State) -> {Ts, State};
-read_ts(State) ->
-  case read_timestamp() of
-    {ok, Ts} -> {Ts, State#{ ts => Ts }};
-    Error -> Error
-  end.
-
-persist_ts(Ts) ->
-  {ok, _Ts} = write_timestamp(Ts),
-  ok.
-
-
 persist_file() ->
-  case init:get_argument(ts_file) of
-    {ok, [[P]]} -> P;
-    _ ->
-      FileName = case application:get_env(barrel, ts_file) of
-                   undefined -> ?DEFAULT_CONFIG;
-                   {ok, P} -> P
-                 end,
-      FullPath = filename:join(barrel_config:get(data_dir), FileName),
-      ok = filelib:ensure_dir(FullPath),
-      FullPath
-  end.
-
-read_file(Name) ->
-  case file:read_file(Name) of
-    {ok, Bin} ->
-      Term = erlang:binary_to_term(Bin),
-      {ok,  Term};
-    Error ->
-      Error
-  end.
+  FullPath = filename:join(barrel_config:get(data_dir), ?TS_FILE),
+  ok = filelib:ensure_dir(FullPath),
+  FullPath.
 
 
 get_interval() ->
   application:get_env(barrel, persist_ts_interval, ?DEFAULT_INTERVAL).
 
+
+check_for_clock_error() ->
+  AllowableDowntime = barrel_config:get(ts_allowable_downtime, ?ALLOWABLE_DOWNTIME),
+  {ok, LastTs} = read_timestamp(),
+  Now = timestamp(),
+  TimeSinceLastRun = Now - LastTs,
+  check_for_clock_error(Now >= LastTs, TimeSinceLastRun < AllowableDowntime).
+  
+
 check_for_clock_error(true, true) -> ok;
 check_for_clock_error(false, _) ->
-  ?LOG_ERROR(
-    "~s: system running backwards, failing startup of time service~n",
-    [?MODULE_STRING]
-  ),
+  ?LOG_ERROR("system running backwards, failing startup of time service~n", []),
   exit(clock_running_backwards);
 check_for_clock_error(_, false) ->
-  ?LOG_ERROR(
-    "~s: system clock too far advanced, failing startup of time service~n",
-    [?MODULE_STRING]
-  ),
+  ?LOG_ERROR("system clock too far advanced, failing startup of time service~n",[]),
   exit(clock_advanced).
+
+
+to_timestamp({{Year,Month,Day},{Hours,Minutes,Seconds}}) ->
+  (calendar:datetime_to_gregorian_seconds(
+    {{Year,Month,Day},{Hours,Minutes,Seconds}}
+  ) - 62167219200) * 1000.
+
+timestamp() ->
+  {Mega, Sec, _} = os:timestamp(),
+  ((Mega * 1000000 + Sec) * 1000).
 
 
 %% ols implementation just based on hw address and node name

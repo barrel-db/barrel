@@ -11,10 +11,22 @@
 
 -export([
   init_store/2,
-  create_barrel/2,
-  open_barrel/2,
+  init_barrel/2,
   delete_barrel/2,
   barrel_infos/2
+]).
+
+-export([
+  init_ctx/3,
+  release_ctx/1
+]).
+
+-export([
+  write_docs/2,
+  get_doc_info/2,
+  get_doc_revision/3,
+  fold_docs/4,
+  fold_changes/4
 ]).
 
 -export([
@@ -46,73 +58,47 @@ init_store(Name, Options) ->
   barrel_services:activate_service(store, ?MODULE, Name, Spec).
 
 
-create_barrel(StoreName, Name) ->
+init_barrel(StoreName, BarrelId) ->
   #{ ref := Ref } = Store = gproc:lookup_value(?rdb_store(StoreName)),
-  BarrelKey = barrel_rocksdb_keys:local_barrel_ident(Name),
-  case find_ident(Name, Store) of
-    {ok, _Ident} ->
-      ?LOG_INFO("db already exists store=~p name=~p ident=~p~n", [StoreName, Name, _Ident]),
-      {error, db_already_exists};
-    error ->
-      NewIdent = new_ident(Store),
-      BarrelId = barrel_encoding:encode_nonsorting_uvarint(<<>>, NewIdent),
-      case rocksdb:put(Ref, BarrelKey, BarrelId, [{sync, true}]) of
-        ok ->
-          _ = create_ident(Name, BarrelId, Store),
-          {ok,
-            #{name => Name,
-              provider => {?MODULE, StoreName},
-              id => BarrelId,
-              last_seq => 0,
-              purge_seq => 0}};
-        Error ->
-          Error
-      end
-  end.
-
-open_barrel(StoreName, Name) ->
-  #{ ref := Ref } = Store = gproc:lookup_value(?rdb_store(StoreName)),
-  case find_ident(Name, Store) of
-    {ok, BarrelId} ->
-      {ok, Itr} = rocksdb:iterator(Ref, [{iterate_lower_bound, barrel_rocksdb_keys:doc_seq_prefix(BarrelId)}]),
-      LastSeq = case rocksdb:iterator_move(Itr, {seek_for_prev, barrel_rocksdb_keys:doc_seq_max(BarrelId)}) of
+  BarrelKey = barrel_rocksdb_keys:local_barrel_ident(BarrelId),
+  case find_ident(BarrelId, Store) of
+    {ok, Ident} ->
+      {ok, Itr} = rocksdb:iterator(Ref, [{iterate_lower_bound, barrel_rocksdb_keys:doc_seq_prefix(Ident)}]),
+      LastSeq = case rocksdb:iterator_move(Itr, {seek_for_prev, barrel_rocksdb_keys:doc_seq_max(Ident)}) of
                   {ok, SeqKey, _} ->
                     barrel_rocksdb_keys:decode_doc_seq(SeqKey);
                   _ -> 0
                 end,
       _ = rocksdb:iterator_close(Itr),
-      PurgeSeq = case rocksdb:get(Ref, barrel_rocksdb_keys:purge_seq(BarrelId), []) of
-                   {ok, PurgeSeqBin} -> binary_to_term(PurgeSeqBin);
-                   not_found -> 0
-                 end,
-      
-      {ok,
-        #{name => Name,
-          provider => {?MODULE, StoreName},
-          id => BarrelId,
-          last_seq => LastSeq,
-          purge_seq => PurgeSeq}};
+      {ok, Ident, LastSeq};
     error ->
-      {error, db_not_found}
+      NewIdentInt = new_ident(Store),
+      Ident = barrel_encoding:encode_nonsorting_uvarint(<<>>, NewIdentInt),
+      case rocksdb:put(Ref, BarrelKey, Ident, [{sync, true}]) of
+        ok ->
+          _ = create_ident(BarrelId, Ident, Store),
+          {ok, 0};
+        Error ->
+          Error
+      end
   end.
-
 
 delete_barrel(StoreName, Name) ->
   #{ ref := Ref } = Store = gproc:lookup_value(?rdb_store(StoreName)),
   BarrelKey = barrel_rocksdb_keys:local_barrel_ident(Name),
   case rocksdb:get(Ref, BarrelKey, []) of
-    {ok, BarrelId} ->
+    {ok, Ident} ->
       %% first delete atomically all barrel metadata
       {ok, Batch} = rocksdb:batch(),
       rocksdb:batch_delete(Batch, BarrelKey),
-      rocksdb:batch_delete(Batch, barrel_rocksdb_keys:docs_count(BarrelId)),
-      rocksdb:batch_delete(Batch, barrel_rocksdb_keys:docs_del_count(BarrelId)),
-      rocksdb:batch_delete(Batch, barrel_rocksdb_keys:purge_seq(BarrelId)),
+      rocksdb:batch_delete(Batch, barrel_rocksdb_keys:docs_count(Ident)),
+      rocksdb:batch_delete(Batch, barrel_rocksdb_keys:docs_del_count(Ident)),
+      rocksdb:batch_delete(Batch, barrel_rocksdb_keys:purge_seq(Ident)),
       ok = rocksdb:write_batch(Ref, Batch, []),
       _ = delete_ident(Name, Store),
       %% delete barrel data
       rocksdb:delete_range(
-        Ref, barrel_rocksdb_keys:db_prefix(BarrelId), barrel_rocksdb_keys:db_prefix_end(BarrelId), []
+        Ref, barrel_rocksdb_keys:db_prefix(Ident), barrel_rocksdb_keys:db_prefix_end(Ident), []
       ),
       ok;
     not_found ->
@@ -127,29 +113,25 @@ barrel_infos(StoreName, Name) ->
   {ok, Snapshot} = rocksdb:snapshot(Ref),
   ReadOptions = [{snapshot, Snapshot}],
   case rocksdb:get(Ref, BarrelKey, ReadOptions) of
-    {ok, BarrelId} ->
-      {ok, DocsCount} = db_get(Ref, barrel_rocksdb_keys:docs_count(BarrelId), 0, ReadOptions),
-      {ok, DelDocsCount} = db_get(Ref, barrel_rocksdb_keys:docs_del_count(BarrelId), 0, ReadOptions),
-      {ok, PurgeSeq} = db_get(Ref, barrel_rocksdb_keys:purge_seq(BarrelId), 0, ReadOptions),
-      {ok, Itr} = rocksdb:iterator(Ref, [{iterate_lower_bound, barrel_rocksdb_keys:doc_seq_prefix(BarrelId)}]),
-      LastSeq = case rocksdb:iterator_move(Itr, {seek_for_prev, barrel_rocksdb_keys:doc_seq_max(BarrelId)}) of
+    {ok, Ident} ->
+      {ok, DocsCount} = db_get(Ref, barrel_rocksdb_keys:docs_count(Ident), 0, ReadOptions),
+      {ok, DelDocsCount} = db_get(Ref, barrel_rocksdb_keys:docs_del_count(Ident), 0, ReadOptions),
+      {ok, PurgeSeq} = db_get(Ref, barrel_rocksdb_keys:purge_seq(Ident), 0, ReadOptions),
+      {ok, Itr} = rocksdb:iterator(Ref, [{iterate_lower_bound, barrel_rocksdb_keys:doc_seq_prefix(Ident)}]),
+      LastSeq = case rocksdb:iterator_move(Itr, {seek_for_prev, barrel_rocksdb_keys:doc_seq_max(Ident)}) of
                   {ok, SeqKey, _} ->
                     barrel_rocksdb_keys:decode_doc_seq(SeqKey);
                   _ -> 0
                 end,
       _ = rocksdb:iterator_close(Itr),
       _ = rocksdb:release_snapshot(Snapshot),
-      {ok, #{ name => Name,
-              store => StoreName,
-              id => BarrelId,
-              updated_seq => LastSeq,
+      {ok, #{ updated_seq => LastSeq,
               purge_seq => PurgeSeq,
               docs_count => DocsCount,
-              docs_del_count => DelDocsCount}};
+              docs_del_count => DelDocsCount }};
     not_found ->
-      {error, db_not_found}
+      {error, barrel_not_found}
   end.
-
 
 find_ident(Name, #{ ident_tab := Tab }) ->
   try {ok, ets:lookup_element(Tab, {b, Name}, 2)}
@@ -166,6 +148,216 @@ create_ident(Name, Ident, #{ ident_tab := Tab }) ->
 
 delete_ident(Name, #{ ident_tab := Tab }) ->
   ets:delete(Tab, {b, Name}).
+
+
+
+%% -------------------
+%% docs
+
+
+init_ctx(StoreName, Name, IsRead) ->
+  #{ ref := Ref } = Store = gproc:lookup_value(?rdb_store(StoreName)),
+  case find_ident(Name, Store) of
+    {ok, BarrelId} ->
+      Snapshot = case IsRead of
+                   true ->
+                     {ok, S} = rocksdb:snapshot(Ref),
+                     S;
+                   false ->
+                     undefined
+                 end,
+
+      {ok, #{ ref => Ref, barrel_id => BarrelId, snapshot => Snapshot }};
+    error ->
+      {error, db_not_found}
+  end.
+
+release_ctx(#{ snapshot := undefined }) -> ok;
+release_ctx(#{ snapshot := S }) ->
+  rocksdb:release_snapshot(S).
+
+%% TODO: do we need to handle a batch there? we could simplu have a write_doc.
+write_docs(#{ ref := Ref, barrel_id := BarrelId }, DIPairs) ->
+  {ok, WB} = rocksdb:batch(),
+  {AddInc, DelInc} = lists:foldl(
+    fun
+      ({DI, DI}, {Added, Deleted}) ->
+        {Added, Deleted};
+      ({#{ id := DocId, seq := Seq } = DI, not_found}, {Added, Deleted}) ->
+        DI2 = flush_revisions(Ref, BarrelId, DI),
+        DIKey = barrel_rocksdb_keys:doc_info(BarrelId, DocId),
+        SeqKey = barrel_rocksdb_keys:doc_seq(BarrelId, Seq ),
+        rocksdb:batch_put(WB, DIKey, term_to_binary(DI2)),
+        rocksdb:batch_put(WB, SeqKey, term_to_binary(DI2)),
+        {Added + 1, Deleted};
+      ({#{ id := DocId, seq := Seq } = DI, OldDI}, {Added, Deleted}) ->
+        DI2 = flush_revisions(Ref, BarrelId, DI),
+        DIKey = barrel_rocksdb_keys:doc_info(BarrelId, DocId),
+        SeqKey = barrel_rocksdb_keys:doc_seq(BarrelId, Seq ),
+        rocksdb:batch_put(WB, DIKey, term_to_binary(DI2)),
+        rocksdb:batch_put(WB, SeqKey, term_to_binary(DI2)),
+        case {maps:get(deleted, DI, false), maps:get(deleted, OldDI, false)} of
+          {true, false}  ->
+            {Added, Deleted + 1};
+          {false, true} ->
+            {Added, Deleted - 1};
+          {_, _} ->
+            {Added, Deleted}
+        end
+    end,
+    {0, 0},
+    DIPairs
+  ),
+  %% update counters -)
+  rocksdb:batch_merge(WB, barrel_rocksdb_keys:docs_count(BarrelId), integer_to_binary(AddInc)),
+  rocksdb:batch_merge(WB, barrel_rocksdb_keys:docs_del_count(BarrelId), integer_to_binary(DelInc)),
+
+  WriteResult = rocksdb:write_batch(Ref, WB, []),
+  ok = rocksdb:release_batch(WB),
+  WriteResult.
+
+flush_revisions(Ref, BarrelId, DI = #{ id := DocId }) ->
+  {BodyMap, DI2} = maps:take(body_map, DI),
+
+  _ = maps:fold(
+    fun(DocRev, Body, _) ->
+      RevKey = barrel_rocksdb_keys:doc_rev(BarrelId, DocId, DocRev),
+      ok = rocksdb:put(Ref, RevKey, term_to_binary(Body), []),
+      ok
+    end,
+    ok,
+    BodyMap
+  ),
+  DI2.
+
+read_options(#{ snapshot := undefined }) ->
+  [];
+read_options(#{ snapshot := Snapshot }) ->
+  [{snapshot, Snapshot}].
+
+get_doc_info(#{ ref := Ref, barrel_id := BarrelId } = Ctx, DocId) ->
+  ReadOptions = read_options(Ctx),
+  DIKey = barrel_rocksdb_keys:doc_info(BarrelId, DocId),
+  case rocksdb:get(Ref, DIKey, ReadOptions) of
+    {ok, Bin} -> {ok, binary_to_term(Bin)};
+    not_found -> {error, not_found};
+    Error -> Error
+  end.
+
+get_doc_revision(#{ ref := Ref, barrel_id := BarrelId } = Ctx, DocId, Rev) ->
+  ReadOptions = read_options(Ctx),
+  RevKey = barrel_rocksdb_keys:doc_rev(BarrelId, DocId, Rev),
+  case rocksdb:get(Ref, RevKey, ReadOptions) of
+    {ok, Bin} -> {ok, binary_to_term(Bin)};
+    not_found -> {error, not_found};
+    Error -> Error
+  end.
+
+fold_docs(#{ ref := Ref, barrel_id := BarrelId } = Ctx, UserFun, UserAcc, Options) ->
+  {LowerBound, IsNext} = 
+    case maps:find(next_to, Options) of
+      {ok, NextTo} ->
+        {barrel_rocksdb_keys:doc_info(BarrelId, NextTo), true};
+      error ->
+        case maps:find(start_at, Options) of
+          {ok, StartAt} ->
+            {barrel_rocksdb_keys:doc_info(BarrelId, StartAt), false};
+          error ->
+            {barrel_rocksdb_keys:doc_info(BarrelId, <<>>), false}
+        end
+    end,
+  {UpperBound, Prev} =
+    case maps:find(previous_to, Options) of
+      {ok, PreviousTo} ->
+        UpperBound1 = barrel_rocksdb_keys:doc_info(BarrelId, PreviousTo),
+        {UpperBound1, UpperBound1};
+      error ->
+        case maps:find(end_at, Options) of
+          {ok, EndAt} ->
+            {barrel_rocksdb_keys:doc_info(BarrelId, EndAt), false};
+          error ->
+            {barrel_rocksdb_keys:doc_info_max(BarrelId), false}
+        end
+    end,
+  
+  ReadOptions = [{iterate_lower_bound, LowerBound}, 
+                  {iterate_upper_bound, UpperBound}] ++ read_options(Ctx),  
+  {ok, Itr} = rocksdb:iterator(Ref, ReadOptions),
+  {Limit, Next, FirstMove} = 
+    case maps:find(limit_to_first, Options) of
+      {ok, L} -> 
+        {L, fun() -> rocksdb:iterator_move(Itr, next) end, first};
+      error ->
+        case maps:find(limit_to_last, Options) of
+          {ok, L} -> 
+            {L, fun() -> rocksdb:iterator_move(Itr, prev) end, last};
+          error ->
+            {1 bsl 32 - 1, fun() -> rocksdb:iterator_move(Itr, next) end, first}
+        end
+    end,
+
+  First = case {rocksdb:iterator_move(Itr, FirstMove), IsNext} of
+            {{ok, _, _}, true} ->
+              Next();
+            {Else, _} -> 
+              Else
+          end,
+
+  try do_fold_docs(First, Next, UserFun, UserAcc, Prev, Limit)
+  after rocksdb:iterator_close(Itr)
+  end.
+
+do_fold_docs({ok, Key, Value}, Next, UserFun, UserAcc, PrevTo, Limit) when Limit > 0 ->
+  if 
+    Key =/= PrevTo ->
+      #{ id := DocId } = DI = binary_to_term(Value),
+      case UserFun(DocId, DI, UserAcc) of
+        {ok, UserAcc2} ->
+          do_fold_docs(Next(), Next, UserFun, UserAcc2, PrevTo, Limit -1);
+        {stop, UserAcc2} ->
+          UserAcc2;
+        skip ->
+          do_fold_docs(Next(), Next, UserFun, UserAcc, PrevTo, Limit);
+        stop ->
+          UserAcc
+      end;
+    true ->
+      UserAcc
+  end;
+do_fold_docs(_Else, _, _, UserAcc, _, _) ->
+  UserAcc.
+
+fold_changes(#{ ref := Ref, barrel_id := BarrelId } = Ctx, Since, UserFun, UserAcc) ->
+  LowerBound = barrel_rocksdb_keys:doc_seq(BarrelId, Since),
+  UpperBound = barrel_rocksdb_keys:doc_seq_max(BarrelId),
+  ReadOptions = [{iterate_lower_bound, LowerBound}, 
+                  {iterate_upper_bound, UpperBound}] ++ read_options(Ctx),  
+  {ok, Itr} = rocksdb:iterator(Ref, ReadOptions),
+  First = rocksdb:iterator_move(Itr, first),             
+  try do_fold_changes(First, Itr, UserFun, UserAcc)
+  after rocksdb:iterator_close(Itr)
+  end.
+
+do_fold_changes({ok, _, Value}, Itr, UserFun, UserAcc) ->
+  #{ id := DocId } = DI = binary_to_term(Value),
+  case UserFun(DocId, DI, UserAcc) of
+    {ok, UserAcc2} ->
+      do_fold_changes(rocksdb:iterator_move(Itr, next), Itr, UserFun, UserAcc2);
+    {stop, UserAcc2} ->
+      UserAcc2;
+    ok ->
+      do_fold_changes(rocksdb:iterator_move(Itr, next), Itr, UserFun, UserAcc);
+    stop ->
+      UserAcc;
+    skip ->
+      do_fold_changes(rocksdb:iterator_move(Itr, next), Itr, UserFun, UserAcc)
+  end;
+
+do_fold_changes(_, _, _, UserAcc) ->
+  UserAcc.
+
+
+
 
 %% -------------------
 %% cache api

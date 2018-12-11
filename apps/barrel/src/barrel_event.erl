@@ -125,8 +125,6 @@ init([IsNew]) ->
 
 -spec handle_call(term(), term(), state()) -> {reply, term(), state()}.
 handle_call({register_dbs, Pid,  DbNames}, _From, State) ->
-  barrel_statistics:record_tick(num_changes_subscribe, 1),
-  barrel_statistics:record_tick(num_change_subscriptions, length(DbNames)),
   do_register_dbs(Pid, DbNames),
   {reply, ok, State};
 
@@ -135,7 +133,6 @@ handle_call({register_indexes, Pid, Indexes}, _From, State) ->
   {reply, ok, State};
 
 handle_call({unregister, Pid}, _From, State) ->
-  barrel_statistics:record_tick(num_changes_unsubscribe, 1),
   do_unregister(Pid),
   {reply, ok, State};
 
@@ -145,7 +142,6 @@ handle_call(_Msg, _From, State) ->
 -spec handle_cast(term(), state()) -> {noreply, state()}.
 
 handle_cast({notify, DbName, Event}, State) ->
-  barrel_statistics:record_tick(num_changes, 1),
   notify_listeners(DbName, Event),
   {noreply, State};
 
