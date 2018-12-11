@@ -67,6 +67,12 @@ init([]) ->
       shutdown => infinity,
       type => worker
     },
+  
+    %% counters
+    #{
+      id => barrel_counters,
+      start => {barrel_counters, start_link, []}
+    },
 
     %% safe supervisor
     #{id => barrel_safe_sup,
@@ -79,6 +85,11 @@ init([]) ->
 
 init(safe) ->
   Specs = [
+  
+    %% transaction server
+    #{id => barrel_tx,
+      start => {barrel_tx, start_link, []}
+    },
 
     %% index pool supervisor
     #{id => barrel_index_pool,
