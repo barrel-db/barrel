@@ -23,7 +23,7 @@
 
 -export([
   write_doc_infos/4,
-F  get_doc_info/2,
+  get_doc_info/2,
   get_doc_revision/3,
   fold_docs/4,
   fold_changes/4,
