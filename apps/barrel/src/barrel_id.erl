@@ -1,4 +1,4 @@
-%%%-------------------------------------------------------------------
+za%%%-------------------------------------------------------------------
 %%% @author benoitc
 %%% @copyright (C) 2017, <COMPANY>
 %%% @doc
@@ -25,7 +25,7 @@
 ]).
 
 id() ->
-  gen_id(barrel_ts:curr_time_millis(), worker_id(), seq()).
+  gen_id(barrel_server:curr_time_millis(), worker_id(), seq()).
 
 id(Base) ->
   <<IntId:128/integer>> = id(),
@@ -108,7 +108,7 @@ as_list(I0, Base, R0) ->
 -include_lib("eunit/include/eunit.hrl").
 
 flake_test() ->
-  TS = barrel_ts:curr_time_millis(),
+  TS = barrel_server:curr_time_millis(),
   << Worker:48/integer >> = list_to_binary(lists:seq(1, 6)),
   Flake = gen_id(TS, Worker, 0),
   <<Time:64/integer, WorkerId:48/integer, Sequence:16/integer>> = Flake,

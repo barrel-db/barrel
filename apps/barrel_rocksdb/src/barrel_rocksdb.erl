@@ -23,8 +23,7 @@
 
 -export([
   write_doc_infos/4,
-  write_docs/2,
-  get_doc_info/2,
+F  get_doc_info/2,
   get_doc_revision/3,
   fold_docs/4,
   fold_changes/4,
@@ -201,60 +200,6 @@ write_doc_infos(Ctx, DocInfos, AddCount, DelCount) ->
   try rocksdb:write_batch(Ref, WB, [])
   after rocksdb:release_batch(WB)
   end.
-
-%% TODO: do we need to handle a batch there? we could simplu have a write_doc.
-write_docs(#{ ref := Ref, barrel_id := BarrelId }, DIPairs) ->
-  {ok, WB} = rocksdb:batch(),
-  {AddInc, DelInc} = lists:foldl(
-    fun
-      ({DI, DI}, {Added, Deleted}) ->
-        {Added, Deleted};
-      ({#{ id := DocId, seq := Seq } = DI, not_found}, {Added, Deleted}) ->
-        DI2 = flush_revisions(Ref, BarrelId, DI),
-        DIKey = barrel_rocksdb_keys:doc_info(BarrelId, DocId),
-        SeqKey = barrel_rocksdb_keys:doc_seq(BarrelId, Seq ),
-        rocksdb:batch_put(WB, DIKey, term_to_binary(DI2)),
-        rocksdb:batch_put(WB, SeqKey, term_to_binary(DI2)),
-        {Added + 1, Deleted};
-      ({#{ id := DocId, seq := Seq } = DI, OldDI}, {Added, Deleted}) ->
-        DI2 = flush_revisions(Ref, BarrelId, DI),
-        DIKey = barrel_rocksdb_keys:doc_info(BarrelId, DocId),
-        SeqKey = barrel_rocksdb_keys:doc_seq(BarrelId, Seq ),
-        rocksdb:batch_put(WB, DIKey, term_to_binary(DI2)),
-        rocksdb:batch_put(WB, SeqKey, term_to_binary(DI2)),
-        case {maps:get(deleted, DI, false), maps:get(deleted, OldDI, false)} of
-          {true, false}  ->
-            {Added, Deleted + 1};
-          {false, true} ->
-            {Added, Deleted - 1};
-          {_, _} ->
-            {Added, Deleted}
-        end
-    end,
-    {0, 0},
-    DIPairs
-  ),
-  %% update counters -)
-  rocksdb:batch_merge(WB, barrel_rocksdb_keys:docs_count(BarrelId), integer_to_binary(AddInc)),
-  rocksdb:batch_merge(WB, barrel_rocksdb_keys:docs_del_count(BarrelId), integer_to_binary(DelInc)),
-
-  WriteResult = rocksdb:write_batch(Ref, WB, []),
-  ok = rocksdb:release_batch(WB),
-  WriteResult.
-
-flush_revisions(Ref, BarrelId, DI = #{ id := DocId }) ->
-  {BodyMap, DI2} = maps:take(body_map, DI),
-
-  _ = maps:fold(
-    fun(DocRev, Body, _) ->
-      RevKey = barrel_rocksdb_keys:doc_rev(BarrelId, DocId, DocRev),
-      ok = rocksdb:put(Ref, RevKey, term_to_binary(Body), []),
-      ok
-    end,
-    ok,
-    BodyMap
-  ),
-  DI2.
 
 read_options(#{ snapshot := undefined }) ->
   [];
