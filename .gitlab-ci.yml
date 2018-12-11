@@ -1,5 +1,13 @@
 image: erlang:21
 
+before_script:
+  - apt-get -q update
+  - apt-get -qy install cmake
+
+before_script:
+  - apt-get -q update
+  - apt-get -qy install cmake
+
 test:
   artifacts:
     when: always
@@ -8,7 +16,7 @@ test:
     - _build/test/cover
 
   script:
-    - make test cover
+    - MAKEFLAGS=-j4 make test cover
 
   cache:
     paths:
