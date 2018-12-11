@@ -43,4 +43,4 @@
 -define(docs_revision_suffix, << "drev" >>).
 
 
--define(local_doc_prefix, <<"_local/">>).
+-define(local_doc_prefix, <<"ld">>).

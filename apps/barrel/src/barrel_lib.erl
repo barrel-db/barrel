@@ -33,6 +33,7 @@
 -export([group_by/2]).
 
 -export([do_exec/1]).
+-export([log_and_backoff/4]).
 
 %% imported from attic
 %% TODO: check if we really need such functions
@@ -43,6 +44,7 @@
 ]).
 
 -include("barrel.hrl").
+-include("barrel_logger.hrl").
 -include_lib("syntax_tools/include/merl.hrl").
 
 %% "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
@@ -358,6 +360,30 @@ do_exec(F) when is_function(F) ->
   F();
 do_exec(_) ->
   erlang:error(badarg).
+
+log_and_backoff(LogLevel, Component, Attempts, Message) ->
+  ?ANY_LOG(
+    LogLevel,
+    "~p: ~p. Retrying, attempt:~p",
+    [Component, Message, Attempts]
+  ),
+  if
+    Attempts < 4 ->
+      ok;
+    Attempts < 10 ->
+      timer:sleep(1),
+      ok;
+    Attempts < 100 ->
+      timer:sleep(5),
+      ok;
+    Attempts < 200 ->
+      timer:sleep(10),
+      ok;
+    true ->
+      timer:sleep(100),
+      ok
+  end.
+
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").

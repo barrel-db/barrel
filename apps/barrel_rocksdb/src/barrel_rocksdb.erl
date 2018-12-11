@@ -22,11 +22,17 @@
 ]).
 
 -export([
+  write_doc_infos/4,
   write_docs/2,
   get_doc_info/2,
   get_doc_revision/3,
   fold_docs/4,
-  fold_changes/4
+  fold_changes/4,
+  insert_local_doc/2,
+  delete_local_doc/2,
+  get_local_doc/2,
+  add_doc_revision/4,
+  delete_doc_revision/3
 ]).
 
 -export([
@@ -176,6 +182,26 @@ release_ctx(#{ snapshot := undefined }) -> ok;
 release_ctx(#{ snapshot := S }) ->
   rocksdb:release_snapshot(S).
 
+write_doc_infos(Ctx, DocInfos, AddCount, DelCount) ->
+  #{ ref := Ref, barrel_id := BarrelId } = Ctx,
+  {ok, WB} = rocksdb:batch(),
+  lists:foreach(
+    fun(#{  id := DocId, seq := Seq } = DI) ->
+      DIKey = barrel_rocksdb_keys:doc_info(BarrelId, DocId),
+      SeqKey = barrel_rocksdb_keys:doc_seq(BarrelId, Seq ),
+      DIVal = term_to_binary(DI),
+      rocksdb:batch_put(WB, DIKey, DIVal),
+      rocksdb:batch_put(WB, SeqKey, DIVal)
+    end,
+    DocInfosq
+  ),
+  %% update counters -)
+  rocksdb:batch_merge(WB, barrel_rocksdb_keys:docs_count(BarrelId), integer_to_binary(AddCount)),
+  rocksdb:batch_merge(WB, barrel_rocksdb_keys:docs_del_count(BarrelId), integer_to_binary(-DelCount)),
+  try rocksdb:write_batch(Ref, WB, [])
+  after rocksdb:release_batch(WB)
+  end.
+
 %% TODO: do we need to handle a batch there? we could simplu have a write_doc.
 write_docs(#{ ref := Ref, barrel_id := BarrelId }, DIPairs) ->
   {ok, WB} = rocksdb:batch(),
@@ -252,6 +278,15 @@ get_doc_revision(#{ ref := Ref, barrel_id := BarrelId } = Ctx, DocId, Rev) ->
     not_found -> {error, not_found};
     Error -> Error
   end.
+
+add_doc_revision(#{ ref := Ref, barrel_id := BarrelId }, DocId, DocRev, Body) ->
+  RevKey = barrel_rocksdb_keys:doc_rev(BarrelId, DocId, DocRev),
+  rocksdb:put(Ref, RevKey, term_to_binary(Body), []).
+
+delete_doc_revision(#{ ref := Ref, barrel_id := BarrelId }, DocId, DocRev) ->
+  RevKey = barrel_rocksdb_keys:doc_rev(BarrelId, DocId, DocRev),
+  rocksdb:delete(Ref, RevKey, []).
+
 
 fold_docs(#{ ref := Ref, barrel_id := BarrelId } = Ctx, UserFun, UserAcc, Options) ->
   {LowerBound, IsNext} = 
@@ -357,7 +392,18 @@ do_fold_changes(_, _, _, UserAcc) ->
   UserAcc.
 
 
+insert_local_doc(#{ ref := Ref, barrel_id := BarrelId }, LocalDoc) ->
+  #{ <<"id" >> := DocId } = LocalDoc,
+  LocalKey = barrel_rocksdb_keys:local_doc(BarrelId, DocId),
+  rocksdb:put(Ref, LocalKey, term_to_binary(LocalDoc), []).
 
+delete_local_doc(#{ ref := Ref, barrel_id := BarrelId }, DocId) ->
+  LocalKey = barrel_rocksdb_keys:local_doc(BarrelId, DocId),
+  rocksdb:delete(Ref, LocalKey, []).
+
+get_local_doc(#{ ref := Ref, barrel_id := BarrelId }, DocId) ->
+  LocalKey = barrel_rocksdb_keys:local_doc(BarrelId, DocId),
+  rocksdb:get(Ref, LocalKey, []).
 
 %% -------------------
 %% cache api

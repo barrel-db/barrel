@@ -36,7 +36,8 @@
   decode_doc_seq/1,
   doc_seq_max/1,
   doc_seq_prefix/1,
-  doc_rev/3
+  doc_rev/3,
+  local_doc/2
 ]).
 
 
@@ -123,5 +124,11 @@ doc_rev(BarrelId, DocId, DocRev) ->
     << DocId/binary, DocRev/binary >>
   ).
 
-  
-  
+
+
+%% @doc local document key
+local_doc(BarrelId, DocId) ->
+  barrel_encoding:encode_binary_ascending(
+    << (db_prefix(BarrelId))/binary, ?local_doc_prefix/binary >>,
+    DocId
+  ).

@@ -153,8 +153,6 @@ with_ctx(#{ id := Id, store_mod := Mod, store_name := Store }, Fun) ->
   after Mod:release_ctx(Ctx)
   end.
 
-
-
 fetch_doc(#{ store_mod := Mod } = Barrel, DocId, Options) ->
   with_ctx(
     Barrel,
@@ -344,67 +342,115 @@ change_with_doc(Change, DocId, Rev, Mod, Ctx, true) ->
 change_with_doc(Change, _, _, _, _, _) ->
   Change.
   
-update_docs(Barrel, Docs, Options, interactive_edit) ->
-  %% TODO: add native attachment support
-  AllOrNothing =  maps:get(all_or_nothing, Options, false),
-  WritePolicy = case AllOrNothing of
-                  true -> merge_with_conflict;
-                  false -> merge
+update_docs(Barrel, Docs, Options, UpdateType) ->
+  with_ctx(Barrel, fun(Ctx) -> update_docs(Barrel, Ctx, Docs, Options, UpdateType) end).
+
+update_docs(Barrel, Ctx, Docs, Options, UpdateType) ->
+  #{ name := Name } = Barrel,
+  WritePolicy = case UpdateType of
+                  interactive_edit ->
+                    AllOrNothing =  maps:get(all_or_nothing, Options, false),
+                    case AllOrNothing of
+                      true -> merge_with_conflict;
+                      false -> merge
+                    end;
+                  replicated_changes ->
+                    merge_with_conflict
                 end,
-  %% prepare docs
-  {Records, IdsRevs} = prepare_docs(Docs, [], #{}),  
-  %% do writes
-  {ok, CommitResults} = write_and_commit(Barrel, Records, WritePolicy, Options),
-  %% replace results with records and new local revisions
-  ResultsMap = lists:foldl(
-    fun({Key, Resp}, M) -> maps:put(Key, Resp, M) end,
-    IdsRevs,
-    CommitResults
-  ),
-  %% reorder results
-  UpdateResults = lists:map(
-    fun(#{ ref := Ref }) -> maps:get(Ref, ResultsMap) end,
-    Records
-  ),
-  {ok, UpdateResults};
+  barrel_tx:transact(
+    fun() ->
+      {Batch, Results} = lists:foldl(
+        fun(Doc, {Batch1, Results1}) ->
+          Record = barrel_doc:make_record(Doc),
+          case update_doc(Barrel, Ctx, Record, WritePolicy, 0) of
+            {ignore, Result} -> {Batch1, [Result | Results1]};
+            {update_doc, OP, #{ id := DocId, rev := Rev } = DI} ->
+              Result = {ok, DocId, Rev},
+              {[{update_doc, OP, DI} | Batch1], [Result | Results1]}
+          end
+        end,
+        {[], []},
+        Docs
+      ),
+      Tag = make_ref(),
+      FinalBatch = lists:reverse([{end_batch, Tag, self()} | Batch]),
+      Pid = barrel_registry:where_is(Name),
+      MRef = erlang:monitor(process, Pid),
+      ok = gen_batch_server:cast_batch(Pid, FinalBatch),
+      receive
+        {Pid, Tag, done} when UpdateType =:= interactive_edit ->
+          erlang:demonitor(MRef, [flush]),
+          barrel_tx:commit(),
+          {ok, lists:reverse(Results)};
+        {Pid, Tag, done} ->
+          barrel_tx:commit(),
+          erlang:demonitor(MRef, [flush]),
+          ok;
+        {'DOWN', MRef, _, _, Reason} ->
+          barrel_tx:abort(),
+          exit(Reason)
+      end
+    end).
 
-update_docs(Barrel, Docs, Options, replicated_changes) ->
-  %% create records to store
-  Records = [barrel_doc:make_record(Doc) || Doc <- Docs],
-  %% do writes
-  {ok, _} = write_and_commit(Barrel, Records,  merge_with_conflict, Options),
-  ok.
 
-
-prepare_docs([Doc | Rest], Records, IdRevs) ->
-  #{ id := Id,
-     revs := [RevId | _],
-     ref := Ref } = Record = barrel_doc:make_record(Doc),
-  prepare_docs(Rest, [Record | Records], IdRevs#{ Ref => {ok, Id, RevId} });
-prepare_docs([], Records, IdRevs) ->
-  {lists:reverse(Records), IdRevs}.
-
-write_and_commit(#{ name := Name }, Records, WritePolicy, _Options) ->
-  Batch = [{update, self(), Record, WritePolicy} || Record <- Records],
-  Pid = barrel_registry:where_is(Name),
-  MRef = erlang:monitor(process, Pid),
-  ok = gen_batch_server:cast_batch(Pid, Batch),
-  try await_write_results(MRef, Pid, [])
-  after erlang:demonitor(MRef, [flush])
-  end.
-
-await_write_results(MRef, Pid, Results) ->
-  receive
-    {result, Pid, Resp} ->
-      await_write_results(MRef, Pid, [Resp | Results]);
-    {done, Pid} ->
-      {ok, Results};
-    {'DOWN', MRef, _, _, Reason} ->
-      exit(Reason)
+update_doc(Barrel, Ctx, #{ id := << ?LOCAL_DOC_PREFIX, _/binary>>=DocId } = Record, Policy, Attempts) ->
+  #{name := Name, store_mod := Mod } = Barrel,
+  case barrel_tx:register_write({Name, DocId}) of
+    true ->
+      #{ doc := LocalDoc, deleted := Deleted } = Record,
+      case Deleted of
+        true ->
+          ok = Mod:delete_local_doc(Ctx, DocId);
+        false ->
+          ok = Mod:insert_local_doc(Ctx, LocalDoc)
+      end,
+      {ignore, {ok, DocId}};
+    false ->
+      barrel_lib:log_and_backoff(debug, ?MODULE, Attempts, "local doc write conflict"),
+      update_doc(Barrel, Ctx, Record, Policy, Attempts +1 )
+  end;
+update_doc(Barrel, Ctx, #{ id := DocId } = Record, Policy, Attempts) ->
+  #{name := Name, store_mod := Mod } = Barrel,
+  case barrel_tx:register_write({Name, DocId}) of
+    true ->
+      {DocStatus, DI} = case Mod:get_doc_info(Ctx, DocId) of
+                          {ok, DI1} -> {found, DI1#{ body_map => #{} }};
+                          {error, not_found} -> {not_found, new_docinfo(DocId)}
+                        end,
+      MergeFun = case Policy of
+                   merge -> fun merge_revtree/2;
+                   merge_with_conflict -> fun merge_revtree_with_conflict/2
+                 end,
+      case MergeFun(Record, DI) of
+        {ok, DI2} ->
+          OP = case {DocStatus, maps:get(deleted, DI2, false)} of
+                 {found, false} -> update;
+                 {found, deleted} -> delete;
+                 _ -> add
+               end,
+          {update_doc, OP, flush_revisions(Barrel, Ctx, DI2)};
+        Error ->
+          {ignore, Error}
+      end;
+    false ->
+      barrel_lib:log_and_backoff(debug, ?MODULE, Attempts, "document write conflict"),
+      update_doc(Barrel, Ctx, Record, Policy, Attempts +1 )
   end.
 
 maybe_add_deleted(Doc, true) -> Doc#{ <<"_deleted">> => true };
 maybe_add_deleted(Doc, false) -> Doc.
+
+flush_revisions(#{ store_mod := Mod }, Ctx, #{id := DocId} = DI) ->
+  {BodyMap, DI2} = maps:take(body_map, DI),
+  _ = maps:fold(
+    fun(DocRev, Body, _) ->
+      ok = Mod:add_doc_revision(Ctx, DocId, DocRev, Body),
+      ok
+    end,
+    ok,
+    BodyMap
+  ),
+  DI2.
 
 start_link(Name, Params) ->
   gen_batch_server:start_link({via, barrel_registry, Name}, ?MODULE, [Name, Params]).
@@ -423,7 +469,7 @@ init([Name, Params]) ->
 
 handle_batch(Batch, State) ->
   {ok, Ctx} = init_ctx(State),
-  NewState = try handle_ops(Batch, [], #{}, maps:get(updated_seq, State), Ctx, State)
+  NewState = try handle_ops(Batch, [], [], 0, 0, maps:get(updated_seq, State), Ctx, State)
              after release_ctx(Ctx, State)
              end,
   {ok, NewState}.
@@ -455,66 +501,34 @@ try_close_barrel(#{ name := BarrelName, provider := {Mod, StoreName} }) ->
       ok
   end.
 
-handle_ops([{_, {update, From, #{id := Id} = Record, Policy}} | Rest], Clients, DocInfosMap, Seq, Ctx, Barrel) ->
-  Clients2 = [From | Clients],
-  case maps:find(Id, DocInfosMap) of
-    {ok, {DI, OldDI}} ->
-      DI2 = merge_revtree(Record, DI, From, Policy),
-      if
-        DI2 /= DI ->
-          Seq2 = Seq +1,
-          DocInfosMap2 = DocInfosMap#{ Id => { DI2#{ seq => Seq2}, OldDI }},
-          handle_ops(Rest, Clients2, DocInfosMap2, Seq2, Ctx, Barrel);
-        true ->
-          handle_ops(Rest, Clients2, DocInfosMap, Seq,Ctx,  Barrel)
-      end;
-    error ->
-      {Status, DI} = case get_doc_info(Ctx, Id, Barrel) of
-                       {ok, DI1} ->
-                         {found, DI1#{ body_map => #{} }};
-                       {error, not_found} ->
-                         {not_found, new_docinfo(Id)}
-                     end,  
-      DI2 = merge_revtree(Record, DI, From, Policy),
-      if
-        DI2 /= DI ->
-          Seq2 = Seq +1,
-          Pair = case Status of
-                   found -> { DI2#{ seq => Seq2 }, DI };
-                   not_found -> { DI2#{ seq => Seq2 }, not_found }
-                 end,
-          DocInfosMap2 = DocInfosMap#{ Id => Pair },
-          handle_ops(Rest, Clients2, DocInfosMap2, Seq2, Ctx, Barrel);
-        true ->
-          handle_ops(Rest, Clients2, DocInfosMap, Seq, Ctx, Barrel)
-      end
-  end;
-handle_ops([], Clients, DocInfosMap, Seq, Ctx, Barrel) ->
-  DiPairs = maps:values(DocInfosMap),
-  ok = maybe_write_docs(DiPairs, Ctx, Barrel),
-  Barrel2 = Barrel#{ updated_seq => Seq },
-  %% notify an event and eventually update the shared state
-  ok = maybe_notify(Barrel2, Barrel),
-
+handle_ops([{_, {end_batch, Tag, Pid}} | Rest], Clients, DocInfos, AddCount, DelCount, Seq, Ctx, State) ->
+  handle_ops(Rest, [{Tag, Pid} | Clients], DocInfos, AddCount, DelCount, Seq, Ctx, State);
+handle_ops([{_, {update_doc, OP, DI2}} | Rest], Clients, DocInfos, AddCount, DelCount, Seq, Ctx, State) ->
+  Seq2 = Seq + 1,
+  DocInfos2 = [DI2#{ seq => Seq2 } | DocInfos],
+  {AddCount2, DelCount2} = case OP of
+                             add -> {AddCount + 1, DelCount};
+                             delete -> {AddCount, DelCount + 1};
+                             update -> {AddCount, DelCount}
+                           end,
   
-  _ = complete_batch(Clients),
-  Barrel2.
-
-maybe_write_docs([], _Ctx, _Barrel) ->
-  ok;
-maybe_write_docs(DiPairs, Ctx, Barrel) ->
-  write_docs(DiPairs, Ctx, Barrel).
-  
+  handle_ops(Rest, Clients, DocInfos2, AddCount2, DelCount2, Seq2, Ctx, State);
+handle_ops([], Clients, DocInfos, AddCount, DelCount, Seq, Ctx, Barrel) ->
+  #{ name := Name, store_mod := Mod} = Barrel,
+  case Mod:write_doc_infos(Ctx, DocInfos, AddCount, DelCount) of
+    ok ->
+      NewBarrel = Barrel#{updated_seq => Seq},
+      gproc:set_value(?barrel(Name), NewBarrel),
+      barrel_event:notify(Name, db_updated),
+      _ = complete_batch(Clients, done),
+      NewBarrel;
+    Error ->
+      _ = complete_batch(Clients, Error),
+      Barrel
+  end.
 
 %% -----------------------------------------
 %% merge doc infos
-
-merge_revtree(Record, DocInfos, ClientPid, Policy) ->
-  case Policy of
-    merge -> merge_revtree(Record, DocInfos, ClientPid);
-    merge_with_conflict -> merge_revtree_with_conflict(Record, DocInfos, ClientPid)
-  end.
-
 
 new_docinfo(DocId) ->
   #{id => DocId,
@@ -524,7 +538,7 @@ new_docinfo(DocId) ->
     revtree => barrel_revtree:new(),
     body_map => #{}}.
 
-merge_revtree(Record, #{ deleted := true } = DocInfo, ClientPid) ->
+merge_revtree(Record, #{ deleted := true } = DocInfo) ->
   #{ rev := WinningRev,  revtree := RevTree, body_map := BodyMap } = DocInfo,
   #{ revs := Revs, deleted := NewDeleted, doc := Doc } = Record,
   Depth = length(Revs),
@@ -535,32 +549,30 @@ merge_revtree(Record, #{ deleted := true } = DocInfo, ClientPid) ->
       NewRev = << (integer_to_binary(Gen+1))/binary, "-", NewRevHash/binary  >>,
       RevInfo = #{  id => NewRev,  parent => WinningRev, deleted => false },
       RevTree2 = barrel_revtree:add(RevInfo, RevTree),
-      DocInfo#{
+      {ok, DocInfo#{
         rev => NewRev,
         deleted => false,
         revtree => RevTree2 ,
         body_map => BodyMap#{ NewRev => Doc }
-      };
+      }};
     false ->
       %% revision conflict
-      cast_merge_result(ClientPid, Record, {error, {conflict, revision_conflict}}),
-      DocInfo
+      {error, {conflict, revision_conflict}}
   end;
-merge_revtree(Record, DocInfo, ClientPid) ->
+merge_revtree(Record, DocInfo) ->
   #{ revtree := RevTree, body_map := BodyMap } = DocInfo,
   #{ revs := Revs, deleted := NewDeleted, doc := Doc } = Record,
   case Revs of
     [NewRev] when map_size(RevTree) =:= 0  ->
       RevInfo = #{  id => NewRev, parent => <<>>, deleted => NewDeleted },
       RevTree1 = barrel_revtree:add(RevInfo, RevTree),
-      DocInfo#{ rev => NewRev,
+      {ok, DocInfo#{ rev => NewRev,
         revtree => RevTree1,
         deleted => NewDeleted,
-        body_map => BodyMap#{ NewRev => Doc} };
+        body_map => BodyMap#{ NewRev => Doc} }};
     [_NewRev] ->
       %% doc exists, we will create a new branch
-      cast_merge_result(ClientPid, Record, {error, {conflict, doc_exists}}),
-      DocInfo;
+      {error, {conflict, doc_exists}};
     [NewRev, Rev | _] ->
       case barrel_revtree:is_leaf(Rev, RevTree) of
         true ->
@@ -569,23 +581,22 @@ merge_revtree(Record, DocInfo, ClientPid) ->
           {WinningRev, _, _} = barrel_revtree:winning_revision(RevTree2),
           case NewDeleted of
             false ->
-              DocInfo#{ rev => WinningRev,
+              {ok, DocInfo#{ rev => WinningRev,
                 deleted => false,
                 revtree => RevTree2,
-                body_map => BodyMap#{ NewRev => Doc} };
+                body_map => BodyMap#{ NewRev => Doc} }};
             true ->
-              DocInfo#{ rev => WinningRev,
+              {ok, DocInfo#{ rev => WinningRev,
                 deleted => barrel_doc:is_deleted(RevTree2),
                 revtree => RevTree2,
-                body_map => BodyMap#{ NewRev => Doc} }
+                body_map => BodyMap#{ NewRev => Doc} }}
           end;
         false ->
-          cast_merge_result(ClientPid, Record, {error, {conflict, revision_conflict}}),
-          DocInfo
+          {error, {conflict, revision_conflict}}
       end
   end.
 
-merge_revtree_with_conflict(Record, DocInfo, _Client) ->
+merge_revtree_with_conflict(Record, DocInfo) ->
   #{ revtree := RevTree, body_map := BodyMap } = DocInfo,
   #{ revs := [LeafRev|Revs] ,  deleted := NewDeleted, doc := Doc  } = Record,
   
@@ -593,7 +604,7 @@ merge_revtree_with_conflict(Record, DocInfo, _Client) ->
     true ->
       %% revision already stored. This only happen when doing all_or_nothing.
       %% TODO: check before sending it to writes?
-      DocInfo;
+      {ok, DocInfo};
     false ->
       %% Find the point where this doc's history branches from the current rev:
       {Parent, Path} = find_parent(Revs, RevTree, []),
@@ -610,12 +621,12 @@ merge_revtree_with_conflict(Record, DocInfo, _Client) ->
       {WinningRev, _, _} = barrel_revtree:winning_revision(RevTree2),
       %% update DocInfo, we always find is the doc is deleted there
       %% since we could have only updated an internal branch
-      DocInfo#{
+      {ok, DocInfo#{
         rev => WinningRev,
         revtree => RevTree2,
         deleted => barrel_doc:is_deleted(RevTree2),
         body_map => BodyMap#{ LeafRev => Doc }
-      }
+      }}
   end.
 
 find_parent([RevId | Rest], RevTree, Acc) ->
@@ -632,36 +643,11 @@ find_parent([], _RevTree, Acc) ->
 %% -----------------------------------------
 %% internals
 
-maybe_notify(#{ updated_seq := Seq }, #{ updated_seq := Seq }) ->
-  ok;
-maybe_notify(Barrel = #{ name := Name }, _) ->
-  gproc:set_value(?barrel(Name), Barrel),
-  barrel_event:notify(Name, db_updated).
-
-
 init_ctx(#{ id := Id, store_mod := Mod, store_name := Store }) ->
   Mod:init_ctx(Store, Id, false).
 
 release_ctx(Ctx, #{store_mod := Mod }) ->
   Mod:release_ctx(Ctx).
 
-
-
-get_doc_info(Ctx, DocId, #{ store_mod := Mod }) ->
-  Mod:get_doc_info(Ctx, DocId).
-
-write_docs(Pairs, Ctx, #{ store_mod := Mod }) ->
-  Mod:write_docs(Ctx, Pairs).
-
-complete_batch(Pids) ->
-  _ = sets:fold(fun(Pid, _) -> catch Pid ! {done, self()} end, ok, sets:from_list(Pids)).
-
--compile({inline, [cast_merge_result/3]}).
--spec cast_merge_result(From :: {pid(), term()}, Record :: map(), Msg :: any()) -> ok.
-cast_merge_result(Pid, #{ ref := Ref }, Msg) ->
-  try Pid ! {result, self(), {Ref, Msg}} of
-    _ ->
-      ok
-  catch
-    _:_ -> ok
-  end.
+complete_batch(Clients, Msg) ->
+  _ = [catch Pid ! {self(), Tag, Msg} || {Tag, Pid} <- Clients].
