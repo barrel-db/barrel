@@ -27,7 +27,6 @@
 ]).
 
 -export([
-  drop_barrel/1,
   fetch_doc/3,
   update_docs/4,
   revsdiff/3,
@@ -35,10 +34,6 @@
   fold_changes/5
 ]).
 
-
--export([
-  do_for_ref/2
-]).
 
 -export([start_link/2]).
 
@@ -408,56 +403,8 @@ await_write_results(MRef, Pid, Results) ->
       exit(Reason)
   end.
 
-drop_barrel(DbRef) ->
-  req(DbRef, drop_barrel).
-
-
-
-do_for_ref(DbRef, Fun) ->
-  try
-      case gproc:lookup_values(?barrel(DbRef)) of
-        [{_Pid, Db}] ->
-          Fun(Db);
-        [] ->
-          case barrel_db_sup:start_db(DbRef) of
-            {ok, _Pid} ->
-              do_for_ref(DbRef, Fun) ;
-            {error, {already_started, _id}} ->
-              do_for_ref(DbRef, Fun);
-            Err = {error, _} ->
-              Err;
-            Error ->
-              {error, Error}
-          end
-      end
-  catch
-      exit:Reason when Reason =:= normal  ->
-        do_for_ref(DbRef, Fun)
-  end.
-
 maybe_add_deleted(Doc, true) -> Doc#{ <<"_deleted">> => true };
 maybe_add_deleted(Doc, false) -> Doc.
-
-req(Barrel, Request) ->
-  do_for_ref(
-    Barrel,
-    fun(#{ updater_pid := Pid }) ->
-      Tag = erlang:make_ref(),
-      From = {self(), Tag},
-      MRef = erlang:monitor(process, Pid),
-      Pid ! ?BARREL_CALL(From, Request),
-      await_req(Tag, MRef)
-    end
-  ).
-
-await_req(Tag, MRef) ->
-  receive
-    {Tag, Resp} -> Resp;
-    {'DOWN', MRef, _, _, Reason} ->
-      exit(Reason)
-
-  end.
-
 
 start_link(Name, Params) ->
   gen_batch_server:start_link({via, barrel_registry, Name}, ?MODULE, [Name, Params]).
