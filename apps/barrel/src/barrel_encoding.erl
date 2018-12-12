@@ -17,6 +17,16 @@
          encode_float_ascending/2, encode_float_descending/2,
          decode_float_ascending/1, decode_float_descending/1]).
 
+%% JSON encoding
+-export([
+  encode_json_empty_array/1,
+  encode_json_empty_object/1,
+  encode_json_key_ascending/3,
+  encode_array_ascending/1,
+  add_json_path_terminator/1,
+  encode_json_ascending/1
+]).
+
 -export([pick_encoding/1]).
 
 -include("barrel_logger.hrl").
@@ -30,8 +40,11 @@
 
 -define(ESCAPE, 16#00).
 -define(ESCAPED_TERM, 16#01).
+-define(ESCAPED_JSON_OBJECT_KEY_TERM, 16#02).
+-define(ESCAPED_JSON_ARRAY, 16#03).
 -define(ESCAPED_00, 16#FF).
 -define(ESCAPED_FF, 16#00).
+
 -define(BYTES_MARKER, 16#12).
 -define(BYTES_MARKER_DESC, (?BYTES_MARKER + 1)).
 -define(LITERAL_MARKER, (?BYTES_MARKER_DESC + 1)).
@@ -46,6 +59,9 @@
 -define(FLOAT_POS, (?FLOAT_ZERO + 1)).
 -define(FLOAT_NAN_DESC, (?FLOAT_POS + 1)).
 
+-define(JSON_INVERTED_INDEX, (?BYTES_MARKER + 38)).
+-define(JSON_EMPTY_ARRAY, (?JSON_INVERTED_INDEX + 1)).
+-define(JSON_EMPTY_OBJECT, (?JSON_EMPTY_ARRAY + 1)).
 
 pick_encoding(<< ?BYTES_MARKER, _/binary >>) -> bytes;
 pick_encoding(<< ?BYTES_MARKER_DESC, _/binary >>) -> bytes_desc;
@@ -456,6 +472,37 @@ decode_float_ascending(_) ->
 decode_float_descending(B) ->
   {F, LeftOver} = decode_float_ascending(B),
   {-F, LeftOver}.
+
+
+%% @doc returns a binary with a byte to signify an empty JSON object.
+encode_json_empty_object(B) ->
+  << B/binary, ?ESCAPE, ?ESCAPED_TERM, ?JSON_EMPTY_OBJECT >>.
+
+%% @doc returns a binary b with a byte to signify an empty JSON array.
+encode_json_empty_array(B) ->
+  << B/binary, ?ESCAPE, ?ESCAPED_TERM, ?JSON_EMPTY_ARRAY >>.
+
+%%  adds a json path terminator to a binary
+add_json_path_terminator(B) ->
+  << B/binary, ?ESCAPE, ?ESCAPED_TERM >>.
+
+%% @doc ncodes the JSON key string value with a JSON specific escaped
+%% terminator. This allows us to encode keys in the same number of bytes as a string,
+%% while at the same time giving us a sentinel to identify JSON keys. The end parameter is used
+%% to determine if this is the last key in a a JSON path. If it is we don't add a separator after it.
+encode_json_key_ascending(B, Key, true) ->
+  encode_binary_ascending(B, Key); 
+encode_json_key_ascending(B, Key, false) ->
+  << (encode_binary_ascending(B, Key))/binary, ?ESCAPED_JSON_OBJECT_KEY_TERM >>.
+
+%% @doc encodes a value used to signify membership of an array for JSON objects.
+encode_array_ascending(B) ->
+  << B/binary, ?ESCAPE, ?ESCAPED_JSON_ARRAY>>.
+
+%% @doc encodes a JSON Type. The encoded bytes are appended to the
+%% supplied binary and the final binary is returned.
+encode_json_ascending(B) ->
+  << B/binary, ?JSON_INVERTED_INDEX >>.
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").

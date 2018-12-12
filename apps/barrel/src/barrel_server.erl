@@ -259,18 +259,3 @@ get_if_hw(IfName) ->
         _ -> {ok, HwAddr}
       end
   end.
-
-
-%% ==============================
-%% tests
-
--ifdef(TEST).
--include_lib("eunit/include/eunit.hrl").
-
-persistent_clock_test() ->
-  {ok, TS0} = write_timestamp(),
-  {ok, TS1} = read_timestamp(),
-  ?assert(TS0 =:= TS1).
-
-
--endif.
