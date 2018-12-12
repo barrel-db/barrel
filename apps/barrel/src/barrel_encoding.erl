@@ -28,6 +28,7 @@
 ]).
 
 -export([pick_encoding/1]).
+-export([pp_ikey/1]).
 
 -include("barrel_logger.hrl").
 
@@ -71,6 +72,31 @@ pick_encoding(<< M, _/binary >>) when M >= ?INT_MIN, M =< ?INT_MAX -> int;
 pick_encoding(<< M, _/binary >>) when M >= ?FLOAT_NAN, M =< ?FLOAT_NAN_DESC -> float;
 pick_encoding(_) -> erlang:error(badarg).
 
+pp_ikey(<< ?JSON_INVERTED_INDEX, Rest/binary >>)  ->
+  pp_ikey(Rest, []).
+
+pp_ikey(<< ?ESCAPED_JSON_OBJECT_KEY_TERM, Rest/binary >>, Acc) ->
+  pp_ikey(Rest, Acc);
+pp_ikey(<< ?ESCAPE, ?ESCAPED_JSON_ARRAY, Rest/binary >>, Acc) ->
+  pp_ikey(Rest, [arr | Acc]);
+pp_ikey(<< ?ESCAPE, ?ESCAPED_TERM, Rest/binary >>, Acc) ->
+  pp_ikey(Rest, Acc);
+
+pp_ikey(<< ?BYTES_MARKER, _/binary >> = B, Acc) ->
+  {Key, Rest} = decode_binary_ascending(B),
+  pp_ikey(Rest, [Key | Acc]);
+pp_ikey(<<  ?LITERAL_MARKER, _/binary >> = B, Acc) ->
+  {Key, _} = decode_literal_ascending(B),
+  lists:reverse([Key | Acc]);
+pp_ikey(<< M, _/binary >> = B, Acc) when M >= ?INT_MIN, M =< ?INT_MAX ->
+  {Key, _} = decode_varint_ascending(B),
+  lists:reverse([Key | Acc]);
+pp_ikey(<< M, _/binary >> = B, Acc) when M >= ?FLOAT_NAN, M =< ?FLOAT_NAN_DESC ->
+  {Key, _} = decode_float_ascending(B),
+  lists:reverse([Key | Acc]);
+
+pp_ikey(<<"">>, Acc) ->
+  lists:reverse(Acc).
 
 %% @doc  encodes the uint32 value using a big-endian 8 byte representation.
 %% The bytes are appended to the supplied buffer and the final buffer is returned.

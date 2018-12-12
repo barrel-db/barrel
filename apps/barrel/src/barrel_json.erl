@@ -1,9 +1,9 @@
 -module(barrel_json).
 
 -export([
-  encode_index_keys/1
+  encode_index_keys/1,
+  pretty_print/1
 ]).
-
 
 encode_index_keys(J) ->
   B = barrel_encoding:encode_json_ascending(<<>>),
@@ -31,6 +31,9 @@ encode_json_term(L, B0) when is_atom(L) ->
 encode_json_term(S, B0) when is_binary(S) ->
   B1 = barrel_encoding:add_json_path_terminator(B0),
   barrel_encoding:encode_binary_ascending(B1, S);
+encode_json_term(N, B0) when is_integer(N) ->
+  B1 = barrel_encoding:add_json_path_terminator(B0),
+  barrel_encoding:encode_varint_ascending(B1, N);
 encode_json_term(N, B0) when is_number(N) ->
   B1 = barrel_encoding:add_json_path_terminator(B0),
   barrel_encoding:encode_float_ascending(B1, N).
@@ -76,6 +79,29 @@ encode_array1([], _B, Acc) ->
   Acc.
 
 
+pretty_print(BinKeys) when is_list(BinKeys) ->
+  lists:foldl(
+    fun(BinKey, B) ->
+      
+      Key = barrel_encoding:pp_ikey(BinKey),
+      Last = case lists:last(Key) of
+               L when is_atom(L) -> [<<"/">>, <<"BOOL">>, <<"/">>, barrel_lib:to_binary(L)];
+               N when is_integer(N) -> [<<"/">>,<<"NUMBER">>, <<"/">>, integer_to_binary(N)];
+               N when is_number(N) -> [<<"/">>, <<"NUMBER">>, <<"/">>, float_to_binary(N)];
+               Bin when is_binary(Bin) -> [<<"/">>, <<"STRING">>, <<"/">>, Bin]
+             end,
+      
+      Parts = lists:map(fun
+                          (arr) -> [<<"/">>, <<"ARR">>];
+                          (K) -> [<<"/">>, <<"NOTNULL">>, <<"/">>, K]
+                        end, lists:droplast(Key)),
+      
+      << B/binary, (iolist_to_binary(Parts ++ [Last]))/binary, "\n" >>
+    end,
+    <<>>,
+    BinKeys).
+
+
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
 
@@ -94,7 +120,22 @@ encode_array1([], _B, Acc) ->
 
 basic_test() ->
   Keys = encode_index_keys(?doc),
-  ?assertEqual(13, length(Keys)).
+  ?assertEqual(13, length(Keys)),
+  DecodedKeys = [barrel_encoding:pp_ikey(Key) || Key <- Keys ],
+  ?assertEqual(
+    [[<<"a">>,1],
+      [<<"b">>,<<"2">>],
+      [<<"c">>,<<"a">>,1],
+      [<<"c">>,<<"b">>,arr,<<"a">>],
+      [<<"c">>,<<"b">>,arr,<<"b">>],
+      [<<"c">>,<<"b">>,arr,<<"c">>],
+      [<<"c">>,<<"c">>,<<"a">>,1],
+      [<<"c">>,<<"c">>,<<"b">>,2],
+      [<<"d">>,arr,<<"a">>],
+      [<<"d">>,arr,<<"b">>],
+      [<<"d">>,arr,<<"c">>],
+      [<<"e">>,arr,<<"a">>,1],
+      [<<"e">>,arr,<<"b">>,2]], lists:sort(DecodedKeys)).
 
 
 
