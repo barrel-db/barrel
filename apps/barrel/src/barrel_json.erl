@@ -5,6 +5,9 @@
   pretty_print/1
 ]).
 
+%% @doc encode keys for the index
+%% TODO: `make value precision configurable
+-spec encode_index_keys(map()) -> [binary()].
 encode_index_keys(J) ->
   B = barrel_encoding:encode_json_ascending(<<>>),
   maps:fold(
@@ -30,7 +33,7 @@ encode_json_term(L, B0) when is_atom(L) ->
   barrel_encoding:encode_literal_ascending(B1, L);
 encode_json_term(S, B0) when is_binary(S) ->
   B1 = barrel_encoding:add_json_path_terminator(B0),
-  barrel_encoding:encode_binary_ascending(B1, S);
+  barrel_encoding:encode_binary_ascending(B1, short(S));
 encode_json_term(N, B0) when is_integer(N) ->
   B1 = barrel_encoding:add_json_path_terminator(B0),
   barrel_encoding:encode_varint_ascending(B1, N);
@@ -100,6 +103,12 @@ pretty_print(BinKeys) when is_list(BinKeys) ->
     end,
     <<>>,
     BinKeys).
+
+%% internal
+
+short(<< S:100/binary, _/binary >>) -> S;
+short(S) when is_binary(S) -> S;
+short(S) -> S.
 
 
 -ifdef(TEST).

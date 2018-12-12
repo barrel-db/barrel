@@ -364,9 +364,9 @@ update_docs(Barrel, Ctx, Docs, Options, UpdateType) ->
           Record = barrel_doc:make_record(Doc),
           case update_doc(Barrel, Ctx, Record, WritePolicy, 0) of
             {ignore, Result} -> {Batch1, [Result | Results1]};
-            {update_doc, OP, #{ id := DocId, rev := Rev } = DI} ->
+            {update_doc, OP, #{ id := DocId, rev := Rev } = DI, Tags} ->
               Result = {ok, DocId, Rev},
-              {[{update_doc, OP, DI} | Batch1], [Result | Results1]}
+              {[{update_doc, OP, DI, Tags} | Batch1], [Result | Results1]}
           end
         end,
         {[], []},
@@ -428,7 +428,8 @@ update_doc(Barrel, Ctx, #{ id := DocId } = Record, Policy, Attempts) ->
                  {found, deleted} -> delete;
                  _ -> add
                end,
-          {update_doc, OP, flush_revisions(Barrel, Ctx, DI2)};
+          Tags = do_index(Mod, Ctx, DI, DI2),
+          {update_doc, OP, flush_revisions(Barrel, Ctx, DI2), Tags};
         Error ->
           {ignore, Error}
       end;
@@ -452,6 +453,30 @@ flush_revisions(#{ store_mod := Mod }, Ctx, #{id := DocId} = DI) ->
   ),
   DI2.
 
+do_index(_Mod, _Ctx,  #{ rev := Rev }, #{ rev := Rev }) ->
+  %% winning revision didn't change
+  {[], []};
+do_index(Mod, Ctx, #{ rev := <<"">> }, #{ id := DocId, rev := Rev, body_map := BodyMap }) ->
+  NewDoc = case maps:find(Rev, BodyMap) of
+             {ok, Doc} -> Doc;
+             error ->
+               {ok, Doc} = Mod:get_doc_revision(Ctx, DocId, Rev),
+               Doc
+           end,
+  {barrel_json:encode_index_keys(NewDoc), []};
+do_index(Mod, Ctx, #{ rev := OldRev }, #{ id := DocId, rev := Rev, body_map := BodyMap }) ->
+  {ok, OldDoc} = Mod:get_doc_revision(Ctx, DocId, OldRev),
+  NewDoc = case maps:find(Rev, BodyMap) of
+             {ok, Doc} -> Doc;
+             error ->
+               {ok, Doc} = Mod:get_doc_revision(Ctx, DocId, Rev),
+               Doc
+           end,
+  OldKeys = barrel_json:encode_index_keys(OldDoc),
+  NewKeys = barrel_json:encode_index_keys(NewDoc),
+  %% {Added, Removed}
+  {NewKeys -- OldKeys, OldKeys -- NewKeys}.
+
 start_link(Name, Params) ->
   gen_batch_server:start_link({via, barrel_registry, Name}, ?MODULE, [Name, Params]).
 
@@ -469,7 +494,7 @@ init([Name, Params]) ->
 
 handle_batch(Batch, State) ->
   {ok, Ctx} = init_ctx(State),
-  NewState = try handle_ops(Batch, [], [], 0, 0, maps:get(updated_seq, State), Ctx, State)
+  NewState = try handle_ops(Batch, [], 0, 0, maps:get(updated_seq, State), Ctx, State)
              after release_ctx(Ctx, State)
              end,
   {ok, NewState}.
@@ -501,31 +526,30 @@ try_close_barrel(#{ name := BarrelName, provider := {Mod, StoreName} }) ->
       ok
   end.
 
-handle_ops([{_, {end_batch, Tag, Pid}} | Rest], Clients, DocInfos, AddCount, DelCount, Seq, Ctx, State) ->
-  handle_ops(Rest, [{Tag, Pid} | Clients], DocInfos, AddCount, DelCount, Seq, Ctx, State);
-handle_ops([{_, {update_doc, OP, DI2}} | Rest], Clients, DocInfos, AddCount, DelCount, Seq, Ctx, State) ->
+handle_ops([{_, {end_batch, Tag, Pid}} | Rest], DocInfos, AddCount, DelCount, Seq, Ctx, State) ->
+  #{ name := Name, store_mod := Mod} = State,
+  NewState =
+    case Mod:write_doc_infos(Ctx, DocInfos, AddCount, DelCount) of
+      ok ->
+        barrel_event:notify(Name, db_updated),
+        complete_batch({Tag, Pid}, done),
+        State#{updated_seq => Seq};
+      Error ->
+        _ = complete_batch({Tag, Pid}, Error),
+        State
+    end,
+  handle_ops(Rest, [], 0, 0, Seq, Ctx, NewState);
+handle_ops([{_, {update_doc, OP, DI, _DocTags}} | Rest], DocInfos, AddCount, DelCount, Seq, Ctx, State) ->
   Seq2 = Seq + 1,
-  DocInfos2 = [DI2#{ seq => Seq2 } | DocInfos],
+  DocInfos2 = [DI#{ seq => Seq2 } | DocInfos],
   {AddCount2, DelCount2} = case OP of
                              add -> {AddCount + 1, DelCount};
                              delete -> {AddCount, DelCount + 1};
                              update -> {AddCount, DelCount}
                            end,
-  
-  handle_ops(Rest, Clients, DocInfos2, AddCount2, DelCount2, Seq2, Ctx, State);
-handle_ops([], Clients, DocInfos, AddCount, DelCount, Seq, Ctx, Barrel) ->
-  #{ name := Name, store_mod := Mod} = Barrel,
-  case Mod:write_doc_infos(Ctx, DocInfos, AddCount, DelCount) of
-    ok ->
-      NewBarrel = Barrel#{updated_seq => Seq},
-      gproc:set_value(?barrel(Name), NewBarrel),
-      barrel_event:notify(Name, db_updated),
-      _ = complete_batch(Clients, done),
-      NewBarrel;
-    Error ->
-      _ = complete_batch(Clients, Error),
-      Barrel
-  end.
+  handle_ops(Rest, DocInfos2, AddCount2, DelCount2, Seq2, Ctx, State);
+handle_ops([], _, _, _, _, _, State) ->
+  State.
 
 %% -----------------------------------------
 %% merge doc infos
@@ -649,5 +673,7 @@ init_ctx(#{ id := Id, store_mod := Mod, store_name := Store }) ->
 release_ctx(Ctx, #{store_mod := Mod }) ->
   Mod:release_ctx(Ctx).
 
-complete_batch(Clients, Msg) ->
+complete_batch({Tag, Pid}, Msg) ->
+  catch Pid ! {self(), Tag, Msg};
+complete_batch(Clients, Msg) when is_list(Clients) ->
   _ = [catch Pid ! {self(), Tag, Msg} || {Tag, Pid} <- Clients].
