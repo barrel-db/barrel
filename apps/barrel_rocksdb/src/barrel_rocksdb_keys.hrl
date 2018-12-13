@@ -44,3 +44,5 @@
 
 
 -define(local_doc_prefix, <<"ld">>).
+
+-define(index_prefix, <<"i">>).

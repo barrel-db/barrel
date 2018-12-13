@@ -539,9 +539,10 @@ handle_ops([{_, {end_batch, Tag, Pid}} | Rest], DocInfos, AddCount, DelCount, Se
         State
     end,
   handle_ops(Rest, [], 0, 0, Seq, Ctx, NewState);
-handle_ops([{_, {update_doc, OP, DI, _DocTags}} | Rest], DocInfos, AddCount, DelCount, Seq, Ctx, State) ->
+handle_ops([{_, {update_doc, OP, DI, DocTags}} | Rest], DocInfos, AddCount, DelCount, Seq, Ctx, State) ->
   Seq2 = Seq + 1,
-  DocInfos2 = [DI#{ seq => Seq2 } | DocInfos],
+  DI2 = DI#{ seq => Seq2 },
+  DocInfos2 = [{DI2, DocTags} | DocInfos],
   {AddCount2, DelCount2} = case OP of
                              add -> {AddCount + 1, DelCount};
                              delete -> {AddCount, DelCount + 1};

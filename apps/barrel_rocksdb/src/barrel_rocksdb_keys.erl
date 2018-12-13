@@ -37,14 +37,13 @@
   doc_seq_max/1,
   doc_seq_prefix/1,
   doc_rev/3,
-  local_doc/2
+  local_doc/2,
+  index_key/3
 ]).
 
 
 -include_lib("barrel/include/barrel_logger.hrl").
 -include("barrel_rocksdb_keys.hrl").
-
-
 
 %% ----
 %% local storage
@@ -74,7 +73,6 @@ docs_del_count(BarrelId) ->
 purge_seq(BarrelId) ->
   barrel_encoding:encode_binary_ascending(?purge_seq_prefix, BarrelId).
 
-
 %% ----
 %% barrel replicated documents
 
@@ -83,7 +81,6 @@ db_prefix(BarrelId) ->
 
 db_prefix_end(BarrelId) ->
   barrel_rocksdb_util:bytes_prefix_end(db_prefix(BarrelId)).
-
 
 %% @doc document info key
 doc_info(BarrelId, DocId) ->
@@ -95,7 +92,6 @@ doc_info(BarrelId, DocId) ->
 doc_info_max(BarrelId) ->
   << (db_prefix(BarrelId))/binary, 
      (barrel_rocksdb_util:bytes_prefix_end(?docs_info_suffix))/binary >>.
-
 
 %% @doc document sequence key
 doc_seq(BarrelId, Seq) ->
@@ -124,11 +120,15 @@ doc_rev(BarrelId, DocId, DocRev) ->
     << DocId/binary, DocRev/binary >>
   ).
 
-
-
 %% @doc local document key
 local_doc(BarrelId, DocId) ->
   barrel_encoding:encode_binary_ascending(
     << (db_prefix(BarrelId))/binary, ?local_doc_prefix/binary >>,
     DocId
+  ).
+
+index_key(BarrelId, DocId, Key) ->
+  Prefix =  << (db_prefix(BarrelId))/binary, ?index_prefix/binary >>,
+  barrel_encoding:encode_binary_ascending(
+    << Prefix/binary, Key/binary>>, DocId
   ).
