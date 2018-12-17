@@ -23,8 +23,11 @@
   encode_json_empty_object/1,
   encode_json_key_ascending/3,
   encode_array_ascending/1,
+  encode_array_ascending/2,
   add_json_path_terminator/1,
-  encode_json_ascending/1
+  encode_json_ascending/1,
+  encode_json_nested/2,
+  encode_json_array_index/2
 ]).
 
 -export([pick_encoding/1]).
@@ -74,17 +77,20 @@ pick_encoding(_) -> erlang:error(badarg).
 
 pp_ikey(<< ?JSON_INVERTED_INDEX, Rest/binary >>)  ->
   pp_ikey(Rest, []).
-
 pp_ikey(<< ?ESCAPED_JSON_OBJECT_KEY_TERM, Rest/binary >>, Acc) ->
+  pp_ikey(Rest, Acc);
+pp_ikey(<< ?ESCAPED_00, ?ESCAPED_00, Rest/binary >>, Acc) ->
   pp_ikey(Rest, Acc);
 pp_ikey(<< ?ESCAPE, ?ESCAPED_JSON_ARRAY, Rest/binary >>, Acc) ->
   pp_ikey(Rest, [arr | Acc]);
 pp_ikey(<< ?ESCAPE, ?ESCAPED_TERM, Rest/binary >>, Acc) ->
   pp_ikey(Rest, Acc);
-
 pp_ikey(<< ?BYTES_MARKER, _/binary >> = B, Acc) ->
   {Key, Rest} = decode_binary_ascending(B),
   pp_ikey(Rest, [Key | Acc]);
+pp_ikey(<< ?ESCAPE, M, Rest/binary >>, Acc) when M >= ?INT_MIN, M =< ?INT_MAX ->
+  {Idx, Rest} = decode_uvarint_ascending(<< M, Rest/binary >>),
+  pp_ikey(Rest, [Idx | Acc]);
 pp_ikey(<<  ?LITERAL_MARKER, _/binary >> = B, Acc) ->
   {Key, _} = decode_literal_ascending(B),
   lists:reverse([Key | Acc]);
@@ -525,10 +531,22 @@ encode_json_key_ascending(B, Key, false) ->
 encode_array_ascending(B) ->
   << B/binary, ?ESCAPE, ?ESCAPED_JSON_ARRAY>>.
 
+%% @doc encodes a value used to signify membership of an array for JSON objects.
+encode_array_ascending(B, I) ->
+  encode_uvarint_ascending(<< B/binary, ?ESCAPE >>, I).
+
+
 %% @doc encodes a JSON Type. The encoded bytes are appended to the
 %% supplied binary and the final binary is returned.
 encode_json_ascending(B) ->
   << B/binary, ?JSON_INVERTED_INDEX >>.
+
+encode_json_nested(B, Key) ->
+  << (encode_binary_ascending(B, Key))/binary, ?ESCAPED_00, ?ESCAPED_00 >>.
+
+encode_json_array_index(B, I) ->
+  << (encode_uvarint_ascending(<< B/binary, ?ESCAPE >>, I))/binary, ?ESCAPED_00, ?ESCAPED_00 >>.
+
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
@@ -550,7 +568,7 @@ encode_uint32_descending_test() ->
 
 encode_uint64_ascending_test() ->
   Tests = [{ << 0, 0, 0, 0, 0, 0, 0, 0 >>, 0 },
-           { << 0, 0, 0, 0, 0, 0, 0, 1 >>, 1 },
+           { << 0, 0, 0, 0, 0, 0, 0, 1 >>, 1 },
            { << 0, 0, 0, 0, 0, 0, 1, 0 >>, 1 bsl 8 },
            { << 16#ff, 16#ff, 16#ff, 16#ff, 16#ff, 16#ff, 16#ff, 16#ff >>, 1 bsl 64 - 1 }], %% max uint64
   test_encode_decode(Tests, fun encode_uint64_ascending/2, fun decode_uint64_ascending/1).
@@ -567,7 +585,7 @@ encode_varint_ascending_test() ->
   Tests = [{ << 16#86, 16#ff, 16#00 >>, -1 bsl 8 },
            { << 16#87, 16#ff >>, -1 },
            { << 16#88 >>, 0 },
-           { << 16#89 >>, 1 },
+           { << 16#89 >>, 1 },
            { << 16#f5 >>, 109 },
            { << 16#f6, 16#f70 >>, 112 },
            { << 16#f7, 16#01, 16#00 >>, 1 bsl 8 },
