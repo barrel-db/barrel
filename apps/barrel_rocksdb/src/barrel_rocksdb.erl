@@ -344,6 +344,7 @@ do_fold_changes({ok, _, Value}, Itr, UserFun, UserAcc) ->
     skip ->
       do_fold_changes(rocksdb:iterator_move(Itr, next), Itr, UserFun, UserAcc)
   end;
+
 do_fold_changes(_, _, _, UserAcc) ->
   UserAcc.
 
