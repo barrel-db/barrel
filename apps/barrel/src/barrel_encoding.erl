@@ -22,47 +22,18 @@
   encode_json_empty_array/1,
   encode_json_empty_object/1,
   encode_json_key_ascending/3,
+  encode_array_ascending/2,
+  encode_array_index_ascending/3,
   encode_array_ascending/1,
   add_json_path_terminator/1,
   encode_json_ascending/1
 ]).
 
 -export([pick_encoding/1]).
--export([pp_ikey/1]).
 
 -include("barrel_logger.hrl").
 
--define(INT_MIN, 16#80).
--define(INT_MAX, 16#fd).
--define(INT_MAX_WIDTH, 8).
--define(INT_ZERO, (?INT_MIN + ?INT_MAX_WIDTH) ).
--define(INT_SMALL, (?INT_MAX - ?INT_ZERO - ?INT_MAX_WIDTH) ).
-
-
--define(ESCAPE, 16#00).
--define(ESCAPED_TERM, 16#01).
--define(ESCAPED_JSON_OBJECT_KEY_TERM, 16#02).
--define(ESCAPED_JSON_ARRAY, 16#03).
--define(ESCAPED_00, 16#FF).
--define(ESCAPED_FF, 16#00).
-
--define(BYTES_MARKER, 16#12).
--define(BYTES_MARKER_DESC, (?BYTES_MARKER + 1)).
--define(LITERAL_MARKER, (?BYTES_MARKER_DESC + 1)).
--define(LITERAL_MARKER_DESC, (?LITERAL_MARKER + 1)).
-
-
--define(ENCODED_NULL, 16#00).
--define(ENCODED_NOT_NULL, 16#01).
--define(FLOAT_NAN, (?ENCODED_NOT_NULL + 1)).
--define(FLOAT_NEG, (?FLOAT_NAN + 1)).
--define(FLOAT_ZERO, (?FLOAT_NEG + 1)).
--define(FLOAT_POS, (?FLOAT_ZERO + 1)).
--define(FLOAT_NAN_DESC, (?FLOAT_POS + 1)).
-
--define(JSON_INVERTED_INDEX, (?BYTES_MARKER + 38)).
--define(JSON_EMPTY_ARRAY, (?JSON_INVERTED_INDEX + 1)).
--define(JSON_EMPTY_OBJECT, (?JSON_EMPTY_ARRAY + 1)).
+-include("barrel_encoding.hrl").
 
 pick_encoding(<< ?BYTES_MARKER, _/binary >>) -> bytes;
 pick_encoding(<< ?BYTES_MARKER_DESC, _/binary >>) -> bytes_desc;
@@ -71,32 +42,6 @@ pick_encoding(<< ?LITERAL_MARKER_DESC, _/binary >>) -> literal_desc;
 pick_encoding(<< M, _/binary >>) when M >= ?INT_MIN, M =< ?INT_MAX -> int;
 pick_encoding(<< M, _/binary >>) when M >= ?FLOAT_NAN, M =< ?FLOAT_NAN_DESC -> float;
 pick_encoding(_) -> erlang:error(badarg).
-
-pp_ikey(<< ?JSON_INVERTED_INDEX, Rest/binary >>)  ->
-  pp_ikey(Rest, []).
-
-pp_ikey(<< ?ESCAPED_JSON_OBJECT_KEY_TERM, Rest/binary >>, Acc) ->
-  pp_ikey(Rest, Acc);
-pp_ikey(<< ?ESCAPE, ?ESCAPED_JSON_ARRAY, Rest/binary >>, Acc) ->
-  pp_ikey(Rest, [arr | Acc]);
-pp_ikey(<< ?ESCAPE, ?ESCAPED_TERM, Rest/binary >>, Acc) ->
-  pp_ikey(Rest, Acc);
-
-pp_ikey(<< ?BYTES_MARKER, _/binary >> = B, Acc) ->
-  {Key, Rest} = decode_binary_ascending(B),
-  pp_ikey(Rest, [Key | Acc]);
-pp_ikey(<<  ?LITERAL_MARKER, _/binary >> = B, Acc) ->
-  {Key, _} = decode_literal_ascending(B),
-  lists:reverse([Key | Acc]);
-pp_ikey(<< M, _/binary >> = B, Acc) when M >= ?INT_MIN, M =< ?INT_MAX ->
-  {Key, _} = decode_varint_ascending(B),
-  lists:reverse([Key | Acc]);
-pp_ikey(<< M, _/binary >> = B, Acc) when M >= ?FLOAT_NAN, M =< ?FLOAT_NAN_DESC ->
-  {Key, _} = decode_float_ascending(B),
-  lists:reverse([Key | Acc]);
-
-pp_ikey(<<"">>, Acc) ->
-  lists:reverse(Acc).
 
 %% @doc  encodes the uint32 value using a big-endian 8 byte representation.
 %% The bytes are appended to the supplied buffer and the final buffer is returned.
@@ -524,6 +469,16 @@ encode_json_key_ascending(B, Key, false) ->
 %% @doc encodes a value used to signify membership of an array for JSON objects.
 encode_array_ascending(B) ->
   << B/binary, ?ESCAPE, ?ESCAPED_JSON_ARRAY>>.
+
+encode_array_ascending(B, I) ->
+  <<  (encode_uvarint_ascending(B, I))/binary, ?ESCAPE, ?ESCAPED_JSON_ARRAY>>.
+
+%% @doc encodes a value used to signify membership of an array for JSON objects.
+encode_array_index_ascending(B, I, true) ->
+  encode_uvarint_ascending(B, I);
+encode_array_index_ascending(B, I, false) ->
+  << (encode_uvarint_ascending(B, I))/binary, ?ESCAPED_JSON_ARRAY_KEY>>.
+
 
 %% @doc encodes a JSON Type. The encoded bytes are appended to the
 %% supplied binary and the final binary is returned.

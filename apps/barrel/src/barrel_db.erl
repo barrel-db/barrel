@@ -463,7 +463,7 @@ do_index(Mod, Ctx, #{ rev := <<"">> }, #{ id := DocId, rev := Rev, body_map := B
                {ok, Doc} = Mod:get_doc_revision(Ctx, DocId, Rev),
                Doc
            end,
-  {barrel_json:encode_index_keys(NewDoc), []};
+  {barrel_ars:analyze(NewDoc), []};
 do_index(Mod, Ctx, #{ rev := OldRev }, #{ id := DocId, rev := Rev, body_map := BodyMap }) ->
   {ok, OldDoc} = Mod:get_doc_revision(Ctx, DocId, OldRev),
   NewDoc = case maps:find(Rev, BodyMap) of
@@ -472,8 +472,8 @@ do_index(Mod, Ctx, #{ rev := OldRev }, #{ id := DocId, rev := Rev, body_map := B
                {ok, Doc} = Mod:get_doc_revision(Ctx, DocId, Rev),
                Doc
            end,
-  OldKeys = barrel_json:encode_index_keys(OldDoc),
-  NewKeys = barrel_json:encode_index_keys(NewDoc),
+  OldKeys = barrel_ars:analyze(OldDoc),
+  NewKeys = barrel_ars:analyze(NewDoc),
   %% {Added, Removed}
   {NewKeys -- OldKeys, OldKeys -- NewKeys}.
 
