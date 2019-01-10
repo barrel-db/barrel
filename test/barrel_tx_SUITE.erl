@@ -77,6 +77,7 @@ basic(_Config) ->
     {ok, false} ->
       Pid ! {done, self()},
       receive ok -> ok end,
+      timer:sleep(10),
       0 = ets:info(barrel_tx_uncommited_keys, size),
       0 = ets:info(barrel_tx_commited_keys, size),
       commited = barrel_tx:transact(fun() ->

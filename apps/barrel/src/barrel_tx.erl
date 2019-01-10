@@ -34,6 +34,7 @@ transact(Fun) ->
   _ = clean_transaction(),
   Tx = #{ snapshot_id => new_transaction(),
           written_keys => []},
+  io:format("tx is ~p~n", [Tx]),
   _ = erlang:put(barrel_transaction, Tx),
   try Fun()
   after clean_transaction()
@@ -73,16 +74,18 @@ commit() ->
 -spec commit(Timeout :: non_neg_integer() | infinity) -> ok.
 commit(Timeout) ->
   case erlang:get(barrel_transaction) of
-    undefined -> erlang:error(no_transaction);
+    undefined ->
+      io:format("error undefined", []),
+      erlang:error(no_transaction);
     #{ snapshot_id := SnapshotId, written_keys := Keys } ->
-
       ok = gen_server:call(?MODULE, {commit, Keys, self(), SnapshotId}, Timeout),
       _ = erlang:erase(barrel_transaction),
       ok
   end.
 
 new_transaction() ->
-  barrel_counters:tick(snapshot_id).
+  SnapshotId = persistent_term:get({?MODULE, snapshot_id}),
+  atomics:add_get(SnapshotId, 1, 1).
 
 
 clean_transaction() ->
@@ -101,7 +104,9 @@ init([]) ->
   ?uncommited_keys = ets:new(?uncommited_keys, [ordered_set, public, named_table,
     {write_concurrency, true}, {read_concurrency, true}]),
   ?commited_keys = ets:new(?commited_keys, [set, named_table]),
-  true = barrel_counters:new(snapshot_id),
+  SnapshotId = atomics:new(1, []),
+  persistent_term:put({?MODULE, snapshot_id}, SnapshotId),
+
   {ok, #{ snapshot_id => 0, monitors => #{} } }.
 
 
@@ -121,15 +126,13 @@ handle_call({register_write, Key, Pid, SnapshotId}, _From, State) ->
       end
   end;
 
-handle_call({commit, Keys, Pid, SnapshotId}, From, State) ->
-  %% we reply immediately, so the client can return fast
-  gen_server:reply(From, ok),
+handle_call({commit, Keys, Pid, SnapshotId}, _From, State) ->
   clean_uncommited_keys(Pid, Keys),
   lists:foreach(
     fun(Key) -> ets:insert(?commited_keys, {Key, SnapshotId}) end,
     Keys
   ),
-  {noreply, State};
+  {reply, ok, State};
 
 handle_call({abort, Pid, Keys}, _From, State) ->
   clean_uncommited_keys(Pid, Keys),
@@ -158,7 +161,7 @@ is_uncommited(Key, Pid) ->
   case ets:lookup(?uncommited_keys, Key) of
     [] -> true;
     [{_, OtherPid}] when OtherPid =/= Pid -> false;
-    _ -> true
+    _Else -> true
   end.
 
 clean_uncommited_keys(Pid, Keys) ->

@@ -67,12 +67,6 @@ init([]) ->
       shutdown => infinity,
       type => worker
     },
-  
-    %% counters
-    #{
-      id => barrel_counters,
-      start => {barrel_counters, start_link, []}
-    },
 
     %% safe supervisor
     #{id => barrel_safe_sup,
