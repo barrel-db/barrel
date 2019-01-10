@@ -21,14 +21,18 @@
 
 
 get(Key) ->
-  barrel_mochiglobal:get(Key).
+  persistent_term:get({?MODULE, Key}).
 
 get(Key, Default) ->
-  barrel_mochiglobal:get(Key, Default).
+  try
+    persistent_term:get({?MODULE, Key})
+  catch
+      error:badarg  -> Default
+  end.
 
 set(Key, Value) ->
   application:set_env(?APP, Key, Value),
-  barrel_mochiglobal:put(Key, Value).
+  persistent_term:put({?MODULE, Key}, Value).
 
 
 

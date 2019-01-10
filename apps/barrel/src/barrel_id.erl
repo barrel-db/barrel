@@ -51,7 +51,7 @@ gen_id(Time, WorkerId, Sequence) ->
   <<Time:64/integer, WorkerId:48/integer, Sequence:16/integer>>.
 
 worker_id() ->
-  barrel_mochiglobal:get(worker_id).
+  barrel_config:get(worker_id).
 
 
 t() ->

@@ -24,4 +24,3 @@ start_link() ->
     {worker, {barrel_index_worker, []}}
   ],
   wpool:start_pool(?MODULE, PoolOptions).
-

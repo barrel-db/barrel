@@ -41,7 +41,7 @@
 %% PUBLIC API
 
 start_link() ->
-  barrel_mochiglobal:put(worker_id, get_worker_id()),
+  barrel_config:set(worker_id, get_worker_id()),
   gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
 get_last_ts() ->

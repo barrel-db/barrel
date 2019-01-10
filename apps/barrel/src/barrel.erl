@@ -362,8 +362,8 @@ try_init_barrel(Name, StoreMod, Args) ->
     {ok, StoreMod:init_barrel(Name, Args)}
   catch
       throw:R  -> {ok, R};
-    Class:R ->
-      {'EXIT', Class, R, erlang:get_stacktrace()}
+    Class:R:E ->
+      {'EXIT', Class, R, E}
   end.
 
 
