@@ -34,7 +34,6 @@ transact(Fun) ->
   _ = clean_transaction(),
   Tx = #{ snapshot_id => new_transaction(),
           written_keys => []},
-  io:format("tx is ~p~n", [Tx]),
   _ = erlang:put(barrel_transaction, Tx),
   try Fun()
   after clean_transaction()
@@ -75,7 +74,6 @@ commit() ->
 commit(Timeout) ->
   case erlang:get(barrel_transaction) of
     undefined ->
-      io:format("error undefined", []),
       erlang:error(no_transaction);
     #{ snapshot_id := SnapshotId, written_keys := Keys } ->
       ok = gen_server:call(?MODULE, {commit, Keys, self(), SnapshotId}, Timeout),
