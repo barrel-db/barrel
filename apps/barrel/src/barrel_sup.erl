@@ -67,7 +67,14 @@ init([]) ->
       shutdown => infinity,
       type => worker
     },
-
+  
+    #{id => barrel_storage,
+      start => {barrel_storage, start_link, []},
+      shutdown => infinity,
+      type => worker
+    },
+  
+  
     %% safe supervisor
     #{id => barrel_safe_sup,
       start => {supervisor, start_link, [{local, barrel_safe_sup}, ?MODULE, safe]},

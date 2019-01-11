@@ -22,10 +22,8 @@
 ]).
 
 
-db_options(Options) ->
-  default_db_options() ++ cf_options(Options).
-
-
+db_options(Cache) ->
+  default_db_options() ++ cf_options(Cache).
 
 
 default_db_options() ->
@@ -50,9 +48,15 @@ default_db_options() ->
 
   ].
 
-cf_options(Options) ->
-  WriteBufferSize =  64 bsl 20, %% 64 MB
-  CfOpts = [
+cf_options(false) ->
+  default_cf_options();
+cf_options(CacheRef) ->
+  BlockOptions = [{block_cache, CacheRef}],
+  default_cf_options() ++ [{block_based_table_options, BlockOptions}].
+
+default_cf_options() ->
+  WriteBufferSize =  barrel_config:get(rocksdb_write_buffer_size),
+  [
     {write_buffer_size, WriteBufferSize}, %% 64MB
     {max_write_buffer_number, 4},
     {min_write_buffer_number_to_merge, 1},
@@ -78,29 +82,4 @@ cf_options(Options) ->
     {compression, snappy},
     {prefix_extractor, {fixed_prefix_transform, 10}},
     {merge_operator, counter_merge_operator}
-  ],
-
-  case maps:get(cache, Options, false) of
-    false -> CfOpts;
-    Cache ->
-      %% Reserve 1 memtable worth of memory from the cache. Under high
-      %% load situations we'll be using somewhat more than 1 memtable
-      %% but usually not significantly more unless there is an I/O
-      %% throughput problem.
-      %%
-      %% We ensure that at least 1MB is allocated for the block cache.
-      %% Some unit tests expect to see a non-zero block cache hit rate,
-      %% but they use a cache that is small enough that all of it would
-      %% otherwise be reserved for the memtable.
-      {ok, CacheRef} = barrel_rocksdb_cache:run_locked(
-        Cache,
-        fun(CacheRef) ->
-          Capacity = rocksdb:get_capacity(CacheRef),
-          NewCapacity = erlang:max(1 bsl 20, Capacity - WriteBufferSize),
-          ok = rocksdb:set_capacity(CacheRef, NewCapacity),
-          Cache
-        end
-      ),
-      BlockOptions = [{block_cache, CacheRef}],
-      CfOpts ++ [{block_based_table_options, BlockOptions}]
-  end.
+  ].

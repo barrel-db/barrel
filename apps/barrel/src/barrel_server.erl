@@ -53,7 +53,6 @@ get_last_ts() ->
 init([]) ->
   process_flag(trap_exit, true),
   ok = check_for_clock_error(), %% restart if we detected a clock change
-  ok = barrel_registry:init(barrel_config:get(data_dir)),
   
   {ok, TRef} = timer:send_interval(get_interval(), persist_time),
   MRef = erlang:monitor(time_offset, clock_service),
@@ -114,7 +113,7 @@ write_timestamp() ->
 curr_time_millis() -> erlang:system_time(millisecond).
 
 persist_file() ->
-  FullPath = filename:join(barrel_config:get(data_dir), ?TS_FILE),
+  FullPath = filename:join(barrel_config:get(docs_store_path), ?TS_FILE),
   ok = filelib:ensure_dir(FullPath),
   FullPath.
 

@@ -10,14 +10,19 @@
 -author("benoitc").
 
 -export([
-  init_store/2,
-  init_barrel/2,
-  delete_barrel/2,
-  barrel_infos/2
+  init_storage/0,
+  terminate_storage/2
 ]).
 
 -export([
-  init_ctx/3,
+  open_barrel/2,
+  delete_barrel/2,
+  barrel_infos/2,
+  barrel_exists/2
+]).
+
+-export([
+  init_ctx/2,
   release_ctx/1
 ]).
 
@@ -34,21 +39,6 @@
   delete_doc_revision/3
 ]).
 
--export([
-  start_cache/2,
-  stop_cache/1
-]).
-
--export([start_link/2]).
-
-%% gen_server callbaks
--export([
-  init/1,
-  handle_call/3,
-  handle_cast/2,
-  terminate/2
-]).
-
 -include_lib("barrel/include/barrel_logger.hrl").
 -include("barrel_rocksdb.hrl").
 -include("barrel_rocksdb_keys.hrl").
@@ -58,13 +48,7 @@
 %% -------------------
 %% store api
 
-init_store(Name, Options) ->
-  Spec = #{ start => {?MODULE, start_link, [Name, Options]} },
-  barrel_services:activate_service(store, ?MODULE, Name, Spec).
-
-
-init_barrel(StoreName, BarrelId) ->
-  #{ ref := Ref } = Store = gproc:lookup_value(?rdb_store(StoreName)),
+open_barrel(BarrelId, #rocksdb_store{ref=Ref}=Store) ->
   BarrelKey = barrel_rocksdb_keys:local_barrel_ident(BarrelId),
   case find_ident(BarrelId, Store) of
     {ok, Ident} ->
@@ -75,21 +59,22 @@ init_barrel(StoreName, BarrelId) ->
                   _ -> 0
                 end,
       _ = rocksdb:iterator_close(Itr),
-      {ok, Ident, LastSeq};
+      BarrelRef = #{  id => Ident, ref => Ref },
+      {ok, BarrelRef, LastSeq};
     error ->
       NewIdentInt = new_ident(Store),
       Ident = barrel_encoding:encode_nonsorting_uvarint(<<>>, NewIdentInt),
       case rocksdb:put(Ref, BarrelKey, Ident, [{sync, true}]) of
         ok ->
           _ = create_ident(BarrelId, Ident, Store),
-          {ok, 0};
+          BarrelRef = #{  id => Ident, ref => Ref },
+          {ok, BarrelRef, 0};
         Error ->
           Error
       end
   end.
 
-delete_barrel(StoreName, Name) ->
-  #{ ref := Ref } = Store = gproc:lookup_value(?rdb_store(StoreName)),
+delete_barrel(Name, #rocksdb_store{ref=Ref}=Store) ->
   BarrelKey = barrel_rocksdb_keys:local_barrel_ident(Name),
   case rocksdb:get(Ref, BarrelKey, []) of
     {ok, Ident} ->
@@ -112,8 +97,7 @@ delete_barrel(StoreName, Name) ->
       Error
   end.
   
-barrel_infos(StoreName, Name) ->
-  #{ ref := Ref } = gproc:lookup_value(?rdb_store(StoreName)),
+barrel_infos(Name, #rocksdb_store{ref=Ref}) ->
   BarrelKey = barrel_rocksdb_keys:local_barrel_ident(Name),
   {ok, Snapshot} = rocksdb:snapshot(Ref),
   ReadOptions = [{snapshot, Snapshot}],
@@ -138,20 +122,26 @@ barrel_infos(StoreName, Name) ->
       {error, barrel_not_found}
   end.
 
-find_ident(Name, #{ ident_tab := Tab }) ->
+barrel_exists(Name, Store) ->
+  case find_ident(Name, Store) of
+    {ok, _Ident} -> true;
+    error -> false
+  end.
+
+find_ident(Name, #rocksdb_store{ident_tab=Tab}) ->
   try {ok, ets:lookup_element(Tab, {b, Name}, 2)}
   catch
     error:badarg -> error
   end.
 
 
-new_ident(#{ ident_tab := Tab }) ->
+new_ident(#rocksdb_store{ident_tab=Tab}) ->
   ets:update_counter(Tab, '$ident_prefix', {2, 1}).
 
-create_ident(Name, Ident, #{ ident_tab := Tab }) ->
+create_ident(Name, Ident, #rocksdb_store{ident_tab=Tab}) ->
   ets:insert(Tab, {{b, Name}, Ident}).
 
-delete_ident(Name, #{ ident_tab := Tab }) ->
+delete_ident(Name, #rocksdb_store{ident_tab=Tab}) ->
   ets:delete(Tab, {b, Name}).
 
 
@@ -160,22 +150,16 @@ delete_ident(Name, #{ ident_tab := Tab }) ->
 %% docs
 
 
-init_ctx(StoreName, Name, IsRead) ->
-  #{ ref := Ref } = Store = gproc:lookup_value(?rdb_store(StoreName)),
-  case find_ident(Name, Store) of
-    {ok, BarrelId} ->
-      Snapshot = case IsRead of
-                   true ->
-                     {ok, S} = rocksdb:snapshot(Ref),
-                     S;
-                   false ->
-                     undefined
-                 end,
-
-      {ok, #{ ref => Ref, barrel_id => BarrelId, snapshot => Snapshot }};
-    error ->
-      {error, db_not_found}
-  end.
+init_ctx(#{ id := BarrelId, ref := Ref }, IsRead) ->
+  Snapshot = case IsRead of
+               true ->
+                 {ok, S} = rocksdb:snapshot(Ref),
+                 S;
+               false ->
+                 undefined
+             end,
+  
+  {ok, #{ ref => Ref, barrel_id => BarrelId, snapshot => Snapshot }}.
 
 release_ctx(#{ snapshot := undefined }) -> ok;
 release_ctx(#{ snapshot := S }) ->
@@ -365,52 +349,56 @@ get_local_doc(#{ ref := Ref, barrel_id := BarrelId }, DocId) ->
 %% -------------------
 %% cache api
 
-start_cache(Name, CacheSize) when is_atom(Name) ->
-  Spec =
-    #{id => {barrel_rocksdb_cache, Name},
-      start => {barrel_rocksdb_cache, start_link, [Name, CacheSize]}},
-  barrel_services:start_service(Spec).
-
-stop_cache(Name) ->
-  barrel_services:stop_service({barrel_rocksdb_cache, Name}).
-
-%% -------------------
-%% - internals
-
-start_link(Name, Options) ->
-  gen_server:start_link({via, gproc, ?rdb_store(Name)}, ?MODULE, [Name, Options], []).
-
-
-init([Name, Options = #{ path := Path }]) ->
+init_storage() ->
+  DocsStorePath = barrel_config:get(docs_store_path),
+  ShardPath = filename:join([DocsStorePath, "1"]),
+  CacheRef = case barrel_config:get(rocksdb_cache_size) of
+               false ->
+                 false;
+               Sz ->
+                 {ok, CacheSize} =  barrel_lib:parse_size_unit(Sz),
+                 %% Reserve 1 MB worth of memory from the cache. Under high
+                 %% load situations we'll be using somewhat more than 1 MB
+                 %% but usually not significantly more unless there is an I/O
+                 %% throughput problem.
+                 %%
+                 %% We ensure that at least 1MB is allocated for the block cache.
+                 %% Some unit tests expect to see a non-zero block cache hit rate,
+                 %% but they use a cache that is small enough that all of it would
+                 %% otherwise be reserved for the memtable.
+                 WriteBufferSize = barrel_config:get(rocksdb_write_buffer_size),
+                 Capacity = erlang:max(1 bsl 20, CacheSize - WriteBufferSize),
+                 {ok, Ref} = rocksdb:new_lru_cache(Capacity),
+                 ok = rocksdb:set_strict_capacity_limit(Ref, true),
+                 Ref
+             end,
   Retries = application:get_env(barrel, rocksdb_open_retries, ?DB_OPEN_RETRIES),
-  DbOptions = barrel_rocksdb_options:db_options(Options),
-  case open_db(Path, DbOptions, Retries, false) of
-    {ok, Ref, IdentTab} ->
-      erlang:process_flag(trap_exit, true),
-      Store = #{ name => Name, path => Path, ref => Ref, ident_tab => IdentTab },
-      _ = gproc:set_value(?rdb_store(Name), Store),
+  DbOptions = barrel_rocksdb_options:db_options(CacheRef),
+  case open_db(ShardPath, DbOptions, Retries, false) of
+    {ok, DbRef} ->
+      IdentTab = ets:new(
+        ?IDENT_TAB, [ordered_set, public, {read_concurrency, true}, {write_concurrency, true}]
+      ),
+      ok = load_idents(DbRef, IdentTab),
+      Store =
+        #rocksdb_store{ref=DbRef,
+                       cache_ref=CacheRef,
+                       path=ShardPath,
+                       ident_tab=IdentTab},
       {ok, Store};
     {error, Error} ->
       exit(Error)
   end.
 
-handle_call(_Msg, _From, Store) -> {reply, ok, Store}.
-
-handle_cast(_Msg, Store) -> {noreply, Store}.
-
-terminate(_Reason, #{ ref := Ref }) ->
+terminate_storage(_Reason, #rocksdb_store{ref=Ref}) ->
   _ = rocksdb:close(Ref),
   ok.
-
 
 open_db(_Path, _DbOpts, 0, LastError) ->
   {error, LastError};
 open_db(Path, DbOpts,RetriesLeft, _LastError) ->
   case rocksdb:open(Path, DbOpts) of
-    {ok, Ref} ->
-      IdentTab = ets:new(?IDENT_TAB, [ordered_set, public, {read_concurrency, true}, {write_concurrency, true}]) ,
-      ok = load_idents(Ref, IdentTab),
-      {ok, Ref, IdentTab};
+    {ok, Ref} -> {ok, Ref};
     %% Check specifically for lock error, this can be caused if
     %% a crashed instance takes some time to flush leveldb information
     %% out to disk.  The process is gone, but the NIF resource cleanup
@@ -431,7 +419,6 @@ open_db(Path, DbOpts,RetriesLeft, _LastError) ->
     {error, _} = Error ->
       Error
   end.
-
 
 load_idents(Ref, IdentTab) ->
   ReadOptions =

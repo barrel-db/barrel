@@ -20,7 +20,7 @@
 
 %% API
 -export([
-  create_barrel/2,
+  create_barrel/1,
   open_barrel/1,
   close_barrel/1,
   delete_barrel/1,
@@ -54,10 +54,6 @@
 -include_lib("barrel/include/barrel.hrl").
 -include_lib("barrel/include/barrel_logger.hrl").
 
--type barrel_create_params() :: #{
-  store_provider => atom(),
-  index_policy => list()
-}.
 
 -type barrel_infos() :: #{
   updated_seq := non_neg_integer(),
@@ -121,9 +117,9 @@ stop_store(Name) ->
 
 
 %% @doc create a barrel, (note: for now the options is an empty map)
--spec create_barrel(Name :: barrel_name(), Params :: barrel_create_params()) -> ok | {error, any()}.
-create_barrel(Name, Params) ->
-  barrel_db:create_barrel(Name, Params).
+-spec create_barrel(Name :: barrel_name()) -> ok | {error, any()}.
+create_barrel(Name) ->
+  barrel_db:create_barrel(Name).
 
 -spec open_barrel(Name :: barrel_name()) -> {ok, barrel()} | {error, barrel_not_found} | {error, any()}.
 open_barrel(Name) ->
@@ -138,9 +134,9 @@ delete_barrel(Name) ->
   barrel_db:delete_barrel(Name).
   
 %% @doc return barrel_infos.
--spec barrel_infos(Barrel :: barrel()) -> barrel_infos().
-barrel_infos(Barrel) ->
-  barrel_db:barrel_infos(Barrel).
+-spec barrel_infos(Name :: barrel_name()) -> barrel_infos().
+barrel_infos(Name) ->
+  barrel_db:barrel_infos(Name).
 
 
 %% @doc lookup a doc by its docid.

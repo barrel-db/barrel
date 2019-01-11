@@ -1,4 +1,4 @@
-%% Copyright (c) 2018. Benoit Chesneau
+%% Copyright (c) 2018-2019. Benoit Chesneau
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License"); you may not
 %% use this file except in compliance with the License. You may obtain a copy of
@@ -15,6 +15,14 @@
 
 -define(DB_OPEN_RETRIES, 30).
 -define(DB_OPEN_RETRY_DELAY, 2000).
+
+
+-record(rocksdb_store, {
+  ref,
+  cache_ref,
+  path,
+  ident_tab
+}).
 
 -define(rdb_store(Name), {n, l, {barrel_rocksdb_store, Name}}).
 -define(rdb_cache(Name), {n, l, {barrel_rocksdb_cache, Name}}).

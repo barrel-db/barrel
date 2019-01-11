@@ -10,13 +10,7 @@
 -author("benoitc").
 
 %% API
--export([init/1, deinit/0]).
-
 -export([
-  store_config/2,
-  delete_config/1,
-  config_of/1,
-  exists/1,
   reference_of/1,
   where_is/1
 ]).
@@ -33,24 +27,6 @@
 
 
 -include_lib("barrel/include/barrel.hrl").
-
--define(REVERSE_TBL, barrel_directory_reverse).
-
--spec init(file:filename()) -> ok.
-init(Dir) ->
-  Dets = filename:join(Dir, "barrels.dets"),
-  ok = filelib:ensure_dir(Dets),
-  {ok, ?REVERSE_TBL} = dets:open_file(?REVERSE_TBL,
-    [{file, Dets},
-      {auto_save, 500},
-      {access, read_write}]),
-  ok.
-
-
--spec deinit() -> ok.
-deinit() ->
-  _ = dets:close(?REVERSE_TBL),
-  ok.
 
 -spec register_name(barrel_name(), pid()) -> yes | no.
 register_name(BarrelName, Pid) ->
@@ -71,26 +47,6 @@ send(BarrelName, Msg) ->
 
 where_is(BarrelName) ->
   whereis_name(BarrelName).
-
--spec store_config(barrel_name(), barrel_config()) -> ok.
-store_config(BarrelName, Config) ->
-  dets:insert(?REVERSE_TBL, {BarrelName, Config}).
-
-
--spec delete_config(barrel_name()) -> ok.
-delete_config(BarrelName) ->
-  dets:delete(?REVERSE_TBL, BarrelName).
-
--spec config_of(barrel_name()) -> {ok, barrel_config()} | error.
-config_of(BarrelName) ->
-  case dets:lookup(?REVERSE_TBL, BarrelName) of
-    [] -> error;
-    [{_, Config}] -> {ok, Config}
-  end.
-
--spec exists(barrel_name()) -> true | false.
-exists(BarrelName) ->
-  (config_of(BarrelName) =/= error).
 
 -spec reference_of(barrel_name()) -> {ok, map()} | error.
 reference_of(Name) ->

@@ -19,7 +19,7 @@
 %% API
 
 -export([
-  create_barrel/2,
+  create_barrel/1,
   open_barrel/1,
   close_barrel/1,
   delete_barrel/1,
@@ -35,7 +35,7 @@
 ]).
 
 
--export([start_link/2]).
+-export([start_link/1]).
 
 -export([
   init/1,
@@ -56,26 +56,21 @@
     error:badarg -> erlang:error(bad_provider_config)
   end).
 
-create_barrel(Name, Params0 = #{ store_provider := Store}) ->
-  % raise an error if the store doesn't exist
-  _ = ?BAD_PROVIDER_CONFIG(Store),
-  barrel_registry:with_locked_barrel(
+create_barrel(Name) ->
+  #{ mod := Mod, ref := Ref } = barrel_storage:get_store(),
+  with_locked_barrel(
     Name,
     fun() ->
-      case barrel_registry:exists(Name) of
+      case Mod:barrel_exists(Name, Ref) of
         true ->  {error, barrel_already_exists};
         false ->
-          Id = barrel_registry:local_id(Name),
-          Params1 = Params0#{ id => Id },
-          case start_barrel(Name, Params1) of
+          case start_barrel(Name) of
             {ok, _Pid} -> ok;
             Error  -> Error
           end
       end
     end
-  );
-create_barrel(Name, Params) ->
-  create_barrel(Name, Params#{ store_provider => default }).
+  ).
   
 open_barrel(Name) ->
   try
@@ -83,14 +78,14 @@ open_barrel(Name) ->
         {ok, _} = OK ->
           OK;
         error ->
+          #{ mod := Mod, ref := Ref } = barrel_storage:get_store(),
           Res = barrel_registry:with_locked_barrel(
             Name,
             fun() ->
-              case barrel_registry:config_of(Name) of
-                {ok, #{ store_provider := Store } = Params} ->
-                  _ = ?BAD_PROVIDER_CONFIG(Store),
-                  start_barrel(Name, Params);
-                error ->
+              case Mod:barrel_exists(Name, Ref) of
+                true ->
+                  start_barrel(Name);
+                false ->
                   {error, barrel_not_found}
               end
             end
@@ -115,23 +110,17 @@ close_barrel(Name) ->
   
 
 delete_barrel(Name) ->
-  barrel_registry:with_locked_barrel(
+  with_locked_barrel(
     Name,
     fun() ->
       ok = stop_barrel(Name),
-      case barrel_registry:config_of(Name) of
-        {ok, #{ id := Id, store_provider := Store }} ->
-          ok = barrel_registry:delete_config(Name),
-          Mod = barrel_services:get_service_module(store, Store),
-          Mod:delete_barrel(Store, Id);
-        error ->
-          ok
-      end
+      #{ mod := Mod, ref := Ref } = barrel_storage:get_store(),
+      Mod:delete_barrel(Name, Ref)
     end
   ).
 
-start_barrel(Name, Params) ->
-  supervisor:start_child(barrel_dbs_sup, [Name, Params]).
+start_barrel(Name) ->
+  supervisor:start_child(barrel_dbs_sup, [Name]).
 
 stop_barrel(Name) ->
   case supervisor:terminate_child(barrel_dbs_sup, barrel_registry:where_is(Name)) of
@@ -139,16 +128,17 @@ stop_barrel(Name) ->
     {error, simple_one_for_one} -> ok
   end.
 
-barrel_infos(#{ id := Id, store_mod := Mod, store_name := Store }) ->
-  try Mod:barrel_infos(Store, Id)
+barrel_infos(Name) ->
+  #{ mod := Mod, ref := Ref } = barrel_storage:get_store(),
+  try Mod:barrel_infos(Name, Ref)
   catch
     error:badarg ->
       {error, barrel_not_found}
   end.
 
 
-with_ctx(#{ id := Id, store_mod := Mod, store_name := Store }, Fun) ->
-  {ok, Ctx} = Mod:init_ctx(Store, Id, true),
+with_ctx(#{ store_mod := Mod, ref := Ref  }, Fun) ->
+  {ok, Ctx} = Mod:init_ctx(Ref, true),
   try Fun(Ctx)
   after Mod:release_ctx(Ctx)
   end.
@@ -477,17 +467,16 @@ do_index(Mod, Ctx, #{ rev := OldRev }, #{ id := DocId, rev := Rev, body_map := B
   %% {Added, Removed}
   {NewKeys -- OldKeys, OldKeys -- NewKeys}.
 
-start_link(Name, Params) ->
-  gen_batch_server:start_link({via, barrel_registry, Name}, ?MODULE, [Name, Params]).
+start_link(Name) ->
+  gen_batch_server:start_link({via, barrel_registry, Name}, ?MODULE, [Name]).
 
-init([Name, Params]) ->
-  case init_(Name, Params) of
-    {ok, Barrel} ->
+init([Name]) ->
+  case init_(Name) of
+    {ok, Barrel, LastSeq} ->
       %% we trap exit there to to handle barrel closes
       erlang:process_flag(trap_exit, true),
-      ok = barrel_registry:store_config(Name, Params),
       gproc:set_value(?barrel(Name), Barrel),
-      {ok, Barrel};
+      {ok, Barrel#{updated_seq => LastSeq}};
     {error, Reason} ->
       {stop, Reason}
   end.
@@ -504,24 +493,21 @@ terminate(_Reason, State) ->
   ok.
 
 
-init_(Name, #{ id := Id, store_provider := Store }) ->
-  Mod = barrel_services:get_service_module(store, Store),
-  case Mod:init_barrel(Store, Id) of
-    {ok, LastSeq} ->
-      {ok, #{ name => Name,
-              id => Id,
-              store_mod => Mod,
-              store_name => Store,
-              updated_seq => LastSeq }};
+init_(Name) ->
+  #{ mod := Mod, ref := Ref } = barrel_storage:get_store(),
+  case Mod:open_barrel(Name, Ref) of
+    {ok, BarrelRef, LastSeq} ->
+      Store = #{ name => Name, ref => BarrelRef, store_mod => Mod},
+      {ok, Store, LastSeq};
     Error ->
       Error
   end.
 
 
-try_close_barrel(#{ name := BarrelName, provider := {Mod, StoreName} }) ->
+try_close_barrel(#{ name := BarrelName, store_mod := Mod }) ->
   case erlang:function_exported(Mod, close_barrel, 2) of
     true ->
-      Mod:close_barrel(StoreName, BarrelName);
+      Mod:close_barrel(BarrelName);
     false ->
       ok
   end.
@@ -668,8 +654,8 @@ find_parent([], _RevTree, Acc) ->
 %% -----------------------------------------
 %% internals
 
-init_ctx(#{ id := Id, store_mod := Mod, store_name := Store }) ->
-  Mod:init_ctx(Store, Id, false).
+init_ctx(#{ store_mod := Mod, ref := Ref }) ->
+  Mod:init_ctx(Ref, false).
 
 release_ctx(Ctx, #{store_mod := Mod }) ->
   Mod:release_ctx(Ctx).
@@ -678,3 +664,10 @@ complete_batch({Tag, Pid}, Msg) ->
   catch Pid ! {self(), Tag, Msg};
 complete_batch(Clients, Msg) when is_list(Clients) ->
   _ = [catch Pid ! {self(), Tag, Msg} || {Tag, Pid} <- Clients].
+
+
+%% TODO: replace with our own internal locking system?
+-spec with_locked_barrel(barrel_name(), fun()) -> any().
+with_locked_barrel(BarrelName, Fun) ->
+  LockId = {{barrel, BarrelName}, self()},
+  global:trans(LockId, Fun).
