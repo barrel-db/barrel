@@ -25,6 +25,7 @@
 
 -include_lib("stdlib/include/ms_transform.hrl").
 
+-define(active_snapshots, barrel_tx_active_snapshots).
 -define(uncommited_keys, barrel_tx_uncommited_keys).
 -define(commited_keys, barrel_tx_commited_keys).
 
@@ -76,22 +77,26 @@ commit(Timeout) ->
     undefined ->
       erlang:error(no_transaction);
     #{ snapshot_id := SnapshotId, written_keys := Keys } ->
-      ok = gen_server:call(?MODULE, {commit, Keys, self(), SnapshotId}, Timeout),
+      Batch = [{Key, SnapshotId} || Key <- Keys],
+      ok = gen_server:call(?MODULE, {commit, self(), Batch, SnapshotId}, Timeout),
       _ = erlang:erase(barrel_transaction),
       ok
   end.
 
 new_transaction() ->
   SnapshotId = persistent_term:get({?MODULE, snapshot_id}),
-  atomics:add_get(SnapshotId, 1, 1).
+  Id = atomics:add_get(SnapshotId, 1, 1),
+  Id.
 
 
 clean_transaction() ->
   case erlang:erase(barrel_transaction) of
     undefined ->
       ok;
-    #{ written_keys := Keys } ->
-      clean_uncommited_keys(self(), Keys)
+    #{ written_keys := _Keys } ->
+      _ = clean_uncommited_keys(self()),
+      _ = erlang:erase(barrel_transaction),
+      ok
   end.
 
 
@@ -104,7 +109,6 @@ init([]) ->
   ?commited_keys = ets:new(?commited_keys, [set, named_table]),
   SnapshotId = atomics:new(1, []),
   persistent_term:put({?MODULE, snapshot_id}, SnapshotId),
-
   {ok, #{ snapshot_id => 0, monitors => #{} } }.
 
 
@@ -115,8 +119,7 @@ handle_call({register_write, Key, Pid, SnapshotId}, _From, State) ->
     false ->
       case is_uncommited(Key, Pid) of
         true ->
-          ets:insert(?uncommited_keys, {Key, Pid}),
-          ets:insert(?uncommited_keys, {{Pid, Key}, Key}),
+          ets:insert(?uncommited_keys, [{Key, Pid},  {{Pid, Key}, Key}]),
           NewState = maybe_monitor(Pid, State),
           {reply, true, NewState};
         false ->
@@ -124,20 +127,17 @@ handle_call({register_write, Key, Pid, SnapshotId}, _From, State) ->
       end
   end;
 
-handle_call({commit, Keys, Pid, SnapshotId}, _From, State) ->
-  clean_uncommited_keys(Pid, Keys),
-  lists:foreach(
-    fun(Key) -> ets:insert(?commited_keys, {Key, SnapshotId}) end,
-    Keys
-  ),
+handle_call({commit, Pid, Batch, _SnapshotId}, _From, State) ->
+  _  = clean_uncommited_keys(Pid),
+  _  = ets:insert(?commited_keys, Batch),
   {reply, ok, State};
 
-handle_call({abort, Pid, Keys}, _From, State) ->
-  clean_uncommited_keys(Pid, Keys),
+handle_call({abort, Pid}, _From, State) ->
+  _  = clean_uncommited_keys(Pid),
   {reply, ok, State}.
 
-handle_cast({abort, Pid, Keys}, State) ->
-  clean_uncommited_keys(Pid, Keys),
+handle_cast({abort, Pid}, State) ->
+  _ = clean_uncommited_keys(Pid),
   {noreply, State};
 
 handle_cast(_Msg, State) ->
@@ -155,6 +155,8 @@ is_commited_after_snapshot(Key, SnapshotId) ->
     _ -> true
   end.
 
+%% TODO: since only one process can do a transaction at a time we may not need to ckeck
+%% who's the owner of the transaction but only if one is already running?
 is_uncommited(Key, Pid) ->
   case ets:lookup(?uncommited_keys, Key) of
     [] -> true;
@@ -162,14 +164,13 @@ is_uncommited(Key, Pid) ->
     _Else -> true
   end.
 
-clean_uncommited_keys(Pid, Keys) ->
-  lists:foreach(
-    fun(Key) ->
-      ets:delete(?uncommited_keys, Key),
-      ets:delete(?uncommited_keys, {Pid, Key})
-    end,
-    Keys
-  ).
+-spec clean_uncommited_keys(pid()) -> non_neg_integer().
+clean_uncommited_keys(Pid) ->
+  MS = ets:fun2ms(fun
+                    ({{P, _K}, _}) when P =:= Pid -> true;
+                    ({_, P}) when P =:= Pid -> true
+                  end),
+  ets:select_delete(?uncommited_keys, MS).
 
 maybe_monitor(Pid, #{ monitors := Monitors } = State) ->
   case maps:is_key(Pid, Monitors) of
@@ -183,15 +184,7 @@ maybe_monitor(Pid, #{ monitors := Monitors } = State) ->
 process_is_down(Pid, #{ monitors := Monitors} = State) ->
   case maps:take(Pid, Monitors) of
     {_, Monitors2} ->
-      MS = ets:fun2ms(fun({{P, K}, _}) when P =:= Pid -> K end),
-      Keys = ets:select(?uncommited_keys, MS),
-      lists:foreach(
-        fun(Key) ->
-          ets:delete(?uncommited_keys, [Key, {Pid, Key}])
-        end,
-        Keys
-      ),
-    
+      _ = clean_uncommited_keys(Pid),
       State#{ monitors => Monitors2 };
     error ->
       State
