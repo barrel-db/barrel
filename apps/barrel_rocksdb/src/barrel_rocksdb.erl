@@ -169,24 +169,12 @@ write_doc_infos(Ctx, DocInfos, AddCount, DelCount) ->
   #{ ref := Ref, barrel_id := BarrelId } = Ctx,
   {ok, WB} = rocksdb:batch(),
   lists:foreach(
-    fun({#{  id := DocId, seq := Seq } = DI, DocTags}) ->
+    fun(#{  id := DocId, seq := Seq } = DI) ->
       DIKey = barrel_rocksdb_keys:doc_info(BarrelId, DocId),
       SeqKey = barrel_rocksdb_keys:doc_seq(BarrelId, Seq ),
       DIVal = term_to_binary(DI),
       rocksdb:batch_put(WB, DIKey, DIVal),
-      rocksdb:batch_put(WB, SeqKey, DIVal),
-      %% handle index tags
-      {ToAdd, ToRemove} = DocTags,
-      lists:foreach(
-        fun(Path) ->
-          PathKey = barrel_rocksdb_keys:index_key(BarrelId, DocId, Path),
-          rocksdb:batch_put(WB, PathKey, <<>>)
-        end, ToAdd),
-      lists:foreach(
-        fun(Path) ->
-          PathKey = barrel_rocksdb_keys:index_key(BarrelId, DocId, Path),
-          rocksdb:batch_delete(WB, PathKey)
-        end, ToRemove)
+      rocksdb:batch_put(WB, SeqKey, DIVal)
     end,
     DocInfos
   ),

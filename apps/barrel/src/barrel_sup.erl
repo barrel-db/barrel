@@ -73,8 +73,7 @@ init([]) ->
       shutdown => infinity,
       type => worker
     },
-  
-  
+
     %% safe supervisor
     #{id => barrel_safe_sup,
       start => {supervisor, start_link, [{local, barrel_safe_sup}, ?MODULE, safe]},
@@ -90,11 +89,6 @@ init(safe) ->
     %% transaction server
     #{id => barrel_tx,
       start => {barrel_tx, start_link, []}
-    },
-
-    %% index pool supervisor
-    #{id => barrel_index_pool,
-      start => {barrel_index_pool, start_link, []}
     },
 
     %% barrel db supervisor

@@ -354,9 +354,9 @@ update_docs(Barrel, Ctx, Docs, Options, UpdateType) ->
           Record = barrel_doc:make_record(Doc),
           case update_doc(Barrel, Ctx, Record, WritePolicy, 0) of
             {ignore, Result} -> {Batch1, [Result | Results1]};
-            {update_doc, OP, #{ id := DocId, rev := Rev } = DI, Tags} ->
+            {update_doc, OP, #{ id := DocId, rev := Rev } = DI} ->
               Result = {ok, DocId, Rev},
-              {[{update_doc, OP, DI, Tags} | Batch1], [Result | Results1]}
+              {[{update_doc, OP, DI} | Batch1], [Result | Results1]}
           end
         end,
         {[], []},
@@ -418,8 +418,7 @@ update_doc(Barrel, Ctx, #{ id := DocId } = Record, Policy, Attempts) ->
                  {found, deleted} -> delete;
                  _ -> add
                end,
-          Tags = do_index(Mod, Ctx, DI, DI2),
-          {update_doc, OP, flush_revisions(Barrel, Ctx, DI2), Tags};
+          {update_doc, OP, flush_revisions(Barrel, Ctx, DI2)};
         Error ->
           {ignore, Error}
       end;
@@ -442,30 +441,6 @@ flush_revisions(#{ store_mod := Mod }, Ctx, #{id := DocId} = DI) ->
     BodyMap
   ),
   DI2.
-
-do_index(_Mod, _Ctx,  #{ rev := Rev }, #{ rev := Rev }) ->
-  %% winning revision didn't change
-  {[], []};
-do_index(Mod, Ctx, #{ rev := <<"">> }, #{ id := DocId, rev := Rev, body_map := BodyMap }) ->
-  NewDoc = case maps:find(Rev, BodyMap) of
-             {ok, Doc} -> Doc;
-             error ->
-               {ok, Doc} = Mod:get_doc_revision(Ctx, DocId, Rev),
-               Doc
-           end,
-  {barrel_ars:analyze(NewDoc), []};
-do_index(Mod, Ctx, #{ rev := OldRev }, #{ id := DocId, rev := Rev, body_map := BodyMap }) ->
-  {ok, OldDoc} = Mod:get_doc_revision(Ctx, DocId, OldRev),
-  NewDoc = case maps:find(Rev, BodyMap) of
-             {ok, Doc} -> Doc;
-             error ->
-               {ok, Doc} = Mod:get_doc_revision(Ctx, DocId, Rev),
-               Doc
-           end,
-  OldKeys = barrel_ars:analyze(OldDoc),
-  NewKeys = barrel_ars:analyze(NewDoc),
-  %% {Added, Removed}
-  {NewKeys -- OldKeys, OldKeys -- NewKeys}.
 
 start_link(Name) ->
   gen_batch_server:start_link({via, barrel_registry, Name}, ?MODULE, [Name]).
@@ -525,10 +500,10 @@ handle_ops([{_, {end_batch, Tag, Pid}} | Rest], DocInfos, AddCount, DelCount, Se
         State
     end,
   handle_ops(Rest, [], 0, 0, Seq, Ctx, NewState);
-handle_ops([{_, {update_doc, OP, DI, DocTags}} | Rest], DocInfos, AddCount, DelCount, Seq, Ctx, State) ->
+handle_ops([{_, {update_doc, OP, DI}} | Rest], DocInfos, AddCount, DelCount, Seq, Ctx, State) ->
   Seq2 = Seq + 1,
   DI2 = DI#{ seq => Seq2 },
-  DocInfos2 = [{DI2, DocTags} | DocInfos],
+  DocInfos2 = [DI2 | DocInfos],
   {AddCount2, DelCount2} = case OP of
                              add -> {AddCount + 1, DelCount};
                              delete -> {AddCount, DelCount + 1};
