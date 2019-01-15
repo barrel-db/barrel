@@ -53,7 +53,6 @@ get_last_ts() ->
 init([]) ->
   process_flag(trap_exit, true),
   ok = check_for_clock_error(), %% restart if we detected a clock change
-  
   {ok, TRef} = timer:send_interval(get_interval(), persist_time),
   MRef = erlang:monitor(time_offset, clock_service),
   {ok, #{ tref => TRef, clock_monitor => MRef}}.
@@ -84,7 +83,6 @@ handle_info(_Msg, State) -> {noreply, State}.
 handle_cast(_Msg, State) -> {noreply, State}.
 
 terminate(_Reason, _State) ->
-  _ = barrel_registry:deinit(),
   ok.
 
 
