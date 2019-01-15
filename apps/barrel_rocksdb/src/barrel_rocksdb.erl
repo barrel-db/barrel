@@ -238,7 +238,8 @@ fold_docs(#{ ref := Ref, barrel_id := BarrelId } = Ctx, UserFun, UserAcc, Option
       error ->
         case maps:find(end_at, Options) of
           {ok, EndAt} ->
-            {barrel_rocksdb_keys:doc_info(BarrelId, EndAt), false};
+            Bound = barrel_rocksdb_util:bytes_next(barrel_rocksdb_keys:doc_info(BarrelId, EndAt)),
+            {Bound, false};
           error ->
             {barrel_rocksdb_keys:doc_info_max(BarrelId), false}
         end
