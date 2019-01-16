@@ -57,8 +57,8 @@ init([]) ->
 
     %% persist time server
     #{
-      id => server,
-      start => {barrel_server, start_link, []}
+      id => time_server,
+      start => {barrel_time_server, start_link, []}
     },
 
     %% barrel event server

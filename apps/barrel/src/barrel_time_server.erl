@@ -6,7 +6,7 @@
 %%% @end
 %%% Created : 13. Jul 2017 10:51
 %%%-------------------------------------------------------------------
--module(barrel_server).
+-module(barrel_time_server).
 -behaviouur(gen_server).
 %% API
 -export([
