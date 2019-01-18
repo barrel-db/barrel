@@ -174,4 +174,4 @@ fold_changes(_Config) ->
   6 = LastSeq2,
   {ok, [], 6} = barrel:fold_changes(Barrel, 6, Fun, [], #{include_deleted => true}),
   ok.
-  
+

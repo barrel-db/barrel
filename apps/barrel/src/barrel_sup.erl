@@ -67,7 +67,7 @@ init([]) ->
       shutdown => infinity,
       type => worker
     },
-  
+
     #{id => barrel_storage,
       start => {barrel_storage, start_link, []},
       shutdown => infinity,
@@ -84,17 +84,16 @@ init([]) ->
   {ok, { {one_for_one, 4, 2000}, Specs} };
 
 init(safe) ->
-  Specs = [
-  
-    %% transaction server
-    #{id => barrel_tx,
-      start => {barrel_tx, start_link, []}
-    },
-
-    %% barrel db supervisor
-    #{id => barrel_dbs_sup,
-      start => {barrel_dbs_sup, start_link, []}
-    }
-  ],
+  Specs =
+    [
+     %% transaction server
+     #{id => barrel_tx,
+       start => {barrel_tx, start_link, []}
+      },
+     %% barrel db supervisor
+     #{id => barrel_server_sup,
+       start => {barrel_server_sup, start_link, []}
+      }
+    ],
 
   {ok, { {one_for_one, 4, 2000}, Specs} }.

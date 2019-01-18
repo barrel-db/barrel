@@ -14,7 +14,6 @@
 
 -module(barrel_db).
 -author("benoitc").
--behaviour(gen_batch_server).
 
 %% API
 
@@ -32,15 +31,6 @@
   revsdiff/3,
   fold_docs/4,
   fold_changes/5
-]).
-
-
--export([start_link/1]).
-
--export([
-  init/1,
-  handle_batch/2,
-  terminate/2
 ]).
 
 
@@ -71,7 +61,7 @@ create_barrel(Name) ->
       end
     end
   ).
-  
+
 open_barrel(Name) ->
   try
       case barrel_registry:reference_of(Name) of
@@ -107,7 +97,7 @@ open_barrel(Name) ->
 
 close_barrel(Name) ->
   stop_barrel(Name).
-  
+
 
 delete_barrel(Name) ->
   with_locked_barrel(
@@ -120,10 +110,10 @@ delete_barrel(Name) ->
   ).
 
 start_barrel(Name) ->
-  supervisor:start_child(barrel_dbs_sup, [Name]).
+  supervisor:start_child(barrel_server_sup, [Name]).
 
 stop_barrel(Name) ->
-  case supervisor:terminate_child(barrel_dbs_sup, barrel_registry:where_is(Name)) of
+  case supervisor:terminate_child(barrel_server_sup, barrel_registry:where_is(Name)) of
     ok -> ok;
     {error, simple_one_for_one} -> ok
   end.
@@ -183,8 +173,8 @@ do_fetch_doc(Mod, Ctx, DocId, Options) ->
             Error ->
               Error
           end;
-        Error ->
-          Error
+        error ->
+          {error, not_found}
       end;
     Error ->
       Error
@@ -331,13 +321,17 @@ change_with_doc(Change, DocId, Rev, Mod, Ctx, true) ->
   end;
 change_with_doc(Change, _, _, _, _, _) ->
   Change.
-  
-update_docs(Barrel, Docs, Options, UpdateType) ->
-  with_ctx(Barrel, fun(Ctx) -> update_docs(Barrel, Ctx, Docs, Options, UpdateType) end).
 
-update_docs(Barrel, Ctx, Docs, Options, UpdateType) ->
-  #{ name := Name } = Barrel,
-  WritePolicy = case UpdateType of
+
+
+prepare_docs([Doc | Rest], Refs, Records) ->
+  #{ id := Id, ref := Ref } = Record = barrel_doc:make_record(Doc),
+  prepare_docs(Rest, [Ref | Refs], dict:append(Id, Record, Records));
+prepare_docs([], Refs, Records) ->
+  {lists:reverse(Refs), Records}.
+
+update_docs(#{ name := Name }, Docs, Options, UpdateType) ->
+  MergePolicy = case UpdateType of
                   interactive_edit ->
                     AllOrNothing =  maps:get(all_or_nothing, Options, false),
                     case AllOrNothing of
@@ -347,299 +341,18 @@ update_docs(Barrel, Ctx, Docs, Options, UpdateType) ->
                   replicated_changes ->
                     merge_with_conflict
                 end,
-  barrel_tx:transact(
-    fun() ->
-      {Batch, Results} = lists:foldl(
-        fun(Doc, {Batch1, Results1}) ->
-          Record = barrel_doc:make_record(Doc),
-          case update_doc(Barrel, Ctx, Record, WritePolicy, 0) of
-            {ignore, Result} -> {Batch1, [Result | Results1]};
-            {update_doc, OP, #{ id := DocId, rev := Rev } = DI} ->
-              Result = {ok, DocId, Rev},
-              {[{update_doc, OP, DI} | Batch1], [Result | Results1]}
-          end
-        end,
-        {[], []},
-        Docs
-      ),
-      Tag = make_ref(),
-      FinalBatch = lists:reverse([{end_batch, Tag, self()} | Batch]),
-      Pid = barrel_registry:where_is(Name),
-      MRef = erlang:monitor(process, Pid),
-      ok = gen_batch_server:cast_batch(Pid, FinalBatch),
-      receive
-        {Pid, Tag, done} when UpdateType =:= interactive_edit ->
-          erlang:demonitor(MRef, [flush]),
-          barrel_tx:commit(),
-          {ok, lists:reverse(Results)};
-        {Pid, Tag, done} ->
-          barrel_tx:commit(),
-          erlang:demonitor(MRef, [flush]),
-          ok;
-        {'DOWN', MRef, _, _, Reason} ->
-          barrel_tx:abort(),
-          exit(Reason)
-      end
-    end).
-
-
-update_doc(Barrel, Ctx, #{ id := << ?LOCAL_DOC_PREFIX, _/binary>>=DocId } = Record, Policy, Attempts) ->
-  #{name := Name, store_mod := Mod } = Barrel,
-  case barrel_tx:register_write({Name, DocId}) of
-    true ->
-      #{ doc := LocalDoc, deleted := Deleted } = Record,
-      case Deleted of
-        true ->
-          ok = Mod:delete_local_doc(Ctx, DocId);
-        false ->
-          ok = Mod:insert_local_doc(Ctx, LocalDoc)
-      end,
-      {ignore, {ok, DocId}};
-    false ->
-      barrel_lib:log_and_backoff(debug, ?MODULE, Attempts, "local doc write conflict"),
-      update_doc(Barrel, Ctx, Record, Policy, Attempts +1 )
-  end;
-update_doc(Barrel, Ctx, #{ id := DocId } = Record, Policy, Attempts) ->
-  #{name := Name, store_mod := Mod } = Barrel,
-  case barrel_tx:register_write({Name, DocId}) of
-    true ->
-      {DocStatus, DI} = case Mod:get_doc_info(Ctx, DocId) of
-                          {ok, DI1} -> {found, DI1#{ body_map => #{} }};
-                          {error, not_found} -> {not_found, new_docinfo(DocId)}
-                        end,
-      MergeFun = case Policy of
-                   merge -> fun merge_revtree/2;
-                   merge_with_conflict -> fun merge_revtree_with_conflict/2
-                 end,
-      case MergeFun(Record, DI) of
-        {ok, DI2} ->
-          OP = case {DocStatus, maps:get(deleted, DI2, false)} of
-                 {found, false} -> update;
-                 {found, deleted} -> delete;
-                 _ -> add
-               end,
-          {update_doc, OP, flush_revisions(Barrel, Ctx, DI2)};
-        Error ->
-          {ignore, Error}
-      end;
-    false ->
-      barrel_lib:log_and_backoff(debug, ?MODULE, Attempts, "document write conflict"),
-      update_doc(Barrel, Ctx, Record, Policy, Attempts +1 )
-  end.
-
-maybe_add_deleted(Doc, true) -> Doc#{ <<"_deleted">> => true };
-maybe_add_deleted(Doc, false) -> Doc.
-
-flush_revisions(#{ store_mod := Mod }, Ctx, #{id := DocId} = DI) ->
-  {BodyMap, DI2} = maps:take(body_map, DI),
-  _ = maps:fold(
-    fun(DocRev, Body, _) ->
-      ok = Mod:add_doc_revision(Ctx, DocId, DocRev, Body),
-      ok
-    end,
-    ok,
-    BodyMap
-  ),
-  DI2.
-
-start_link(Name) ->
-  gen_batch_server:start_link({via, barrel_registry, Name}, ?MODULE, [Name]).
-
-init([Name]) ->
-  case init_(Name) of
-    {ok, Barrel, LastSeq} ->
-      %% we trap exit there to to handle barrel closes
-      erlang:process_flag(trap_exit, true),
-      gproc:set_value(?barrel(Name), Barrel),
-      {ok, Barrel#{updated_seq => LastSeq}};
-    {error, Reason} ->
-      {stop, Reason}
-  end.
-
-handle_batch(Batch, State) ->
-  {ok, Ctx} = init_ctx(State),
-  NewState = try handle_ops(Batch, [], 0, 0, maps:get(updated_seq, State), Ctx, State)
-             after release_ctx(Ctx, State)
-             end,
-  {ok, NewState}.
-
-terminate(_Reason, State) ->
-  ok = try_close_barrel(State),
-  ok.
-
-
-init_(Name) ->
-  #{ mod := Mod, ref := Ref } = barrel_storage:get_store(),
-  case Mod:open_barrel(Name, Ref) of
-    {ok, BarrelRef, LastSeq} ->
-      Store = #{ name => Name, ref => BarrelRef, store_mod => Mod},
-      {ok, Store, LastSeq};
+  {Refs, Records} = prepare_docs(Docs, [], dict:new()),
+  Server =  barrel_registry:where_is(Name),
+  case barrel_server:update_docs(Server, Records, MergePolicy) of
+    {ok, Results} ->
+      FinalResults = [maps:get(Ref, Results) || Ref <- Refs],
+      {ok, FinalResults};
     Error ->
       Error
   end.
 
-
-try_close_barrel(#{ name := BarrelName, store_mod := Mod }) ->
-  case erlang:function_exported(Mod, close_barrel, 2) of
-    true ->
-      Mod:close_barrel(BarrelName);
-    false ->
-      ok
-  end.
-
-handle_ops([{_, {end_batch, Tag, Pid}} | Rest], DocInfos, AddCount, DelCount, Seq, Ctx, State) ->
-  #{ name := Name, store_mod := Mod} = State,
-  NewState =
-    case Mod:write_doc_infos(Ctx, DocInfos, AddCount, DelCount) of
-      ok ->
-        barrel_event:notify(Name, db_updated),
-        complete_batch({Tag, Pid}, done),
-        State#{updated_seq => Seq};
-      Error ->
-        _ = complete_batch({Tag, Pid}, Error),
-        State
-    end,
-  handle_ops(Rest, [], 0, 0, Seq, Ctx, NewState);
-handle_ops([{_, {update_doc, OP, DI}} | Rest], DocInfos, AddCount, DelCount, Seq, Ctx, State) ->
-  Seq2 = Seq + 1,
-  DI2 = DI#{ seq => Seq2 },
-  DocInfos2 = [DI2 | DocInfos],
-  {AddCount2, DelCount2} = case OP of
-                             add -> {AddCount + 1, DelCount};
-                             delete -> {AddCount, DelCount + 1};
-                             update -> {AddCount, DelCount}
-                           end,
-  handle_ops(Rest, DocInfos2, AddCount2, DelCount2, Seq2, Ctx, State);
-handle_ops([], _, _, _, _, _, State) ->
-  State.
-
-%% -----------------------------------------
-%% merge doc infos
-
-new_docinfo(DocId) ->
-  #{id => DocId,
-    rev => <<"">>,
-    seq => 0,
-    deleted => false,
-    revtree => barrel_revtree:new(),
-    body_map => #{}}.
-
-merge_revtree(Record, #{ deleted := true } = DocInfo) ->
-  #{ rev := WinningRev,  revtree := RevTree, body_map := BodyMap } = DocInfo,
-  #{ revs := Revs, deleted := NewDeleted, doc := Doc } = Record,
-  Depth = length(Revs),
-  case Depth == 1 andalso not NewDeleted of
-    true ->
-      {Gen, _}  = barrel_doc:parse_revision(WinningRev),
-      NewRevHash = barrel_doc:revision_hash(Doc, WinningRev, false),
-      NewRev = << (integer_to_binary(Gen+1))/binary, "-", NewRevHash/binary  >>,
-      RevInfo = #{  id => NewRev,  parent => WinningRev, deleted => false },
-      RevTree2 = barrel_revtree:add(RevInfo, RevTree),
-      {ok, DocInfo#{
-        rev => NewRev,
-        deleted => false,
-        revtree => RevTree2 ,
-        body_map => BodyMap#{ NewRev => Doc }
-      }};
-    false ->
-      %% revision conflict
-      {error, {conflict, revision_conflict}}
-  end;
-merge_revtree(Record, DocInfo) ->
-  #{ revtree := RevTree, body_map := BodyMap } = DocInfo,
-  #{ revs := Revs, deleted := NewDeleted, doc := Doc } = Record,
-  case Revs of
-    [NewRev] when map_size(RevTree) =:= 0  ->
-      RevInfo = #{  id => NewRev, parent => <<>>, deleted => NewDeleted },
-      RevTree1 = barrel_revtree:add(RevInfo, RevTree),
-      {ok, DocInfo#{ rev => NewRev,
-        revtree => RevTree1,
-        deleted => NewDeleted,
-        body_map => BodyMap#{ NewRev => Doc} }};
-    [_NewRev] ->
-      %% doc exists, we will create a new branch
-      {error, {conflict, doc_exists}};
-    [NewRev, Rev | _] ->
-      case barrel_revtree:is_leaf(Rev, RevTree) of
-        true ->
-          RevInfo = #{  id => NewRev, parent => Rev, deleted => NewDeleted },
-          RevTree2 = barrel_revtree:add(RevInfo, RevTree),
-          {WinningRev, _, _} = barrel_revtree:winning_revision(RevTree2),
-          case NewDeleted of
-            false ->
-              {ok, DocInfo#{ rev => WinningRev,
-                deleted => false,
-                revtree => RevTree2,
-                body_map => BodyMap#{ NewRev => Doc} }};
-            true ->
-              {ok, DocInfo#{ rev => WinningRev,
-                deleted => barrel_doc:is_deleted(RevTree2),
-                revtree => RevTree2,
-                body_map => BodyMap#{ NewRev => Doc} }}
-          end;
-        false ->
-          {error, {conflict, revision_conflict}}
-      end
-  end.
-
-merge_revtree_with_conflict(Record, DocInfo) ->
-  #{ revtree := RevTree, body_map := BodyMap } = DocInfo,
-  #{ revs := [LeafRev|Revs] ,  deleted := NewDeleted, doc := Doc  } = Record,
-  
-  case barrel_revtree:contains(LeafRev, RevTree) of
-    true ->
-      %% revision already stored. This only happen when doing all_or_nothing.
-      %% TODO: check before sending it to writes?
-      {ok, DocInfo};
-    false ->
-      %% Find the point where this doc's history branches from the current rev:
-      {Parent, Path} = find_parent(Revs, RevTree, []),
-      %% merge path in the revision tree
-      {_, RevTree2} = lists:foldr(
-        fun(RevId, {P, Tree}) ->
-          Deleted = (NewDeleted =:= true andalso RevId =:= LeafRev),
-          RevInfo = #{ id => RevId, parent => P, deleted => Deleted },
-          {RevId, barrel_revtree:add(RevInfo, Tree)}
-        end,
-        {Parent, RevTree},
-        [LeafRev|Path]
-      ),
-      {WinningRev, _, _} = barrel_revtree:winning_revision(RevTree2),
-      %% update DocInfo, we always find is the doc is deleted there
-      %% since we could have only updated an internal branch
-      {ok, DocInfo#{
-        rev => WinningRev,
-        revtree => RevTree2,
-        deleted => barrel_doc:is_deleted(RevTree2),
-        body_map => BodyMap#{ LeafRev => Doc }
-      }}
-  end.
-
-find_parent([RevId | Rest], RevTree, Acc) ->
-  case barrel_revtree:contains(RevId, RevTree) of
-    true ->
-      {RevId, Rest};
-    false ->
-      find_parent(Rest, RevTree, [RevId | Acc])
-  end;
-find_parent([], _RevTree, Acc) ->
-  {<<"">>, lists:reverse(Acc)}.
-
-
-%% -----------------------------------------
-%% internals
-
-init_ctx(#{ store_mod := Mod, ref := Ref }) ->
-  Mod:init_ctx(Ref, false).
-
-release_ctx(Ctx, #{store_mod := Mod }) ->
-  Mod:release_ctx(Ctx).
-
-complete_batch({Tag, Pid}, Msg) ->
-  catch Pid ! {self(), Tag, Msg};
-complete_batch(Clients, Msg) when is_list(Clients) ->
-  _ = [catch Pid ! {self(), Tag, Msg} || {Tag, Pid} <- Clients].
-
+maybe_add_deleted(Doc, true) -> Doc#{ <<"_deleted">> => true };
+maybe_add_deleted(Doc, false) -> Doc.
 
 %% TODO: replace with our own internal locking system?
 -spec with_locked_barrel(barrel_name(), fun()) -> any().

@@ -6,7 +6,7 @@
 %%% @end
 %%% Created : 29. Nov 2018 23:21
 %%%-------------------------------------------------------------------
--module(barrel_dbs_sup).
+-module(barrel_server_sup).
 -author("benoitc").
 -behaviour(supervisor).
 
@@ -24,7 +24,7 @@ start_link() ->
 init([]) ->
   Spec =
     #{ id => barrel,
-       start => {barrel_db, start_link, []}},
-  
+       start => {barrel_server, start_link, []}},
+
   SupFlags = #{ strategy => simple_one_for_one },
   {ok, {SupFlags, [Spec]}}.

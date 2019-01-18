@@ -72,7 +72,7 @@ basic(_Config) ->
       )
     end
   ),
-  
+
   receive
     {ok, false} ->
       Pid ! {done, self()},

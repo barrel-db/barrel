@@ -120,7 +120,7 @@ close_barrel(Name) ->
 -spec delete_barrel(Name :: barrel_name()) -> ok.
 delete_barrel(Name) ->
   barrel_db:delete_barrel(Name).
-  
+
 %% @doc return barrel_infos.
 -spec barrel_infos(Name :: barrel_name()) -> barrel_infos().
 barrel_infos(Name) ->
@@ -202,7 +202,8 @@ save_docs(Barrel, Docs, Options) ->
   Docs :: [barrel_doc:doc()],
   SaveResult :: ok.
 save_replicated_docs(Barrel, Docs) ->
-  barrel_db:update_docs(Barrel, Docs, #{}, replicated_changes).
+  {ok, _} = barrel_db:update_docs(Barrel, Docs, #{}, replicated_changes),
+  ok.
 
 %% @doc delete multiple docs
 -spec delete_docs(Name, DocsOrDocsRevId) -> SaveResults when

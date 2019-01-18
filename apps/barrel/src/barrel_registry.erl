@@ -26,7 +26,7 @@
 -export([local_id/1]).
 
 
--include_lib("barrel/include/barrel.hrl").
+-include("barrel.hrl").
 
 -spec register_name(barrel_name(), pid()) -> yes | no.
 register_name(BarrelName, Pid) ->
