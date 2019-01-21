@@ -36,7 +36,10 @@
   fold_docs/4,
   fold_changes/5,
   fold_path/5,
-  save_replicated_docs/2
+  save_replicated_docs/2,
+  put_local_doc/3,
+  delete_local_doc/2,
+  get_local_doc/2
 ]).
 
 -include_lib("barrel/include/barrel.hrl").
@@ -260,3 +263,14 @@ fold_changes(Barrel, Since, Fun, AccIn, Options) ->
   AccOut :: any().
 fold_path(Barrel, Path, Fun, Acc, Options) ->
   barrel_db:fold_path(Barrel, Path, Fun, Acc, Options).
+
+
+
+put_local_doc(Barrel, DocId, Doc) ->
+  barrel_db:put_local_doc(Barrel, DocId, Doc).
+
+delete_local_doc(Barrel, DocId) ->
+  barrel_db:delete_local_doc(Barrel, DocId).
+
+get_local_doc(Barrel, DocId) ->
+  barrel_db:get_local_doc(Barrel, DocId).

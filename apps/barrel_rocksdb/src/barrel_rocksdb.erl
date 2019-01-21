@@ -28,7 +28,7 @@
          commit/1,
          insert_doc_infos/2,
          update_doc_infos/3,
-         insert_local_doc/2,
+         put_local_doc/3,
          delete_local_doc/2,
          add_doc_revision/4,
          delete_doc_revision/3]).
@@ -216,17 +216,6 @@ update_doc_infos(#{ barrel_id := BarrelId,
   ok = rocksdb:batch_single_delete(Batch, OldSeqKey),
   Ctx#{ docs_count => DocsCount1, docs_del_count => DocsDelCount1 }.
 
-insert_local_doc(#{ barrel_id := BarrelId, batch := Batch } = Ctx, LocalDoc) ->
-  #{ <<"id" >> := DocId } = LocalDoc,
-  LocalKey = barrel_rocksdb_keys:local_doc(BarrelId, DocId),
-  ok = rocksdb:batch_put(Batch, LocalKey, term_to_binary(LocalDoc)),
-  Ctx.
-
-delete_local_doc(#{ barrel_id := BarrelId, batch := Batch } = Ctx, DocId) ->
-  LocalKey = barrel_rocksdb_keys:local_doc(BarrelId, DocId),
-  ok = rocksdb:batch_delete(Batch, LocalKey),
-  Ctx.
-
 add_doc_revision(#{ barrel_id := BarrelId, batch := Batch } = Ctx, DocId, DocRev, Body) ->
   RevKey = barrel_rocksdb_keys:doc_rev(BarrelId, DocId, DocRev),
   ok = rocksdb:batch_put(Batch, RevKey, term_to_binary(Body)),
@@ -236,6 +225,16 @@ delete_doc_revision(#{ barrel_id := BarrelId, batch := Batch } = Ctx, DocId, Doc
   RevKey = barrel_rocksdb_keys:doc_rev(BarrelId, DocId, DocRev),
   ok = rocksdb:batch_delete(Batch, RevKey),
   Ctx.
+
+put_local_doc(#{ id := BarrelId, ref := Ref}, DocId, LocalDoc) ->
+  LocalKey = barrel_rocksdb_keys:local_doc(BarrelId, DocId),
+  ok = rocksdb:put(Ref, LocalKey, term_to_binary(LocalDoc), []),
+  ok.
+
+delete_local_doc(#{ id := BarrelId, ref := Ref }, DocId) ->
+  LocalKey = barrel_rocksdb_keys:local_doc(BarrelId, DocId),
+  ok = rocksdb:delete(Ref, LocalKey, []),
+  ok.
 
 init_ctx(#{ id := BarrelId, ref := Ref }, IsRead) ->
   Snapshot = case IsRead of
@@ -385,7 +384,11 @@ do_fold_changes(_, _, _, UserAcc) ->
 
 get_local_doc(#{ ref := Ref, barrel_id := BarrelId }, DocId) ->
   LocalKey = barrel_rocksdb_keys:local_doc(BarrelId, DocId),
-  rocksdb:get(Ref, LocalKey, []).
+  case rocksdb:get(Ref, LocalKey, []) of
+    {ok, DocBin} -> {ok, binary_to_term(DocBin)};
+    not_found -> {error, not_found};
+    Error -> Error
+  end.
 
 %% -------------------
 %% internals

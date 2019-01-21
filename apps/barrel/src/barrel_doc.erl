@@ -21,9 +21,9 @@
 -export([
     revision_hash/3,
     revision_id/2,
-    parse_revision/1, 
-    encode_revisions/1, 
-    parse_revisions/1, 
+    parse_revision/1,
+    encode_revisions/1,
+    parse_revisions/1,
     trim_history/3
   , compare/2
 ]).
@@ -68,7 +68,7 @@ revision_hash(Doc, Rev, Deleted) ->
 
 revision_id(RevPos, RevHash) when is_integer(RevPos), is_binary(RevHash) ->
   << (integer_to_binary(RevPos))/binary, "-", RevHash/binary >>.
-  
+
 parse_revision(<<"">>) -> {0, <<"">>};
 parse_revision(Rev) when is_binary(Rev) ->
   case binary:split(Rev, <<"-">>) of
@@ -88,7 +88,7 @@ parse_revisions(#{ <<"revisions">> := Revisions}) ->
         end, {[], Start}, Ids),
       lists:reverse(Revs);
     _ -> []
-  
+
   end;
 parse_revisions(#{<<"_rev">> := Rev}) -> [Rev];
 parse_revisions(_) -> [].
@@ -155,15 +155,6 @@ doc_without_meta(Doc) ->
     Doc
   ).
 
-make_record(Doc0 = #{ <<"id">> := Id = << ?LOCAL_DOC_PREFIX, _/binary >> }) ->
-  Deleted = maps:get(<<"deleted">>, Doc0, false),
-  Rev = maps:get(<<"_rev">>, Doc0, <<"0">>),
-  Doc1 = doc_without_meta(Doc0),
-  #{id => Id,
-    ref => erlang:make_ref(),
-    deleted => Deleted,
-    revs => [Rev],
-    doc => Doc1};
 make_record(#{ <<"id">> := Id, <<"doc">> := Doc0, <<"history">> := History }) ->
   Deleted = maps:get(<<"deleted">>, Doc0, false),
   Doc1 = doc_without_meta(Doc0),

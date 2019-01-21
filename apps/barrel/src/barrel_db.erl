@@ -30,7 +30,10 @@
   update_docs/4,
   revsdiff/3,
   fold_docs/4,
-  fold_changes/5
+  fold_changes/5,
+  put_local_doc/3,
+  delete_local_doc/2,
+  get_local_doc/2
 ]).
 
 
@@ -350,6 +353,24 @@ update_docs(#{ name := Name }, Docs, Options, UpdateType) ->
     Error ->
       Error
   end.
+
+
+put_local_doc(#{ name := Name}, DocId, Doc) ->
+   Server =  barrel_registry:where_is(Name),
+   gen_server:call(Server, {put_local_doc, DocId, Doc}).
+
+delete_local_doc(#{ name := Name }, DocId) ->
+  Server =  barrel_registry:where_is(Name),
+  gen_server:call(Server, {delete_local_doc, DocId}).
+
+get_local_doc(#{ store_mod := Mod } = Barrel, DocId) ->
+  with_ctx(
+    Barrel,
+    fun(Ctx) ->
+        Mod:get_local_doc(Ctx, DocId)
+    end
+   ).
+
 
 maybe_add_deleted(Doc, true) -> Doc#{ <<"_deleted">> => true };
 maybe_add_deleted(Doc, false) -> Doc.

@@ -46,6 +46,18 @@ init([Name]) ->
       {stop, Reason}
   end.
 
+handle_call({put_local_doc, DocId, Doc}, _From,
+            #{ store_mod := Mod,
+               ref := Ref} = State) ->
+  Reply = Mod:put_local_doc(Ref, DocId, Doc),
+  {reply, Reply, State};
+
+handle_call({delete_local_doc, DocId}, _From,
+            #{ store_mod := Mod,
+               ref := Ref} = State) ->
+  Reply = Mod:delete_local_doc(Ref, DocId),
+  {reply, Reply, State};
+
 handle_call({update_docs, Docs, MergePolicy}, _From,
             #{ store_mod := Mod,
                ref := Ref,
@@ -88,17 +100,7 @@ update_docs(GroupedRecords, MergePolicy, RU,
                merge_with_conflict -> fun merge_revtree_with_conflict/2
              end,
   dict:fold(
-    fun
-      (<< ?LOCAL_DOC_PREFIX, _/binary>>, Records, {Results1, RU1, Seq1}) ->
-        #{ id := DocId } = Record = dict:last(Records),
-        RU2  = case Record of
-                  #{ doc := LocalDoc, deleted := false } ->
-                    Mod:insert_local_doc(RU1, LocalDoc);
-                  _ ->
-                    Mod:delete_local_doc(RU1, DocId)
-                end,
-        {[{ok, DocId} | Results1], RU2, Seq1};
-      (DocId, Records, {Results1, RU1, Seq1}) ->
+    fun(DocId, Records, {Results1, RU1, Seq1}) ->
         {DocStatus, #{ seq := OldSeq } = DI} = case Mod:get_doc_info(RU, DocId) of
                                                  {ok, DI1} -> {found, DI1};
                                                  {error, not_found} -> {not_found, new_docinfo(DocId)}
@@ -108,11 +110,11 @@ update_docs(GroupedRecords, MergePolicy, RU,
           DI /= DI2 ->
             Seq2 = Seq1 + 1,
             RU3 = case DocStatus of
-              not_found ->
-                Mod:insert_doc_infos(RU2, DI2#{ seq => Seq2 });
-              found ->
-                Mod:update_doc_infos(RU2, DI2#{ seq => Seq2 }, OldSeq)
-            end,
+                    not_found ->
+                      Mod:insert_doc_infos(RU2, DI2#{ seq => Seq2 });
+                    found ->
+                      Mod:update_doc_infos(RU2, DI2#{ seq => Seq2 }, OldSeq)
+                  end,
             {Results2, RU3, Seq2};
           true ->
             {Results2, RU2, Seq1}
