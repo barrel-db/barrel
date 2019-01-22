@@ -37,8 +37,8 @@
 ]).
 
 
--include_lib("barrel/include/barrel.hrl").
--include_lib("barrel/include/barrel_logger.hrl").
+-include_lib("barrel.hrl").
+-include_lib("barrel_logger.hrl").
 
 -define(WRITE_BATCH_SIZE, 128).
 
