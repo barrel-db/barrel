@@ -12,7 +12,7 @@ test:
     - _build/test/cover
 
   script:
-    - MAKEFLAGS=-j4 make test cover
+    - make test cover
 
   cache:
     paths:
