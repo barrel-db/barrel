@@ -63,8 +63,8 @@ handle_call({update_docs, Docs, MergePolicy}, _From,
                ref := Ref,
                name := Name,
                updated_seq := LastSeq } = State) ->
-  {ok, RU0} = Mod:recovery_unit(Ref),
-  {Results, RU, UpdatedSeq} = update_docs(Docs, MergePolicy, RU0, State),
+  {ok, RU} = Mod:recovery_unit(Ref),
+  {Results, UpdatedSeq} = update_docs(Docs, MergePolicy, RU, State),
   {Reply, NewState} = case Mod:commit(RU) of
                         ok ->
                           Mod:release_recovery_unit(RU),
@@ -100,41 +100,40 @@ update_docs(GroupedRecords, MergePolicy, RU,
                merge_with_conflict -> fun merge_revtree_with_conflict/2
              end,
   dict:fold(
-    fun(DocId, Records, {Results1, RU1, Seq1}) ->
+    fun(DocId, Records, {Results1, Seq1}) ->
         {DocStatus, #{ seq := OldSeq } = DI} = case Mod:get_doc_info(RU, DocId) of
                                                  {ok, DI1} -> {found, DI1};
                                                  {error, not_found} -> {not_found, new_docinfo(DocId)}
                                                end,
-        {DI2, Results2, RU2} = merge_revtrees(Records, DI, Results1, Mod, RU1, MergeFun),
+        {DI2, Results2} = merge_revtrees(Records, DI, Results1, Mod, RU, MergeFun),
         if
           DI /= DI2 ->
             Seq2 = Seq1 + 1,
-            RU3 = case DocStatus of
-                    not_found ->
-                      Mod:insert_doc_infos(RU2, DI2#{ seq => Seq2 });
-                    found ->
-                      Mod:update_doc_infos(RU2, DI2#{ seq => Seq2 }, OldSeq)
-                  end,
-            {Results2, RU3, Seq2};
+            case DocStatus of
+              not_found ->
+                Mod:insert_doc_infos(RU, DI2#{ seq => Seq2 });
+              found ->
+                Mod:update_doc_infos(RU, DI2#{ seq => Seq2 }, OldSeq)
+            end,
+            {Results2, Seq2};
           true ->
-            {Results2, RU2, Seq1}
+            {Results2, Seq1}
         end
     end,
-    {#{}, RU, LastSeq},
-    GroupedRecords).
+    {#{}, LastSeq}, GroupedRecords).
 
 merge_revtrees([#{ ref := Ref } = Record | Rest], #{ id := DocId } = DI, Results, Mod, RU, MergeFun) ->
-        case MergeFun(Record, DI) of
-          {ok, #{ rev := Rev } = DI2, DocRev, RevBody} ->
-            RU2 = Mod:add_doc_revision(RU, DocId, DocRev, RevBody),
-            Results2 = maps:put(Ref, {ok, DocId, Rev}, Results),
-            merge_revtrees(Rest, DI2, Results2, Mod, RU2, MergeFun);
-          Error ->
-            Results2 = maps:put(Ref, Error, Results),
-            merge_revtrees(Rest, DI, Results2, Mod, RU, MergeFun)
-        end;
-merge_revtrees([], DI, Results, _Mod, RU, _MergedFun) ->
-        {DI, Results, RU}.
+  case MergeFun(Record, DI) of
+    {ok, #{ rev := Rev } = DI2, DocRev, RevBody} ->
+      ok = Mod:add_doc_revision(RU, DocId, DocRev, RevBody),
+      Results2 = maps:put(Ref, {ok, DocId, Rev}, Results),
+      merge_revtrees(Rest, DI2, Results2, Mod, RU, MergeFun);
+    Error ->
+      Results2 = maps:put(Ref, Error, Results),
+      merge_revtrees(Rest, DI, Results2, Mod, RU, MergeFun)
+  end;
+merge_revtrees([], DI, Results, _Mod, _RU, _MergedFun) ->
+  {DI, Results}.
 
 %% -----------------------------------------
 %% merge doc infos

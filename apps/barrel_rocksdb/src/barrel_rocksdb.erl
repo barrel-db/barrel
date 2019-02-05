@@ -158,8 +158,7 @@ recovery_unit(#{ id := BarrelId, ref := Ref }) ->
   {ok, #{ ref => Ref,
           barrel_id => BarrelId,
           batch => WB,
-          docs_count => 0,
-          del_docs_count => 0 }}.
+          counts => counters:new(2, [])}}.
 
 release_recovery_unit(#{ batch := Batch }) ->
   _ = (catch rocksdb:release_batch(Batch)),
@@ -168,10 +167,9 @@ release_recovery_unit(#{ batch := Batch }) ->
 commit(#{ barrel_id := BarrelId,
           ref := Ref,
           batch := Batch,
-          docs_count := DocsCount,
-          del_docs_count := DocsDelCount }) ->
-  ok = maybe_merge_count(DocsCount, docs_count, BarrelId, Batch),
-  ok = maybe_merge_count(DocsDelCount, del_docs_count, BarrelId, Batch),
+          counts := Counts }) ->
+  ok = maybe_merge_count(counters:get(Counts, 1), docs_count, BarrelId, Batch),
+  ok = maybe_merge_count(counters:get(Counts, 2), del_docs_count, BarrelId, Batch),
   rocksdb:write_batch(Ref, Batch, []).
 
 maybe_merge_count(0, _Name, _Id, _Batch) -> ok;
@@ -186,27 +184,21 @@ maybe_merge_count(Count, del_docs_count, Id, Batch) ->
 
 insert_doc_infos(#{ barrel_id := BarrelId,
                     batch := Batch,
-                    docs_count := DocsCount } = Ctx,
+                    counts := Counts },
                  #{ id := DocId, seq := Seq } = DI) ->
   DIKey = barrel_rocksdb_keys:doc_info(BarrelId, DocId),
   SeqKey = barrel_rocksdb_keys:doc_seq(BarrelId, Seq ),
   DIVal = term_to_binary(DI),
   ok = rocksdb:batch_put(Batch, DIKey, DIVal),
   ok = rocksdb:batch_put(Batch, SeqKey, DIVal),
-  Ctx#{ docs_count => DocsCount + 1 }.
+  ok = counters:add(Counts, 1, 1),
+  ok.
 
 update_doc_infos(#{ barrel_id := BarrelId,
                     batch := Batch,
-                    docs_count := DocsCount0,
-                    del_docs_count := DocsDelCount0 } = Ctx,
+                    counts := Counts },
                  #{ id := DocId, seq := Seq, deleted := Del } = DI, OldSeq) ->
 
-  {DocsCount1, DocsDelCount1} = case Del of
-                                  false ->
-                                    {DocsCount0, DocsDelCount0};
-                                  true ->
-                                    {DocsCount0 - 1, DocsDelCount0 + 1}
-                                end,
   DIKey = barrel_rocksdb_keys:doc_info(BarrelId, DocId),
   SeqKey = barrel_rocksdb_keys:doc_seq(BarrelId, Seq ),
   OldSeqKey = barrel_rocksdb_keys:doc_seq(BarrelId, OldSeq),
@@ -214,27 +206,30 @@ update_doc_infos(#{ barrel_id := BarrelId,
   ok = rocksdb:batch_put(Batch, DIKey, DIVal),
   ok = rocksdb:batch_put(Batch, SeqKey, DIVal),
   ok = rocksdb:batch_single_delete(Batch, OldSeqKey),
-  Ctx#{ docs_count => DocsCount1, docs_del_count => DocsDelCount1 }.
+  ok = update_counters(Del, Counts),
+  ok.
 
-add_doc_revision(#{ barrel_id := BarrelId, batch := Batch } = Ctx, DocId, DocRev, Body) ->
-  RevKey = barrel_rocksdb_keys:doc_rev(BarrelId, DocId, DocRev),
-  ok = rocksdb:batch_put(Batch, RevKey, term_to_binary(Body)),
-  Ctx.
+update_counters(false, _) -> ok;
+update_counters(true, Counts) ->
+  ok = counters:sub(Counts, 1, 1),
+  ok = counters:add(Counts, 2, 1),
+  ok.
 
-delete_doc_revision(#{ barrel_id := BarrelId, batch := Batch } = Ctx, DocId, DocRev) ->
+add_doc_revision(#{ barrel_id := BarrelId, batch := Batch }, DocId, DocRev, Body) ->
   RevKey = barrel_rocksdb_keys:doc_rev(BarrelId, DocId, DocRev),
-  ok = rocksdb:batch_delete(Batch, RevKey),
-  Ctx.
+  rocksdb:batch_put(Batch, RevKey, term_to_binary(Body)).
+
+delete_doc_revision(#{ barrel_id := BarrelId, batch := Batch }, DocId, DocRev) ->
+  RevKey = barrel_rocksdb_keys:doc_rev(BarrelId, DocId, DocRev),
+  rocksdb:batch_delete(Batch, RevKey).
 
 put_local_doc(#{ id := BarrelId, ref := Ref}, DocId, LocalDoc) ->
   LocalKey = barrel_rocksdb_keys:local_doc(BarrelId, DocId),
-  ok = rocksdb:put(Ref, LocalKey, term_to_binary(LocalDoc), []),
-  ok.
+  rocksdb:put(Ref, LocalKey, term_to_binary(LocalDoc), []).
 
 delete_local_doc(#{ id := BarrelId, ref := Ref }, DocId) ->
   LocalKey = barrel_rocksdb_keys:local_doc(BarrelId, DocId),
-  ok = rocksdb:delete(Ref, LocalKey, []),
-  ok.
+  rocksdb:delete(Ref, LocalKey, []).
 
 init_ctx(#{ id := BarrelId, ref := Ref }, IsRead) ->
   Snapshot = case IsRead of
