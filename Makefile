@@ -33,7 +33,7 @@ dialyzer:
 	@$(REBAR) dialyzer
 
 test: cleantest
-	@$(REBAR) eunit
+	@ERLANG_ROCKSDB_OPTS="-DWITH_SNAPPY=ON" $(REBAR) eunit
 	@$(EPMD) -daemon
 	@ERLANG_ROCKSDB_OPTS="-DWITH_SNAPPY=ON" $(REBAR) ct --sname=barrel_test
 
