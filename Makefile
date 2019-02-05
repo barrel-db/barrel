@@ -8,11 +8,11 @@ EPMD ?= $(shell which epmd)
 all: compile
 
 compile:
-	@$(REBAR) compile
+	@ERLANG_ROCKSDB_OPTS="-DWITH_SNAPPY" $(REBAR) compile
 
 ## Create a barrel release
 rel:
-	@$(REBAR) as prod release
+	@ERLANG_ROCKSDB_OPTS="-DWITH_SNAPPY" $(REBAR) as prod release
 
 devrel: ## Create a barrel release
 	@$(REBAR) release
@@ -35,7 +35,7 @@ dialyzer:
 test: cleantest
 	@$(REBAR) eunit
 	@$(EPMD) -daemon
-	@$(REBAR) ct --sname=barrel_test
+	@ERLANG_ROCKSDB_OPTS="-DWITH_SNAPPY" $(REBAR) ct --sname=barrel_test
 
 cover:
 	@$(REBAR) cover

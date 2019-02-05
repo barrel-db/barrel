@@ -2,11 +2,7 @@ image: erlang:21.2
 
 before_script:
   - apt-get -q update
-  - apt-get -qy install cmake
-
-before_script:
-  - apt-get -q update
-  - apt-get -qy install cmake
+  - apt-get -qy install cmake libsnappy-dev
 
 test:
   artifacts:
