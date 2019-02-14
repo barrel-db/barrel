@@ -1,2 +1,2 @@
-true = os:putenv("ERLANG_ROCKSDB_OPTS", "-DWITH_SNAPPY=ON"),
+true = os:putenv("ERLANG_ROCKSDB_OPTS", "-DWITH_BUNDLE_SNAPPY=ON"),
 CONFIG.
