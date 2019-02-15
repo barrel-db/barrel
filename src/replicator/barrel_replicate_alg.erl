@@ -21,7 +21,7 @@
   replicate/4
 ]).
 
--include_lib("barrel/include/barrel_logger.hrl").
+-include_lib("barrel_logger.hrl").
 
 replicate(Source, Target, Changes, Metrics) ->
   {ok, Metrics2} = lists:foldl(fun(C, {ok, Acc}) ->

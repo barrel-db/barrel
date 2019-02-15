@@ -67,7 +67,7 @@ init([]) ->
       shutdown => infinity,
       type => worker
     },
-  
+
     #{id => barrel_storage,
       start => {barrel_storage, start_link, []},
       shutdown => infinity,
@@ -85,7 +85,14 @@ init([]) ->
 
 init(safe) ->
   Specs = [
-  
+
+    %% barrel db supervisor
+    #{id => barrel_replicator_sup,
+      start => {barrel_replicator_sup, start_link, []},
+      type => supervisor,
+      shutdown => infinity
+     },
+
     %% transaction server
     #{id => barrel_tx,
       start => {barrel_tx, start_link, []}

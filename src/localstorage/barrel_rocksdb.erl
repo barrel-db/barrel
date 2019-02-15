@@ -39,7 +39,7 @@
   delete_doc_revision/3
 ]).
 
--include_lib("barrel/include/barrel_logger.hrl").
+-include_lib("barrel_logger.hrl").
 -include("barrel_rocksdb.hrl").
 -include("barrel_rocksdb_keys.hrl").
 
