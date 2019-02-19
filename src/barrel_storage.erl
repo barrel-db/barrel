@@ -9,7 +9,6 @@
 -module(barrel_storage).
 -author("benoitc").
 
-
 %% API
 -export([get_store/0]).
 -export([start_link/0]).

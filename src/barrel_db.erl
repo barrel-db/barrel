@@ -67,31 +67,31 @@ create_barrel(Name) ->
 
 open_barrel(Name) ->
   try
-      case barrel_registry:reference_of(Name) of
-        {ok, _} = OK ->
-          OK;
-        error ->
-          #{ mod := Mod, ref := Ref } = barrel_storage:get_store(),
-          Res = barrel_registry:with_locked_barrel(
-            Name,
-            fun() ->
-              case Mod:barrel_exists(Name, Ref) of
-                true ->
-                  start_barrel(Name);
-                false ->
-                  {error, barrel_not_found}
-              end
-            end
-          ),
-          case Res of
-            {ok, _} ->
-              open_barrel(Name);
-            {error,{already_started, _}} ->
-              open_barrel(Name);
-            Error ->
-              Error
-          end
-      end
+    case barrel_registry:reference_of(Name) of
+      {ok, _} = OK ->
+        OK;
+      error ->
+        #{ mod := Mod, ref := Ref } = barrel_storage:get_store(),
+        Res = barrel_registry:with_locked_barrel(
+                Name,
+                fun() ->
+                    case Mod:barrel_exists(Name, Ref) of
+                      true ->
+                        start_barrel(Name);
+                      false ->
+                        {error, barrel_not_found}
+                    end
+                end
+               ),
+        case Res of
+          {ok, _} ->
+            open_barrel(Name);
+          {error,{already_started, _}} ->
+            open_barrel(Name);
+          Error ->
+            Error
+        end
+    end
   catch
     exit:Reason when Reason =:= normal ->
       timer:sleep(10),
@@ -146,10 +146,11 @@ fetch_doc(#{ store_mod := Mod } = Barrel, DocId, Options) ->
 
 do_fetch_doc(Mod, Ctx, DocId, Options) ->
   UserRev = maps:get(rev, Options, <<"">>),
+  WithSeq = maps:get(seq, Options, false),
   case Mod:get_doc_info(Ctx, DocId) of
     {ok, #{ deleted := true } = _DI} when UserRev =:= <<>> ->
       {error, not_found};
-    {ok, #{ rev := WinningRev, revtree := RevTree}=_DI} ->
+    {ok, #{ rev := WinningRev, revtree := RevTree, seq := Seq }=_DI} ->
       Rev = case UserRev of
               <<"">> -> WinningRev;
               _ -> UserRev
@@ -159,17 +160,18 @@ do_fetch_doc(Mod, Ctx, DocId, Options) ->
           Del = maps:get(deleted, RevInfo, false),
           case Mod:get_doc_revision(Ctx, DocId, Rev) of
             {ok, Doc} ->
+              Doc1 = maybe_add_sequence(Doc, Seq, WithSeq),
               WithHistory = maps:get(history, Options, false),
               MaxHistory = maps:get(max_history, Options, ?IMAX1),
               Ancestors = maps:get(ancestors, Options, []),
               case WithHistory of
                 false ->
-                  {ok, maybe_add_deleted(Doc#{ <<"_rev">> => Rev }, Del)};
+                  {ok, maybe_add_deleted(Doc1#{ <<"_rev">> => Rev }, Del)};
                 true ->
                   History = barrel_revtree:history(Rev, RevTree),
                   EncodedRevs = barrel_doc:encode_revisions(History),
                   Revisions = barrel_doc:trim_history(EncodedRevs, Ancestors, MaxHistory),
-                  {ok, maybe_add_deleted(Doc#{ <<"_rev">> => Rev, <<"_revisions">> => Revisions }, Del)}
+                  {ok, maybe_add_deleted(Doc1#{ <<"_rev">> => Rev, <<"_revisions">> => Revisions }, Del)}
               end;
             not_found ->
               {error, not_found};
@@ -182,6 +184,9 @@ do_fetch_doc(Mod, Ctx, DocId, Options) ->
     Error ->
       Error
   end.
+
+maybe_add_sequence(Doc, _, false) -> Doc;
+maybe_add_sequence(Doc, Seq, true) -> Doc#{ <<"_seq">> => Seq }.
 
 revsdiff(#{ store_mod := Mod } = Barrel, DocId, RevIds) ->
   with_ctx(

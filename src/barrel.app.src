@@ -14,7 +14,8 @@
     gproc,
     hooks,
     ehash,
-    worker_pool
+    worker_pool,
+    rocksdb
    ]},
   {env, []},
   {modules, []},

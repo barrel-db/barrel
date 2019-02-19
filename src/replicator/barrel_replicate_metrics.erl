@@ -13,7 +13,6 @@
 %% the License.
 
 -module(barrel_replicate_metrics).
--author("Bernard Notarianni").
 
 -export([new/0]).
 -export([inc/3]).

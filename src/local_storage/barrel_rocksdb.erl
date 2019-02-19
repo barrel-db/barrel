@@ -26,6 +26,7 @@
 -export([recovery_unit/1,
          release_recovery_unit/1,
          commit/1,
+         data_size/1,
          insert_doc_infos/2,
          update_doc_infos/3,
          put_local_doc/3,
@@ -43,7 +44,12 @@
          fold_changes/4,
          get_local_doc/2]).
 
--include_lib("barrel/include/barrel_logger.hrl").
+-export([open_view/2,
+         update_view/3,
+         delete_view/2
+        ]).
+
+-include("barrel_logger.hrl").
 -include("barrel_rocksdb.hrl").
 -include("barrel_rocksdb_keys.hrl").
 
@@ -171,6 +177,9 @@ commit(#{ barrel_id := BarrelId,
   ok = maybe_merge_count(counters:get(Counts, 1), docs_count, BarrelId, Batch),
   ok = maybe_merge_count(counters:get(Counts, 2), del_docs_count, BarrelId, Batch),
   rocksdb:write_batch(Ref, Batch, []).
+
+
+data_size(#{ batch := WB }) -> rocksdb:batch_data_size(WB).
 
 maybe_merge_count(0, _Name, _Id, _Batch) -> ok;
 maybe_merge_count(Count, docs_count, Id, Batch) ->
@@ -384,6 +393,26 @@ get_local_doc(#{ ref := Ref, barrel_id := BarrelId }, DocId) ->
     not_found -> {error, not_found};
     Error -> Error
   end.
+
+%% -------------------
+%% view
+
+open_view(#{ barrel_id := Id, ref := Ref }, ViewId) ->
+  ViewKey = barrel_rocksdb_keys:view_key(Id, ViewId),
+  case rocksdb:get(Ref, ViewKey, []) of
+    {ok, InfoBin} ->
+      {ok, binary_to_term(InfoBin)};
+    Error ->
+      Error
+  end.
+
+update_view(#{ barrel_id := Id, ref := Ref }, ViewId, View) ->
+  ViewKey = barrel_rocksdb_keys:view_key(Id, ViewId),
+  rocksdb:put(Ref, ViewKey, term_to_binary(View), []).
+
+delete_view(#{ barrel_id := Id, ref := Ref }, ViewId) ->
+  ViewKey = barrel_rocksdb_keys:view_key(Id, ViewId),
+  rocksdb:delete(Ref, ViewKey, []).
 
 %% -------------------
 %% internals

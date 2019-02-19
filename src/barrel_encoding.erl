@@ -462,7 +462,7 @@ add_json_path_terminator(B) ->
 %% while at the same time giving us a sentinel to identify JSON keys. The end parameter is used
 %% to determine if this is the last key in a a JSON path. If it is we don't add a separator after it.
 encode_json_key_ascending(B, Key, true) ->
-  encode_binary_ascending(B, Key); 
+  encode_binary_ascending(B, Key);
 encode_json_key_ascending(B, Key, false) ->
   << (encode_binary_ascending(B, Key))/binary, ?ESCAPED_JSON_OBJECT_KEY_TERM >>.
 

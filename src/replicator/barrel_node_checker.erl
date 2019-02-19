@@ -25,7 +25,7 @@
 ]).
 
 
--include_lib("barrel/include/barrel_logger.hrl").
+-include("barrel_logger.hrl").
 -include_lib("stdlib/include/ms_transform.hrl").
 
 

@@ -46,3 +46,6 @@
 -define(local_doc_prefix, <<"ld">>).
 
 -define(index_prefix, <<"i">>).
+
+-define(view_key, <<"k">>).
+-define(view_back_key, <<"bk">>).

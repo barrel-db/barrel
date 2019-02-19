@@ -43,7 +43,6 @@ init_per_suite(Config) ->
   application:set_env(barrel, docs_store_path, "/tmp/default_rocksdb_test"),
   os:cmd("rm -rf /tmp/default_rocksdb_test"),
   {ok, _} = application:ensure_all_started(barrel),
-  {ok, _} = application:ensure_all_started(barrel_rocksdb),
   Config.
 
 init_per_testcase(_, Config) ->

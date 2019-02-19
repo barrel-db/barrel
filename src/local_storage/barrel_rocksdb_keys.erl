@@ -37,12 +37,10 @@
   doc_seq_max/1,
   doc_seq_prefix/1,
   doc_rev/3,
-  local_doc/2,
-  index_key/3
+  local_doc/2
 ]).
 
-
--include_lib("barrel/include/barrel_logger.hrl").
+-include("barrel_logger.hrl").
 -include("barrel_rocksdb_keys.hrl").
 
 %% ----
@@ -90,7 +88,7 @@ doc_info(BarrelId, DocId) ->
   ).
 
 doc_info_max(BarrelId) ->
-  << (db_prefix(BarrelId))/binary, 
+  << (db_prefix(BarrelId))/binary,
      (barrel_rocksdb_util:bytes_prefix_end(?docs_info_suffix))/binary >>.
 
 %% @doc document sequence key
@@ -127,8 +125,4 @@ local_doc(BarrelId, DocId) ->
     DocId
   ).
 
-index_key(BarrelId, DocId, Key) ->
-  Prefix =  << (db_prefix(BarrelId))/binary, ?index_prefix/binary >>,
-  barrel_encoding:encode_binary_ascending(
-    << Prefix/binary, Key/binary>>, DocId
-  ).
+
