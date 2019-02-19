@@ -44,7 +44,9 @@ start_link() ->
 
 %% Child :: {Id,StartFunc,Restart,Shutdown,Type,Modules}
 init([]) ->
-  ok = barrel_config:init(),
+%% initi the config 
+ok = barrel_config:init(),
+
   Specs = [
     %% services management
     %% TODO: put services in their own supervisor?

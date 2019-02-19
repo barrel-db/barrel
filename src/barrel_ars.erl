@@ -24,7 +24,7 @@
   decode_segment/1
 ]).
 
--include("barrel_encoding.hrl").
+-include("util/barrel_encoding.hrl").
 
 -define(segment_size, 3).
 

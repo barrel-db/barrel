@@ -19,7 +19,6 @@
 -export([docs_store_path/0]).
 
 -include("barrel.hrl").
--include("barrel_logger.hrl").
 
 
 get(Key) ->
@@ -37,6 +36,10 @@ set(Key, Value) ->
   persistent_term:put({?MODULE, Key}, Value).
 
 init() ->
+  %% configure the logger module from the application config
+  Logger = application:get_env(barrel, logger_module, logger),
+  barrel_config:set('$barrel_logger', Logger),
+
   %% Configure data dir
   DocsStorePath = docs_store_path(),
   barrel_config:set(docs_store_path, DocsStorePath),
