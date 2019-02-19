@@ -15,9 +15,6 @@
 
 -export([init/1]).
 
--include_lib("barrel/include/barrel.hrl").
-
-
 start_link() ->
   supervisor:start_link({local, ?MODULE}, ?MODULE, []).
 

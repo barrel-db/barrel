@@ -5,6 +5,7 @@
 
 -define(APP, barrel).
 
+-define(VIEWS, barrel_views).
 
 -define(DATA_DIR, "data").
 -define(DEFAULT_ADAPTER, "barrel_rocksdb").

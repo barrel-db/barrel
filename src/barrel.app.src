@@ -14,8 +14,10 @@
     gproc,
     hooks,
     ehash,
+    recon,
     worker_pool,
-    rocksdb
+    rocksdb,
+    gen_batch_server
    ]},
   {env, []},
   {modules, []},

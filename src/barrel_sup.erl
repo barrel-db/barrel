@@ -44,7 +44,7 @@ start_link() ->
 
 %% Child :: {Id,StartFunc,Restart,Shutdown,Type,Modules}
 init([]) ->
-%% initi the config 
+%% initi the config
 ok = barrel_config:init(),
 
   Specs = [
@@ -102,7 +102,13 @@ init(safe) ->
      %% barrel db supervisor
      #{id => barrel_server_sup,
        start => {barrel_server_sup, start_link, []}
+      },
+
+     %% barrel view supervisor
+     #{id => barrel_view_sup,
+       start => {barrel_view_sup, start_link, []}
       }
+
     ],
 
   {ok, { {one_for_one, 4, 2000}, Specs} }.

@@ -20,7 +20,6 @@
 
 %% supervisor callbacks
 -export([init/1]).
-
 -define(SHUTDOWN, 120000).  % 2 minutes
 
 
