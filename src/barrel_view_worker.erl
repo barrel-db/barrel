@@ -40,18 +40,9 @@ get_view(ViewKey) ->
 process_doc(#{ <<"id">> := DocId } = Doc,
             BarrelId, ViewId, ViewMod, ViewConfig) ->
   {ok, Barrel} = barrel_db:open(BarrelId),
-
-  OldKeys = view_doc_keys(Barrel, ViewId, DocId),
-  KVsMap = ViewMod:handle_doc(Doc, ViewConfig),
-  Keys = maps:keys(KVsMap),
-  ToRem = OldKeys -- Keys,
-  ToAdd = maps:without(ToRem, ToRem),
-  ok = update_view_index(Barrel, ViewId, DocId, ToRem, ToAdd),
+  KVs = ViewMod:handle_doc(Doc, ViewConfig),
+  ok = update_view_index(Barrel, ViewId, DocId, KVs),
   ok.
 
-
-view_doc_keys(#{ store_mod := Mod} = Barrel, ViewId, DocId) ->
-  Mod:fold_view_doc_keys(Barrel, ViewId, DocId).
-
-update_view_index(#{ store_mod := Mod} = Barrel, ViewId, DocId, ToRem, ToAdd) ->
-  Mod:update_view_index(Barrel, ViewId, DocId, ToRem, ToAdd).
+update_view_index(#{ store_mod := Mod} = Barrel, ViewId, DocId, KVs) ->
+  Mod:update_view_index(Barrel, ViewId, DocId, KVs).

@@ -43,6 +43,7 @@
 -export([view_prefix/2,
          view_doc_key/3,
          view_key/3,
+         encode_view_key/2,
          decode_view_key/1]).
 
 

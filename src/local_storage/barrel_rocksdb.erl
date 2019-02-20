@@ -47,8 +47,7 @@
 -export([open_view/2,
          update_view/3,
          delete_view/2,
-         fold_view_doc_keys/3,
-         update_view_index/5
+         update_view_index/4
         ]).
 
 -include("barrel_logger.hrl").
@@ -416,47 +415,41 @@ delete_view(#{ barrel_id := Id, ref := Ref }, ViewId) ->
   ViewKey = barrel_rocksdb_keys:view_key(Id, ViewId),
   rocksdb:delete(Ref, ViewKey, []).
 
-
-fold_view_doc_keys(#{ barrel_id := Id, ref := Ref }, ViewId, DocId) ->
-  LowerBound = barrel_rocksdb_keys:view_doc_key_min(Id, ViewId, DocId),
-  UpperBound = barrel_rocksdb_keys:view_doc_key_max(Id, ViewId, DocId),
-  {ok, Itr} = rocksdb:iterator(Ref, [{lower_bound, LowerBound},
-                                     {upper_bound, UpperBound}]),
-  try do_fold_view_doc_keys(rocksdb:iterator_move(Itr, first), Itr, [])
-  after rocksdb:iterator_close(Itr)
-  end.
-
-do_fold_view_doc_keys({ok, Key, _}, Itr, Acc) ->
-  {ok, Key} = rocksdb_keys:decode_view_doc_key(Key),
-  do_fold_view_doc_keys(rocksdb:iterator_move(Itr, next), Itr, [Key | Acc]);
-
-do_fold_view_doc_keys(_, _, Acc) ->
-  lists:sort(Acc).
-
-update_view_index(#{ barrel_id := Id, ref := Ref }, ViewId, DocId, ToRem, ToAdd) ->
-  {ok, Batch} = rocksdb:batch(),
+update_view_index(#{ barrel_id := Id, ref := Ref }, ViewId, DocId, KVs) ->
+  %% get the reverse maps for the document.
+  %% reverse maps contains old keys indexed
+  RevMapKey = barrel_rocksdb_keys:view_doc_key(Id, ViewId, DocId),
+  OldReverseMaps = case rocksdb:get(Ref, RevMapKey, []) of
+                     {ok, Bin} ->
+                       binary_to_term(Bin);
+                     not_found ->
+                       []
+                   end,
   %% we add new keys as prefixed keys with empty values to the index
   %% old keys are deleted once since they are only supposed to be unique
-  %% and have only one updater.
-  ok = make_view_batch(
-         ToAdd, Id, ViewId, DocId,
-         fun(Key) -> rocksdb:batch_put(Batch, Key, <<>>) end
-        ),
-  ok = make_view_batch(
-         ToRem, Id, ViewId, DocId,
-         fun(Key) -> rocksdb:batch_delete_once(Batch, Key) end
-        ),
-  %% write the batch
+  %% and have only one updaterc
+  ViewPrefix = barrel_rocksdb_keys:view_prefix(Id, ViewId),
+  {ok, Batch} = rocksdb:batch(),
+  ReverseMaps = lists:foldl(fun({K0, V0}, Acc) ->
+                                K1 = barrel_rocksdb_keys:encode_view_key(ViewPrefix, K0),
+                                V1 = term_to_binary(V0),
+                                rocksdb:batch_put(Batch, append_docid(K0, DocId), V1),
+                                [K1 | Acc]
+                            end,
+                            [], KVs),
+  ReverseMaps1 = lists:usort(ReverseMaps),
+  ToDelete = OldReverseMaps -- ReverseMaps1,
+  lists:foreach(fun(K) ->
+                    rocksdb:batch_single_delete(Batch, append_docid(K, DocId))
+                end, ToDelete),
+  rocksdb:batch_put(Batch, RevMapKey, term_to_binary(ReverseMaps1)),
+   %% write the batch
   ok = rocksdb:write_batch(Ref, Batch, []),
   ok = rocksdb:release_batch(Batch),
   ok.
 
-make_view_batch([Key | Rest], BarrelId, ViewId, DocId, BatchFun) ->
-  BatchFun(barrel_rocksdb_keys:view_doc_key(BarrelId, ViewId, DocId, Key)),
-  make_view_batch(Rest, BarrelId, ViewId, DocId, BatchFun);
-make_view_batch([], _, _, _, _) ->
-  ok.
-
+append_docid(KeyBin, DocId) ->
+  barrel_encoding:encode_binary_ascending(KeyBin, DocId).
 
 %% -------------------
 %% internals
