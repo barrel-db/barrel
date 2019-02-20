@@ -92,9 +92,6 @@ delete_barrel(Name, #rocksdb_store{ref=Ref}=Store) ->
       %% first delete atomically all barrel metadata
       {ok, Batch} = rocksdb:batch(),
       rocksdb:batch_delete(Batch, BarrelKey),
-      rocksdb:batch_delete(Batch, barrel_rocksdb_keys:docs_count(Ident)),
-      rocksdb:batch_delete(Batch, barrel_rocksdb_keys:docs_del_count(Ident)),
-      rocksdb:batch_delete(Batch, barrel_rocksdb_keys:purge_seq(Ident)),
       ok = rocksdb:write_batch(Ref, Batch, []),
       _ = delete_ident(Name, Store),
       %% delete barrel data
