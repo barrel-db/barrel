@@ -63,26 +63,26 @@ decode_barrel_ident(<< _:3/binary, Key/binary >>) ->
   {Name, _} = barrel_encoding:decode_binary_ascending(Key),
   Name.
 
+db_prefix(BarrelId) ->
+  << ?db_prefix/binary, BarrelId/binary >>.
+
 %% ----
 %% barrels local metadata
 
 %% @doc key for document count of a barrel
 docs_count(BarrelId) ->
-  barrel_encoding:encode_binary_ascending(?docs_count_prefix, BarrelId).
+  << (db_prefix(BarrelId))/binary, ?docs_count_suffix/binary >>.
 
 %% @doc key for deleted document count of a barrel
 docs_del_count(BarrelId) ->
-  barrel_encoding:encode_binary_ascending(?docs_del_count_prefix, BarrelId).
+  << (db_prefix(BarrelId))/binary, ?docs_del_count_suffix/binary >>.
 
 %% @doc purge sequence key for a barrel
 purge_seq(BarrelId) ->
-  barrel_encoding:encode_binary_ascending(?purge_seq_prefix, BarrelId).
+  << (db_prefix(BarrelId))/binary, ?purge_seq_suffix/binary >>.
 
 %% ----
 %% barrel replicated documents
-
-db_prefix(BarrelId) ->
-  << ?db_prefix/binary, BarrelId/binary >>.
 
 db_prefix_end(BarrelId) ->
   barrel_rocksdb_util:bytes_prefix_end(db_prefix(BarrelId)).

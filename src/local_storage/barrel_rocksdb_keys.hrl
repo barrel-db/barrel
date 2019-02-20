@@ -31,9 +31,9 @@
 -define(local_barrel_ident_prefix, << ?local_prefix, "db">>).
 
 
--define(docs_count_prefix, << ?meta1_prefix, "docs-count" >>).
--define(docs_del_count_prefix, << ?meta1_prefix, "docs-del-count" >>).
--define(purge_seq_prefix, << ?meta1_prefix, "purge-seq" >>).
+-define(docs_count_suffix, << "docs-count" >>).
+-define(docs_del_count_suffix, << "docs-del-count" >>).
+-define(purge_seq_suffix, << "purge-seq" >>).
 
 
 -define(db_prefix, << ?system_prefix, "b" >>).
