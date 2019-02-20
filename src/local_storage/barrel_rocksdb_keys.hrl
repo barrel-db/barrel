@@ -49,4 +49,5 @@
 -define(view_key, <<"v">>).
 -define(reverse_map_prefix, <<"r">>).
 -define(index_prefix, <<"i">>).
+-define(view_upgrade_suffix, <<"bg">>).
 

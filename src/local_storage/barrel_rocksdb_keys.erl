@@ -41,6 +41,7 @@
 ]).
 
 -export([view_prefix/2,
+         view_upgrade_task/2,
          view_doc_key/3,
          view_key/3,
          encode_view_key/2,
@@ -136,6 +137,9 @@ local_doc(BarrelId, DocId) ->
 view_prefix(BarrelId, ViewId) ->
   << (db_prefix(BarrelId))/binary, ?view_key/binary, ViewId/binary >>.
 
+
+view_upgrade_task(BarrelId, ViewId) ->
+  << (view_prefix(BarrelId, ViewId))/binary, ?view_upgrade_suffix/binary >>.
 
 view_doc_key(BarrelId, ViewId, DocId) ->
    << (view_prefix(BarrelId, ViewId))/binary, ?reverse_map_prefix/binary, DocId/binary >>.

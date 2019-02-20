@@ -145,17 +145,16 @@ init_upgrade_task(Barrel,
   ok = put_upgrade_task(Barrel, ViewId, BgState),
   BgState.
 
-put_upgrade_task(#{ store_mod := Store, ref := Ref }, ViewId, Task) ->
-  Store:put_barrel_task(Ref, ViewId, Task).
+put_upgrade_task(#{ store_mod := Store }=Barrel, ViewId, Task) ->
+  Store:put_view_upgrade_task(Barrel, ViewId, Task).
 
 
-get_upgrade_task(#{ store_mod := Store, ref := Ref }, ViewId) ->
-  Store:get_barrel_task(Ref, ViewId).
+get_upgrade_task(#{ store_mod := Store }=Barrel, ViewId) ->
+  Store:get_view_upgrade_task(Barrel, ViewId).
 
 
-delete_upgrade_task(#{ store_mod := Store, ref := Ref }, ViewId) ->
-  Store:delete_barrel_task(Ref, ViewId).
-
+delete_upgrade_task(#{ store_mod := Store }=Barrel, ViewId) ->
+  Store:delete_view_upgtade_task(Barrel, ViewId).
 
 
 should_upgrade(#{ version := V}, V) -> false;

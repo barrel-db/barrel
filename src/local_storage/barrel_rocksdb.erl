@@ -47,7 +47,10 @@
 -export([open_view/2,
          update_view/3,
          delete_view/2,
-         update_view_index/4
+         update_view_index/4,
+         put_view_upgrade_task/3,
+         get_view_upgrade_task/2,
+         delete_view_upgrade_task/2
         ]).
 
 -include("barrel_logger.hrl").
@@ -411,6 +414,22 @@ update_view(#{ barrel_id := Id, ref := Ref }, ViewId, View) ->
 delete_view(#{ barrel_id := Id, ref := Ref }, ViewId) ->
   ViewKey = barrel_rocksdb_keys:view_key(Id, ViewId),
   rocksdb:delete(Ref, ViewKey, []).
+
+put_view_upgrade_task(#{ barrel_id := Id, ref := Ref }, ViewId, Task) ->
+  rocksdb:put(Ref,
+              barrel_keys:view_upgrade_task(Id, ViewId),
+              term_to_binary(Task),
+              []
+             ).
+
+get_view_upgrade_task(#{ barrel_id := Id, ref := Ref }, ViewId) ->
+  case rocksdb:get(Ref, barrel_keys:view_upgrade_task(Id, ViewId), []) of
+    {ok, TaskBin} -> {ok, binary_to_term(TaskBin)};
+    Error -> Error
+  end.
+
+delete_view_upgrade_task(#{ barrel_id := Id, ref := Ref }, ViewId) ->
+  rocksdb:delete(Ref, barrel_keys:view_upgrade_task(Id, ViewId), []).
 
 update_view_index(#{ barrel_id := Id, ref := Ref }, ViewId, DocId, KVs) ->
   %% get the reverse maps for the document.
