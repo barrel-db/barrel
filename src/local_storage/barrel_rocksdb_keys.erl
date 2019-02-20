@@ -40,6 +40,12 @@
   local_doc/2
 ]).
 
+-export([view_prefix/2,
+         view_doc_key/3,
+         view_key/3,
+         decode_view_key/1]).
+
+
 -include("barrel_logger.hrl").
 -include("barrel_rocksdb_keys.hrl").
 
@@ -125,4 +131,64 @@ local_doc(BarrelId, DocId) ->
     DocId
   ).
 
+
+view_prefix(BarrelId, ViewId) ->
+  << (db_prefix(BarrelId))/binary, ?view_key/binary, ViewId/binary >>.
+
+
+view_doc_key(BarrelId, ViewId, DocId) ->
+   << (view_prefix(BarrelId, ViewId))/binary, ?reverse_map_prefix/binary, DocId/binary >>.
+
+view_key(BarrelId, ViewId, Key) when is_list(Key) ->
+  Prefix = << (view_prefix(BarrelId, ViewId))/binary, ?index_prefix/binary >>,
+  encode_view_key(Key, Prefix);
+view_key(BarrelId, ViewId, Key) when is_binary(Key); is_number(Key) ->
+  view_key(BarrelId, ViewId, [Key]);
+view_key(BarrelId, ViewId, Key) ->
+  ok = barrel_encoding:is_literal(Key),
+  view_key(BarrelId, ViewId, [Key]).
+
+encode_view_key([Term|Rest], AccBin) ->
+  encode_view_key(Rest, encode_view_term(AccBin, Term));
+encode_view_key([], AccBin) ->
+  AccBin.
+
+
+encode_view_term(L, B) when is_atom(L) ->
+  barrel_encoding:encode_literal_ascending(B, L);
+encode_view_term(S, B) when is_binary(S) ->
+  barrel_encoding:encode_binary_ascending(B, S);
+encode_view_term(N, B) when is_integer(N) ->
+  barrel_encoding:encode_varint_ascending(B, N);
+encode_view_term(N, B) when is_number(N) ->
+  barrel_encoding:encode_float_ascending(B, N).
+
+
+decode_view_key(Bin) ->
+  case binary:split(Bin, ?index_prefix) of
+    [_ViewPrefix, KeyBin] ->
+      decode_view_key_1(KeyBin, []);
+    _ ->
+      erlang:error(badarg)
+  end.
+
+decode_view_key_1(<<>>, Acc) ->
+  lists:reverse(Acc);
+decode_view_key_1(Bin, Acc) ->
+  case barrel_encoding:pick_encoding(Bin) of
+    bytes ->
+      {Val, Rest} = barrel_encoding:decode_binary_ascending(Bin),
+      decode_view_key_1(Rest, [Val | Acc]);
+    int ->
+       {Val, Rest} = barrel_encoding:decode_varint_ascending(Bin),
+       decode_view_key_1(Rest, [Val | Acc]);
+    float ->
+      {Val, Rest} = barrel_encoding:decode_varint_ascending(Bin),
+      decode_view_key_1(Rest, [Val | Acc]);
+    literal ->
+      {Val, Rest} = barrel_encoding:decode_varint_ascending(Bin),
+      decode_view_key_1(Rest, [Val | Acc]);
+    _ ->
+      erlang:error(badarg)
+  end.
 
