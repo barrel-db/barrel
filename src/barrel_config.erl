@@ -43,16 +43,17 @@ init() ->
   %% Configure data dir
   DocsStorePath = docs_store_path(),
   barrel_config:set(docs_store_path, DocsStorePath),
-  
+
   [env_or_default(Key, Default) ||
     {Key, Default} <- [
       {fold_timeout, 5000},
+      {index_worker_threads, 128},
       %% docs storage
       {rocksdb_cache_size, 1 bsl 20}, %% 1 MB,
       {rocksdb_write_buffer_size, 64 bsl 20} %% 64 MB
     ]
   ],
-  
+
   ok.
 
 docs_store_path() ->

@@ -42,6 +42,8 @@
   get_local_doc/2
 ]).
 
+-export([start_view/4]).
+
 -include_lib("barrel/include/barrel.hrl").
 -include_lib("barrel/include/barrel_logger.hrl").
 
@@ -274,3 +276,11 @@ delete_local_doc(Barrel, DocId) ->
 
 get_local_doc(Barrel, DocId) ->
   barrel_db:get_local_doc(Barrel, DocId).
+
+start_view(Barrel, View, ViewMod, ViewConfig) ->
+  Conf =
+    #{ barrel => Barrel,
+       view => View,
+       mod => ViewMod,
+       config => ViewConfig },
+  supervisor:start_child(barrel_view_sup_sup, [Conf]).

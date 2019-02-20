@@ -76,6 +76,8 @@ ok = barrel_config:init(),
       type => worker
     },
 
+    index_pool_spec(),
+
     %% safe supervisor
     #{id => barrel_safe_sup,
       start => {supervisor, start_link, [{local, barrel_safe_sup}, ?MODULE, safe]},
@@ -105,10 +107,21 @@ init(safe) ->
       },
 
      %% barrel view supervisor
-     #{id => barrel_view_sup,
-       start => {barrel_view_sup, start_link, []}
+     #{id => barrel_view_sup_sup,
+       start => {barrel_view_sup_sup, start_link, []}
       }
 
     ],
 
   {ok, { {one_for_one, 4, 2000}, Specs} }.
+
+
+
+index_pool_spec() ->
+  NumThreads = barrel_config:get(index_worker_threads),
+  PoolOptions = [{workers, NumThreads}],
+
+
+  #{ id => index_pool,
+     start => {wpool, start_pool, [barrel_view_pool, PoolOptions]} }.
+

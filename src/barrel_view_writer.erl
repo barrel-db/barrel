@@ -18,7 +18,7 @@ handle_batch(Batch, #{ barrel := Barrel, view := View } = State) ->
   %% process docs
   DocIds = lists:foldl(
              fun(#{ <<"id">> := DocId } = Doc, Acc) ->
-                 worker_pool:cast(barrel_view_pool,
+                 wpool:cast(barrel_view_pool,
                                   {process_doc, {Barrel, View}, self(), Doc}),
                  [DocId | Acc]
              end,

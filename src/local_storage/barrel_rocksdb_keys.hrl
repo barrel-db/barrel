@@ -50,4 +50,5 @@
 -define(reverse_map_prefix, <<"r">>).
 -define(index_prefix, <<"i">>).
 -define(view_upgrade_suffix, <<"bg">>).
+-define(view_meta_suffix, <<"m">>).
 

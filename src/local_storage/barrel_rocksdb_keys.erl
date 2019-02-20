@@ -41,6 +41,8 @@
 ]).
 
 -export([view_prefix/2,
+         view_meta/2,
+         view_prefix_end/2,
          view_upgrade_task/2,
          view_doc_key/3,
          view_key/3,
@@ -136,6 +138,13 @@ local_doc(BarrelId, DocId) ->
 
 view_prefix(BarrelId, ViewId) ->
   << (db_prefix(BarrelId))/binary, ?view_key/binary, ViewId/binary >>.
+
+view_meta(BarrelId, ViewId) ->
+  << (view_prefix(BarrelId, ViewId))/binary, ?view_meta_suffix/binary >>.
+
+
+view_prefix_end(BarrelId, ViewId) ->
+  barrel_rocksdb_util:bytes_prefix_end(view_prefix(BarrelId, ViewId)).
 
 
 view_upgrade_task(BarrelId, ViewId) ->

@@ -1,6 +1,7 @@
 -module(barrel_view_adapter).
 
--export([start_link/4]).
+
+-export([start_link/1]).
 %% gen_statem callbacks
 -export([init/1,
          callback_mode/0,
@@ -22,11 +23,16 @@
 -include("barrel.hrl").
 -include("barrel_logger.hrl").
 
-%% TODO: make opening more robust
-start_link(BarrelId, ViewId, ViewMod, ViewConfig) ->
-  gen_server:start_link(?MODULE, [BarrelId, ViewId, ViewMod, ViewConfig]).
 
-init([BarrelId, ViewId, ViewMod, ViewConfig0]) ->
+%% TODO: make opening more robust
+start_link( Conf) ->
+  gen_server:start_link(?MODULE, Conf, []).
+
+
+init(#{ barrel := BarrelId,
+        view := ViewId,
+        mod := ViewMod,
+        config := ViewConfig0 }) ->
   process_flag(trap_exit, true),
 
   {ok, Barrel} = barrel_db:open_barrel(BarrelId),
@@ -36,7 +42,6 @@ init([BarrelId, ViewId, ViewMod, ViewConfig0]) ->
              {ok, V} ->  V;
              not_found ->
                InitialView = #{ id => ViewId,
-                                config => ViewConfig,
                                 version => Version,
                                 indexed_seq => 0 },
                ok = update_view(Barrel, InitialView),
@@ -60,6 +65,7 @@ init([BarrelId, ViewId, ViewMod, ViewConfig0]) ->
 
   %% if version of the module changed or an
   %% upgrade was running, got to upgrade state.
+  _ = register_view(BarrelId, ViewId, ViewMod, ViewConfig),
   case get_upgrade_task(Barrel, ViewId) of
     {ok, #{ version := UpgradeVersion } = BgState0} ->
       %% an upgrade was already running, try to catch up from there.
@@ -77,9 +83,8 @@ init([BarrelId, ViewId, ViewMod, ViewConfig0]) ->
                             {View0, BgState0}
                         end,
       Reindexer =
-        spawn_link(?MODULE, bg_index_loop,
-                   [Barrel, BatchServer, ViewId, BgState]),
-      _ = register_view(BarrelId, ViewId, ViewMod, ViewConfig),
+      spawn_link(?MODULE, bg_index_loop,
+                 [Barrel, BatchServer, ViewId, BgState]),
       {ok, upgrade, Data#{ view => View, reindexer => Reindexer}};
     not_found ->
       case should_upgrade(View0, Version) of
@@ -88,13 +93,12 @@ init([BarrelId, ViewId, ViewMod, ViewConfig0]) ->
           BgState =  init_upgrade_task(Barrel, View),
           ok = update_view(Barrel, View),
           Reindexer =
-            spawn_link(?MODULE, bg_index_loop,
-                       [Barrel, BatchServer, ViewId, BgState]),
-          _ = register_view(BarrelId, ViewId, ViewMod, ViewConfig),
+          spawn_link(?MODULE, bg_index_loop,
+                     [Barrel, BatchServer, ViewId, BgState]),
+
           {ok, upgrade, Data#{ view => View, reindexer => Reindexer}};
 
         false ->
-          _ = register_view(BarrelId, ViewId, ViewMod, ViewConfig),
           %% trigger refresh
           self() ! refresh_view,
           {ok, online, Data}
@@ -106,6 +110,7 @@ init([BarrelId, ViewId, ViewMod, ViewConfig0]) ->
 callback_mode() -> state_functions.
 
 terminate(_Reason, _State, #{ barrel := #{ name := Name }, view :=#{ id := Id }}) ->
+  io:format("termuinate ~s conf=~p~n", [?MODULE_STRING, [Name, Id]]),
   unregister_view(Name, Id).
 
 code_change(_Vsn, State, Data, _Extra) ->
@@ -145,16 +150,16 @@ init_upgrade_task(Barrel,
   ok = put_upgrade_task(Barrel, ViewId, BgState),
   BgState.
 
-put_upgrade_task(#{ store_mod := Store }=Barrel, ViewId, Task) ->
-  Store:put_view_upgrade_task(Barrel, ViewId, Task).
+put_upgrade_task(#{ store_mod := Store, ref := Ref }, ViewId, Task) ->
+  Store:put_view_upgrade_task(Ref, ViewId, Task).
 
 
-get_upgrade_task(#{ store_mod := Store }=Barrel, ViewId) ->
-  Store:get_view_upgrade_task(Barrel, ViewId).
+get_upgrade_task(#{ store_mod := Store, ref := Ref}, ViewId) ->
+  Store:get_view_upgrade_task(Ref, ViewId).
 
 
-delete_upgrade_task(#{ store_mod := Store }=Barrel, ViewId) ->
-  Store:delete_view_upgtade_task(Barrel, ViewId).
+delete_upgrade_task(#{ store_mod := Store, ref := Ref}, ViewId) ->
+  Store:delete_view_upgtade_task(Ref, ViewId).
 
 
 should_upgrade(#{ version := V}, V) -> false;

@@ -398,8 +398,8 @@ get_local_doc(#{ ref := Ref, barrel_id := BarrelId }, DocId) ->
 %% -------------------
 %% view
 
-open_view(#{ barrel_id := Id, ref := Ref }, ViewId) ->
-  ViewKey = barrel_rocksdb_keys:view_key(Id, ViewId),
+open_view(#{ id := Id, ref := Ref }, ViewId) ->
+  ViewKey = barrel_rocksdb_keys:view_meta(Id, ViewId),
   case rocksdb:get(Ref, ViewKey, []) of
     {ok, InfoBin} ->
       {ok, binary_to_term(InfoBin)};
@@ -407,31 +407,33 @@ open_view(#{ barrel_id := Id, ref := Ref }, ViewId) ->
       Error
   end.
 
-update_view(#{ barrel_id := Id, ref := Ref }, ViewId, View) ->
-  ViewKey = barrel_rocksdb_keys:view_key(Id, ViewId),
+update_view(#{ id := Id, ref := Ref }, ViewId, View) ->
+  ViewKey = barrel_rocksdb_keys:view_meta(Id, ViewId),
   rocksdb:put(Ref, ViewKey, term_to_binary(View), []).
 
-delete_view(#{ barrel_id := Id, ref := Ref }, ViewId) ->
-  ViewKey = barrel_rocksdb_keys:view_key(Id, ViewId),
-  rocksdb:delete(Ref, ViewKey, []).
+delete_view(#{ id := Id, ref := Ref }, ViewId) ->
+  Start = barrel_rocksdb_keys:view_meta(Id, ViewId),
+  End = barrel_rocksdb_keys:view_prefix_end(Id, ViewId),
+  %% delete  all range
+  rocksdb:delete_range(Ref, Start, End, []).
 
-put_view_upgrade_task(#{ barrel_id := Id, ref := Ref }, ViewId, Task) ->
+put_view_upgrade_task(#{ id := Id, ref := Ref }, ViewId, Task) ->
   rocksdb:put(Ref,
-              barrel_keys:view_upgrade_task(Id, ViewId),
+              barrel_rocksdb_keys:view_upgrade_task(Id, ViewId),
               term_to_binary(Task),
               []
              ).
 
-get_view_upgrade_task(#{ barrel_id := Id, ref := Ref }, ViewId) ->
-  case rocksdb:get(Ref, barrel_keys:view_upgrade_task(Id, ViewId), []) of
+get_view_upgrade_task(#{ id := Id, ref := Ref }, ViewId) ->
+  case rocksdb:get(Ref, barrel_rocksdb_keys:view_upgrade_task(Id, ViewId), []) of
     {ok, TaskBin} -> {ok, binary_to_term(TaskBin)};
     Error -> Error
   end.
 
-delete_view_upgrade_task(#{ barrel_id := Id, ref := Ref }, ViewId) ->
-  rocksdb:delete(Ref, barrel_keys:view_upgrade_task(Id, ViewId), []).
+delete_view_upgrade_task(#{ id := Id, ref := Ref }, ViewId) ->
+  rocksdb:delete(Ref, barrel_rocksdb_keys:view_upgrade_task(Id, ViewId), []).
 
-update_view_index(#{ barrel_id := Id, ref := Ref }, ViewId, DocId, KVs) ->
+update_view_index(#{ id := Id, ref := Ref }, ViewId, DocId, KVs) ->
   %% get the reverse maps for the document.
   %% reverse maps contains old keys indexed
   RevMapKey = barrel_rocksdb_keys:view_doc_key(Id, ViewId, DocId),
