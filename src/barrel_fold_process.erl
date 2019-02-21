@@ -26,7 +26,7 @@ init(Parent, {fold_view, BarrelId, ViewId, To, Options}) ->
                 %% TODO: replace by partisan call
                 To ! {self(), {ok, Row}},
                 Now = erlang:timestamp(),
-                Diff = timer:now_dif(Now, Ts),
+                Diff = timer:now_diff(Now, Ts),
                 if
                   Diff >= Timeout ->
                     {stop, timeout};

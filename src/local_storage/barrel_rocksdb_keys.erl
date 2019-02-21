@@ -154,7 +154,7 @@ view_doc_key(BarrelId, ViewId, DocId) ->
    << (view_prefix(BarrelId, ViewId))/binary, ?reverse_map_prefix/binary, DocId/binary >>.
 
 view_key(BarrelId, ViewId, Key) when is_list(Key) ->
-  Prefix = << (view_prefix(BarrelId, ViewId))/binary, ?index_prefix/binary >>,
+  Prefix = << (view_prefix(BarrelId, ViewId))/binary >>,
   encode_view_key(Key, Prefix);
 view_key(BarrelId, ViewId, Key) when is_binary(Key); is_number(Key) ->
   view_key(BarrelId, ViewId, [Key]);
@@ -162,9 +162,12 @@ view_key(BarrelId, ViewId, Key) ->
   ok = barrel_encoding:is_literal(Key),
   view_key(BarrelId, ViewId, [Key]).
 
-encode_view_key([Term|Rest], AccBin) ->
-  encode_view_key(Rest, encode_view_term(AccBin, Term));
-encode_view_key([], AccBin) ->
+encode_view_key(Key, AccBin) ->
+  encode_view_key_1(Key, << AccBin/binary, ?index_prefix/binary >>).
+
+encode_view_key_1([Term|Rest], AccBin) ->
+  encode_view_key_1(Rest, encode_view_term(Term, AccBin));
+encode_view_key_1([], AccBin) ->
   AccBin.
 
 
@@ -179,7 +182,7 @@ encode_view_term(N, B) when is_number(N) ->
 
 
 decode_view_key(Bin) ->
-  case binary:split(Bin, << ?index_prefix/binary >>) of
+  case binary:split(Bin, ?index_prefix) of
     [_ViewPrefix, KeyBin] ->
       decode_view_key_1(KeyBin, []);
     _Else ->
@@ -188,7 +191,7 @@ decode_view_key(Bin) ->
   end.
 
 decode_view_key_1(<<>>, Acc) ->
-  [DocId | Key] = lists:reverse(Acc),
+  [DocId | Key] = Acc,
   {DocId, Key};
 decode_view_key_1(Bin, Acc) ->
   case barrel_encoding:pick_encoding(Bin) of
@@ -199,10 +202,10 @@ decode_view_key_1(Bin, Acc) ->
        {Val, Rest} = barrel_encoding:decode_varint_ascending(Bin),
        decode_view_key_1(Rest, [Val | Acc]);
     float ->
-      {Val, Rest} = barrel_encoding:decode_varint_ascending(Bin),
+      {Val, Rest} = barrel_encoding:decode_float_ascending(Bin),
       decode_view_key_1(Rest, [Val | Acc]);
     literal ->
-      {Val, Rest} = barrel_encoding:decode_varint_ascending(Bin),
+      {Val, Rest} = barrel_encoding:decode_literal_ascending(Bin),
       decode_view_key_1(Rest, [Val | Acc]);
     _ ->
       erlang:error(badarg)

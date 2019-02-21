@@ -451,9 +451,9 @@ update_view_index(#{ id := Id, ref := Ref }, ViewId, DocId, KVs) ->
   ViewPrefix = barrel_rocksdb_keys:view_prefix(Id, ViewId),
   {ok, Batch} = rocksdb:batch(),
   ReverseMaps = lists:foldl(fun({K0, V0}, Acc) ->
-                                K1 = barrel_rocksdb_keys:encode_view_key(ViewPrefix, K0),
+                                K1 = barrel_rocksdb_keys:encode_view_key(K0, ViewPrefix),
                                 V1 = term_to_binary(V0),
-                                rocksdb:batch_put(Batch, append_docid(K0, DocId), V1),
+                                rocksdb:batch_put(Batch, append_docid(K1, DocId), V1),
                                 [K1 | Acc]
                             end,
                             [], KVs),

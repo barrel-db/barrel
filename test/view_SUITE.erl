@@ -54,8 +54,10 @@ basic_test(_Config) ->
   [<<"a">>] = barrel:fold_view(<<"test">>, <<"ars">>,
                                fun(#{ id := Id }, Acc) ->
                                    io:format("received i ~p~n", [Id]),
-                                   [Id | Acc] end,
+                                   {ok, [Id | Acc]}
+                               end,
                                [],
-                               #{}),
+                               #{ begin_key => [<<"id">>, <<"a">>],
+                                  end_key => [<<"id">>, << 16#ff, 16#ff >>] }),
 
   ok.
