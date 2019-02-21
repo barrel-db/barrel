@@ -9,10 +9,10 @@ test:
     when: always
     paths:
     - _build/test/logs
-    - _build/test/cover
 
   script:
-    - make test cover
+    - ./support/rebar3 eunit
+    - ./support/rebar3 ct 
 
   cache:
     paths:
