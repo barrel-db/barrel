@@ -50,7 +50,8 @@
          update_view_index/4,
          put_view_upgrade_task/3,
          get_view_upgrade_task/2,
-         delete_view_upgrade_task/2
+         delete_view_upgrade_task/2,
+         fold_view_index/5
         ]).
 
 -include("barrel_logger.hrl").
@@ -468,6 +469,92 @@ update_view_index(#{ id := Id, ref := Ref }, ViewId, DocId, KVs) ->
 
 append_docid(KeyBin, DocId) ->
   barrel_encoding:encode_binary_ascending(KeyBin, DocId).
+
+lowerbound(undefined, _Prefix, ReadOpts) ->
+  ReadOpts;
+lowerbound(Begin, Prefix, ReadOpts) ->
+  Bound = barrel_rocksdb_keys:encode_view_key(Prefix, Begin),
+  [{iterate_lower_bound, Bound} | ReadOpts].
+
+
+upperbound(undefined, _EndOrEqual, _Prefix, ReadOpts) ->
+  ReadOpts;
+upperbound(End, false, Prefix, ReadOpts) ->
+  Bound = barrel_rocksdb_util:bytes_next(
+    barrel_rocksdb_keys:encode_view_key(Prefix, End)
+   ),
+  [{iterate_upper_bound, Bound} | ReadOpts];
+upperbound(End, true, Prefix, ReadOpts) ->
+  Bound = barrel_rocksdb_keys:encode_view_key(Prefix, End),
+  [{iterate_upper_bound, Bound} | ReadOpts].
+
+
+fold_view_index(#{ id := Id, ref := Ref }, ViewId, UserFun, UserAcc, Options) ->
+  Prefix = barrel_rocksdb_keys:view_prefix(Id, ViewId),
+  WrapperFun = fun(KeyBin, ValBin, Acc) ->
+                   {DocId, Key} = barrel_keys:decode_view_key(KeyBin),
+                   Val = binary_to_term(ValBin),
+                   UserFun({DocId, Key, Val}, Acc)
+               end,
+
+  Begin = maps:get(begin_key, Options, undefined),
+  End = maps:get(end_key, Options, undefined),
+  BeginOrEqual = maps:get(begin_or_equal, Options, true),
+  EndOrEqual = maps:get(end_or_equal, Options, true),
+  Reverse = maps:get(reverse, Options, false),
+
+  %% set readoptions
+  ReadOpts = upperbound(End, EndOrEqual, Prefix,
+                         lowerbound(Begin, Prefix, []) ),
+
+  {ok, Itr} = rocksdb:iterator(Ref, ReadOpts),
+  Next = case Reverse of
+           false ->
+             fun() -> rocksdb:iterator_move(Itr, next) end;
+           true ->
+             fun() -> rocksdb:iterator_move(Itr, prev) end
+         end,
+  Limit = maps:get(limit, Options, 1 bsl 64 - 1),
+
+  case Reverse of
+    false when Begin =:= undefined ->
+      do_fold(rocksdb:iterator_move(Itr, first), Next, WrapperFun, UserAcc, Limit);
+    false ->
+      case rocksdb:iterator_move(Itr, first) of
+        {ok, Begin, _} when BeginOrEqual =:= false ->
+          do_fold(rocksdb:iterator_move(Itr, next),
+                  Next, WrapperFun, UserAcc, Limit);
+        Res ->
+          do_fold(Res, Next, WrapperFun, UserAcc, Limit)
+      end;
+    true when End =:= undefined ->
+      do_fold(rocksdb:iterator_move(Itr, last),
+              Next, WrapperFun, UserAcc, Limit);
+    true ->
+      case EndOrEqual of
+        true ->
+          do_fold(rocksdb:iterator_move(Itr, End),
+                  Next, WrapperFun, UserAcc, Limit);
+        false ->
+          do_fold(rocksdb:iterator_move(Itr, {previous_to, End}),
+                  Next, WrapperFun, UserAcc, Limit)
+      end
+  end.
+
+
+do_fold({ok, K, V}, Next, Fun, Acc, Limit) when Limit > 0 ->
+  case Fun(K, V, Acc) of
+    {ok, Acc2} ->
+      do_fold(Next(), Next, Fun, Acc2, Limit - 1);
+    {stop, Acc2} ->
+      Acc2;
+    skip ->
+      do_fold(Next(), Next, Fun, Acc, Limit - 1);
+    stop ->
+      Acc
+  end;
+do_fold(_, _, _, Acc, _) ->
+  Acc.
 
 %% -------------------
 %% internals

@@ -69,9 +69,6 @@ short(S) when is_binary(S) -> S;
 short(S) -> S.
 
 
-
-
-
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
 
