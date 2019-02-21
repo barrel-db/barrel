@@ -1,5 +1,5 @@
 -module(barrel_view_adapter).
-
+-behaviour(gen_statem).
 
 -export([start_link/1]).
 %% gen_statem callbacks
@@ -11,6 +11,7 @@
 %% states
 -export([upgrade/3,
          online/3]).
+-export([handle_event/4]).
 
 -export([bg_index_loop/4]).
 
@@ -26,7 +27,7 @@
 
 %% TODO: make opening more robust
 start_link( Conf) ->
-  gen_server:start_link(?MODULE, Conf, []).
+  gen_statem:start_link(?MODULE, Conf, []).
 
 
 init(#{ barrel := BarrelId,
@@ -35,7 +36,10 @@ init(#{ barrel := BarrelId,
         config := ViewConfig0 }) ->
   process_flag(trap_exit, true),
 
+  io:format("barrel is ~p~n", [BarrelId]),
   {ok, Barrel} = barrel_db:open_barrel(BarrelId),
+
+  io:format("opened barrel=~p~n", [BarrelId]),
   {ok, ViewConfig} = ViewMod:init(ViewConfig0),
   Version = ViewMod:version(),
   View0 = case open_view(Barrel, ViewId) of
@@ -49,10 +53,8 @@ init(#{ barrel := BarrelId,
            end,
 
   %% init batch server
-  BatchServer = gen_batch_server:start_link(
-                  barrel_view_writer,
-                  [BarrelId, ViewId]
-                 ),
+  {ok, BatchServer } =
+    gen_batch_server:start_link(barrel_view_writer, [BarrelId, ViewId] ),
 
   %% initialize gen_statem data
   Data =
@@ -66,6 +68,8 @@ init(#{ barrel := BarrelId,
   %% if version of the module changed or an
   %% upgrade was running, got to upgrade state.
   _ = register_view(BarrelId, ViewId, ViewMod, ViewConfig),
+  %% trigger refresh
+  self() ! refresh_view,
   case get_upgrade_task(Barrel, ViewId) of
     {ok, #{ version := UpgradeVersion } = BgState0} ->
       %% an upgrade was already running, try to catch up from there.
@@ -99,8 +103,6 @@ init(#{ barrel := BarrelId,
           {ok, upgrade, Data#{ view => View, reindexer => Reindexer}};
 
         false ->
-          %% trigger refresh
-          self() ! refresh_view,
           {ok, online, Data}
       end
   end.
@@ -110,8 +112,9 @@ init(#{ barrel := BarrelId,
 callback_mode() -> state_functions.
 
 terminate(_Reason, _State, #{ barrel := #{ name := Name }, view :=#{ id := Id }}) ->
-  io:format("termuinate ~s conf=~p~n", [?MODULE_STRING, [Name, Id]]),
-  unregister_view(Name, Id).
+  io:format("terminate ~s conf=~p~n", [?MODULE_STRING, [Name, Id]]),
+  _ = unregister_view(Name, Id),
+  ok.
 
 code_change(_Vsn, State, Data, _Extra) ->
     {ok, State, Data}.
@@ -123,11 +126,30 @@ monitor_barrel(#{ name := Name }) ->
 
 
 upgrade(info, refresh_view, Data) ->
-  {keep_state, refresh_view(Data)}.
+  {keep_state, refresh_view(Data)};
 
+upgrade(EventType, EventContent, Data) ->
+
+  handle_event(EventType, upgrade, EventContent ,Data).
 
 online(info, refresh_view, Data) ->
-  {keep_state, refresh_view(Data)}.
+  {keep_state, refresh_view(Data)};
+
+online(EventType, EventContent, Data) ->
+  handle_event(EventType, online, EventContent ,Data).
+
+
+handle_event(info, _State,  {'DOWN', MRef, process, _Pid, Reason},
+             #{ barrel := Barrel, view := View, mref := MRef } = Data) ->
+  ?LOG_INFO("closing view adapter. barrel is down. reason:~p barrel=~p, view=~p~n",
+            [Reason, Barrel, View]),
+
+  {stop, normal, Data};
+
+handle_event(EventType, State, EventContent, Data) ->
+  ?LOG_INFO("view adapter got an unexpected event. event=~p state=~p, msg=~p",
+            [EventType, State, EventContent] ),
+  {stop, {error, unexpected_event}, Data}.
 
 
 open_view(#{ store_mod := Store, ref := Ref }, ViewId) ->
@@ -196,18 +218,20 @@ bg_index_loop(Barrel, BatchServer, ViewId,
 refresh_view(#{ barrel := Barrel,
                 batch_server := BatchServer,
                 view := #{ indexed_seq := Start } = View} = State) ->
-  ?LOG_DEBUG("start indexing barrel=~p view=~p~n", [Barrel, View]),
-  {ok, {NState, _}, _} = barrel_db:fold_changes(
+  ?LOG_DEBUG("start indexing barrel=~p view=~p seq=~p~n", [Barrel, View, Start]),
+  {ok, {NState, _}, LastSeq} = barrel_db:fold_changes(
                                  Barrel, Start,
                                  fun(#{ <<"seq">> := Seq, <<"doc">> := Doc }, {State1, Ts}) ->
                                      Doc1 = Doc#{ <<"_seq">> => Seq },
+                                     io:format("index doc=~p~n", [Doc1]),
                                      ok = gen_batch_server:cast(BatchServer, {index_doc, Doc1}),
                                      maybe_checkpoint(State1, Seq, Ts)
                                  end,
                                  {State, erlang:timestamp()},
-                                 [#{ include_doc => true }]),
+                                 #{ include_doc => true }),
+  erlang:send_after(100, self(), refresh_view),
   ?LOG_DEBUG("end indexing barrel=~p view=~p~n", [Barrel, maps:get(view, NState)]),
-  NState.
+  store_checkpoint(NState, LastSeq).
 
 
 maybe_gc(Ts)  ->
@@ -222,22 +246,24 @@ maybe_gc(Ts)  ->
   end.
 
 
-maybe_checkpoint(#{ barrel := Barrel,
-                    view := View,
-                    batch_server := BatchServer } = State, Seq, Ts) ->
+maybe_checkpoint(State0, Seq, Ts) ->
   Now = erlang:timestamp(),
   Diff = timer:now_diff(Now, Ts),
   if
     Diff > ?CHECKPOINT_INTERVAL ->
-      ok = gen_batch_server:call(BatchServer, wait_commit),
-      View1 = View#{ indexed_seq => Seq },
-      ok = update_view(Barrel, View1),
-      {State#{ view => View1 }, Now};
+      State1 = store_checkpoint(State0, Seq),
+      {ok, {State1, Now}};
     true ->
-      {State, Ts}
+      {ok, {State0, Ts}}
   end.
 
-
+store_checkpoint(#{ barrel := Barrel,
+                    view := View,
+                    batch_server := BatchServer } = State, Seq) ->
+  ok = gen_batch_server:call(BatchServer, wait_commit),
+  View1 = View#{ indexed_seq => Seq },
+  ok = update_view(Barrel, View1),
+  State#{ view => View1 }.
 
 register_view(Barrel, View, ViewMod, ViewConfig) ->
   ets:insert(?VIEWS, [{{Barrel, View}, {ViewMod, ViewConfig}}]).

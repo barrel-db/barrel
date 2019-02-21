@@ -179,15 +179,17 @@ encode_view_term(N, B) when is_number(N) ->
 
 
 decode_view_key(Bin) ->
-  case binary:split(Bin, ?index_prefix) of
+  case binary:split(Bin, << ?index_prefix/binary >>) of
     [_ViewPrefix, KeyBin] ->
       decode_view_key_1(KeyBin, []);
-    _ ->
+    _Else ->
+      io:format("got else=~p, prefix=~p~n", [_Else, ?index_prefix]),
       erlang:error(badarg)
   end.
 
 decode_view_key_1(<<>>, Acc) ->
-  lists:reverse(Acc);
+  [DocId | Key] = lists:reverse(Acc),
+  {DocId, Key};
 decode_view_key_1(Bin, Acc) ->
   case barrel_encoding:pick_encoding(Bin) of
     bytes ->

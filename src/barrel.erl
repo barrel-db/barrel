@@ -35,7 +35,6 @@
   delete_docs/2,
   fold_docs/4,
   fold_changes/5,
-  fold_path/5,
   save_replicated_docs/2,
   put_local_doc/3,
   delete_local_doc/2,
@@ -43,6 +42,7 @@
 ]).
 
 -export([start_view/4]).
+-export([fold_view/5]).
 
 -include_lib("barrel/include/barrel.hrl").
 -include_lib("barrel/include/barrel_logger.hrl").
@@ -63,15 +63,6 @@
 
 -type prop() :: binary().
 
--type query_options() :: #{
-  order_by => order_by_key |order_by_value,
-  equal_to => prop(),
-  start_at => prop(),
-  next_to => prop(),
-  end_at => prop(),
-  previous_to => prop(),
-  include_deleted => true | false
-}.
 
 -type fold_docs_options() :: #{
   equal_to => prop(),
@@ -252,20 +243,6 @@ fold_changes(Barrel, Since, Fun, AccIn, Options) ->
   barrel_db:fold_changes(Barrel, Since, Fun, AccIn, Options).
 
 
-%% @doc query the barrel indexes
-%%
-%% To query all docs just pass "/" or "/id"
--spec fold_path(Name, Path, Fun, AccIn, Options) -> AccOut when
-  Name :: barrel_name(),
-  Path :: binary(),
-  AccResult :: {ok, Acc2 :: any()} | {stop, Acc2 :: any()} | {skip, Acc2 :: any()} | ok | stop | skip,
-  Fun :: fun( (Doc :: barrel_doc:doc(), Acc1 :: any() ) -> AccResult ),
-  AccIn :: any(),
-  Options :: query_options(),
-  AccOut :: any().
-fold_path(Barrel, Path, Fun, Acc, Options) ->
-  barrel_db:fold_path(Barrel, Path, Fun, Acc, Options).
-
 
 
 put_local_doc(Barrel, DocId, Doc) ->
@@ -284,3 +261,30 @@ start_view(Barrel, View, ViewMod, ViewConfig) ->
        mod => ViewMod,
        config => ViewConfig },
   supervisor:start_child(barrel_view_sup_sup, [Conf]).
+
+
+fold_view(Barrel, View, Fun, Acc, Options) ->
+  {ok, StreamPid} = barrel_view:get_range(Barrel, View, Options),
+  fold_loop(StreamPid, Fun, Acc).
+
+fold_loop(StreamPid, Fun, Acc) ->
+  Timeout = barrel_config:get(fold_timeout),
+  receive
+    {StreamPid, {ok, Row}} ->
+      case Fun(Row, Acc) of
+        {ok, Acc2} ->
+          fold_loop(StreamPid, Fun, Acc2);
+        {stop, Acc2} ->
+          _ = barrel_view:stop_kvs_steam(StreamPid),
+          Acc2;
+        ok ->
+          fold_loop(StreamPid, Fun, Acc);
+        stop ->
+          _ = barrel_view:stop_kvs_steam(StreamPid),
+          Acc
+      end;
+    {StreamPid, done} ->
+      Acc
+  after Timeout ->
+          erlang:exit(fold_timeout)
+  end.

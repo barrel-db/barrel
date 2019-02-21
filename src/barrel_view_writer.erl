@@ -14,7 +14,6 @@ init([Barrel, View]) ->
 
 handle_batch(Batch, #{ barrel := Barrel, view := View } = State) ->
   {Waiters, Docs} = prepare_batch(Batch, [], #{}),
-
   %% process docs
   DocIds = lists:foldl(
              fun(#{ <<"id">> := DocId } = Doc, Acc) ->
@@ -32,7 +31,7 @@ terminate(_Reason, _State) ->
   ok.
 
 %% deduplicate docs (only take the more recent one and extract waiters
-prepare_batch([{call, From, wait_comit} | Rest], Waiters, Docs) ->
+prepare_batch([{call, From, wait_commit} | Rest], Waiters, Docs) ->
   prepare_batch(Rest, [From | Waiters], Docs);
 prepare_batch([{cast, {index_doc, #{ <<"id">> := DocId,
                                      <<"_seq">> := Seq}= Doc}} | Rest],
@@ -40,11 +39,13 @@ prepare_batch([{cast, {index_doc, #{ <<"id">> := DocId,
   case maps:find(DocId, Docs) of
     {ok, #{ <<"_seq">> := CurrentSeq }} when CurrentSeq < Seq ->
       prepare_batch(Rest, Waiters, maps:put(DocId, Doc, Docs));
-    _ ->
-      prepare_batch(Rest, Waiters, Docs)
+    {ok, _} ->
+      prepare_batch(Rest, Waiters, Docs);
+    error ->
+      prepare_batch(Rest, Waiters, maps:put(DocId, Doc, Docs))
   end;
 prepare_batch([], Waiters, Docs) ->
-  {Waiters, Docs}.
+  {Waiters, maps:values(Docs)}.
 
 
 %% TODO: add timeout

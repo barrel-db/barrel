@@ -42,4 +42,20 @@ end_per_suite(Config) ->
 
 
 basic_test(_Config) ->
-  {ok, _} = barrel:start_view(<<"test">>, <<"ars">>, barrel_ars_view, #{}).
+  {ok, Barrel} = barrel:open_barrel(<<"test">>),
+  {ok, _} = barrel:start_view(<<"test">>, <<"ars">>, barrel_ars_view, #{}),
+
+  Docs = [
+    #{ <<"id">> => <<"a">>, <<"v">> => 1, <<"o">> => #{ <<"o1">> => 1, << "o2">> => 1}}
+  ],
+  {ok, _Saved} = barrel:save_docs(Barrel, Docs),
+  timer:sleep(1000),
+
+  [<<"a">>] = barrel:fold_view(<<"test">>, <<"ars">>,
+                               fun(#{ id := Id }, Acc) ->
+                                   io:format("received i ~p~n", [Id]),
+                                   [Id | Acc] end,
+                               [],
+                               #{}),
+
+  ok.

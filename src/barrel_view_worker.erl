@@ -9,7 +9,7 @@
          code_change/3,
          terminate/2]).
 
-init([]) ->
+init(_) ->
   {ok, #{}}.
 
 handle_call(_Msg, _From, State) ->

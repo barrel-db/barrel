@@ -323,7 +323,7 @@ change_with_deleted(Change, true) -> Change#{ <<"deleted">> => true };
 change_with_deleted(Change, _) -> Change.
 
 change_with_doc(Change, DocId, Rev, Mod, Ctx, true) ->
-  case Mod:get_revision(Ctx, DocId, Rev) of
+  case Mod:get_doc_revision(Ctx, DocId, Rev) of
     {ok, Doc} -> Change#{ <<"doc">> => Doc };
     _ -> Change#{ <<"doc">> => null }
   end;

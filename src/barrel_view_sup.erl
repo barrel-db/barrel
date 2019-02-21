@@ -13,8 +13,8 @@ start_link(Conf) ->
 
 init(Conf) ->
   Specs = [
-           #{ id => view_adaper,
-              start => {barrel_view_adapter, start_link, [Conf]} },
+           #{ id => view_adapter,
+              start => {barrel_view, start_link, [Conf]} },
 
            #{ id => view,
               start => {barrel_view_adapter, start_link, [Conf]},

@@ -362,7 +362,7 @@ do_exec(_) ->
   erlang:error(badarg).
 
 log_and_backoff(LogLevel, Component, Attempts, Message) ->
-  ?ANY_LOG(
+  ?DISPATCH_LOG(
     LogLevel,
     "~p: ~p. Retrying, attempt:~p",
     [Component, Message, Attempts]

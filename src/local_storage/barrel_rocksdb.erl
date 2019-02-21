@@ -435,6 +435,7 @@ delete_view_upgrade_task(#{ id := Id, ref := Ref }, ViewId) ->
   rocksdb:delete(Ref, barrel_rocksdb_keys:view_upgrade_task(Id, ViewId), []).
 
 update_view_index(#{ id := Id, ref := Ref }, ViewId, DocId, KVs) ->
+  io:format("index kvs=~p~n", [KVs]),
   %% get the reverse maps for the document.
   %% reverse maps contains old keys indexed
   RevMapKey = barrel_rocksdb_keys:view_doc_key(Id, ViewId, DocId),
@@ -473,7 +474,7 @@ append_docid(KeyBin, DocId) ->
 lowerbound(undefined, _Prefix, ReadOpts) ->
   ReadOpts;
 lowerbound(Begin, Prefix, ReadOpts) ->
-  Bound = barrel_rocksdb_keys:encode_view_key(Prefix, Begin),
+  Bound = barrel_rocksdb_keys:encode_view_key(Begin, Prefix),
   [{iterate_lower_bound, Bound} | ReadOpts].
 
 
@@ -481,24 +482,24 @@ upperbound(undefined, _EndOrEqual, _Prefix, ReadOpts) ->
   ReadOpts;
 upperbound(End, false, Prefix, ReadOpts) ->
   Bound = barrel_rocksdb_util:bytes_next(
-    barrel_rocksdb_keys:encode_view_key(Prefix, End)
+    barrel_rocksdb_keys:encode_view_key(End, Prefix)
    ),
   [{iterate_upper_bound, Bound} | ReadOpts];
 upperbound(End, true, Prefix, ReadOpts) ->
-  Bound = barrel_rocksdb_keys:encode_view_key(Prefix, End),
+  Bound = barrel_rocksdb_keys:encode_view_key(End, Prefix),
   [{iterate_upper_bound, Bound} | ReadOpts].
 
 
 fold_view_index(#{ id := Id, ref := Ref }, ViewId, UserFun, UserAcc, Options) ->
   Prefix = barrel_rocksdb_keys:view_prefix(Id, ViewId),
   WrapperFun = fun(KeyBin, ValBin, Acc) ->
-                   {DocId, Key} = barrel_keys:decode_view_key(KeyBin),
+                   {DocId, Key} = barrel_rocksdb_keys:decode_view_key(KeyBin),
                    Val = binary_to_term(ValBin),
                    UserFun({DocId, Key, Val}, Acc)
                end,
 
-  Begin = maps:get(begin_key, Options, undefined),
-  End = maps:get(end_key, Options, undefined),
+  Begin = maps:get(begin_key, Options, [?key_min]),
+  End = maps:get(end_key, Options, [?key_max]),
   BeginOrEqual = maps:get(begin_or_equal, Options, true),
   EndOrEqual = maps:get(end_or_equal, Options, true),
   Reverse = maps:get(reverse, Options, false),
@@ -548,8 +549,10 @@ do_fold({ok, K, V}, Next, Fun, Acc, Limit) when Limit > 0 ->
       do_fold(Next(), Next, Fun, Acc2, Limit - 1);
     {stop, Acc2} ->
       Acc2;
-    skip ->
+    ok ->
       do_fold(Next(), Next, Fun, Acc, Limit - 1);
+    skip ->
+      do_fold(Next(), Next, Fun, Acc, Limit);
     stop ->
       Acc
   end;
@@ -617,7 +620,7 @@ open_db(Path, DbOpts,RetriesLeft, _LastError) ->
       case lists:prefix("IO error: lock ", OpenErr) of
         true ->
           SleepFor = application:get_env(barrel, db_open_retry_delay, ?DB_OPEN_RETRY_DELAY),
-          _ = ?LOG_WARNING(
+          ?LOG_WARNING(
             "~s: barrel rocksdb backend retrying ~p in ~p ms after error ~s\n",
             [?MODULE, Path, SleepFor, OpenErr]
           ),
