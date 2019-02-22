@@ -470,9 +470,15 @@ update_view_index(#{ id := Id, ref := Ref }, ViewId, DocId, KVs) ->
 append_docid(KeyBin, DocId) ->
   barrel_encoding:encode_binary_ascending(KeyBin, DocId).
 
-lowerbound(undefined, _Prefix, ReadOpts) ->
+lowerbound(undefined, _BeginOrEqual, _Prefix, ReadOpts) ->
   ReadOpts;
-lowerbound(Begin, Prefix, ReadOpts) ->
+lowerbound(Begin, false, Prefix, ReadOpts) ->
+  Bound = barrel_rocksdb_util:bytes_next(
+            barrel_rocksdb_keys:encode_view_key(Begin, Prefix)
+           ),
+  [{iterate_lower_bound, Bound} | ReadOpts];
+
+lowerbound(Begin, true, Prefix, ReadOpts) ->
   Bound = barrel_rocksdb_keys:encode_view_key(Begin, Prefix),
   [{iterate_lower_bound, Bound} | ReadOpts].
 
@@ -505,7 +511,7 @@ fold_view_index(#{ id := Id, ref := Ref }, ViewId, UserFun, UserAcc, Options) ->
 
   %% set readoptions
   ReadOpts = upperbound(End, EndOrEqual, Prefix,
-                         lowerbound(Begin, Prefix, []) ),
+                         lowerbound(Begin, BeginOrEqual, Prefix, []) ),
 
   {ok, Itr} = rocksdb:iterator(Ref, ReadOpts),
   Next = case Reverse of
@@ -521,8 +527,6 @@ fold_view_index(#{ id := Id, ref := Ref }, ViewId, UserFun, UserAcc, Options) ->
       do_fold(rocksdb:iterator_move(Itr, first), Next, WrapperFun, UserAcc, Limit);
     false ->
       BeginEnc = barrel_rocksdb_keys:encode_view_key(Begin, Prefix),
-
-
       case rocksdb:iterator_move(Itr, BeginEnc) of
         {ok, BeginEnc, _} when BeginOrEqual =:= false ->
           do_fold(rocksdb:iterator_move(Itr, next),
