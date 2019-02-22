@@ -636,7 +636,7 @@ open_db(Path, DbOpts,RetriesLeft, _LastError) ->
 load_idents(Ref, IdentTab) ->
   ReadOptions =
     [{iterate_lower_bound, ?local_barrel_ident_prefix},
-     {iterate_upper_boun, barrel_rocksdb_keys:local_barrel_ident_max()}],
+     {iterate_upper_bound, barrel_rocksdb_keys:local_barrel_ident_max()}],
   {ok, Itr} = rocksdb:iterator(Ref, ReadOptions),
   try load_idents(rocksdb:iterator_move(Itr, first), Itr, IdentTab, 0)
   after rocksdb:iterator_close(Itr)

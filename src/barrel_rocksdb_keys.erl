@@ -57,7 +57,9 @@
 %% local storage
 
 %% barrel ident
-local_barrel_ident_max() -> barrel_rocksdb_util:bytes_prefix_end(?local_barrel_ident_prefix).
+local_barrel_ident_max() ->
+  local_barrel_ident(?key_max).
+
 local_barrel_ident(Name) ->
   barrel_encoding:encode_binary_ascending(?local_barrel_ident_prefix, Name).
 
