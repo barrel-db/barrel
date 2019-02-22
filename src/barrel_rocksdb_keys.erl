@@ -47,7 +47,7 @@
          view_doc_key/3,
          view_key/3,
          encode_view_key/2,
-         decode_view_key/1]).
+         decode_view_key/2]).
 
 
 -include("barrel_logger.hrl").
@@ -183,12 +183,11 @@ encode_view_term(N, B) when is_number(N) ->
   barrel_encoding:encode_float_ascending(B, N).
 
 
-decode_view_key(Bin) ->
-  case binary:split(Bin, ?index_prefix) of
+decode_view_key(Prefix, Bin) ->
+  case binary:split(Bin, << Prefix/binary, ?index_prefix/binary >>) of
     [_ViewPrefix, KeyBin] ->
       decode_view_key_1(KeyBin, []);
     _Else ->
-      io:format("got else=~p, prefix=~p~n", [_Else, ?index_prefix]),
       erlang:error(badarg)
   end.
 
@@ -209,7 +208,7 @@ decode_view_key_1(Bin, Acc) ->
     literal ->
       {Val, Rest} = barrel_encoding:decode_literal_ascending(Bin),
       decode_view_key_1(Rest, [Val | Acc]);
-    _ ->
+    _Else ->
       erlang:error(badarg)
   end.
 

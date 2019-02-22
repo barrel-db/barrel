@@ -492,7 +492,7 @@ upperbound(End, true, Prefix, ReadOpts) ->
 fold_view_index(#{ id := Id, ref := Ref }, ViewId, UserFun, UserAcc, Options) ->
   Prefix = barrel_rocksdb_keys:view_prefix(Id, ViewId),
   WrapperFun = fun(KeyBin, ValBin, Acc) ->
-                   {DocId, Key} = barrel_rocksdb_keys:decode_view_key(KeyBin),
+                   {DocId, Key} = barrel_rocksdb_keys:decode_view_key(Prefix, KeyBin),
                    Val = binary_to_term(ValBin),
                    UserFun({DocId, Key, Val}, Acc)
                end,
