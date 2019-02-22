@@ -35,11 +35,7 @@ init(#{ barrel := BarrelId,
         mod := ViewMod,
         config := ViewConfig0 }) ->
   process_flag(trap_exit, true),
-
-  io:format("barrel is ~p~n", [BarrelId]),
   {ok, Barrel} = barrel_db:open_barrel(BarrelId),
-
-  io:format("opened barrel=~p~n", [BarrelId]),
   {ok, ViewConfig} = ViewMod:init(ViewConfig0),
   Version = ViewMod:version(),
   View0 = case open_view(Barrel, ViewId) of
@@ -112,7 +108,6 @@ init(#{ barrel := BarrelId,
 callback_mode() -> state_functions.
 
 terminate(_Reason, _State, #{ barrel := #{ name := Name }, view :=#{ id := Id }}) ->
-  io:format("terminate ~s conf=~p~n", [?MODULE_STRING, [Name, Id]]),
   _ = unregister_view(Name, Id),
   ok.
 
@@ -223,7 +218,6 @@ refresh_view(#{ barrel := Barrel,
                                  Barrel, Start,
                                  fun(#{ <<"seq">> := Seq, <<"doc">> := Doc }, {State1, Ts}) ->
                                      Doc1 = Doc#{ <<"_seq">> => Seq },
-                                     io:format("index doc=~p~n", [Doc1]),
                                      ok = gen_batch_server:cast(BatchServer, {index_doc, Doc1}),
                                      maybe_checkpoint(State1, Seq, Ts)
                                  end,

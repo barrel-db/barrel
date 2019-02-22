@@ -435,7 +435,6 @@ delete_view_upgrade_task(#{ id := Id, ref := Ref }, ViewId) ->
   rocksdb:delete(Ref, barrel_rocksdb_keys:view_upgrade_task(Id, ViewId), []).
 
 update_view_index(#{ id := Id, ref := Ref }, ViewId, DocId, KVs) ->
-  io:format("index kvs=~p~n", [KVs]),
   %% get the reverse maps for the document.
   %% reverse maps contains old keys indexed
   RevMapKey = barrel_rocksdb_keys:view_doc_key(Id, ViewId, DocId),

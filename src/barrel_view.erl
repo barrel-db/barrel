@@ -47,7 +47,6 @@ start_link(#{barrel := Barrel,  view := View} = Conf) ->
 
 init(Conf) ->
   process_flag(trap_exit, true),
-  io:format("start ~s conf=~p~n", [?MODULE_STRING, Conf]),
   {ok, Conf}.
 
 handle_call({get_range, To, Options}, _From, #{ barrel := Barrel, view := View } = State) ->
@@ -62,11 +61,8 @@ handle_call(_Msg, _From, State) ->
 handle_cast(_Msg, State) ->
   {noreply, State}.
 
-terminate(_Reason, State) ->
-  io:format("termuinate ~s conf=~p~n", [?MODULE_STRING, State]),
+terminate(_Reason, _State) ->
   ok.
-
-
 
 
 process_name(BarrelId, ViewId) ->
