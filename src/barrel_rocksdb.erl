@@ -520,8 +520,11 @@ fold_view_index(#{ id := Id, ref := Ref }, ViewId, UserFun, UserAcc, Options) ->
     false when Begin =:= undefined ->
       do_fold(rocksdb:iterator_move(Itr, first), Next, WrapperFun, UserAcc, Limit);
     false ->
-      case rocksdb:iterator_move(Itr, first) of
-        {ok, Begin, _} when BeginOrEqual =:= false ->
+      BeginEnc = barrel_rocksdb_keys:encode_view_key(Begin, Prefix),
+
+
+      case rocksdb:iterator_move(Itr, BeginEnc) of
+        {ok, BeginEnc, _} when BeginOrEqual =:= false ->
           do_fold(rocksdb:iterator_move(Itr, next),
                   Next, WrapperFun, UserAcc, Limit);
         Res ->
@@ -531,12 +534,13 @@ fold_view_index(#{ id := Id, ref := Ref }, ViewId, UserFun, UserAcc, Options) ->
       do_fold(rocksdb:iterator_move(Itr, last),
               Next, WrapperFun, UserAcc, Limit);
     true ->
+      EndEnc = barrel_rocksdb_keys:encode_view_key(End, Prefix),
       case EndOrEqual of
         true ->
-          do_fold(rocksdb:iterator_move(Itr, End),
+          do_fold(rocksdb:iterator_move(Itr, EndEnc),
                   Next, WrapperFun, UserAcc, Limit);
         false ->
-          do_fold(rocksdb:iterator_move(Itr, {previous_to, End}),
+          do_fold(rocksdb:iterator_move(Itr, {previous_to, EndEnc}),
                   Next, WrapperFun, UserAcc, Limit)
       end
   end.
