@@ -210,9 +210,9 @@ bg_index_loop(Barrel, BatchServer, ViewId,
   ok = delete_upgrade_task(Barrel, ViewId),
   ok.
 
-refresh_view(#{ barrel := Barrel,
+refresh_view(#{ barrel := #{ name := BarrelId } = Barrel,
                 batch_server := BatchServer,
-                view := #{ indexed_seq := Start } = View} = State) ->
+                view := #{ id := ViewId, indexed_seq := Start } = View} = State) ->
   ?LOG_DEBUG("start indexing barrel=~p view=~p seq=~p~n", [Barrel, View, Start]),
   {ok, {NState, _}, LastSeq} = barrel_db:fold_changes(
                                  Barrel, Start,
@@ -224,6 +224,7 @@ refresh_view(#{ barrel := Barrel,
                                  {State, erlang:timestamp()},
                                  #{ include_doc => true }),
   erlang:send_after(100, self(), refresh_view),
+  ok = barrel_view:update(BarrelId, ViewId, view_refresh),
   ?LOG_DEBUG("end indexing barrel=~p view=~p~n", [Barrel, maps:get(view, NState)]),
   store_checkpoint(NState, LastSeq).
 
