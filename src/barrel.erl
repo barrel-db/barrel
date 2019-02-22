@@ -118,7 +118,7 @@ delete_barrel(Name) ->
   barrel_db:delete_barrel(Name).
 
 %% @doc return barrel_infos.
--spec barrel_infos(Name :: barrel_name()) -> barrel_infos().
+-spec barrel_infos(Name :: barrel_name()) -> {ok, barrel_infos()}.
 barrel_infos(Name) ->
   barrel_db:barrel_infos(Name).
 
