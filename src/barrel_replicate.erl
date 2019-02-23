@@ -140,7 +140,7 @@ config_file() ->
                    undefined -> ?DEFAULT_CONFIG;
                    {ok, P} -> P
                  end,
-      FullPath = filename:join(barrel_config:get(docs_store_path), FileName),
+      FullPath = filename:join(barrel_config:get(data_dir), FileName),
       ok = filelib:ensure_dir(FullPath),
       FullPath
   end.

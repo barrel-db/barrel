@@ -29,6 +29,8 @@
 -include("barrel.hrl").
 -include("barrel_logger.hrl").
 
+
+
 update_docs(Server, Records, MergePolicy) ->
   gen_server:call(Server, {update_docs, Records, MergePolicy}).
 
@@ -47,27 +49,24 @@ init([Name]) ->
   end.
 
 handle_call({put_local_doc, DocId, Doc}, _From,
-            #{ store_mod := Mod,
-               ref := Ref} = State) ->
-  Reply = Mod:put_local_doc(Ref, DocId, Doc),
+            #{ ref := Ref} = State) ->
+  Reply = ?STORE:put_local_doc(Ref, DocId, Doc),
   {reply, Reply, State};
 
 handle_call({delete_local_doc, DocId}, _From,
-            #{ store_mod := Mod,
-               ref := Ref} = State) ->
-  Reply = Mod:delete_local_doc(Ref, DocId),
+            #{ ref := Ref} = State) ->
+  Reply = ?STORE:delete_local_doc(Ref, DocId),
   {reply, Reply, State};
 
 handle_call({update_docs, Docs, MergePolicy}, _From,
-            #{ store_mod := Mod,
-               ref := Ref,
+            #{ ref := Ref,
                name := Name,
                updated_seq := LastSeq } = State) ->
-  {ok, RU} = Mod:recovery_unit(Ref),
+  {ok, RU} = ?STORE:recovery_unit(Ref),
   {Results, UpdatedSeq} = update_docs(Docs, MergePolicy, RU, State),
-  {Reply, NewState} = case Mod:commit(RU) of
+  {Reply, NewState} = case  ?STORE:commit(RU) of
                         ok ->
-                          Mod:release_recovery_unit(RU),
+                          ?STORE:release_recovery_unit(RU),
                           if
                             UpdatedSeq =/= LastSeq ->
                               barrel_event:notify(Name, db_updated),
@@ -93,7 +92,7 @@ terminate(_Reason, State) ->
 
 
 update_docs(GroupedRecords, MergePolicy, RU,
-            #{ store_mod := Mod, updated_seq := LastSeq }) ->
+            #{ updated_seq := LastSeq }) ->
 
   MergeFun = case MergePolicy of
                merge -> fun merge_revtree/2;
@@ -101,19 +100,19 @@ update_docs(GroupedRecords, MergePolicy, RU,
              end,
   dict:fold(
     fun(DocId, Records, {Results1, Seq1}) ->
-        {DocStatus, #{ seq := OldSeq } = DI} = case Mod:get_doc_info(RU, DocId) of
+        {DocStatus, #{ seq := OldSeq } = DI} = case ?STORE:get_doc_info(RU, DocId) of
                                                  {ok, DI1} -> {found, DI1};
                                                  {error, not_found} -> {not_found, new_docinfo(DocId)}
                                                end,
-        {DI2, Results2} = merge_revtrees(Records, DI, Results1, Mod, RU, MergeFun),
+        {DI2, Results2} = merge_revtrees(Records, DI, Results1, RU, MergeFun),
         if
           DI /= DI2 ->
             Seq2 = Seq1 + 1,
             case DocStatus of
               not_found ->
-                Mod:insert_doc_infos(RU, DI2#{ seq => Seq2 });
+                ?STORE:insert_doc_infos(RU, DI2#{ seq => Seq2 });
               found ->
-                Mod:update_doc_infos(RU, DI2#{ seq => Seq2 }, OldSeq)
+                ?STORE:update_doc_infos(RU, DI2#{ seq => Seq2 }, OldSeq)
             end,
             {Results2, Seq2};
           true ->
@@ -122,17 +121,17 @@ update_docs(GroupedRecords, MergePolicy, RU,
     end,
     {#{}, LastSeq}, GroupedRecords).
 
-merge_revtrees([#{ ref := Ref } = Record | Rest], #{ id := DocId } = DI, Results, Mod, RU, MergeFun) ->
+merge_revtrees([#{ ref := Ref } = Record | Rest], #{ id := DocId } = DI, Results, RU, MergeFun) ->
   case MergeFun(Record, DI) of
     {ok, #{ rev := Rev } = DI2, DocRev, RevBody} ->
-      ok = Mod:add_doc_revision(RU, DocId, DocRev, RevBody),
+      ok = ?STORE:add_doc_revision(RU, DocId, DocRev, RevBody),
       Results2 = maps:put(Ref, {ok, DocId, Rev}, Results),
-      merge_revtrees(Rest, DI2, Results2, Mod, RU, MergeFun);
+      merge_revtrees(Rest, DI2, Results2, RU, MergeFun);
     Error ->
       Results2 = maps:put(Ref, Error, Results),
-      merge_revtrees(Rest, DI, Results2, Mod, RU, MergeFun)
+      merge_revtrees(Rest, DI, Results2, RU, MergeFun)
   end;
-merge_revtrees([], DI, Results, _Mod, _RU, _MergedFun) ->
+merge_revtrees([], DI, Results, _RU, _MergedFun) ->
   {DI, Results}.
 
 %% -----------------------------------------
@@ -240,20 +239,19 @@ find_parent([], _RevTree, Acc) ->
 %% init & terminate a barrel server
 
 init_(Name) ->
-  #{ mod := Mod, ref := Ref } = barrel_storage:get_store(),
-  case Mod:open_barrel(Name, Ref) of
+  case ?STORE:open_barrel(Name) of
     {ok, BarrelRef, LastSeq} ->
-      Store = #{ name => Name, ref => BarrelRef, store_mod => Mod},
+      Store = #{ name => Name, ref => BarrelRef},
       {ok, Store, LastSeq};
     Error ->
       Error
   end.
 
 
-try_close_barrel(#{ name := BarrelName, store_mod := Mod }) ->
-  case erlang:function_exported(Mod, close_barrel, 2) of
+try_close_barrel(#{ name := BarrelName }) ->
+  case erlang:function_exported(?STORE, close_barrel, 2) of
     true ->
-      Mod:close_barrel(BarrelName);
+      ?STORE:close_barrel(BarrelName);
     false ->
       ok
   end.

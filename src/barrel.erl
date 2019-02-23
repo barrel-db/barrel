@@ -15,8 +15,7 @@
 -module(barrel).
 -author("benoitc").
 
-%% store api
--export([start_store/3, stop_store/1]).
+
 
 %% API
 -export([
@@ -84,20 +83,6 @@
 -type save_options() :: #{
   all_or_nothing => boolean()
 }.
-
-
-
-start_store(Name, Module, Options) ->
-  _ = code:ensure_loaded(Module),
-  case erlang:function_exported(Module, init_store, 2) of
-    true ->
-      Module:init_store(Name, Options);
-    false ->
-      erlang:exit(badarg)
-  end.
-
-stop_store(Name) ->
-  barrel_services:deactivate_service(store, Name).
 
 
 %% @doc create a barrel, (note: for now the options is an empty map)

@@ -38,7 +38,7 @@ init(#{ barrel := BarrelId,
   {ok, Barrel} = barrel_db:open_barrel(BarrelId),
   {ok, ViewConfig} = ViewMod:init(ViewConfig0),
   Version = ViewMod:version(),
-  View0 = case open_view(Barrel, ViewId) of
+  View0 = case open_view(BarrelId, ViewId) of
              {ok, V} ->  V;
              not_found ->
                InitialView = #{ id => ViewId,
@@ -147,11 +147,11 @@ handle_event(EventType, State, EventContent, Data) ->
   {stop, {error, unexpected_event}, Data}.
 
 
-open_view(#{ store_mod := Store, ref := Ref }, ViewId) ->
-  Store:open_view(Ref, ViewId).
+open_view(BarrelId, ViewId) ->
+  ?STORE:open_view(BarrelId, ViewId).
 
-update_view(#{ store_mod := Store, ref := Ref }, #{ id := ViewId } = View) ->
-  Store:update_view(Ref, ViewId, View).
+update_view(#{ ref := Ref }, #{ id := ViewId } = View) ->
+  ?STORE:update_view(Ref, ViewId, View).
 
 
 %% ---------------
@@ -167,16 +167,16 @@ init_upgrade_task(Barrel,
   ok = put_upgrade_task(Barrel, ViewId, BgState),
   BgState.
 
-put_upgrade_task(#{ store_mod := Store, ref := Ref }, ViewId, Task) ->
-  Store:put_view_upgrade_task(Ref, ViewId, Task).
+put_upgrade_task(#{ ref := Ref }, ViewId, Task) ->
+  ?STORE:put_view_upgrade_task(Ref, ViewId, Task).
 
 
-get_upgrade_task(#{ store_mod := Store, ref := Ref}, ViewId) ->
-  Store:get_view_upgrade_task(Ref, ViewId).
+get_upgrade_task(#{ ref := Ref}, ViewId) ->
+  ?STORE:get_view_upgrade_task(Ref, ViewId).
 
 
-delete_upgrade_task(#{ store_mod := Store, ref := Ref}, ViewId) ->
-  Store:delete_view_upgtade_task(Ref, ViewId).
+delete_upgrade_task(#{ ref := Ref}, ViewId) ->
+  ?STORE:delete_view_upgtade_task(Ref, ViewId).
 
 
 should_upgrade(#{ version := V}, V) -> false;

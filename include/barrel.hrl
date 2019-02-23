@@ -11,6 +11,9 @@
 -define(DEFAULT_ADAPTER, "barrel_rocksdb").
 
 
+-define(STORE, (barrel_config:storage())).
+
+
 
 -define(IMAX1, 16#ffffFFFFffffFFFF).
 
@@ -31,11 +34,6 @@
 
 
 
-
-
-
--define(store(Name), {n, l, {barrel_storage, Name}}).
--define(via_store(Name), {via, gproc, {n, l, {barrel_storage, Name}}}).
 
 
 

@@ -44,5 +44,5 @@ process_doc(#{ <<"id">> := DocId } = Doc,
   ok = update_view_index(Barrel, ViewId, DocId, KVs),
   {ok, DocId}.
 
-update_view_index(#{ store_mod := Mod, ref := Ref }, ViewId, DocId, KVs) ->
-  Mod:update_view_index(Ref, ViewId, DocId, KVs).
+update_view_index(#{ ref := Ref }, ViewId, DocId, KVs) ->
+  ?STORE:update_view_index(Ref, ViewId, DocId, KVs).
