@@ -46,6 +46,7 @@ await_refresh(Barrel, View) ->
   await_refresh(Barrel, View, barrel_config:get(fold_timeout)).
 
 await_refresh(Barrel, View, Timeout) ->
+  random_sleep(5),
   {ok, Ref} = gen_server:call(process_name(Barrel, View), {await_refresh, self()}),
   receive
     {Ref, view_refresh} ->
@@ -53,6 +54,20 @@ await_refresh(Barrel, View, Timeout) ->
   after Timeout ->
           exit(refresh_timeout)
   end.
+
+random_sleep(Times) ->
+    _ = case Times rem 10 of
+	    0 ->
+		_ = rand:seed(exsplus);
+	    _ ->
+		ok
+	end,
+    %% First time 1/4 seconds, then doubling each time up to 8 seconds max.
+    Tmax = if Times > 5 -> 8000;
+	      true -> ((1 bsl Times) * 1000) div 8
+	   end,
+    T = rand:uniform(Tmax),
+    receive after T -> ok end.
 
 update(Barrel, View, Msg) ->
   ViewRef = process_name(Barrel, View),
