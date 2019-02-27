@@ -31,7 +31,7 @@
   terminate/2
 ]).
 
--include("barrel_logger.hrl").
+-include("barrel.hrl").
 
 -define(TS_FILE, "BARREL_TS").
 -define(DEFAULT_INTERVAL, 1000).

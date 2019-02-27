@@ -22,7 +22,6 @@
 
 
 -include("barrel.hrl").
--include("barrel_logger.hrl").
 
 
 %% TODO: make opening more robust

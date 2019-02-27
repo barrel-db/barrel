@@ -12,7 +12,7 @@
 %% API
 -export([get_mem_usage/0]).
 
--include("barrel_logger.hrl").
+-include("barrel.hrl").
 
 %% @doc return the process memory usage
 -spec get_mem_usage() -> non_neg_integer().

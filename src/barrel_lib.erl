@@ -44,7 +44,6 @@
 ]).
 
 -include("barrel.hrl").
--include("barrel_logger.hrl").
 -include_lib("syntax_tools/include/merl.hrl").
 
 %% "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"

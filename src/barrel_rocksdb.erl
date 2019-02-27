@@ -56,7 +56,7 @@
          terminate/2]).
 
 
--include("barrel_logger.hrl").
+-include("barrel.hrl").
 -include("barrel_rocksdb.hrl").
 -include("barrel_rocksdb_keys.hrl").
 

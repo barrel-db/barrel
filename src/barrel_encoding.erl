@@ -31,7 +31,7 @@
 
 -export([pick_encoding/1]).
 
--include("barrel_logger.hrl").
+-include("barrel.hrl").
 
 -include("barrel_encoding.hrl").
 

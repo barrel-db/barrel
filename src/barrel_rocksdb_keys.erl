@@ -50,7 +50,7 @@
          decode_view_key/2]).
 
 
--include("barrel_logger.hrl").
+-include("barrel.hrl").
 -include("barrel_rocksdb_keys.hrl").
 
 %% ----

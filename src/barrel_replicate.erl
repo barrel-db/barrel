@@ -24,7 +24,7 @@
 ]).
 
 
--include("barrel_logger.hrl").
+-include("barrel.hrl").
 -include_lib("stdlib/include/ms_transform.hrl").
 
 -define(DEFAULT_CONFIG, "replication.config").

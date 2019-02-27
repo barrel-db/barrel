@@ -44,8 +44,6 @@
 -export([fold_view/5]).
 
 -include_lib("barrel/include/barrel.hrl").
--include_lib("barrel/include/barrel_logger.hrl").
-
 
 -type barrel_infos() :: #{
   updated_seq := non_neg_integer(),
