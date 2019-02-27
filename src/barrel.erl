@@ -270,6 +270,8 @@ fold_view(Barrel, View, Fun, Acc, Options) ->
                         false ->
                           {1 bsl 64 -1, Options}
                       end,
+
+  io:format("limit=~p options=~p~n", [Limit, Options1]),
   {ok, StreamPid} = barrel_view:get_range(Barrel, View, Options1),
 
   fold_loop(StreamPid, Fun, Acc, Limit).
@@ -278,6 +280,7 @@ fold_loop(StreamPid, Fun, Acc, Limit) when Limit > 0 ->
   Timeout = barrel_config:get(fold_timeout),
   receive
     {StreamPid, {ok, Row}} ->
+      io:format("got row=~p~n", [Row]),
       case Fun(Row, Acc) of
         {ok, Acc2} ->
           fold_loop(StreamPid, Fun, Acc2, Limit -1);
@@ -288,7 +291,7 @@ fold_loop(StreamPid, Fun, Acc, Limit) when Limit > 0 ->
           fold_loop(StreamPid, Fun, Acc2, Limit);
         ok ->
           fold_loop(StreamPid, Fun, Acc, Limit -1);
-        skipk ->
+        skip ->
           fold_loop(StreamPid, Fun, Acc, Limit);
 
         stop ->
