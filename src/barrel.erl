@@ -264,21 +264,33 @@ start_view(Barrel, View, ViewMod, ViewConfig) ->
 
 
 fold_view(Barrel, View, Fun, Acc, Options) ->
-  {ok, StreamPid} = barrel_view:get_range(Barrel, View, Options),
-  fold_loop(StreamPid, Fun, Acc).
+  {Limit, Options1} = case maps:is_key(limit, Options) of
+                        true ->
+                          maps:take(limit, Options);
+                        false ->
+                          {1 bsl 64 -1, Options}
+                      end,
+  {ok, StreamPid} = barrel_view:get_range(Barrel, View, Options1),
 
-fold_loop(StreamPid, Fun, Acc) ->
+  fold_loop(StreamPid, Fun, Acc, Limit).
+
+fold_loop(StreamPid, Fun, Acc, Limit) when Limit > 0 ->
   Timeout = barrel_config:get(fold_timeout),
   receive
     {StreamPid, {ok, Row}} ->
       case Fun(Row, Acc) of
         {ok, Acc2} ->
-          fold_loop(StreamPid, Fun, Acc2);
+          fold_loop(StreamPid, Fun, Acc2, Limit -1);
         {stop, Acc2} ->
           _ = barrel_view:stop_kvs_steam(StreamPid),
           Acc2;
+        {skip, Acc2} ->
+          fold_loop(StreamPid, Fun, Acc2, Limit);
         ok ->
-          fold_loop(StreamPid, Fun, Acc);
+          fold_loop(StreamPid, Fun, Acc, Limit -1);
+        skipk ->
+          fold_loop(StreamPid, Fun, Acc, Limit);
+
         stop ->
           _ = barrel_view:stop_kvs_steam(StreamPid),
           Acc
@@ -287,4 +299,6 @@ fold_loop(StreamPid, Fun, Acc) ->
       Acc
   after Timeout ->
           erlang:exit(fold_timeout)
-  end.
+  end;
+fold_loop(_StreamPid, _Fun, Acc, 0) ->
+  Acc.
