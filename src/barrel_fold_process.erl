@@ -19,30 +19,18 @@ init(Parent, {fold_view, BarrelId, ViewId, To, Options}) ->
   proc_lib:init_ack(Parent, {ok, self()}),
   %% link to the client
   true = link(To),
-  Timeout = barrel_config:get(fold_timeout),
-  FoldFun = fun({DocId, Key, Value}, Ts) ->
+  FoldFun = fun({DocId, Key, Value}, _) ->
                 Row = #{ key => Key,
                          value => Value,
                          id => DocId },
 
                 %% TODO: replace by partisan call
                 To ! {self(), {ok, Row}},
-                Now = erlang:timestamp(),
-                Diff = timer:now_diff(Now, Ts),
-                if
-                  Diff >= Timeout ->
-                    {stop, timeout};
-                  true ->
-                    {ok, Now}
-                end
+                ok
             end,
 
-  case ?STORE:fold_view_index(Ref, ViewId, FoldFun, erlang:timestamp(), Options) of
-    {stop, timeout} ->
-      exit({fold_timeout, self()});
-    _ ->
-       To ! {self(), done}
-  end.
+ ok = ?STORE:fold_view_index(Ref, ViewId, FoldFun, ok, Options),
+ To ! {self(), done}.
 
 
 

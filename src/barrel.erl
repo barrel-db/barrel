@@ -255,6 +255,8 @@ fold_view(Barrel, View, Fun, Acc, Options) ->
                       end,
 
   io:format("limit=~p options=~p~n", [Limit, Options1]),
+  OldTrapExit = process_flag(trap_exit, true),
+  erlang:put(old_trap_exit, OldTrapExit),
   {ok, StreamPid} = barrel_view:get_range(Barrel, View, Options1),
 
   fold_loop(StreamPid, Fun, Acc, Limit).
@@ -268,6 +270,7 @@ fold_loop(StreamPid, Fun, Acc, Limit) when Limit > 0 ->
         {ok, Acc2} ->
           fold_loop(StreamPid, Fun, Acc2, Limit -1);
         {stop, Acc2} ->
+          clear_fold(),
           _ = barrel_view:stop_kvs_steam(StreamPid),
           Acc2;
         {skip, Acc2} ->
@@ -278,13 +281,22 @@ fold_loop(StreamPid, Fun, Acc, Limit) when Limit > 0 ->
           fold_loop(StreamPid, Fun, Acc, Limit);
 
         stop ->
+          clear_fold(),
           _ = barrel_view:stop_kvs_steam(StreamPid),
           Acc
       end;
     {StreamPid, done} ->
+      clear_fold(),
       Acc
   after Timeout ->
           erlang:exit(fold_timeout)
   end;
 fold_loop(_StreamPid, _Fun, Acc, 0) ->
+  clear_fold(),
   Acc.
+
+
+clear_fold() ->
+  OldTrapExit = erlang:get(old_trap_exit),
+  process_flag(trap_exit, OldTrapExit).
+
