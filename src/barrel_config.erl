@@ -16,9 +16,15 @@
   get/1, get/2
 ]).
 
--export([docs_store_path/0]).
+-export([storage/0]).
+
+-export([data_dir/0]).
 
 -include("barrel.hrl").
+
+
+storage() ->
+  persistent_term:get({?MODULE, storage}).
 
 
 get(Key) ->
@@ -40,28 +46,29 @@ init() ->
   Logger = application:get_env(barrel, logger_module, logger),
   barrel_config:set('$barrel_logger', Logger),
 
-  %% Configure data dir
-  DocsStorePath = docs_store_path(),
-  barrel_config:set(docs_store_path, DocsStorePath),
+  % Configure data dir
+  DataDir = data_dir(),
+  barrel_config:set(data_dir, DataDir),
 
   [env_or_default(Key, Default) ||
-    {Key, Default} <- [
-      {fold_timeout, 5000},
-      {index_worker_threads, 128},
-      %% docs storage
-      {rocksdb_cache_size, 1 bsl 20}, %% 1 MB,
-      {rocksdb_write_buffer_size, 64 bsl 20} %% 64 MB
-    ]
-  ],
+   {Key, Default} <- [
+                      {fold_timeout, 5000},
+                      {index_worker_threads, 128},
+                      %% storage backend
+                      {storage, barrel_rocksdb},
+                      %% docs storage
+                      {rocksdb_root_dir, DataDir},
+                      {rocksdb_cache_size, 1 bsl 20}, %% 1 MB,
+                      {rocksdb_write_buffer_size, 64 bsl 20} %% 64 MB
+                     ]],
 
   ok.
 
-docs_store_path() ->
+data_dir() ->
   Default = filename:join([?DATA_DIR, node(), "barrel"]),
-  Dir = application:get_env(barrel, docs_store_path, Default),
+  Dir = application:get_env(barrel, data_dir, Default),
   _ = filelib:ensure_dir(filename:join([".", Dir, "dummy"])),
   Dir.
-
 
 env_or_default(Key, Default) ->
   case application:get_env(barrel, Key) of

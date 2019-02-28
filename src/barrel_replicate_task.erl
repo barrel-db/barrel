@@ -43,7 +43,7 @@
   system_terminate/4
 ]).
 
--include("barrel_logger.hrl").
+-include("barrel.hrl").
 
 
 -record(st, {

@@ -44,8 +44,18 @@ start_link() ->
 
 %% Child :: {Id,StartFunc,Restart,Shutdown,Type,Modules}
 init([]) ->
-%% initi the config
-ok = barrel_config:init(),
+  %% initi the config
+  ok = barrel_config:init(),
+
+  %% storage mod
+  StoreMod = barrel_config:storage(),
+
+  %% index pool options
+  NumThreads = barrel_config:get(index_worker_threads),
+  PoolOptions = [{workers, NumThreads},
+                 {worker, {barrel_view_worker, undefined}}],
+
+
 
   Specs = [
     %% services management
@@ -70,13 +80,13 @@ ok = barrel_config:init(),
       type => worker
     },
 
-    #{id => barrel_storage,
-      start => {barrel_storage, start_link, []},
-      shutdown => infinity,
-      type => worker
-    },
+    #{ id => local_storage,
+              start => {StoreMod, start_link, []},
+              restart => permanent,
+              type => worker },
 
-    index_pool_spec(),
+    #{ id => index_pool,
+       start => {wpool, start_pool, [barrel_view_pool, PoolOptions]} },
 
     %% safe supervisor
     #{id => barrel_safe_sup,
@@ -118,13 +128,3 @@ init(safe) ->
     ],
 
   {ok, { {one_for_one, 4, 2000}, Specs} }.
-
-
-
-index_pool_spec() ->
-  NumThreads = barrel_config:get(index_worker_threads),
-  PoolOptions = [{workers, NumThreads},
-                 {worker, {barrel_view_worker, undefined}}],
-  #{ id => index_pool,
-     start => {wpool, start_pool, [barrel_view_pool, PoolOptions]} }.
-

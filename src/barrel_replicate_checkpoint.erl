@@ -26,7 +26,7 @@
         , delete/1
         ]).
 
--include("barrel_logger.hrl").
+-include("barrel.hrl").
 
 
 -record(st, { repid       ::binary()

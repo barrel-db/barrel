@@ -45,7 +45,7 @@ all() ->
 
 init_per_suite(Config) ->
   _ = application:load(barrel),
-  application:set_env(barrel, docs_store_path, "/tmp/default_rocksdb_test"),
+  application:set_env(barrel, data_dir, "/tmp/default_rocksdb_test"),
   os:cmd("rm -rf /tmp/default_rocksdb_test"),
   {ok, _} = application:ensure_all_started(barrel),
   Config.
@@ -60,9 +60,9 @@ end_per_testcase(_, _Config) ->
   ok.
 
 end_per_suite(Config) ->
-  ok = barrel:stop_store(default),
+  Dir = barrel_config:get(rocksdb_root_dir),
   ok = application:stop(barrel),
-  ok = rocksdb:destroy("/tmp/default_rocksdb_test", []),
+  ok = rocksdb:destroy(Dir, []),
   os:cmd("rm -rf /tmp/default_rocksdb_test"),
   Config.
 

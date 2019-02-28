@@ -8,7 +8,7 @@
 %% for debugging purpose
 -export([analyze/1]).
 
--include("barrel_logger.hrl").
+-include("barrel.hrl").
 
 version() -> 1.
 

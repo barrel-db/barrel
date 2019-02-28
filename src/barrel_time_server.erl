@@ -31,7 +31,7 @@
   terminate/2
 ]).
 
--include("barrel_logger.hrl").
+-include("barrel.hrl").
 
 -define(TS_FILE, "BARREL_TS").
 -define(DEFAULT_INTERVAL, 1000).
@@ -111,7 +111,7 @@ write_timestamp() ->
 curr_time_millis() -> erlang:system_time(millisecond).
 
 persist_file() ->
-  FullPath = filename:join(barrel_config:get(docs_store_path), ?TS_FILE),
+  FullPath = filename:join(barrel_config:get(data_dir), ?TS_FILE),
   ok = filelib:ensure_dir(FullPath),
   FullPath.
 
@@ -126,7 +126,7 @@ check_for_clock_error() ->
   Now = timestamp(),
   TimeSinceLastRun = Now - LastTs,
   check_for_clock_error(Now >= LastTs, TimeSinceLastRun < AllowableDowntime).
-  
+
 
 check_for_clock_error(true, true) -> ok;
 check_for_clock_error(false, _) ->

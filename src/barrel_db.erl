@@ -38,7 +38,6 @@
 
 
 -include_lib("barrel.hrl").
--include_lib("barrel_logger.hrl").
 
 -define(WRITE_BATCH_SIZE, 128).
 
@@ -50,19 +49,9 @@
   end).
 
 create_barrel(Name) ->
-  #{ mod := Mod, ref := Ref } = barrel_storage:get_store(),
   with_locked_barrel(
     Name,
-    fun() ->
-      case Mod:barrel_exists(Name, Ref) of
-        true ->  {error, barrel_already_exists};
-        false ->
-          case start_barrel(Name) of
-            {ok, _Pid} -> ok;
-            Error  -> Error
-          end
-      end
-    end
+    fun() -> ?STORE:create_barrel(Name) end
   ).
 
 open_barrel(Name) ->
@@ -71,17 +60,9 @@ open_barrel(Name) ->
       {ok, _} = OK ->
         OK;
       error ->
-        #{ mod := Mod, ref := Ref } = barrel_storage:get_store(),
         Res = barrel_registry:with_locked_barrel(
                 Name,
-                fun() ->
-                    case Mod:barrel_exists(Name, Ref) of
-                      true ->
-                        start_barrel(Name);
-                      false ->
-                        {error, barrel_not_found}
-                    end
-                end
+                fun() -> start_barrel(Name)  end
                ),
         case Res of
           {ok, _} ->
@@ -107,8 +88,7 @@ delete_barrel(Name) ->
     Name,
     fun() ->
       ok = stop_barrel(Name),
-      #{ mod := Mod, ref := Ref } = barrel_storage:get_store(),
-      Mod:delete_barrel(Name, Ref)
+      ?STORE:delete_barrel(Name)
     end
   ).
 
@@ -122,32 +102,26 @@ stop_barrel(Name) ->
   end.
 
 barrel_infos(Name) ->
-  #{ mod := Mod, ref := Ref } = barrel_storage:get_store(),
-  try Mod:barrel_infos(Name, Ref)
-  catch
-    error:badarg ->
-      {error, barrel_not_found}
-  end.
+  ?STORE:barrel_infos(Name).
 
-
-with_ctx(#{ store_mod := Mod, ref := Ref  }, Fun) ->
-  {ok, Ctx} = Mod:init_ctx(Ref, true),
+with_ctx(#{ ref := Ref  }, Fun) ->
+  {ok, Ctx} = ?STORE:init_ctx(Ref, true),
   try Fun(Ctx)
-  after Mod:release_ctx(Ctx)
+  after ?STORE:release_ctx(Ctx)
   end.
 
-fetch_doc(#{ store_mod := Mod } = Barrel, DocId, Options) ->
+fetch_doc(Barrel, DocId, Options) ->
   with_ctx(
     Barrel,
     fun(Ctx) ->
-      do_fetch_doc(Mod, Ctx, DocId, Options)
+      do_fetch_doc(Ctx, DocId, Options)
     end
   ).
 
-do_fetch_doc(Mod, Ctx, DocId, Options) ->
+do_fetch_doc(Ctx, DocId, Options) ->
   UserRev = maps:get(rev, Options, <<"">>),
   WithSeq = maps:get(seq, Options, false),
-  case Mod:get_doc_info(Ctx, DocId) of
+  case ?STORE:get_doc_info(Ctx, DocId) of
     {ok, #{ deleted := true } = _DI} when UserRev =:= <<>> ->
       {error, not_found};
     {ok, #{ rev := WinningRev, revtree := RevTree, seq := Seq }=_DI} ->
@@ -158,7 +132,7 @@ do_fetch_doc(Mod, Ctx, DocId, Options) ->
       case maps:find(Rev, RevTree) of
         {ok, RevInfo} ->
           Del = maps:get(deleted, RevInfo, false),
-          case Mod:get_doc_revision(Ctx, DocId, Rev) of
+          case ?STORE:get_doc_revision(Ctx, DocId, Rev) of
             {ok, Doc} ->
               Doc1 = maybe_add_sequence(Doc, Seq, WithSeq),
               WithHistory = maps:get(history, Options, false),
@@ -188,16 +162,16 @@ do_fetch_doc(Mod, Ctx, DocId, Options) ->
 maybe_add_sequence(Doc, _, false) -> Doc;
 maybe_add_sequence(Doc, Seq, true) -> Doc#{ <<"_seq">> => Seq }.
 
-revsdiff(#{ store_mod := Mod } = Barrel, DocId, RevIds) ->
+revsdiff(Barrel, DocId, RevIds) ->
   with_ctx(
     Barrel,
     fun(Ctx) ->
-      do_revsdiff(Mod, Ctx, DocId, RevIds)
+      do_revsdiff(Ctx, DocId, RevIds)
     end
   ).
 
-do_revsdiff(Mod, Ctx, DocId, RevIds) ->
-  case Mod:get_doc_info(Ctx, DocId) of
+do_revsdiff(Ctx, DocId, RevIds) ->
+  case ?STORE:get_doc_info(Ctx, DocId) of
     {ok, #{revtree := RevTree}} ->
       {Missing, PossibleAncestors} = lists:foldl(
         fun(RevId, {M, A} = Acc) ->
@@ -230,16 +204,16 @@ do_revsdiff(Mod, Ctx, DocId, RevIds) ->
       Error
   end.
 
-fold_docs(#{ store_mod := Mod } = Barrel, UserFun, UserAcc, Options) ->
+fold_docs(Barrel, UserFun, UserAcc, Options) ->
   with_ctx(
     Barrel,
     fun(Ctx) ->
-      WrapperFun = fold_docs_fun(Mod, Ctx, UserFun, Options),
-      Mod:fold_docs(Ctx, WrapperFun, UserAcc, Options)
+      WrapperFun = fold_docs_fun(Ctx, UserFun, Options),
+      ?STORE:fold_docs(Ctx, WrapperFun, UserAcc, Options)
     end
   ).
 
-fold_docs_fun(Mod, Ctx, UserFun, Options) ->
+fold_docs_fun(Ctx, UserFun, Options) ->
   IncludeDeleted =  maps:get(include_deleted, Options, false),
   WithHistory = maps:get(history, Options, false),
   MaxHistory = maps:get(max_history, Options, ?IMAX1),
@@ -247,7 +221,7 @@ fold_docs_fun(Mod, Ctx, UserFun, Options) ->
     case DI of
       #{ deleted := true } when IncludeDeleted =/= true -> skip;
       #{ rev := Rev, revtree := RevTree, deleted := Del } ->
-        case Mod:get_doc_revision(Ctx, DocId, Rev) of
+        case ?STORE:get_doc_revision(Ctx, DocId, Rev) of
           {ok, Doc} ->
             case WithHistory of
               false ->
@@ -268,15 +242,15 @@ fold_docs_fun(Mod, Ctx, UserFun, Options) ->
   end.
 
 
-fold_changes(#{ store_mod := Mod } = Barrel, Since, UserFun, UserAcc, Options) ->
+fold_changes(Barrel, Since, UserFun, UserAcc, Options) ->
   with_ctx(
     Barrel,
     fun(Ctx) ->
-      fold_changes_1(Mod,Ctx, Since, UserFun, UserAcc, Options)
+      fold_changes_1(Ctx, Since, UserFun, UserAcc, Options)
     end
   ).
 
-fold_changes_1(Mod, Ctx, Since, UserFun, UserAcc, Options) ->
+fold_changes_1(Ctx, Since, UserFun, UserAcc, Options) ->
   %% get options
   IncludeDoc = maps:get(include_doc, Options, false),
   WithHistory = maps:get(with_history, Options, false),
@@ -300,7 +274,7 @@ fold_changes_1(Mod, Ctx, Since, UserFun, UserAcc, Options) ->
         },
         Change = change_with_doc(
           change_with_deleted(Change0, Deleted),
-          DocId, Rev, Mod, Ctx, IncludeDoc
+          DocId, Rev, Ctx, IncludeDoc
         ),
         case UserFun(Change, Acc0) of
           {ok, Acc1} ->
@@ -316,18 +290,18 @@ fold_changes_1(Mod, Ctx, Since, UserFun, UserAcc, Options) ->
         end
     end,
   AccIn = {UserAcc, Since},
-  {AccOut, LastSeq} = Mod:fold_changes(Ctx, Since + 1, WrapperFun, AccIn),
+  {AccOut, LastSeq} = ?STORE:fold_changes(Ctx, Since + 1, WrapperFun, AccIn),
   {ok, AccOut, LastSeq}.
 
 change_with_deleted(Change, true) -> Change#{ <<"deleted">> => true };
 change_with_deleted(Change, _) -> Change.
 
-change_with_doc(Change, DocId, Rev, Mod, Ctx, true) ->
-  case Mod:get_doc_revision(Ctx, DocId, Rev) of
+change_with_doc(Change, DocId, Rev, Ctx, true) ->
+  case ?STORE:get_doc_revision(Ctx, DocId, Rev) of
     {ok, Doc} -> Change#{ <<"doc">> => Doc };
     _ -> Change#{ <<"doc">> => null }
   end;
-change_with_doc(Change, _, _, _, _, _) ->
+change_with_doc(Change, _, _, _, _) ->
   Change.
 
 
@@ -368,11 +342,11 @@ delete_local_doc(#{ name := Name }, DocId) ->
   Server =  barrel_registry:where_is(Name),
   gen_server:call(Server, {delete_local_doc, DocId}).
 
-get_local_doc(#{ store_mod := Mod } = Barrel, DocId) ->
+get_local_doc(Barrel, DocId) ->
   with_ctx(
     Barrel,
     fun(Ctx) ->
-        Mod:get_local_doc(Ctx, DocId)
+        ?STORE:get_local_doc(Ctx, DocId)
     end
    ).
 

@@ -25,7 +25,7 @@
 ]).
 
 
--include("barrel_logger.hrl").
+-include("barrel.hrl").
 -include_lib("stdlib/include/ms_transform.hrl").
 
 
@@ -68,7 +68,7 @@ remonitor(false) ->
   MS = ets:fun2ms(fun({Pid, m}) -> Pid end),
   _ = [erlang:monitor(process, Pid) || Pid <- ets:select(?TAB, MS)],
   ok.
-  
+
 remonitor_nodes(true) -> ok;
 remonitor_nodes(false) ->
   MS = ets:fun2ms(
@@ -136,7 +136,7 @@ maybe_start_checker(Node, State = #{ nodes := Nodes, workers := Workers}) ->
           State#{ nodes => Nodes2, workers => Workers2 }
       end
   end.
-  
+
 maybe_stop_checker(Node, State = #{ nodes := Nodes, workers := Workers}) ->
   case maps:take(Node, Nodes) of
     {Worker, Nodes2} ->
@@ -178,7 +178,7 @@ worker(Node) ->
   B2 = backoff:type(B, jitter),
   TRef = backoff:fire(B2),
   worker_loop(Node, TRef, B2).
-  
+
 worker_loop(Node, TRef, B) ->
   receive
     {timeout, TRef, ping} ->
