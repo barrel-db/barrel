@@ -21,11 +21,9 @@
 
 -include("barrel.hrl").
 
-
 get_range(Barrel, View, Options) ->
-  OldExit = process_flag(trap_exit, true),
-  erlang:put(old_trap_exit, OldExit),
-  gen_server:call(process_name(Barrel, View), {get_range, self(), Options}).
+  supervisor:start_child(barrel_fold_process_sup,
+                         [{fold_view, Barrel, View, self(), Options}]).
 
 await_kvs(StreamRef) ->
   Timeout = barrel_config:get(fold_timeout),
@@ -35,11 +33,7 @@ await_kvs(StreamRef) ->
     {StreamRef, done} ->
       OldTrapExit = erlang:erase(old_trap_exit),
       process_flag(trap_exit, OldTrapExit),
-      done;
-    {'EXIT', _, {fold_timeout, StreamRef}} ->
-      erlang:exit(fold_timeout);
-    {'EXIT', _, Reason} ->
-      erlang:error(Reason)
+      done
   after Timeout ->
           erlang:exit(fold_timeout)
   end.

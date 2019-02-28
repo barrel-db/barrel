@@ -517,6 +517,8 @@ do_fold_1({ok, K, V}, Next, Fun, Acc, Limit) when Limit > 0 ->
   case Fun(K, V, Acc) of
     {ok, Acc2} ->
       do_fold_1(Next(), Next, Fun, Acc2, Limit - 1);
+    {skip, Acc2} ->
+      do_fold_1(Next(), Next, Fun, Acc2, Limit);
     {stop, Acc2} ->
       Acc2;
     ok ->
