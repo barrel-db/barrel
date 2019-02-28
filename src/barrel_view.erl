@@ -19,6 +19,8 @@
          handle_info/2,
          terminate/2]).
 
+-include("barrel.hrl").
+
 
 get_range(Barrel, View, Options) ->
   OldExit = process_flag(trap_exit, true),
@@ -46,7 +48,8 @@ await_refresh(Barrel, View) ->
   await_refresh(Barrel, View, barrel_config:get(fold_timeout)).
 
 await_refresh(Barrel, View, Timeout) ->
-  {ok, Ref} = gen_server:call(process_name(Barrel, View), {await_refresh, self()}),
+  {ok, #{updated_seq := Seq}} = ?STORE:barrel_infos(Barrel),
+  {ok, Ref} = gen_server:call(process_name(Barrel, View), {await_refresh, self(), Seq}),
   receive
     {Ref, view_refresh} ->
       ok
@@ -75,10 +78,10 @@ handle_call({get_range, To, Options}, _From, #{ barrel := Barrel, view := View }
                            [{fold_view, Barrel, View, To, Options}]),
   {reply, {ok, Pid}, State};
 
-handle_call({await_refresh, Pid}, _From,
+handle_call({await_refresh, Pid, Seq}, _From,
             #{ waiters := Waiters } = State) ->
   Ref = erlang:make_ref(),
-  {reply, {ok, Ref}, State#{ waiters => [{Pid, Ref} | Waiters] }};
+  {reply, {ok, Ref}, State#{ waiters => [{Pid, Ref, Seq} | Waiters] }};
 
 handle_call(_Msg, _From, State) ->
   {reply, bad_call, State}.
@@ -86,9 +89,9 @@ handle_call(_Msg, _From, State) ->
 handle_cast(_Msg, State) ->
   {noreply, State}.
 
-handle_info(view_refresh, #{waiters := Waiters} = State) ->
-  _ = notify(Waiters, view_refresh),
-  {noreply, State#{ waiters => [] }};
+handle_info({view_refresh, Seq}, #{waiters := Waiters} = State) ->
+  Waiters2 = notify(Waiters, Seq),
+  {noreply, State#{ waiters => Waiters2 }};
 
 handle_info(_Info, State) ->
   {noreply, State}.
@@ -97,15 +100,20 @@ terminate(_Reason, _State) ->
   ok.
 
 
-notify(Waiters, Msg) ->
-  lists:foreach(fun({Pid, Ref}) ->
-                    case erlang:is_process_alive(Pid) of
-                      true ->
-                        Pid ! {Ref, Msg};
-                      false ->
-                        ok
-                    end
-                end, Waiters).
+notify(Waiters, IndexedSeq) ->
+  lists:foldl(fun
+                ({Pid, Ref, Seq}, Acc) when Seq =< IndexedSeq ->
+                  case erlang:is_process_alive(Pid) of
+                    true ->
+                      Pid ! {Ref, view_refresh};
+                    false ->
+                      ok
+                  end,
+                  Acc;
+                (Waiter, Acc) ->
+                  [Waiter, Acc]
+              end,
+              [], lists:reverse(Waiters)).
 
 process_name(BarrelId, ViewId) ->
   list_to_atom(?MODULE_STRING ++

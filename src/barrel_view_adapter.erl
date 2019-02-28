@@ -213,7 +213,7 @@ refresh_view(#{ barrel := #{ name := BarrelId } = Barrel,
                 batch_server := BatchServer,
                 view := #{ id := ViewId, indexed_seq := Start } = View} = State) ->
   ?LOG_DEBUG("start indexing barrel=~p view=~p seq=~p~n", [Barrel, View, Start]),
-  {ok, {NState, _}, LastSeq} = barrel_db:fold_changes(
+  {ok, {State2, _}, LastSeq} = barrel_db:fold_changes(
                                  Barrel, Start,
                                  fun(#{ <<"seq">> := Seq, <<"doc">> := Doc }, {State1, Ts}) ->
                                      Doc1 = Doc#{ <<"_seq">> => Seq },
@@ -223,10 +223,10 @@ refresh_view(#{ barrel := #{ name := BarrelId } = Barrel,
                                  {State, erlang:timestamp()},
                                  #{ include_doc => true }),
   erlang:send_after(100, self(), refresh_view),
-  ok = barrel_view:update(BarrelId, ViewId, view_refresh),
+  NState = store_checkpoint(State2, LastSeq),
+  ok = barrel_view:update(BarrelId, ViewId, {view_refresh, LastSeq}),
   ?LOG_DEBUG("end indexing barrel=~p view=~p~n", [Barrel, maps:get(view, NState)]),
-  store_checkpoint(NState, LastSeq).
-
+  NState.
 
 maybe_gc(Ts)  ->
   Now = erlang:timestamp(),

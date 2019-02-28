@@ -99,7 +99,7 @@ get_last_seq(Ident, ReadOpts0) ->
   MaxSeq = barrel_rocksdb_keys:doc_seq_max(Ident),
   LastSeq = case rocksdb:iterator_move(Itr, {seek_for_prev, MaxSeq}) of
               {ok, SeqKey, _} ->
-                barrel_rocksdb_keys:decode_doc_seq(SeqKey);
+                barrel_rocksdb_keys:decode_doc_seq(Ident, SeqKey);
               _ -> 0
             end,
   _ = rocksdb:iterator_close(Itr),
@@ -131,9 +131,9 @@ barrel_infos(Name) ->
     {ok, Ident} ->
       %% NOTE: we should rather use the multiget API from rocksdb there
       %% but until it's not exposed just get the results for each Keys
-      {ok, DocsCount} = db_get(barrel_rocksdb_keys:docs_count(Ident), 0, ReadOpts),
-      {ok, DelDocsCount} = db_get(barrel_rocksdb_keys:docs_del_count(Ident), 0, ReadOpts),
-      {ok, PurgeSeq} = db_get(barrel_rocksdb_keys:purge_seq(Ident), 0, ReadOpts),
+      {ok, DocsCount} = db_get_int(barrel_rocksdb_keys:docs_count(Ident), 0, ReadOpts),
+      {ok, DelDocsCount} = db_get_int(barrel_rocksdb_keys:docs_del_count(Ident), 0, ReadOpts),
+      {ok, PurgeSeq} = db_get_int(barrel_rocksdb_keys:purge_seq(Ident), 0, ReadOpts),
       %% get last sequence
       LastSeq = get_last_seq(Ident, ReadOpts),
       _ = rocksdb:release_snapshot(Snapshot),
@@ -164,7 +164,7 @@ commit(#{ barrel_id := BarrelId,
           counts := Counts }) ->
   ok = maybe_merge_count(counters:get(Counts, 1), docs_count, BarrelId, Batch),
   ok = maybe_merge_count(counters:get(Counts, 2), del_docs_count, BarrelId, Batch),
-  rocksdb:write_batch(?db, Batch, []).
+  rocksdb:write_batch(?db, Batch, [{sync, true}]).
 
 
 data_size(#{ batch := WB }) -> rocksdb:batch_data_size(WB).
@@ -445,7 +445,7 @@ update_view_index(Id, ViewId, DocId, KVs) ->
                 end, ToDelete),
   rocksdb:batch_put(Batch, RevMapKey, term_to_binary(ReverseMaps1)),
    %% write the batch
-  ok = rocksdb:write_batch(?db, Batch, []),
+  ok = rocksdb:write_batch(?db, Batch, [{sync, true}]),
   ok = rocksdb:release_batch(Batch),
   ok.
 
@@ -693,9 +693,9 @@ default_cf_options() ->
 %% internals
 
 
-db_get(Key, Default, ReadOptions) ->
+db_get_int(Key, Default, ReadOptions) ->
   case rocksdb:get(?db, Key, ReadOptions) of
-    {ok, Val} -> {ok, binary_to_term(Val)};
+    {ok, Val} -> {ok, binary_to_integer(Val)};
     not_found -> {ok, Default};
     Error -> Error
   end.

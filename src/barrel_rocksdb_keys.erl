@@ -33,7 +33,7 @@
   doc_info/2,
   doc_info_max/1,
   doc_seq/2,
-  decode_doc_seq/1,
+  decode_doc_seq/2,
   doc_seq_max/1,
   doc_seq_prefix/1,
   doc_rev/3,
@@ -110,18 +110,21 @@ doc_seq(BarrelId, Seq) ->
     Seq
   ).
 
-decode_doc_seq(SecKey) ->
-  {Seq, _} = barrel_encoding:decode_uint64_descending(SecKey),
-  Seq.
+decode_doc_seq(BarrelId, SeqKey) ->
+  case binary:split(SeqKey, doc_seq_prefix(BarrelId)) of
+    [<<>>, SeqPart] ->
+      {Seq, _} = barrel_encoding:decode_uint64_ascending(SeqPart),
+      Seq;
+    [] ->
+      erlang:error(badarg)
+  end.
+
 
 doc_seq_prefix(BarrelId) -> << (db_prefix(BarrelId))/binary, ?docs_sec_suffix/binary >>.
 
 %% @doc max document sequence key
 doc_seq_max(BarrelId) ->
-  barrel_encoding:encode_uint64_ascending(
-    << (db_prefix(BarrelId))/binary, ?docs_sec_suffix/binary >>,
-    1 bsl 64 - 1
-  ).
+  doc_seq(BarrelId, 1 bsl 64 - 1).
 
 %% @doc document revision key
 doc_rev(BarrelId, DocId, DocRev) ->

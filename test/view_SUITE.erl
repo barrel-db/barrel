@@ -54,7 +54,6 @@ basic_test(_Config) ->
     #{ <<"id">> => <<"a">>, <<"v">> => 1, <<"o">> => #{ <<"o1">> => 1, << "o2">> => 1}}
   ],
   {ok, _Saved} = barrel:save_docs(Barrel, Docs),
-  timer:sleep(200),
   barrel_view:await_refresh(<<"test">>, <<"ars">>),
   [<<"a">>] = barrel:fold_view(<<"test">>, <<"ars">>,
                                fun(#{ id := Id }, Acc) ->
@@ -90,7 +89,6 @@ fwd_test(_Config) ->
    <<"b">>,
    <<"a">>] = barrel:fold_docs(Barrel, Fun, [], #{}),
 
-   timer:sleep(200),
    barrel_view:await_refresh(<<"test">>, <<"ars">>),
 
    [<<"e">>, <<"d">>] = try barrel:fold_view(<<"test">>, <<"ars">>,
@@ -129,7 +127,6 @@ rev_test(_Config) ->
    <<"b">>,
    <<"a">>] = barrel:fold_docs(Barrel, Fun, [], #{}),
 
-   timer:sleep(200),
    barrel_view:await_refresh(<<"test">>, <<"ars">>),
 
    [<<"a">>, <<"b">>] = try barrel:fold_view(<<"test">>, <<"ars">>,
