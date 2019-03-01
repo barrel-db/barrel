@@ -31,9 +31,3 @@ init(Parent, {fold_view, BarrelId, ViewId, To, Options}) ->
 
  ok = ?STORE:fold_view_index(Ref, ViewId, FoldFun, ok, Options),
  To ! {self(), done}.
-
-
-
-
-
-

@@ -105,7 +105,7 @@ notify(Waiters, IndexedSeq) ->
                   end,
                   Acc;
                 (Waiter, Acc) ->
-                  [Waiter, Acc]
+                  [Waiter | Acc]
               end,
               [], lists:reverse(Waiters)).
 
