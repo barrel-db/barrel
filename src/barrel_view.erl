@@ -92,7 +92,7 @@ handle_call({await_refresh, Pid, Seq}, _From,
 handle_call({await_refresh, Pid, Seq}, _From,
             #{ waiters := Waiters } = State) ->
   Ref = erlang:make_ref(),
-  {reply, {ok, Ref}, State#{ waiters => [{Pid, Ref, Seq} | Waiters] }};
+  {reply, {wait, Ref}, State#{ waiters => [{Pid, Ref, Seq} | Waiters] }};
 
 handle_call(_Msg, _From, State) ->
   {reply, bad_call, State}.
