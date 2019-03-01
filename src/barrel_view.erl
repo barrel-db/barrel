@@ -43,12 +43,17 @@ await_refresh(Barrel, View) ->
 
 await_refresh(Barrel, View, Timeout) ->
   {ok, #{updated_seq := Seq}} = ?STORE:barrel_infos(Barrel),
-  {ok, Ref} = gen_server:call(process_name(Barrel, View), {await_refresh, self(), Seq}),
-  receive
-    {Ref, view_refresh} ->
-      ok
-  after Timeout ->
-          exit(refresh_timeout)
+  case gen_server:call(process_name(Barrel, View),
+                       {await_refresh, self(), Seq}) of
+    ok ->
+      ok;
+    {wait, Ref} ->
+      receive
+        {Ref, view_refresh} ->
+          ok
+      after Timeout ->
+              exit(refresh_timeout)
+      end
   end.
 
 update(Barrel, View, Msg) ->
@@ -72,6 +77,18 @@ handle_call({get_range, To, Options}, _From, #{ barrel := Barrel, view := View }
                            [{fold_view, Barrel, View, To, Options}]),
   {reply, {ok, Pid}, State};
 
+
+handle_call({await_refresh, Pid, Seq}, _From,
+            #{ waiters := Waiters, indexed_seq := IndexedSeq } = State) ->
+
+  if
+    IndexedSeq >= Seq ->
+      {reply, ok, State};
+    true ->
+      Ref = erlang:make_ref(),
+      {reply, {wait, Ref}, State#{ waiters => [{Pid, Ref, Seq} | Waiters] }}
+  end;
+
 handle_call({await_refresh, Pid, Seq}, _From,
             #{ waiters := Waiters } = State) ->
   Ref = erlang:make_ref(),
@@ -85,7 +102,7 @@ handle_cast(_Msg, State) ->
 
 handle_info({view_refresh, Seq}, #{waiters := Waiters} = State) ->
   Waiters2 = notify(Waiters, Seq),
-  {noreply, State#{ waiters => Waiters2 }};
+  {noreply, State#{ waiters => Waiters2, indexed_seq => Seq }};
 
 handle_info(_Info, State) ->
   {noreply, State}.
