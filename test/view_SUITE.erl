@@ -12,14 +12,15 @@
 
 -export([basic_test/1,
          fwd_test/1,
-         rev_test/1]).
+         rev_test/1,
+         limit_test/1]).
 
 all() ->
   [
    basic_test,
    fwd_test,
-
-   rev_test
+   rev_test,
+   limit_test
   ].
 
 init_per_suite(Config) ->
@@ -143,6 +144,58 @@ rev_test(_Config) ->
                         end,
 
    ok.
+
+
+limit_test(_Config) ->
+  {ok, Barrel} = barrel:open_barrel(<<"test">>),
+   {ok, ViewPid} = barrel:start_view(<<"test">>, <<"ars">>, barrel_ars_view, #{}),
+
+  Docs = [
+    #{ <<"id">> => <<"a">> },
+    #{ <<"id">> => <<"b">> },
+    #{ <<"id">> => <<"c">> },
+    #{ <<"id">> => <<"d">> },
+    #{ <<"id">> => <<"e">> },
+    #{ <<"id">> => <<"f">> },
+    #{ <<"id">> => <<"g">> },
+    #{ <<"id">> => <<"h">> }
+
+  ],
+
+  {ok, _Saved} = barrel:save_docs(Barrel, Docs),
+  8 = length(_Saved),
+
+  barrel_view:await_refresh(<<"test">>, <<"ars">>),
+
+  [<<"f">>, <<"g">>, <<"h">>] = try barrel:fold_view(<<"test">>, <<"ars">>,
+                                             fun(#{ id := Id }, Acc) ->
+                                                 {ok, [Id | Acc]}
+                                             end,
+                                             [],
+                                             #{begin_key => [<<"id">>],
+                                               limit => 3,
+                                               reverse => true })
+                        after
+                          supervisor:terminate_child(barrel_view_sup_sup, ViewPid)
+                        end,
+
+  [<<"c">>, <<"b">>, <<"a">>] = try barrel:fold_view(<<"test">>, <<"ars">>,
+                                             fun(#{ id := Id }, Acc) ->
+                                                 {ok, [Id | Acc]}
+                                             end,
+                                             [],
+                                             #{begin_key => [<<"id">>], limit => 3})
+                        after
+                          supervisor:terminate_child(barrel_view_sup_sup, ViewPid)
+                        end,
+
+
+   ok.
+
+
+
+
+
 
 
 

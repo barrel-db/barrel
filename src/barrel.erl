@@ -286,6 +286,7 @@ fold_loop(StreamPid, Fun, Acc, Limit) when Limit > 0 ->
           Acc
       end;
     {StreamPid, done} ->
+      io:format("done~n", []),
       clear_fold(),
       Acc
   after Timeout ->
