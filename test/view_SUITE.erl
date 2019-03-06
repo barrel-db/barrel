@@ -13,14 +13,16 @@
 -export([basic_test/1,
          fwd_test/1,
          rev_test/1,
-         limit_test/1]).
+         limit_test/1,
+         r1_test/1]).
 
 all() ->
   [
    basic_test,
    fwd_test,
    rev_test,
-   limit_test
+   limit_test,
+   r1_test
   ].
 
 init_per_suite(Config) ->
@@ -193,8 +195,58 @@ limit_test(_Config) ->
    ok.
 
 
+r1_test(_Config) ->
+  {ok, Barrel} = barrel:open_barrel(<<"test">>),
+  {ok, ViewPid} = barrel:start_view(<<"test">>, <<"ars">>, barrel_ars_view, #{}),
+
+  Ids = [<<"9gUOXd0V5JePkx3HCU">>,<<"9gUOXd0V5JePkx3HCV">>,<<"9gUOXd0V5JePkx3HCW">>,
+ <<"9gUOXd0V5JePkx3HCX">>,<<"9gUOXd0V5JePkx3HCY">>,<<"9gUOXd0V5JePkx3HCZ">>,
+ <<"9gUOXd0V5JePkx3HCa">>,<<"9gUOXd0V5JePkx3HCb">>,<<"9gUOXd0V5JePkx3HCc">>,
+ <<"9gUOXd0V5JePkx3HCd">>,<<"9gUOXd0V5JePkx3HCe">>,<<"9gUOXd0V5JePkx3HCf">>,
+ <<"9gUOXd0V5JePkx3HCg">>,<<"9gUOXd0V5JePkx3HCh">>,<<"9gUOXd0V5JePkx3HCi">>],
 
 
+  Docs = [#{ <<"id">> => Id,
+             <<"message">> => #{ <<"messageId">> => Id }
+           } || Id <- Ids],
+
+  {ok, Saved} = barrel:save_docs(Barrel, Docs),
+  15 = length(Saved),
+
+
+  barrel_view:await_refresh(<<"test">>, <<"ars">>),
+
+  [<<"9gUOXd0V5JePkx3HCe">>,
+   <<"9gUOXd0V5JePkx3HCf">>,
+   <<"9gUOXd0V5JePkx3HCg">>,
+   <<"9gUOXd0V5JePkx3HCh">>,
+   <<"9gUOXd0V5JePkx3HCi">>] = try barrel:fold_view(<<"test">>, <<"ars">>,
+                                                    fun(#{  id := Id }, Acc) ->
+                                                        {ok, [Id | Acc]}
+                                                    end,
+                                                    [],
+                                                    #{begin_key => [<<"message">>, <<"messageId">>],
+                                                      limit => 5,
+                                                      reverse => true })
+                               after
+                                 supervisor:terminate_child(barrel_view_sup_sup, ViewPid)
+                               end,
+
+  [<<"9gUOXd0V5JePkx3HCU">>,
+   <<"9gUOXd0V5JePkx3HCV">>,
+   <<"9gUOXd0V5JePkx3HCW">>,
+   <<"9gUOXd0V5JePkx3HCX">>,
+   <<"9gUOXd0V5JePkx3HCY">>] =try barrel:fold_view(<<"test">>, <<"ars">>,
+                                                   fun(#{ id := Id }, Acc) ->
+                                                       {ok, Acc ++[Id]}
+                                                   end,
+                                                   [],
+                                                   #{begin_key => [<<"message">>, <<"messageId">>],
+                                                     limit => 5})
+                              after
+                                supervisor:terminate_child(barrel_view_sup_sup, ViewPid)
+                              end,
+  ok.
 
 
 

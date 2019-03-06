@@ -466,13 +466,12 @@ fold_view_index(Id, ViewId, UserFun, UserAcc, Options) ->
   LowerBound = barrel_rocksdb_keys:encode_view_key(Begin, Prefix),
   End = maps:get(end_key, Options, [?key_max]),
   EndOrEqual = maps:get(end_or_equal, Options, true),
+  End1 = barrel_rocksdb_keys:encode_view_key(End, Prefix),
   UpperBound = case EndOrEqual of
                  true ->
-                   barrel_rocksdb_util:bytes_next(
-                     barrel_rocksdb_keys:encode_view_key(End, Prefix)
-                    );
+                   barrel_rocksdb_util:bytes_next(End1);
                  false ->
-                   barrel_rocksdb_keys:encode_view_key(End, Prefix)
+                   End1
                end,
   Reverse = maps:get(reverse, Options, false),
   Snapshot = maps:get(snapshot, Options, false),
@@ -502,7 +501,12 @@ fold_view_index(Id, ViewId, UserFun, UserAcc, Options) ->
 
       do_fold(First, Next, Itr, WrapperFun, UserAcc, Limit);
     true ->
-      First = rocksdb:iterator_move(Itr, last),
+      First = case EndOrEqual of
+                true ->
+                  rocksdb:iterator_move(Itr, {seek_for_prev, End1});
+                false ->
+                  rocksdb:iterator_move(Itr, last)
+              end,
       Next = fun() -> rocksdb:iterator_move(Itr, prev) end,
       do_fold(First, Next, Itr, WrapperFun, UserAcc, Limit)
   end.
