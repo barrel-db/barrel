@@ -501,12 +501,7 @@ fold_view_index(Id, ViewId, UserFun, UserAcc, Options) ->
 
       do_fold(First, Next, Itr, WrapperFun, UserAcc, Limit);
     true ->
-      First = case EndOrEqual of
-                true ->
-                  rocksdb:iterator_move(Itr, {seek_for_prev, End1});
-                false ->
-                  rocksdb:iterator_move(Itr, last)
-              end,
+      First = rocksdb:iterator_move(Itr, last),
       Next = fun() -> rocksdb:iterator_move(Itr, prev) end,
       do_fold(First, Next, Itr, WrapperFun, UserAcc, Limit)
   end.
