@@ -75,8 +75,14 @@ create_barrel(Name) ->
     not_found ->
        ok = counters:add(Counters, 1, 1),
        Id = counters:get(Counters, 1),
-       BinId = barrel_encoding:encode_uvarint_ascending(<<>>, Id),
-       ok = rocksdb:put(Ref, BarrelKey, BinId, []),
+       BinId = << Id:32/integer >>,
+       {ok, WB} = rocksdb:batch(),
+       ok = rocksdb:batch_put(WB, BarrelKey, BinId),
+       ok = rocksdb:batch_put(WB, barrel_rocksdb_keys:docs_count(BinId), integer_to_binary(0)),
+       ok = rocksdb:batch_put(WB, barrel_rocksdb_keys:docs_del_count(BinId), integer_to_binary(0)),
+       ok = rocksdb:batch_put(WB, barrel_rocksdb_keys:purge_seq(BinId), integer_to_binary(0)),
+       ok = rocksdb:write_batch(Ref, WB, [{sync, true}]),
+       ok = rocksdb:release_batch(WB),
        ok
   end.
 
@@ -586,14 +592,12 @@ init_db(Dir, CacheRef) ->
   DbOpts = default_db_options() ++ cf_options(CacheRef),
   case open_db(Dir, DbOpts, Retries, false) of
     {ok, Ref} ->
-      NextDbPrefix = barrel_rocksdb_util:bytes_next(?db_prefix),
       %% find last ident
       {ok, Itr} = rocksdb:iterator(Ref, []),
-      LastIdent = case rocksdb:iterator_move(Itr, {seek_for_prev, NextDbPrefix}) of
-                    {ok, Key, _} ->
-                      {Id, _} = barrel_encoding:decode_uvarint_ascending(Key),
+      LastIdent = case rocksdb:iterator_move(Itr, last) of
+                    {ok, << _:2/binary, Id:32/integer, _/binary >>, _} ->
                       Id;
-                     _ ->
+                     _Else ->
                       0
                   end,
       ok = rocksdb:iterator_close(Itr),
