@@ -38,8 +38,7 @@ update_doc(Server, Doc, MergePolicy) ->
    #{ ref := Ref } = Record = barrel_doc:make_record(Doc),
    gen_server:cast(Server, {update_doc, self(), Record, MergePolicy}),
    receive
-     {Ref, Result} -> Result;
-     Else -> io:format("got else ~p~n", [Else])
+     {Ref, Result} -> Result
    after 5000 ->
            exit(timeout)
    end.
@@ -70,28 +69,6 @@ handle_call({delete_local_doc, DocId}, _From,
   Reply = ?STORE:delete_local_doc(Ref, DocId),
   {reply, Reply, State};
 
-handle_call({update_docs, Docs, MergePolicy}, _From,
-            #{ ref := Ref,
-               name := Name,
-               updated_seq := LastSeq } = State) ->
-  {ok, RU} = ?STORE:recovery_unit(Ref),
-  {Results, UpdatedSeq} = update_docs(Docs, MergePolicy, RU, State),
-  {Reply, NewState} = case  ?STORE:commit(RU) of
-                        ok ->
-                          ?STORE:release_recovery_unit(RU),
-                          if
-                            UpdatedSeq =/= LastSeq ->
-                              barrel_event:notify(Name, db_updated),
-                              {{ok, Results}, State#{ updated_seq => UpdatedSeq }};
-                            true ->
-                              {{ok, Results}, State}
-                          end;
-                        Error ->
-                          ?LOG_ERROR("update_docs db=~p error=~p~n", [Name, Error]),
-                          {Error, State}
-                      end,
-  {reply, Reply, NewState};
-
 handle_call(_Msg, _From, State) ->
   {reply, bad_call, State}.
 
@@ -100,10 +77,11 @@ handle_call(_Msg, _From, State) ->
 handle_cast({update_doc, From, #{ id := DocId, ref := Ref } = Record, MergePolicy},
             #{ name := Name, ref := BRef, updated_seq := Seq } = State) ->
 
-  {DocStatus, #{ seq := OldSeq } = DI} = case ?STORE:get_doc_info(BRef, DocId) of
-                                                 {ok, DI1} -> {found, DI1};
-                                                 {error, not_found} -> {not_found, new_docinfo(DocId)}
-                                               end,
+  {DocStatus,
+   #{ seq := OldSeq, deleted := OldDel } = DI} = case ?STORE:get_doc_info(BRef, DocId) of
+                                                   {ok, DI1} -> {found, DI1};
+                                                   {error, not_found} -> {not_found, new_docinfo(DocId)}
+                                                 end,
 
   MergeFun = case MergePolicy of
                merge -> fun merge_revtree/2;
@@ -112,13 +90,13 @@ handle_cast({update_doc, From, #{ id := DocId, ref := Ref } = Record, MergePolic
 
 
   case MergeFun(Record, DI) of
-    {ok, #{ rev := Rev} = DI2, DocRev, DocBody} when DI2 =/= DI ->
+    {ok, #{ rev := Rev } = DI2, DocRev, DocBody} when DI2 =/= DI ->
       Seq2 = Seq + 1,
       case DocStatus of
         not_found ->
           ?STORE:insert_doc(BRef, DI2#{ seq => Seq2 }, DocRev, DocBody);
         found ->
-          ?STORE:update_doc(BRef, DI2#{ seq => Seq2}, DocRev, DocBody, OldSeq)
+          ?STORE:update_doc(BRef, DI2#{ seq => Seq2 }, DocRev, DocBody, OldSeq, OldDel)
       end,
       barrel_event:notify(Name, db_updated),
       From ! {Ref, {ok, DocId, Rev}},
@@ -138,49 +116,6 @@ terminate(_Reason, State) ->
   ok = try_close_barrel(State),
   ok.
 
-
-update_docs(GroupedRecords, MergePolicy, RU,
-            #{ updated_seq := LastSeq }) ->
-
-  MergeFun = case MergePolicy of
-               merge -> fun merge_revtree/2;
-               merge_with_conflict -> fun merge_revtree_with_conflict/2
-             end,
-  dict:fold(
-    fun(DocId, Records, {Results1, Seq1}) ->
-        {DocStatus, #{ seq := OldSeq } = DI} = case ?STORE:get_doc_info(RU, DocId) of
-                                                 {ok, DI1} -> {found, DI1};
-                                                 {error, not_found} -> {not_found, new_docinfo(DocId)}
-                                               end,
-        {DI2, Results2} = merge_revtrees(Records, DI, Results1, RU, MergeFun),
-        if
-          DI /= DI2 ->
-            Seq2 = Seq1 + 1,
-            case DocStatus of
-              not_found ->
-                ?STORE:insert_doc_infos(RU, DI2#{ seq => Seq2 });
-              found ->
-                ?STORE:update_doc_infos(RU, DI2#{ seq => Seq2 }, OldSeq)
-            end,
-            {Results2, Seq2};
-          true ->
-            {Results2, Seq1}
-        end
-    end,
-    {#{}, LastSeq}, GroupedRecords).
-
-merge_revtrees([#{ ref := Ref } = Record | Rest], #{ id := DocId } = DI, Results, RU, MergeFun) ->
-  case MergeFun(Record, DI) of
-    {ok, #{ rev := Rev } = DI2, DocRev, RevBody} ->
-      ok = ?STORE:add_doc_revision(RU, DocId, DocRev, RevBody),
-      Results2 = maps:put(Ref, {ok, DocId, Rev}, Results),
-      merge_revtrees(Rest, DI2, Results2, RU, MergeFun);
-    Error ->
-      Results2 = maps:put(Ref, Error, Results),
-      merge_revtrees(Rest, DI, Results2, RU, MergeFun)
-  end;
-merge_revtrees([], DI, Results, _RU, _MergedFun) ->
-  {DI, Results}.
 
 %% -----------------------------------------
 %% merge doc infos
