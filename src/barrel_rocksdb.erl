@@ -351,7 +351,7 @@ do_fold_changes({ok, _, Value}, Itr, UserFun, UserAcc) ->
 do_fold_changes(_, _, _, UserAcc) ->
   UserAcc.
 
-get_local_doc(#{ barrel_id := BarrelId }, DocId) ->
+get_local_doc(BarrelId, DocId) ->
   LocalKey = barrel_rocksdb_keys:local_doc(BarrelId, DocId),
   case rocksdb:get(?db, LocalKey, []) of
     {ok, DocBin} -> {ok, binary_to_term(DocBin)};

@@ -327,14 +327,8 @@ delete_local_doc(#{ ref := Ref }, DocId) ->
   ?STORE:delete_local_doc(Ref, DocId).
 
 
-get_local_doc(Barrel, DocId) ->
-  with_ctx(
-    Barrel,
-    fun(Ctx) ->
-        ?STORE:get_local_doc(Ctx, DocId)
-    end
-   ).
-
+get_local_doc(#{ ref := Ref }, DocId) ->
+   ?STORE:get_local_doc(Ref, DocId).
 
 maybe_add_deleted(Doc, true) -> Doc#{ <<"_deleted">> => true };
 maybe_add_deleted(Doc, false) -> Doc.
