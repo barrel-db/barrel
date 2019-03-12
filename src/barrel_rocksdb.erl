@@ -149,45 +149,51 @@ barrel_infos(Name) ->
 %% -------------------
 %% docs
 
-insert_doc(BarrelId, #{ id := DocId, seq := Seq } = DI, DocRev, DocBody) ->
-  DIKey = barrel_rocksdb_keys:doc_info(BarrelId, DocId),
-  SeqKey = barrel_rocksdb_keys:doc_seq(BarrelId, Seq),
-  RevKey = barrel_rocksdb_keys:doc_rev(BarrelId, DocId, DocRev),
-  DIVal = term_to_binary(DI),
+insert_doc(BarrelId, DI, DocRev, DocBody) ->
   {ok, Batch} = rocksdb:batch(),
-  ok = rocksdb:batch_put(Batch, DIKey, DIVal),
-  ok = rocksdb:batch_put(Batch, SeqKey, DIVal),
-  ok = rocksdb:batch_put(Batch, RevKey, term_to_binary(DocBody)),
-  ok = rocksdb:batch_merge(Batch, barrel_rocksdb_keys:docs_count(BarrelId), integer_to_binary(1)),
-  try rocksdb:write_batch(?db, Batch, [])
-  after rocksdb:release_batch(Batch)
-  end.
+  batch_put_doc(Batch, BarrelId, DI, DocRev, DocBody),
+  merge_docs_count(Batch, BarrelId, 1),
+  write_batch(Batch).
 
-update_doc(BarrelId, #{ id := DocId, seq := Seq, deleted := Del } = DI,
+update_doc(BarrelId, #{ deleted := Del } = DI,
            DocRev, DocBody, OldSeq, OldDel) ->
-  DIKey = barrel_rocksdb_keys:doc_info(BarrelId, DocId),
-  SeqKey = barrel_rocksdb_keys:doc_seq(BarrelId, Seq),
-  RevKey = barrel_rocksdb_keys:doc_rev(BarrelId, DocId, DocRev),
-  OldSeqKey = barrel_rocksdb_keys:doc_seq(BarrelId, OldSeq),
-
-  DIVal = term_to_binary(DI),
   {ok, Batch} = rocksdb:batch(),
-  ok = rocksdb:batch_put(Batch, DIKey, DIVal),
-  ok = rocksdb:batch_put(Batch, SeqKey, DIVal),
-  ok = rocksdb:batch_put(Batch, RevKey, term_to_binary(DocBody)),
+  batch_put_doc(Batch, BarrelId, DI, DocRev, DocBody),
+  OldSeqKey = barrel_rocksdb_keys:doc_seq(BarrelId, OldSeq),
   ok = rocksdb:batch_single_delete(Batch, OldSeqKey),
   case {Del, OldDel} of
     {true, false} ->
-      ok = rocksdb:batch_merge(Batch, barrel_rocksdb_keys:docs_count(BarrelId), integer_to_binary(-1)),
-      ok = rocksdb:batch_merge(Batch, barrel_rocksdb_keys:docs_del_count(BarrelId), integer_to_binary(1));
+      merge_docs_count(Batch, BarrelId, -1),
+      merge_docs_del_count(Batch, BarrelId, 1);
     {false, true} ->
-      ok = rocksdb:batch_merge(Batch, barrel_rocksdb_keys:docs_count(BarrelId), integer_to_binary(1)),
-      ok = rocksdb:batch_merge(Batch, barrel_rocksdb_keys:docs_del_count(BarrelId), integer_to_binary(-1));
+      merge_docs_count(Batch, BarrelId, 1),
+      merge_docs_del_count(Batch, BarrelId, -1);
     {_, _} ->
       ok
   end,
-  try rocksdb:write_batch(?db, Batch, [])
-  after rocksdb:release_batch(Batch)
+  write_batch(Batch).
+
+batch_put_doc(Batch, BarrelId, #{ id := DocId, seq := Seq } = DI, DocRev, DocBody) ->
+  DIKey = barrel_rocksdb_keys:doc_info(BarrelId, DocId),
+  SeqKey = barrel_rocksdb_keys:doc_seq(BarrelId, Seq),
+  RevKey = barrel_rocksdb_keys:doc_rev(BarrelId, DocId, DocRev),
+  DIVal = term_to_binary(DI),
+  rocksdb:batch_put(Batch, DIKey, DIVal),
+  rocksdb:batch_put(Batch, SeqKey, DIVal),
+  rocksdb:batch_put(Batch, RevKey, term_to_binary(DocBody)).
+
+
+merge_docs_count(Batch, BarrelId, Val) ->
+  Key = barrel_rocksdb_keys:docs_count(BarrelId),
+  rocksdb:batch_merge( Batch, Key, integer_to_binary(Val)).
+
+merge_docs_del_count(Batch, BarrelId, Val) ->
+  Key = barrel_rocksdb_keys:docs_del_count(BarrelId),
+  rocksdb:batch_merge(Batch, Key, integer_to_binary(Val)).
+
+write_batch(WB) ->
+  try rocksdb:write_batch(?db, WB, [])
+  after rocksdb:release_batch(WB)
   end.
 
 put_local_doc(BarrelId, DocId, LocalDoc) ->
