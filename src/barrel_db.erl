@@ -320,13 +320,12 @@ update_docs(#{ name := Name }, Docs, Options, UpdateType) ->
   barrel_server:update_docs(Server, Docs, MergePolicy).
 
 
-put_local_doc(#{ name := Name}, DocId, Doc) ->
-   Server =  barrel_registry:where_is(Name),
-   barrel_server:put_local_doc(Server, DocId, Doc).
+put_local_doc(#{ ref := Ref }, DocId, Doc) ->
+  ?STORE:put_local_doc(Ref, DocId, Doc).
 
-delete_local_doc(#{ name := Name }, DocId) ->
-  Server =  barrel_registry:where_is(Name),
-  barrel_server:delete_local_doc(Server, DocId).
+delete_local_doc(#{ ref := Ref }, DocId) ->
+  ?STORE:delete_local_doc(Ref, DocId).
+
 
 get_local_doc(Barrel, DocId) ->
   with_ctx(

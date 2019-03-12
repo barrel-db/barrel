@@ -19,9 +19,6 @@
 -export([update_docs/3]).
 -export([update_doc/3]).
 
--export([put_local_doc/3,
-         delete_local_doc/2]).
-
 -export([start_link/1]).
 
 -export([init/1,
@@ -32,19 +29,7 @@
 
 -include("barrel.hrl").
 
-
-
-put_local_doc(Server, DocId, Doc) ->
-  gen_server:cast(Server, {put_local_doc, self(), DocId, Doc}),
-  receive
-    Reply -> Reply
-  end.
-
-delete_local_doc(Server, DocId) ->
-  gen_server:cast(Server, {delete_local_doc, self(), DocId}),
-  receive
-    Reply -> Reply
-  end.
+-define(TIMEOUT, 5000).
 
 update_docs(Server, Docs, MergePolicy) ->
   {ok, [update_doc(Server, Doc, MergePolicy) || Doc <- Docs]}.
@@ -77,20 +62,6 @@ init([Name]) ->
 
 handle_call(_Msg, _From, State) ->
   {reply, bad_call, State}.
-
-handle_cast({put_local_doc, From, DocId, Doc},
-            #{ ref := Ref } = State) ->
-  Reply = ?STORE:put_local_doc(Ref, DocId, Doc),
-  From ! Reply,
-  {noreply, State};
-
-handle_cast({delete_local_doc, From, DocId},
-            #{ ref := Ref} = State) ->
-  Reply = ?STORE:delete_local_doc(Ref, DocId),
-  From ! Reply,
-  {noreply, State};
-
-
 
 handle_cast({update_doc, From, #{ id := DocId, ref := Ref } = Record, MergePolicy},
             #{ name := Name, ref := BRef, updated_seq := Seq } = State) ->
