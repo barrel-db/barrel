@@ -13,15 +13,15 @@ start_link(Conf) ->
 
 init(Conf) ->
   Specs = [
-           #{ id => view_adapter,
+           #{ id => view,
               start => {barrel_view, start_link, [Conf]} },
 
-           #{ id => view,
-              start => {barrel_view_adapter, start_link, [Conf]},
-              restart => transient }
+           #{ id => view_adapter,
+              start => {barrel_view_adapter, start_link, [Conf]}
+            }
 
           ],
-  SupFlags = #{ strategy => one_for_all },
+  SupFlags = #{ strategy => rest_for_one },
   {ok, {SupFlags, Specs}}.
 
 

@@ -13,7 +13,7 @@ start_link() ->
 init([]) ->
   _ = ets:new(?VIEWS, [named_table, public, set,
                        {read_concurrency, true}]),
-  Spec = #{ id => view,
+  Spec = #{ id => view_sup,
             start => {barrel_view_sup, start_link, []},
             type => supervisor },
   SupFlags = #{ strategy => simple_one_for_one },

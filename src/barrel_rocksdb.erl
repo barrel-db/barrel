@@ -434,7 +434,7 @@ update_view_index(Id, ViewId, DocId, KVs) ->
                    end,
   %% we add new keys as prefixed keys with empty values to the index
   %% old keys are deleted once since they are only supposed to be unique
-  %% and have only one updaterc
+  %% and have only one update
   ViewPrefix = barrel_rocksdb_keys:view_prefix(Id, ViewId),
   {ok, Batch} = rocksdb:batch(),
   ReverseMaps = lists:foldl(fun({K0, V0}, Acc) ->
