@@ -23,6 +23,8 @@
          data_size/1,
          insert_doc_infos/2,
          update_doc_infos/3,
+         insert_doc/4,
+         update_doc/5,
          put_local_doc/3,
          delete_local_doc/2,
          add_doc_revision/4,
@@ -155,6 +157,45 @@ barrel_infos(Name) ->
 %% -------------------
 %% docs
 
+insert_doc(BarrelId, #{ id := DocId, seq := Seq } = DI, DocRev, DocBody) ->
+  DIKey = barrel_rocksdb_keys:doc_info(BarrelId, DocId),
+  SeqKey = barrel_rocksdb_keys:doc_seq(BarrelId, Seq),
+  RevKey = barrel_rocksdb_keys:doc_rev(BarrelId, DocId, DocRev),
+  DIVal = term_to_binary(DI),
+  {ok, Batch} = rocksdb:batch(),
+  ok = rocksdb:batch_put(Batch, DIKey, DIVal),
+  ok = rocksdb:batch_put(Batch, SeqKey, DIVal),
+  ok = rocksdb:batch_put(Batch, RevKey, term_to_binary(DocBody)),
+  ok = rocksdb:batch_merge(Batch, barrel_rocksdb_keys:docs_count(BarrelId), integer_to_binary(1)),
+  try rocksdb:write_batch(?db, Batch, [])
+  after rocksdb:release_batch(Batch)
+  end.
+
+update_doc(BarrelId, #{ id := DocId, seq := Seq, deleted := Del } = DI,
+           DocRev, DocBody, OldSeq) ->
+  DIKey = barrel_rocksdb_keys:doc_info(BarrelId, DocId),
+  SeqKey = barrel_rocksdb_keys:doc_seq(BarrelId, Seq),
+  RevKey = barrel_rocksdb_keys:doc_rev(BarrelId, DocId, DocRev),
+  OldSeqKey = barrel_rocksdb_keys:doc_seq(BarrelId, OldSeq),
+
+  DIVal = term_to_binary(DI),
+  {ok, Batch} = rocksdb:batch(),
+  ok = rocksdb:batch_put(Batch, DIKey, DIVal),
+  ok = rocksdb:batch_put(Batch, SeqKey, DIVal),
+  ok = rocksdb:batch_put(Batch, RevKey, term_to_binary(DocBody)),
+  ok = rocksdb:batch_single_delete(Batch, OldSeqKey),
+  case Del of
+    true ->
+      ok = rocksdb:batch_merge(Batch, barrel_rocksdb_keys:docs_count(BarrelId), integer_to_binary(-1)),
+      ok = rocksdb:batch_merge(Batch, barrel_rocksdb_keys:docs_del_count(BarrelId), integer_to_binary(1));
+    false ->
+      ok
+  end,
+  try rocksdb:write_batch(?db, Batch, [])
+  after rocksdb:release_batch(Batch)
+  end.
+
+
 recovery_unit(BarrelId) ->
   {ok, WB} = rocksdb:batch(),
   {ok, #{ barrel_id => BarrelId,
@@ -257,6 +298,9 @@ read_options(#{ snapshot := undefined }) ->[];
 read_options(#{ snapshot := Snapshot }) -> [{snapshot, Snapshot}];
 read_options(_) -> [].
 
+
+
+
 get_doc_info(#{ barrel_id := BarrelId } = Ctx, DocId) ->
   ReadOptions = read_options(Ctx),
   DIKey = barrel_rocksdb_keys:doc_info(BarrelId, DocId),
@@ -264,7 +308,15 @@ get_doc_info(#{ barrel_id := BarrelId } = Ctx, DocId) ->
     {ok, Bin} -> {ok, binary_to_term(Bin)};
     not_found -> {error, not_found};
     Error -> Error
+  end;
+get_doc_info(BarrelId, DocId) ->
+  DIKey = barrel_rocksdb_keys:doc_info(BarrelId, DocId),
+  case rocksdb:get(?db, DIKey, []) of
+    {ok, Bin} -> {ok, binary_to_term(Bin)};
+    not_found -> {error, not_found};
+    Error -> Error
   end.
+
 
 get_doc_revision(#{ barrel_id := BarrelId } = Ctx, DocId, Rev) ->
   ReadOptions = read_options(Ctx),

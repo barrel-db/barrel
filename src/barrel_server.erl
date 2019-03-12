@@ -30,8 +30,21 @@
 
 
 
-update_docs(Server, Records, MergePolicy) ->
-  gen_server:call(Server, {update_docs, Records, MergePolicy}).
+update_docs(Server, Docs, MergePolicy) ->
+  {ok, [update_doc(Server, Doc, MergePolicy) || Doc <- Docs]}.
+
+
+update_doc(Server, Doc, MergePolicy) ->
+   #{ ref := Ref } = Record = barrel_doc:make_record(Doc),
+   gen_server:cast(Server, {update_doc, self(), Record, MergePolicy}),
+   receive
+     {Ref, Result} -> Result;
+     Else -> io:format("got else ~p~n", [Else])
+   after 5000 ->
+           exit(timeout)
+   end.
+
+
 
 start_link(Name) ->
   gen_server:start_link({via, barrel_registry, Name}, ?MODULE, [Name], []).
@@ -81,6 +94,42 @@ handle_call({update_docs, Docs, MergePolicy}, _From,
 
 handle_call(_Msg, _From, State) ->
   {reply, bad_call, State}.
+
+
+
+handle_cast({update_doc, From, #{ id := DocId, ref := Ref } = Record, MergePolicy},
+            #{ name := Name, ref := BRef, updated_seq := Seq } = State) ->
+
+  {DocStatus, #{ seq := OldSeq } = DI} = case ?STORE:get_doc_info(BRef, DocId) of
+                                                 {ok, DI1} -> {found, DI1};
+                                                 {error, not_found} -> {not_found, new_docinfo(DocId)}
+                                               end,
+
+  MergeFun = case MergePolicy of
+               merge -> fun merge_revtree/2;
+               merge_with_conflict -> fun merge_revtree_with_conflict/2
+             end,
+
+
+  case MergeFun(Record, DI) of
+    {ok, #{ rev := Rev} = DI2, DocRev, DocBody} when DI2 =/= DI ->
+      Seq2 = Seq + 1,
+      case DocStatus of
+        not_found ->
+          ?STORE:insert_doc(BRef, DI2#{ seq => Seq2 }, DocRev, DocBody);
+        found ->
+          ?STORE:update_doc(BRef, DI2#{ seq => Seq2}, DocRev, DocBody, OldSeq)
+      end,
+      barrel_event:notify(Name, db_updated),
+      From ! {Ref, {ok, DocId, Rev}},
+      {noreply, State#{ updated_seq => Seq2 }};
+    {ok, #{ rev := Rev}, _DocRev, _DocBody} ->
+      From ! {Ref, {ok, DocId, Rev}},
+      {noreply, State};
+    Error ->
+      From ! {Ref, Error},
+      {noreply, State}
+  end;
 
 handle_cast(_Msg, State) ->
   {noreply, State}.

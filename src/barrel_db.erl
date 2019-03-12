@@ -305,13 +305,6 @@ change_with_doc(Change, _, _, _, _) ->
   Change.
 
 
-
-prepare_docs([Doc | Rest], Refs, Records) ->
-  #{ id := Id, ref := Ref } = Record = barrel_doc:make_record(Doc),
-  prepare_docs(Rest, [Ref | Refs], dict:append(Id, Record, Records));
-prepare_docs([], Refs, Records) ->
-  {lists:reverse(Refs), Records}.
-
 update_docs(#{ name := Name }, Docs, Options, UpdateType) ->
   MergePolicy = case UpdateType of
                   interactive_edit ->
@@ -323,15 +316,8 @@ update_docs(#{ name := Name }, Docs, Options, UpdateType) ->
                   replicated_changes ->
                     merge_with_conflict
                 end,
-  {Refs, Records} = prepare_docs(Docs, [], dict:new()),
   Server =  barrel_registry:where_is(Name),
-  case barrel_server:update_docs(Server, Records, MergePolicy) of
-    {ok, Results} ->
-      FinalResults = [maps:get(Ref, Results) || Ref <- Refs],
-      {ok, FinalResults};
-    Error ->
-      Error
-  end.
+  barrel_server:update_docs(Server, Docs, MergePolicy).
 
 
 put_local_doc(#{ name := Name}, DocId, Doc) ->
