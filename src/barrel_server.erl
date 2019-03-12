@@ -96,10 +96,13 @@ handle_cast({update_doc, From, #{ id := DocId, ref := Ref } = Record, MergePolic
             #{ name := Name, ref := BRef, updated_seq := Seq } = State) ->
 
   {DocStatus,
-   #{ seq := OldSeq, deleted := OldDel } = DI} = case ?STORE:get_doc_info(BRef, DocId) of
-                                                   {ok, DI1} -> {found, DI1};
-                                                   {error, not_found} -> {not_found, new_docinfo(DocId)}
-                                                 end,
+   #{ seq := OldSeq,
+      deleted := OldDel } = DI} = case ?STORE:get_doc_info(BRef, DocId) of
+                                    {ok, DI1} ->
+                                      {found, DI1};
+                                    {error, not_found} ->
+                                      {not_found, new_docinfo(DocId)}
+                                  end,
 
   MergeFun = case MergePolicy of
                merge -> fun merge_revtree/2;
