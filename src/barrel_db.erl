@@ -322,11 +322,11 @@ update_docs(#{ name := Name }, Docs, Options, UpdateType) ->
 
 put_local_doc(#{ name := Name}, DocId, Doc) ->
    Server =  barrel_registry:where_is(Name),
-   gen_server:call(Server, {put_local_doc, DocId, Doc}).
+   barrel_server:put_local_doc(Server, DocId, Doc).
 
 delete_local_doc(#{ name := Name }, DocId) ->
   Server =  barrel_registry:where_is(Name),
-  gen_server:call(Server, {delete_local_doc, DocId}).
+  barrel_server:delete_local_doc(Server, DocId).
 
 get_local_doc(Barrel, DocId) ->
   with_ctx(
