@@ -304,7 +304,6 @@ change_with_doc(Change, DocId, Rev, Ctx, true) ->
 change_with_doc(Change, _, _, _, _) ->
   Change.
 
-
 update_docs(#{ name := Name }, Docs, Options, UpdateType) ->
   MergePolicy = case UpdateType of
                   interactive_edit ->
