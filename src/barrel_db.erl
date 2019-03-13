@@ -93,10 +93,10 @@ delete_barrel(Name) ->
   ).
 
 start_barrel(Name) ->
-  supervisor:start_child(barrel_server_sup, [Name]).
+  supervisor:start_child(barrel_writer_sup, [Name]).
 
 stop_barrel(Name) ->
-  case supervisor:terminate_child(barrel_server_sup, barrel_registry:where_is(Name)) of
+  case supervisor:terminate_child(barrel_writer_sup, barrel_registry:where_is(Name)) of
     ok -> ok;
     {error, simple_one_for_one} -> ok
   end.
@@ -317,7 +317,7 @@ update_docs(#{ name := Name }, Docs, Options, UpdateType) ->
                     merge_with_conflict
                 end,
   Server =  barrel_registry:where_is(Name),
-  barrel_server:update_docs(Server, Docs, MergePolicy).
+  barrel_writer:update_docs(Server, Docs, MergePolicy).
 
 
 put_local_doc(#{ ref := Ref }, DocId, Doc) ->

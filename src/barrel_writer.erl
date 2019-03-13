@@ -13,7 +13,7 @@
 %% the License.
 
 
--module(barrel_server).
+-module(barrel_writer).
 -behavior(gen_server).
 
 -export([update_docs/3]).
