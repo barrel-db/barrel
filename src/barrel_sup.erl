@@ -58,14 +58,6 @@ init([]) ->
 
 
   Specs = [
-    %% services management
-    %% TODO: put services in their own supervisor?
-    #{id => barrel_services_sup,
-      start => {barrel_services_sup, start_link, []},
-      type => supervisor},
-
-    #{id => barrel_services,
-      start => {barrel_services, start_link, []}},
 
     %% persist time server
     #{
