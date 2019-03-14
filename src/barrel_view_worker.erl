@@ -16,11 +16,17 @@ handle_call(_Msg, _From, State) ->
   {reply, ok, State}.
 
 handle_cast({process_doc, {BarrelId, ViewId}=ViewKey, BatchPid, Doc}, State) ->
-  %% TODO: cache it.
-  {ViewMod, ViewConfig} = get_view(ViewKey),
-  {ok, DocId} = process_doc(Doc, BarrelId, ViewId, ViewMod, ViewConfig),
-
-  BatchPid ! {ok, DocId},
+  ocp:record('barrel/views/docs_indexed', 1),
+  ocp:record('barrel/views/active_workers', 1),
+  try
+    %% TODO: cache it.
+    {ViewMod, ViewConfig} = get_view(ViewKey),
+    {ok, DocId} = process_doc(Doc, BarrelId, ViewId, ViewMod, ViewConfig),
+    BatchPid ! {ok, DocId}
+  after
+    ocp:record('barrel/views/active_workers', -1)
+  end,
+  erlang:garbage_collect(),
   {noreply, State}.
 
 handle_info(_Info, State) ->
