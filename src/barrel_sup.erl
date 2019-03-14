@@ -56,6 +56,8 @@ init([]) ->
                  {worker, {barrel_view_worker, undefined}}],
 
 
+  %% init metrics
+  ok = barrel_metrics:init(),
 
   Specs = [
 

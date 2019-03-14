@@ -257,8 +257,13 @@ fold_view(Barrel, View, Fun, Acc, Options) ->
   OldTrapExit = process_flag(trap_exit, true),
   erlang:put(old_trap_exit, OldTrapExit),
   {ok, StreamPid} = barrel_view:get_range(Barrel, View, Options1),
-
-  fold_loop(StreamPid, Fun, Acc, Limit).
+  ocp:record('barrel/views/fold_count', 1),
+  Start = erlang:timestamp(),
+  try fold_loop(StreamPid, Fun, Acc, Limit)
+  after
+    ocp:record('barrel/views/fold_duration',
+               timer:now_diff(erlang:timestamp(), Start))
+  end.
 
 fold_loop(StreamPid, Fun, Acc, Limit) when Limit > 0 ->
   Timeout = barrel_config:get(fold_timeout),

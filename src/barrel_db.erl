@@ -114,7 +114,13 @@ fetch_doc(Barrel, DocId, Options) ->
   with_ctx(
     Barrel,
     fun(Ctx) ->
-      do_fetch_doc(Ctx, DocId, Options)
+        Start = erlang:timestamp(),
+        ocp:record('barrel/db/fetch_doc_num', 1),
+        try do_fetch_doc(Ctx, DocId, Options)
+        after
+          ocp:record('barrel/db/fetch_doc_duration',
+                     timer:now_diff(erlang:timestamp(), Start))
+        end
     end
   ).
 
@@ -209,9 +215,15 @@ fold_docs(Barrel, UserFun, UserAcc, Options) ->
     Barrel,
     fun(Ctx) ->
       WrapperFun = fold_docs_fun(Ctx, UserFun, Options),
-      ?STORE:fold_docs(Ctx, WrapperFun, UserAcc, Options)
+      ocp:record('barrel/db/fold_docs_num', 1),
+      Start = erlang:timestamp(),
+      try ?STORE:fold_docs(Ctx, WrapperFun, UserAcc, Options)
+      after
+        ocp:record('barrel/docs/fold_docs_duration',
+                   timer:now_diff(erlang:timestamp(), Start))
+      end
     end
-  ).
+   ).
 
 fold_docs_fun(Ctx, UserFun, Options) ->
   IncludeDeleted =  maps:get(include_deleted, Options, false),
@@ -246,9 +258,15 @@ fold_changes(Barrel, Since, UserFun, UserAcc, Options) ->
   with_ctx(
     Barrel,
     fun(Ctx) ->
-      fold_changes_1(Ctx, Since, UserFun, UserAcc, Options)
+        ocp:record('barrel/db/fold_changes_num', 1),
+        Start = erlang:timestamp(),
+        try fold_changes_1(Ctx, Since, UserFun, UserAcc, Options)
+        after
+          ocp:record('barrel/db/fold_change_duration',
+                     timer:now_diff(erlang:timestamp(), Start))
+        end
     end
-  ).
+   ).
 
 fold_changes_1(Ctx, Since, UserFun, UserAcc, Options) ->
   %% get options

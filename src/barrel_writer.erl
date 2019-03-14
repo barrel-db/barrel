@@ -36,11 +36,17 @@ update_docs(Server, Docs, MergePolicy) ->
 
 
 update_doc(Server, Doc, MergePolicy) ->
+   Start = erlang:timestamp(),
    #{ ref := Ref } = Record = barrel_doc:make_record(Doc),
    gen_server:cast(Server, {update_doc, self(), Record, MergePolicy}),
    receive
-     {Ref, Result} -> Result
+     {Ref, Result} ->
+       Now = erlang:timestamp(),
+       ocp:record('barrel/db/update_doc_duration', timer:now_diff(Now, Start)),
+       ocp:record('barrel/db/update_doc_num', timer:now_diff(Now, Start)),
+       Result
    after 5000 ->
+           ocp:record('barrel/db/update_doc_timeout', 1),
            exit(timeout)
    end.
 
@@ -52,6 +58,7 @@ start_link(Name) ->
 init([Name]) ->
   case init_(Name) of
     {ok, Barrel, LastSeq} ->
+      ocp:record('barrel/dbs/active_num', 1),
       %% we trap exit there to to handle barrel closes
       erlang:process_flag(trap_exit, true),
       gproc:set_value(?barrel(Name), Barrel),
@@ -105,6 +112,7 @@ handle_cast(_Msg, State) ->
   {noreply, State}.
 
 terminate(_Reason, State) ->
+  ocp:record('barrel/dbs/active_num', -1),
   ok = try_close_barrel(State),
   ok.
 

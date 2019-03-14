@@ -17,7 +17,8 @@
     recon,
     worker_pool,
     rocksdb,
-    gen_batch_server
+    gen_batch_server,
+    opencensus
    ]},
   {env, []},
   {modules, []},

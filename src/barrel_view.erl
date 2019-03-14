@@ -69,6 +69,7 @@ start_link(#{barrel := Barrel,  view := View} = Conf) ->
 
 init(Conf) ->
   process_flag(trap_exit, true),
+  ocp:record('barrel/views/active_num', 1),
   {ok, Conf#{ waiters => [] }}.
 
 handle_call({get_range, To, Options}, _From, #{ barrel := Barrel, view := View } = State) ->
@@ -108,6 +109,7 @@ handle_info(_Info, State) ->
   {noreply, State}.
 
 terminate(_Reason, _State) ->
+  ocp:record('barrel/views/active_num', -1),
   ok.
 
 
