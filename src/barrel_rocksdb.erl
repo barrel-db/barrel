@@ -228,8 +228,6 @@ read_options(#{ snapshot := Snapshot }) -> [{snapshot, Snapshot}];
 read_options(_) -> [].
 
 
-
-
 get_doc_info(#{ barrel_id := BarrelId } = Ctx, DocId) ->
   ReadOptions = read_options(Ctx),
   DIKey = barrel_rocksdb_keys:doc_info(BarrelId, DocId),
@@ -672,7 +670,15 @@ default_cf_options() ->
     {target_file_size_multiplier, 2},
     {compression, snappy},
     {prefix_extractor, {fixed_prefix_transform, 10}},
-    {merge_operator, counter_merge_operator}
+    {merge_operator, counter_merge_operator},
+    %% Disable subcompactions since they're a less stable feature, and not
+    %% necessary for our workload, where frequent fsyncs naturally prevent
+    %% foreground writes from getting too far ahead of compactions.
+    {max_subcompactions, 1},
+    %% Increase parallelism for compactions and flushes based on the
+    %% number of cpus. Always use at least 2 threads, otherwise
+    %% compactions and flushes may fight with each other.
+    {total_threads, 2}
   ].
 
 %% -------------------
