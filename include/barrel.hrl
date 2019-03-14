@@ -22,7 +22,12 @@
 
 -define(DISPATCH_LOG(Level, Fmt, Args),
         %% same as OTP logger does when using the macro
-        catch (barrel_config:get('$barrel_logger')):log(Level, Fmt, Args),
+        catch (barrel_config:get('$barrel_logger')):loglog(Level, Fmt, Args,
+                                                           #{mfa => {?MODULE,
+                                                                     ?FUNCTION_NAME,
+                                                                     ?FUNCTION_ARITY},
+                                                             file => ?FILE,
+                                                             line => ?LINE}),
         ok).
 
 -define(barrel(Name), {n, l, {barrel, Name}}).
