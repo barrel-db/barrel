@@ -43,7 +43,7 @@ update_doc(Server, Doc, MergePolicy) ->
      {Ref, Result} ->
        Now = erlang:timestamp(),
        ocp:record('barrel/db/update_doc_duration', timer:now_diff(Now, Start)),
-       ocp:record('barrel/db/update_doc_num', timer:now_diff(Now, Start)),
+       ocp:record('barrel/db/update_doc_num', 1),
        Result
    after 5000 ->
            ocp:record('barrel/db/update_doc_timeout', 1),
