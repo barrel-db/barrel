@@ -53,13 +53,14 @@ init() ->
   [env_or_default(Key, Default) ||
    {Key, Default} <- [
                       {fold_timeout, 5000},
-                      {index_worker_threads, index_worker_threads()},
+                      {index_worker_threads, 128},
                       %% storage backend
                       {storage, barrel_rocksdb},
                       %% docs storage
                       {rocksdb_root_dir, DataDir},
                       {rocksdb_cache_size, 128 bsl 20}, %% 128 MB,
-                      {rocksdb_write_buffer_size, 64 bsl 20} %% 64 MB
+                      {rocksdb_write_buffer_size, 64 bsl 20}, %% 64 MB
+                      {rocksdb_ioq, index_worker_threads()}
                      ]],
 
   ok.

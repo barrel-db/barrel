@@ -169,7 +169,7 @@ merge_revtree(Record, DocInfo) ->
               {ok, DocInfo#{ rev => WinningRev,
                              deleted => false,
                              revtree => RevTree2 }, NewRev, Doc};
-            true ->
+           true ->
               {ok, DocInfo#{ rev => WinningRev,
                              deleted => barrel_doc:is_deleted(RevTree2),
                              revtree => RevTree2 }, NewRev, Doc}

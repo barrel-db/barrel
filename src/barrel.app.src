@@ -18,7 +18,8 @@
     worker_pool,
     rocksdb,
     gen_batch_server,
-    opencensus
+    opencensus,
+    jobs
    ]},
   {env, []},
   {modules, []},
