@@ -15,14 +15,10 @@ init(_) ->
 handle_call(_Msg, _From, State) ->
   {reply, ok, State}.
 
-handle_cast({process_doc, {BarrelId, ViewId}=ViewKey, BatchPid, Doc}, State) ->
+handle_cast({process_doc, ViewKey, BatchPid, Doc}, State) ->
   ocp:record('barrel/views/docs_indexed', 1),
   ocp:record('barrel/views/active_workers', 1),
-  try
-    %% TODO: cache it.
-    {ViewMod, ViewConfig} = get_view(ViewKey),
-    {ok, DocId} = process_doc(Doc, BarrelId, ViewId, ViewMod, ViewConfig),
-    BatchPid ! {ok, DocId}
+  try handle_doc(ViewKey, BatchPid, Doc)
   after
     ocp:record('barrel/views/active_workers', -1)
   end,
@@ -38,6 +34,12 @@ code_change(_OldVsn, State, _Extra) ->
 terminate(_Reason, _State) ->
   ok.
 
+
+handle_doc({BarrelId, ViewId}=ViewKey, BatchPid, Doc) ->
+  {ViewMod, ViewConfig} = get_view(ViewKey),
+  {ok, DocId} = process_doc(Doc, BarrelId, ViewId, ViewMod, ViewConfig),
+  BatchPid ! {ok, DocId},
+  ok.
 
 
 get_view(ViewKey) ->
