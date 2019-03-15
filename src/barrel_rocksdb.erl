@@ -47,6 +47,7 @@
 -export([init/1,
          handle_call/3,
          handle_cast/2,
+         handle_info/2,
          terminate/2]).
 
 
@@ -527,8 +528,21 @@ init([]) ->
   ok = persistent_term:put({?MODULE, db_ref}, DbRef),
   NThreads = erlang:system_info(dirty_io_schedulers),
   ok = jobs:add_queue(?ioq, [{standard_counter, NThreads}]),
+
+  {TRef, LogStatInterval} = case barrel_config:get(rocksdb_log_stats) of
+                              false ->
+                                {undefined, false};
+                              Interval when is_integer(Interval) ->
+                                TRef1 = erlang:send_after(Interval, self(), stats),
+                                {TRef1, Interval}
+                            end,
+
   ?LOG_INFO("Rocksdb storage initialized in ~p~n", [Path]),
-  {ok, #{ path => Path, ref => DbRef, cache_ref => CacheRef }}.
+  {ok, #{ path => Path,
+          ref => DbRef,
+          cache_ref => CacheRef,
+          tref => TRef,
+          log_stat_interval => LogStatInterval }}.
 
 handle_call(cache_info, _From, #{ cache_ref := Ref } = State) ->
   {reply, rocksdb:cache_info(Ref), State};
@@ -538,6 +552,14 @@ handle_call(_Msg, _From, State) ->
 
 handle_cast(_Msg, State) ->
   {noreply, State}.
+
+handle_info(stats, #{ ref :=  #{ ref := Ref }, log_stat_interval := Interval } = State) ->
+  {ok, Stats} = rocksdb:stats(Ref),
+  ?LOG_INFO("== rocksdb stats ==~n~s~n", [Stats]),
+  TRef = erlang:send_after(Interval, self(), stats),
+  io:format("got stast ~s", [Stats]),
+  {noreply, State#{ tref => TRef }}.
+
 
 terminate(_Reason, #{ ref := #{ ref := Ref }, cache_ref := CacheRef }) ->
   _ = persistent_term:erase({?MODULE, db_ref}),

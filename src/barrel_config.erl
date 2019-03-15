@@ -60,7 +60,8 @@ init() ->
                       {rocksdb_root_dir, DataDir},
                       {rocksdb_cache_size, 128 bsl 20}, %% 128 MB,
                       {rocksdb_write_buffer_size, 64 bsl 20}, %% 64 MB
-                      {rocksdb_ioq, index_worker_threads()}
+                      {rocksdb_ioq, index_worker_threads()},
+                      {rocksdb_log_stats, false}
                      ]],
 
   ok.
