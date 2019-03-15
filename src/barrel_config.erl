@@ -53,7 +53,7 @@ init() ->
   [env_or_default(Key, Default) ||
    {Key, Default} <- [
                       {fold_timeout, 5000},
-                      {index_worker_threads, 128},
+                      {index_worker_threads, index_worker_threads()},
                       %% storage backend
                       {storage, barrel_rocksdb},
                       %% docs storage
@@ -77,3 +77,6 @@ env_or_default(Key, Default) ->
     undefined ->
       set(Key, Default)
   end.
+
+index_worker_threads() ->
+  erlang:max(10, erlang:system_info(dirty_io_schedulers)).
