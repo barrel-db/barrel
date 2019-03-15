@@ -17,6 +17,7 @@
          {'barrel/views/fold_duration', "duration when traversing a view", 'ms'},
          {'barrel/views/active_num', "number of active views", '1'},
          {'barrel/views/active_workers', "number of active workers indexing documents", '1'},
+         {'barrel/views/index_duration', "duration while processing a document", 'ms'},
          {'barrel/views/docs_indexed', "number of docs indexed", '1'}
         ]).
 

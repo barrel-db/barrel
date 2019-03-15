@@ -18,9 +18,11 @@ handle_call(_Msg, _From, State) ->
 handle_cast({process_doc, ViewKey, BatchPid, Doc}, State) ->
   ocp:record('barrel/views/docs_indexed', 1),
   ocp:record('barrel/views/active_workers', 1),
+  Start = erlang:timestamp(),
   try handle_doc(ViewKey, BatchPid, Doc)
   after
-    ocp:record('barrel/views/active_workers', -1)
+    ocp:record('barrel/views/active_workers', -1),
+    ocp:record('barrel/views/index_duration', timer:now_diff(erlang:timestamp(), Start))
   end,
   erlang:garbage_collect(),
   {noreply, State}.
