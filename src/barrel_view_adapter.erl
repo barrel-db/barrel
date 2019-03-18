@@ -24,6 +24,8 @@
 -include("barrel.hrl").
 
 
+-define(MAX_ATTEMPTS, 6).
+
 %% TODO: make opening more robust
 start_link( Conf) ->
   gen_statem:start_link(?MODULE, Conf, []).
@@ -57,6 +59,8 @@ init(#{ barrel := BarrelId,
        view => View0,
        mod => ViewMod,
        batch_server => BatchServer,
+       exponential_backoff => barrel_backoff:exponential_backoff(100, 2000, 200),
+       attempt => 1,
        mref => monitor_barrel(Barrel) },
 
 
@@ -92,7 +96,7 @@ init(#{ barrel := BarrelId,
           BgState =  init_upgrade_task(Barrel, View),
           ok = update_view(Barrel, View),
           Reindexer =
-          spawn_link(?MODULE, bg_index_loop,
+            spawn_link(?MODULE, bg_index_loop,
                      [Barrel, BatchServer, ViewId, BgState]),
 
           {ok, upgrade, Data#{ view => View, reindexer => Reindexer}};
@@ -213,6 +217,7 @@ refresh_view(#{ barrel := #{ name := BarrelId } = Barrel,
                 batch_server := BatchServer,
                 view := #{ id := ViewId, indexed_seq := Start } = View} = State) ->
   ?LOG_DEBUG("start indexing barrel=~p view=~p seq=~p~n", [Barrel, View, Start]),
+
   {ok, {State2, _}, LastSeq} = barrel_db:fold_changes(
                                  Barrel, Start,
                                  fun(#{ <<"seq">> := Seq, <<"doc">> := Doc }, {State1, Ts}) ->
@@ -222,11 +227,31 @@ refresh_view(#{ barrel := #{ name := BarrelId } = Barrel,
                                  end,
                                  {State, erlang:timestamp()},
                                  #{ include_doc => true }),
-  erlang:send_after(100, self(), refresh_view),
-  NState = store_checkpoint(State2, LastSeq),
-  ok = barrel_view:update(BarrelId, ViewId, {view_refresh, LastSeq}),
-  ?LOG_DEBUG("end indexing barrel=~p view=~p~n", [Barrel, maps:get(view, NState)]),
-  NState.
+
+  if
+    LastSeq /= Start ->
+      timer:send_after(rand:uniform(100), self(), refresh_view),
+      NState = store_checkpoint(State2, LastSeq),
+      ok = barrel_view:update(BarrelId, ViewId, {view_refresh, LastSeq}),
+      ?LOG_DEBUG("end indexing barrel=~p view=~p~n", [Barrel, maps:get(view, NState)]),
+      NState#{ attempt => 1 } ;
+    true ->
+      ?LOG_INFO("retry indexing barrel=~p view=~p seq=~p~n", [Barrel, View, Start]),
+      ok = barrel_view:update(BarrelId, ViewId, {view_refresh, LastSeq}),
+      retry_refresh_review(State)
+  end.
+
+
+retry_refresh_review(#{ exponential_backoff := Backoff,
+                        attempt := Attempt } = State ) when Attempt < ?MAX_ATTEMPTS ->
+
+
+  Delay = barrel_backoff:next(Attempt, Backoff),
+  timer:send_after(Delay, self(), refresh_view),
+  State#{ attempt => Attempt + 1 };
+retry_refresh_review(State) ->
+  timer:send_after(rand:uniform(100), self(), refresh_view),
+  State#{ attempt => 1 }.
 
 maybe_gc(Ts)  ->
   Now = erlang:timestamp(),
