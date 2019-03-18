@@ -57,7 +57,7 @@ basic_test(_Config) ->
     #{ <<"id">> => <<"a">>, <<"v">> => 1, <<"o">> => #{ <<"o1">> => 1, << "o2">> => 1}}
   ],
   {ok, _Saved} = barrel:save_docs(Barrel, Docs),
-  barrel_view:await_refresh(<<"test">>, <<"ars">>, timer:seconds(10000)),
+  barrel_view:await_refresh(<<"test">>, <<"ars">>),
   [<<"a">>] = barrel:fold_view(<<"test">>, <<"ars">>,
                                fun(#{ id := Id }, Acc) ->
                                    {ok, [Id | Acc]}
@@ -66,7 +66,7 @@ basic_test(_Config) ->
                                #{ begin_key => [<<"id">>, <<"a">>],
                                   end_key => [<<"id">>, << 16#ff, 16#ff >>] }),
 
-  supervisor:terminate_child(barrel_view_sup_sup, ViewPid),
+  supervisor:terminate_child(barrel_view_sup, ViewPid),
 
   ok.
 
@@ -92,7 +92,7 @@ fwd_test(_Config) ->
    <<"b">>,
    <<"a">>] = barrel:fold_docs(Barrel, Fun, [], #{}),
 
-   barrel_view:await_refresh(<<"test">>, <<"ars">>, timer:seconds(10000)),
+   barrel_view:await_refresh(<<"test">>, <<"ars">>),
 
    [<<"e">>, <<"d">>] = try barrel:fold_view(<<"test">>, <<"ars">>,
                                              fun(#{ id := Id }, Acc) ->
@@ -102,7 +102,7 @@ fwd_test(_Config) ->
                                              #{ begin_key => [<<"id">>, <<"c">>],
                                                begin_or_equal => false })
                         after
-                          supervisor:terminate_child(barrel_view_sup_sup, ViewPid)
+                          supervisor:terminate_child(barrel_view_sup, ViewPid)
                         end,
 
   ok.
@@ -130,7 +130,7 @@ rev_test(_Config) ->
    <<"b">>,
    <<"a">>] = barrel:fold_docs(Barrel, Fun, [], #{}),
 
-   barrel_view:await_refresh(<<"test">>, <<"ars">>, timer:seconds(10000)),
+   barrel_view:await_refresh(<<"test">>, <<"ars">>),
 
    [<<"a">>, <<"b">>] = try barrel:fold_view(<<"test">>, <<"ars">>,
                                              fun(#{ id := Id }, Acc) ->
@@ -142,7 +142,7 @@ rev_test(_Config) ->
                                                end_or_equal => false,
                                                reverse => true })
                         after
-                          supervisor:terminate_child(barrel_view_sup_sup, ViewPid)
+                          supervisor:terminate_child(barrel_view_sup, ViewPid)
                         end,
 
    ok.
@@ -167,7 +167,7 @@ limit_test(_Config) ->
   {ok, _Saved} = barrel:save_docs(Barrel, Docs),
   8 = length(_Saved),
 
-  barrel_view:await_refresh(<<"test">>, <<"ars">>, timer:seconds(10000)),
+  barrel_view:await_refresh(<<"test">>, <<"ars">>),
 
   [<<"f">>, <<"g">>, <<"h">>] = try barrel:fold_view(<<"test">>, <<"ars">>,
                                              fun(#{ id := Id }, Acc) ->
@@ -178,7 +178,7 @@ limit_test(_Config) ->
                                                limit => 3,
                                                reverse => true })
                         after
-                          supervisor:terminate_child(barrel_view_sup_sup, ViewPid)
+                          supervisor:terminate_child(barrel_view_sup, ViewPid)
                         end,
 
   [<<"c">>, <<"b">>, <<"a">>] = try barrel:fold_view(<<"test">>, <<"ars">>,
@@ -188,7 +188,7 @@ limit_test(_Config) ->
                                              [],
                                              #{begin_key => [<<"id">>], limit => 3})
                         after
-                          supervisor:terminate_child(barrel_view_sup_sup, ViewPid)
+                          supervisor:terminate_child(barrel_view_sup, ViewPid)
                         end,
 
 
@@ -214,7 +214,7 @@ r1_test(_Config) ->
   15 = length(Saved),
 
 
-  barrel_view:await_refresh(<<"test">>, <<"ars">>, timer:seconds(10000)),
+  barrel_view:await_refresh(<<"test">>, <<"ars">>),
 
   [<<"9gUOXd0V5JePkx3HCe">>,
    <<"9gUOXd0V5JePkx3HCf">>,
@@ -229,7 +229,7 @@ r1_test(_Config) ->
                                                       limit => 5,
                                                       reverse => true })
                                after
-                                 supervisor:terminate_child(barrel_view_sup_sup, ViewPid)
+                                 supervisor:terminate_child(barrel_view_sup, ViewPid)
                                end,
 
   [<<"9gUOXd0V5JePkx3HCU">>,
@@ -244,7 +244,7 @@ r1_test(_Config) ->
                                                    #{begin_key => [<<"message">>, <<"messageId">>],
                                                      limit => 5})
                               after
-                                supervisor:terminate_child(barrel_view_sup_sup, ViewPid)
+                                supervisor:terminate_child(barrel_view_sup, ViewPid)
                               end,
   ok.
 

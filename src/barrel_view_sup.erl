@@ -1,27 +1,20 @@
 -module(barrel_view_sup).
 -behaviour(supervisor).
 
--export([start_link/1]).
+-export([start_link/0]).
 -export([init/1]).
 
 -include("barrel.hrl").
 
-
-start_link(Conf) ->
-  supervisor:start_link(?MODULE, Conf).
-
-
-init(Conf) ->
-  Specs = [
-           #{ id => view,
-              start => {barrel_view, start_link, [Conf]} },
-
-           #{ id => view_adapter,
-              start => {barrel_view_adapter, start_link, [Conf]}
-            }
-
-          ],
-  SupFlags = #{ strategy => rest_for_one },
-  {ok, {SupFlags, Specs}}.
+start_link() ->
+  supervisor:start_link({local, ?MODULE}, ?MODULE, []).
 
 
+init([]) ->
+  _ = ets:new(?VIEWS, [named_table, public, set,
+                       {read_concurrency, true}]),
+  Spec = #{ id => view,
+            start => {barrel_view, start_link, []},
+            type => worker },
+  SupFlags = #{ strategy => simple_one_for_one },
+  {ok, {SupFlags, [Spec]}}.

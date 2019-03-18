@@ -2,6 +2,9 @@
 -behaviour(gen_statem).
 
 -export([start_link/1]).
+
+-export([stop/1]).
+
 %% gen_statem callbacks
 -export([init/1,
          callback_mode/0,
@@ -25,10 +28,14 @@
 
 
 -define(MAX_ATTEMPTS, 6).
+-define(DEFAULT_REFRESH_INTERVAL, timer:seconds(1)).
 
 %% TODO: make opening more robust
-start_link( Conf) ->
+start_link(Conf) ->
   gen_statem:start_link(?MODULE, Conf, []).
+
+stop(Pid) ->
+  gen_statem:stop(Pid, shutdown).
 
 
 init(#{ barrel := BarrelId,
@@ -59,7 +66,9 @@ init(#{ barrel := BarrelId,
        view => View0,
        mod => ViewMod,
        batch_server => BatchServer,
-       exponential_backoff => barrel_backoff:exponential_backoff(100, 2000, 200),
+       exponential_backoff => barrel_backoff:exponential_backoff(timer:seconds(10),
+                                                                 timer:seconds(20),
+                                                                 timer:seconds(1)),
        attempt => 1,
        mref => monitor_barrel(Barrel) },
 
@@ -230,7 +239,8 @@ refresh_view(#{ barrel := #{ name := BarrelId } = Barrel,
 
   if
     LastSeq /= Start ->
-      timer:send_after(rand:uniform(100), self(), refresh_view),
+      timer:send_after(rand:uniform(barrel_config:get(stream_refresh_interval, ?DEFAULT_REFRESH_INTERVAL)),
+                   self(), refresh_view),
       NState = store_checkpoint(State2, LastSeq),
       ok = barrel_view:update(BarrelId, ViewId, {view_refresh, LastSeq}),
       ?LOG_DEBUG("end indexing barrel=~p view=~p~n", [Barrel, maps:get(view, NState)]),
@@ -250,7 +260,8 @@ retry_refresh_review(#{ exponential_backoff := Backoff,
   timer:send_after(Delay, self(), refresh_view),
   State#{ attempt => Attempt + 1 };
 retry_refresh_review(State) ->
-  timer:send_after(rand:uniform(100), self(), refresh_view),
+  timer:send_after(rand:uniform(barrel_config:get(stream_refresh_interval, ?DEFAULT_REFRESH_INTERVAL)),
+                   self(), refresh_view),
   State#{ attempt => 1 }.
 
 maybe_gc(Ts)  ->

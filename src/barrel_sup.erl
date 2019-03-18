@@ -111,7 +111,7 @@ init(safe) ->
       },
 
      #{id => barrel_view_sup_sup,
-       start => {barrel_view_sup_sup, start_link, []}
+       start => {barrel_view_sup, start_link, []}
       },
 
      %% barrel view supervisor

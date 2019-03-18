@@ -243,7 +243,7 @@ start_view(Barrel, View, ViewMod, ViewConfig) ->
        view => View,
        mod => ViewMod,
        config => ViewConfig },
-  supervisor:start_child(barrel_view_sup_sup, [Conf]).
+  supervisor:start_child(barrel_view_sup, [Conf]).
 
 
 fold_view(Barrel, View, Fun, Acc, Options) ->

@@ -69,8 +69,10 @@ start_link(#{barrel := Barrel,  view := View} = Conf) ->
 
 init(Conf) ->
   process_flag(trap_exit, true),
+  {ok, Adapter} = barrel_view_adapter:start_link(Conf),
   ocp:record('barrel/views/active_num', 1),
-  {ok, Conf#{ waiters => [] }}.
+  ?LOG_INFO("view started conf=~p~n", [Conf]),
+  {ok, Conf#{ waiters => [], adapter => Adapter, wait_refresh => false, conf => Conf }}.
 
 handle_call({get_range, To, Options}, _From, #{ barrel := Barrel, view := View } = State) ->
   {ok, Pid} =
@@ -80,14 +82,15 @@ handle_call({get_range, To, Options}, _From, #{ barrel := Barrel, view := View }
 
 
 handle_call({await_refresh, Pid, Seq}, _From,
-            #{ waiters := Waiters, indexed_seq := IndexedSeq } = State) ->
+            #{ waiters := Waiters,
+               indexed_seq := IndexedSeq } = State) ->
 
   if
     IndexedSeq >= Seq ->
       {reply, ok, State};
     true ->
       Ref = erlang:make_ref(),
-      {reply, {wait, Ref}, State#{ waiters => [{Pid, Ref, Seq} | Waiters] }}
+      {reply, {wait, Ref}, maybe_refresh(State#{ waiters => [{Pid, Ref, Seq} | Waiters] })}
   end;
 
 handle_call({await_refresh, Pid, Seq}, _From,
@@ -103,14 +106,25 @@ handle_cast(_Msg, State) ->
 
 handle_info({view_refresh, Seq}, #{waiters := Waiters} = State) ->
   Waiters2 = notify(Waiters, Seq),
-  {noreply, State#{ waiters => Waiters2, indexed_seq => Seq }};
+  {noreply, State#{ waiters => Waiters2, indexed_seq => Seq, wait_refresh => false }};
+
+handle_info({'EXIT', Reason, Pid}, #{ adapter := Pid, conf := Conf } = State) ->
+  ?LOG_INFO("view adapter exited reason=~p conf=~p~n", [Reason, Conf]),
+  {ok, Adapter} = barrel_view_adapter:start_link(Conf),
+  {noreply, State#{ adapter => Adapter }};
 
 handle_info(_Info, State) ->
   {noreply, State}.
 
-terminate(_Reason, _State) ->
+terminate(_Reason, #{ adapter := Adapter }) ->
   ocp:record('barrel/views/active_num', -1),
+  ok = barrel_view_adapter:stop(Adapter),
   ok.
+
+maybe_refresh(#{ wait_refresh := true } = State) -> State;
+maybe_refresh(#{ adapter := Adapter } = State) ->
+  Adapter ! refresh_view,
+  State#{ wait_refresh => true }.
 
 
 notify(Waiters, IndexedSeq) ->
