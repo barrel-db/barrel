@@ -35,7 +35,7 @@ start_link(Conf) ->
   gen_statem:start_link(?MODULE, Conf, []).
 
 stop(Pid) ->
-  gen_statem:stop(Pid, shutdown).
+  gen_statem:call(Pid, close).
 
 
 init(#{ barrel := BarrelId,
@@ -145,6 +145,8 @@ online(info, refresh_view, Data) ->
 online(EventType, EventContent, Data) ->
   handle_event(EventType, online, EventContent ,Data).
 
+handle_event({call, From}, _State, close, _Data) ->
+  {stop_and_reply, normal, [{reply, From, ok}]};
 
 handle_event(info, _State,  {'DOWN', MRef, process, _Pid, Reason},
              #{ barrel := Barrel, view := View, mref := MRef } = Data) ->
