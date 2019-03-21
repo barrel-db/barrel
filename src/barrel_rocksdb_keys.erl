@@ -49,6 +49,9 @@
          encode_view_key/2,
          decode_view_key/2]).
 
+-export([att_prefix/3,
+         att_chunk/2]).
+
 
 -include("barrel.hrl").
 -include("barrel_rocksdb_keys.hrl").
@@ -214,4 +217,15 @@ decode_view_key_1(Bin, Acc) ->
     _Else ->
       erlang:error(badarg)
   end.
+
+
+att_prefix(BarrelId, DocId, Name) ->
+  Prefix = << (db_prefix(BarrelId))/binary, ?docs_att_suffix/binary >>,
+  barrel_encoding:encode_binary_ascending(
+    barrel_encoding:encode_binary_ascending(Prefix, DocId),
+    Name
+   ).
+
+att_chunk(AttPrefix, BlobRef) ->
+  << AttPrefix/binary, BlobRef/binary >>.
 

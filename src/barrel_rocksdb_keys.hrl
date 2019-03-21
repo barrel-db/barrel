@@ -42,6 +42,7 @@
 -define(docs_sec_suffix, << "dseq" >>).
 -define(docs_revision_suffix, << "drev" >>).
 
+-define(docs_att_suffix, <<"att">>).
 
 -define(local_doc_prefix, <<"ld">>).
 

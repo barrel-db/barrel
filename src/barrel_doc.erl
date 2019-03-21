@@ -148,7 +148,7 @@ deleted(_) -> false.
 doc_without_meta(Doc) ->
   maps:filter(
     fun
-      (<< "_attachments", _/binary >>, _) -> true;
+      (<< "_attachments" >>, _) -> true;
       (<< "_", _/binary >>, _) -> false;
       (_, _) -> true
     end,
@@ -157,15 +157,18 @@ doc_without_meta(Doc) ->
 
 make_record(#{ <<"id">> := Id, <<"doc">> := Doc0, <<"history">> := History }) ->
   Deleted = maps:get(<<"deleted">>, Doc0, false),
+  Atts = maps:get(<<"_attachments">>, Doc0, #{}),
   Doc1 = doc_without_meta(Doc0),
   #{id => Id,
     ref => erlang:make_ref(),
     revs => History,
     deleted => Deleted,
+    attachments => Atts,
     doc => Doc1};
 make_record(Doc0) ->
   Deleted = maps:get(<<"_deleted">>, Doc0, false),
   Rev = maps:get(<<"_rev">>, Doc0, <<"">>),
+  Atts = maps:get(<<"_attachments">>, Doc0, #{}),
   Id = case maps:find(<<"id">>, Doc0) of
          {ok, DocId} -> DocId;
          error ->
@@ -184,6 +187,7 @@ make_record(Doc0) ->
     revs => Revs,
     deleted => Deleted,
     hash => Hash,
+    attachments => Atts,
     doc => Doc1}.
 
 -ifdef(TEST).

@@ -31,14 +31,20 @@
 
 -define(TIMEOUT, 5000).
 
-update_docs(Server, Docs, MergePolicy) ->
-  {ok, [update_doc(Server, Doc, MergePolicy) || Doc <- Docs]}.
+
+-define(CHUNK_SIZE, 1024 * 1000).
+
+update_docs(Barrel, Docs, MergePolicy) ->
+  {ok, [update_doc(Barrel, Doc, MergePolicy) || Doc <- Docs]}.
 
 
-update_doc(Server, Doc, MergePolicy) ->
+update_doc(#{ name := Name, ref := BarrelRef }, Doc, MergePolicy) ->
    Start = erlang:timestamp(),
-   #{ ref := Ref } = Record = barrel_doc:make_record(Doc),
-   gen_server:cast(Server, {update_doc, self(), Record, MergePolicy}),
+   #{ ref := Ref } = Record0 = barrel_doc:make_record(Doc),
+   Record1 = flush_attachments(BarrelRef, Record0),
+   Server =  barrel_registry:where_is(Name),
+
+   gen_server:cast(Server, {update_doc, self(), Record1, MergePolicy}),
    receive
      {Ref, Result} ->
        Now = erlang:timestamp(),
@@ -50,7 +56,31 @@ update_doc(Server, Doc, MergePolicy) ->
            exit(timeout)
    end.
 
+flush_attachments(BarrelRef, #{ id := DocId, attachments := Atts0 } = Record) ->
+  Atts1 = maps:map(
+            fun(AttName, AttDoc0) ->
+                {Data, AttDoc1} = maps:take(<<"data">>, AttDoc0),
+                {ok, BlobsRefs, Sz} = flush_att(BarrelRef, DocId, AttName, Data),
+                AttDoc1#{ <<"blobs">> => BlobsRefs, <<"content_length">> => Sz }
+            end,
+            Atts0),
+  Record#{ attachments => Atts1 }.
 
+
+flush_att(BarrelRef, DocId, Name, Bin) ->
+  {ok, Stream} = ?STORE:open_stream(BarrelRef, DocId, Name),
+  ChunkSize = barrel_config:get(rocksdb_stream_chunk_size, ?CHUNK_SIZE),
+  flush_loop(Bin, Stream, ChunkSize).
+
+flush_loop(Bin, Stream, ChunkSize) when byte_size(Bin) >= ChunkSize ->
+  << Chunk:ChunkSize/binary, Rest/binary >> = Bin,
+  Stream2 = ?STORE:write_stream(Stream, Chunk),
+  flush_loop(Rest, Stream2, ChunkSize);
+flush_loop(<<"">>, Stream, _ChunkSize) ->
+  ?STORE:close_stream(Stream);
+flush_loop(Bin, Stream, _ChunkSize) ->
+  Stream2 = ?STORE:write_stream(Stream, Bin),
+  ?STORE:close_stream(Stream2).
 
 start_link(Name) ->
   gen_server:start_link({via, barrel_registry, Name}, ?MODULE, [Name], []).
@@ -129,14 +159,17 @@ new_docinfo(DocId) ->
 
 merge_revtree(Record, #{ deleted := true } = DocInfo) ->
   #{ rev := WinningRev,  revtree := RevTree } = DocInfo,
-  #{ revs := Revs, deleted := NewDeleted, doc := Doc } = Record,
+  #{ revs := Revs, deleted := NewDeleted, doc := Doc, attachments := Atts } = Record,
   Depth = length(Revs),
   case Depth == 1 andalso not NewDeleted of
     true ->
       {Gen, _}  = barrel_doc:parse_revision(WinningRev),
       NewRevHash = barrel_doc:revision_hash(Doc, WinningRev, false),
       NewRev = << (integer_to_binary(Gen+1))/binary, "-", NewRevHash/binary  >>,
-      RevInfo = #{  id => NewRev,  parent => WinningRev, deleted => false },
+      RevInfo = #{  id => NewRev,
+                    parent => WinningRev,
+                    deleted => false,
+                    attachments => Atts },
       RevTree2 = barrel_revtree:add(RevInfo, RevTree),
       {ok, DocInfo#{rev => NewRev,
                     deleted => false,
@@ -147,10 +180,13 @@ merge_revtree(Record, #{ deleted := true } = DocInfo) ->
   end;
 merge_revtree(Record, DocInfo) ->
   #{ revtree := RevTree} = DocInfo,
-  #{ revs := Revs, deleted := NewDeleted, doc := Doc } = Record,
+  #{ revs := Revs, deleted := NewDeleted, doc := Doc, attachments := Atts } = Record,
   case Revs of
     [NewRev] when map_size(RevTree) =:= 0  ->
-      RevInfo = #{  id => NewRev, parent => <<>>, deleted => NewDeleted },
+      RevInfo = #{  id => NewRev,
+                    parent => <<>>,
+                    deleted => NewDeleted,
+                    attachments => Atts },
       RevTree1 = barrel_revtree:add(RevInfo, RevTree),
       {ok, DocInfo#{ rev => NewRev,
                      revtree => RevTree1,
@@ -161,7 +197,10 @@ merge_revtree(Record, DocInfo) ->
     [NewRev, Rev | _] ->
       case barrel_revtree:is_leaf(Rev, RevTree) of
         true ->
-          RevInfo = #{  id => NewRev, parent => Rev, deleted => NewDeleted },
+          RevInfo = #{  id => NewRev,
+                        parent => Rev,
+                        deleted => NewDeleted,
+                    attachments => Atts },
           RevTree2 = barrel_revtree:add(RevInfo, RevTree),
           {WinningRev, _, _} = barrel_revtree:winning_revision(RevTree2),
           case NewDeleted of
@@ -181,7 +220,8 @@ merge_revtree(Record, DocInfo) ->
 
 merge_revtree_with_conflict(#{ revs := [LeafRev|Revs],
                                deleted := NewDeleted,
-                               doc := Doc },
+                               doc := Doc,
+                               attachments := Atts },
                             #{ revtree := RevTree } = DocInfo) ->
   case barrel_revtree:contains(LeafRev, RevTree) of
     true ->
@@ -194,7 +234,14 @@ merge_revtree_with_conflict(#{ revs := [LeafRev|Revs],
       {_, RevTree2} = lists:foldr(
                         fun(RevId, {P, Tree}) ->
                             Deleted = (NewDeleted =:= true andalso RevId =:= LeafRev),
-                            RevInfo = #{ id => RevId, parent => P, deleted => Deleted },
+                            Atts1 =  if
+                                       RevId =:= LeafRev -> Atts;
+                                       true -> #{}
+                                  end,
+                            RevInfo = #{ id => RevId,
+                                         parent => P,
+                                         deleted => Deleted,
+                                         attachments => Atts1 },
                             {RevId, barrel_revtree:add(RevInfo, Tree)}
                         end,
                         {Parent, RevTree},

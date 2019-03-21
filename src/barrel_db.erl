@@ -141,17 +141,18 @@ do_fetch_doc(Ctx, DocId, Options) ->
           case ?STORE:get_doc_revision(Ctx, DocId, Rev) of
             {ok, Doc} ->
               Doc1 = maybe_add_sequence(Doc, Seq, WithSeq),
+              Doc2 = maybe_fetch_attachments(Ctx, DocId, RevInfo, Doc1),
               WithHistory = maps:get(history, Options, false),
               MaxHistory = maps:get(max_history, Options, ?IMAX1),
               Ancestors = maps:get(ancestors, Options, []),
               case WithHistory of
                 false ->
-                  {ok, maybe_add_deleted(Doc1#{ <<"_rev">> => Rev }, Del)};
+                  {ok, maybe_add_deleted(Doc2#{ <<"_rev">> => Rev }, Del)};
                 true ->
                   History = barrel_revtree:history(Rev, RevTree),
                   EncodedRevs = barrel_doc:encode_revisions(History),
                   Revisions = barrel_doc:trim_history(EncodedRevs, Ancestors, MaxHistory),
-                  {ok, maybe_add_deleted(Doc1#{ <<"_rev">> => Rev, <<"_revisions">> => Revisions }, Del)}
+                  {ok, maybe_add_deleted(Doc2#{ <<"_rev">> => Rev, <<"_revisions">> => Revisions }, Del)}
               end;
             not_found ->
               {error, not_found};
@@ -167,6 +168,25 @@ do_fetch_doc(Ctx, DocId, Options) ->
 
 maybe_add_sequence(Doc, _, false) -> Doc;
 maybe_add_sequence(Doc, Seq, true) -> Doc#{ <<"_seq">> => Seq }.
+
+
+maybe_fetch_attachments(Ctx, DocId, #{ attachments := Atts }, Doc) when map_size(Atts) > 0 ->
+  Atts1 = maps:map(
+            fun(Name, AttDoc) ->
+                {Blobs, AttDoc1} = maps:take(<<"blobs">>, AttDoc),
+                Data = iolist_to_binary(
+                         [begin
+                            {ok, Bin} = ?STORE:fetch_blob(Ctx, DocId, Name, BlobRef),
+                            Bin
+                          end || BlobRef <- Blobs]
+                        ),
+                AttDoc1#{ <<"data">> => Data }
+            end, Atts),
+  Doc#{ <<"_attachments">> => Atts1};
+
+maybe_fetch_attachments(_, _, _, Doc) ->
+  Doc.
+
 
 revsdiff(Barrel, DocId, RevIds) ->
   with_ctx(
@@ -323,20 +343,15 @@ change_with_doc(Change, DocId, Rev, Ctx, true) ->
 change_with_doc(Change, _, _, _, _) ->
   Change.
 
-
-
-
-update_docs(#{ name := Name }, Docs, Options, interactive_edit) ->
+update_docs(Barrel, Docs, Options, interactive_edit) ->
   AllOrNothing =  maps:get(all_or_nothing, Options, false),
   MergePolicy = case AllOrNothing of
                   true -> merge_with_conflict;
                   false -> merge
                 end,
-  Server = barrel_registry:where_is(Name),
-  barrel_writer:update_docs(Server, Docs, MergePolicy);
-update_docs(#{ name := Name }, Docs, _Options, replicated_changes) ->
-  Server =  barrel_registry:where_is(Name),
-  barrel_writer:update_docs(Server, Docs, merge).
+  barrel_writer:update_docs(Barrel, Docs, MergePolicy);
+update_docs(Barrel, Docs, _Options, replicated_changes) ->
+  barrel_writer:update_docs(Barrel, Docs, merge).
 
 put_local_doc(#{ ref := Ref }, DocId, Doc) ->
   ?STORE:put_local_doc(Ref, DocId, Doc).

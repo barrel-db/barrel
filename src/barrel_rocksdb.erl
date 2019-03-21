@@ -42,6 +42,13 @@
          fold_view_index/5
         ]).
 
+-export([open_stream/3,
+         write_stream/2,
+         close_stream/1]).
+
+-export([fetch_blob/4]).
+
+
 -export([start_link/0]).
 
 -export([init/1,
@@ -517,6 +524,43 @@ do_fold_1(_, _, _, Acc, _) ->
   Acc.
 
 
+blob_ref(Bin) ->
+  << "sha256-",
+     (barrel_lib:to_hex(crypto:hash(sha256, Bin)))/binary >>.
+
+
+open_stream(BarrelId, DocId, AttName) ->
+  Prefix = barrel_rocksdb_keys:att_prefix(BarrelId, DocId, AttName),
+  {ok, Batch} = rocksdb:batch(),
+  {ok, {Prefix, Batch, [], 0}}.
+
+
+write_stream({Prefix, Batch, Blobs, Sz}, Bin) ->
+  BlobRef = blob_ref(Bin),
+  BlobSize = byte_size(Bin),
+  ChunkKey = barrel_rocksdb_keys:att_chunk(Prefix, BlobRef),
+  ok = rocksdb:batch_put(Batch, ChunkKey, Bin),
+  {Prefix, Batch, [BlobRef | Blobs], Sz + BlobSize}.
+
+
+close_stream({_Prefix, Batch, Blobs, Sz}) ->
+  Result = try db_write_batch(Batch, [{sync, true}])
+           after rocksdb:release_batch(Batch)
+           end,
+
+  case Result of
+    ok ->
+      {ok, lists:reverse(Blobs), Sz};
+    Error ->
+      Error
+  end.
+
+
+fetch_blob(#{ barrel_id := BarrelId } = Ctx, DocId, Name, BlobRef) ->
+   Prefix = barrel_rocksdb_keys:att_prefix(BarrelId, DocId, Name),
+   ChunkKey = barrel_rocksdb_keys:att_chunk(Prefix, BlobRef),
+   db_get(ChunkKey, read_options(Ctx)).
+
 start_link() ->
   gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
@@ -557,7 +601,6 @@ handle_info(stats, #{ ref :=  #{ ref := Ref }, log_stat_interval := Interval } 
   {ok, Stats} = rocksdb:stats(Ref),
   ?LOG_INFO("== rocksdb stats ==~n~s~n", [Stats]),
   TRef = erlang:send_after(Interval, self(), stats),
-  io:format("got stast ~s", [Stats]),
   {noreply, State#{ tref => TRef }}.
 
 
