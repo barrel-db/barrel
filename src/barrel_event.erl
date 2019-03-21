@@ -227,8 +227,6 @@ do_unregister(Pid) ->
       erlang:demonitor(MRef),
       Pattern = ets:fun2ms(fun({{K, P}, _}) when P =:= Pid -> {K, P} end),
       Subs = ets:select(?TAB, Pattern),
-      barrel_statistics:record_tick(num_changes_unsubscribe, 1),
-      barrel_statistics:record_tick(num_change_subscriptions, -length(Subs)),
       lists:foreach(fun(Sub) -> ets:delete(?TAB, Sub) end, Subs)
   end.
 
@@ -239,7 +237,6 @@ process_is_down(Pid) ->
       ets:delete(?TAB, Pid),
       Pattern = ets:fun2ms(fun({{Key, P}, _}) when P =:= Pid -> {Key, P} end),
       Subs = ets:select(?TAB, Pattern),
-      barrel_statistics:record_tick(num_change_subscriptions, -length(Subs)),
       lists:foreach(fun(Sub) -> ets:delete(?TAB, Sub) end, Subs)
   end.
 

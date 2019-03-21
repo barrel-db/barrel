@@ -131,7 +131,6 @@ unregister_if_keepalive(_) ->
 init(Parent, Config) ->
   process_flag(trap_exit, true),
   proc_lib:init_ack(Parent, {ok, self()}),
-  barrel_statistics:record_tick(num_replications_started, 1),
   %% extract config
   #{ id := RepId,
      source := Source,
@@ -301,7 +300,6 @@ loop_changes(State = #st{id=Id, stream=Stream, parent=Parent, status=Status}) ->
       ok = handle_get_state(From, State),
       loop_changes(State);
     {'EXIT', Stream, Reason} ->
-      barrel_statistics:record_tick(num_replications_errors, 1),
       handle_stream_exit(Reason, State);
     {'EXIT', Parent, Reason} ->
       terminate(Reason, State);
@@ -409,7 +407,6 @@ handle_stream_exit(Reason, #st{ id = RepId, keepalive = KeepAlive } = State) ->
     true ->
       wait_for_source(State#st{stream=nil});
     false ->
-      barrel_statistics:record_tick(num_replications_errors, 1),
       cleanup_and_exit(State, Reason)
   end.
 
@@ -426,7 +423,6 @@ system_code_change(Misc, _, _, _) ->
 
 -spec terminate(_, _) -> no_return().
 terminate(Reason, State) ->
-  barrel_statistics:record_tick(num_replications_stopped, 1),
   #st{
     id = RepId,
     metrics = Metrics,
