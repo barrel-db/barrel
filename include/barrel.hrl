@@ -1,7 +1,8 @@
 
 -type barrel_name() :: binary().
+-type barrel() :: term().
 -type barrel_config() :: map().
--type barrel() :: map().
+
 
 -define(APP, barrel).
 

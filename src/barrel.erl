@@ -84,31 +84,31 @@
 
 
 %% @doc create a barrel, (note: for now the options is an empty map)
--spec create_barrel(Name :: barrel_name()) -> ok | {error, any()}.
+-spec create_barrel(Name :: barrel()) -> ok | {error, any()}.
 create_barrel(Name) ->
   barrel_db:create_barrel(Name).
 
--spec open_barrel(Name :: barrel_name()) -> {ok, barrel()} | {error, barrel_not_found} | {error, any()}.
+-spec open_barrel(Name :: barrel()) -> {ok, barrel()} | {error, barrel_not_found} | {error, any()}.
 open_barrel(Name) ->
   barrel_db:open_barrel(Name).
 
--spec close_barrel(Name :: barrel_name()) -> ok.
+-spec close_barrel(Name :: barrel()) -> ok.
 close_barrel(Name) ->
   barrel_db:close_barrel(Name).
 
--spec delete_barrel(Name :: barrel_name()) -> ok.
+-spec delete_barrel(Name :: barrel()) -> ok.
 delete_barrel(Name) ->
   barrel_db:delete_barrel(Name).
 
 %% @doc return barrel_infos.
--spec barrel_infos(Name :: barrel_name()) -> {ok, barrel_infos()}.
+-spec barrel_infos(Name :: barrel()) -> {ok, barrel_infos()}.
 barrel_infos(Name) ->
   barrel_db:barrel_infos(Name).
 
 
 %% @doc lookup a doc by its docid.
 -spec fetch_doc(Barrel, DocId, Options) -> FetchResult when
-  Barrel :: barrel_name(),
+  Barrel :: barrel(),
   DocId :: barrel_doc:docid(),
   Options :: fetch_options(),
   FetchResult :: {ok, Doc :: barrel_doc:doc()} | {error, not_found} | {error, term()}.
@@ -125,7 +125,7 @@ fetch_doc(Barrel, DocId, Options) ->
 %%    conflict will be returned as well
 %%  - if the user try to replace a doc that has been deleted, a not_found error will be returned
 -spec save_doc(Name, Doc) -> SaveResult when
-  Name :: barrel_name(),
+  Name :: barrel(),
   Doc :: barrel_doc:doc(),
   DocId :: barrel_doc:docid(),
   RevId :: barrel_doc:revid(),
@@ -186,7 +186,7 @@ save_replicated_docs(Barrel, Docs) ->
 
 %% @doc delete multiple docs
 -spec delete_docs(Name, DocsOrDocsRevId) -> SaveResults when
-  Name :: barrel_name(),
+  Name :: barrel(),
   DocsOrDocsRevId :: [ barrel_doc:doc() | {barrel_doc:docid(), barrel_doc:revid()}],
   DocId :: barrel_doc:docid(),
   RevId :: barrel_doc:revid(),
@@ -205,7 +205,7 @@ delete_docs(Barrel, DocsOrDocsRevId) ->
   save_docs(Barrel, Docs).
 
 -spec fold_docs(Name, Fun, AccIn, Options) -> AccOut when
-  Name :: barrel_name(),
+  Name :: barrel(),
   AccResult :: {ok, Acc2 :: any()} | {stop, Acc2 :: any()} | {skip, Acc2 :: any()} | stop | ok | skip,
   Fun :: fun( (Doc :: barrel_doc:doc(), Acc1 :: any() ) -> AccResult ),
   AccIn :: any(),
@@ -215,7 +215,7 @@ fold_docs(Barrel, Fun, AccIn, Options) ->
   barrel_db:fold_docs(Barrel, Fun, AccIn, Options).
 
 -spec fold_changes(Name, Since, Fun, AccIn, Options) -> AccOut when
-  Name :: barrel_name(),
+  Name :: barrel(),
   Since :: non_neg_integer(),
   AccResult :: {ok, Acc2 :: any()} | {stop, Acc2 :: any()} | {skip, Acc2 :: any()} | ok | stop | skip,
   Fun :: fun( (Doc :: barrel_doc:doc(), Acc1 :: any() ) -> AccResult ),
