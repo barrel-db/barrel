@@ -242,7 +242,8 @@ fold_docs_fun(Ctx, UserFun, Options) ->
                 History = barrel_revtree:history(Rev, RevTree),
                 EncodedRevs = barrel_doc:encode_revisions(History),
                 Revisions = barrel_doc:trim_history(EncodedRevs, [], MaxHistory),
-                Doc1 = maybe_add_deleted(Doc#{ <<"_rev">> => Rev, <<"_revisions">> => Revisions }, Del),
+                Doc1 = maybe_add_deleted(Doc#{ <<"_rev">> => Rev,
+                                               <<"_revisions">> => Revisions }, Del),
                 UserFun(Doc1, Acc)
             end;
           {errorn, not_found} ->
@@ -322,20 +323,20 @@ change_with_doc(Change, DocId, Rev, Ctx, true) ->
 change_with_doc(Change, _, _, _, _) ->
   Change.
 
-update_docs(#{ name := Name }, Docs, Options, UpdateType) ->
-  MergePolicy = case UpdateType of
-                  interactive_edit ->
-                    AllOrNothing =  maps:get(all_or_nothing, Options, false),
-                    case AllOrNothing of
-                      true -> merge_with_conflict;
-                      false -> merge
-                    end;
-                  replicated_changes ->
-                    merge_with_conflict
-                end,
-  Server =  barrel_registry:where_is(Name),
-  barrel_writer:update_docs(Server, Docs, MergePolicy).
 
+
+
+update_docs(#{ name := Name }, Docs, Options, interactive_edit) ->
+  AllOrNothing =  maps:get(all_or_nothing, Options, false),
+  MergePolicy = case AllOrNothing of
+                  true -> merge_with_conflict;
+                  false -> merge
+                end,
+  Server = barrel_registry:where_is(Name),
+  barrel_writer:update_docs(Server, Docs, MergePolicy);
+update_docs(#{ name := Name }, Docs, _Options, replicated_changes) ->
+  Server =  barrel_registry:where_is(Name),
+  barrel_writer:update_docs(Server, Docs, merge).
 
 put_local_doc(#{ ref := Ref }, DocId, Doc) ->
   ?STORE:put_local_doc(Ref, DocId, Doc).
