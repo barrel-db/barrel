@@ -157,12 +157,16 @@ do_fetch_doc(Ctx, DocId, Options) ->
             not_found ->
               {error, not_found};
             Error ->
+              ?LOG_ERROR("error fetc revision document docid=~p rev=~p error=~p~n",
+                         [DocId, Rev, Error]),
               Error
           end;
         error ->
           {error, not_found}
       end;
     Error ->
+      ?LOG_ERROR("error fetching docinfo docid=~p error=~p~n",
+                 [DocId, Error]),
       Error
   end.
 
@@ -176,8 +180,13 @@ maybe_fetch_attachments(Ctx, DocId, #{ attachments := Atts }, Doc) when map_size
                 {Blobs, AttDoc1} = maps:take(<<"blobs">>, AttDoc),
                 Data = iolist_to_binary(
                          [begin
-                            {ok, Bin} = ?STORE:fetch_blob(Ctx, DocId, Name, BlobRef),
-                            Bin
+                             case?STORE:fetch_blob(Ctx, DocId, Name, BlobRef) of
+                               {ok, Bin} -> Bin;
+                               Error ->
+                                 ?LOG_ERROR("error fetching attachment docid=~p name=~p, error=~p",
+                                            [DocId, Name, Error]),
+                                 exit(Error)
+                             end
                           end || BlobRef <- Blobs]
                         ),
                 AttDoc1#{ <<"data">> => Data }
@@ -269,6 +278,9 @@ fold_docs_fun(Ctx, UserFun, Options) ->
           {errorn, not_found} ->
             skip;
           Error ->
+            ?LOG_ERROR("fold doc error while fetching document docid=~p rev=~p error=~p~n",
+                 [DocId, Rev, Error]),
+
             exit(Error)
         end
     end
@@ -338,7 +350,10 @@ change_with_deleted(Change, _) -> Change.
 change_with_doc(Change, DocId, Rev, Ctx, true) ->
   case ?STORE:get_doc_revision(Ctx, DocId, Rev) of
     {ok, Doc} -> Change#{ <<"doc">> => Doc };
-    _ -> Change#{ <<"doc">> => null }
+    Error ->
+      ?LOG_ERROR("change error while fetching document docid=~p rev=~p error=~p~n",
+                 [DocId, Rev, Error]),
+      Change#{ <<"doc">> => null }
   end;
 change_with_doc(Change, _, _, _, _) ->
   Change.

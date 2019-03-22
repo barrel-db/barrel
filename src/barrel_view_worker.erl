@@ -20,11 +20,17 @@ handle_cast({process_doc, ViewKey, BatchPid, Doc}, State) ->
   ocp:record('barrel/views/active_workers', 1),
   Start = erlang:timestamp(),
   try handle_doc(ViewKey, BatchPid, Doc)
+  catch
+    C:E:T ->
+      %% TODO: we should use a more structured error there
+      ?LOG_ERROR("error while processing view=~p doc=~p error=~p", [ViewKey, Doc, E]),
+      ?LOG_DEBUG("error while processing view=~p doc=~p class=~p error=~p trace=~p",
+                 [ViewKey, Doc, C, E, T]),
+      ok
   after
     ocp:record('barrel/views/active_workers', -1),
     ocp:record('barrel/views/index_duration', timer:now_diff(erlang:timestamp(), Start))
   end,
-  erlang:garbage_collect(),
   {noreply, State}.
 
 handle_info(_Info, State) ->
