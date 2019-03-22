@@ -350,13 +350,8 @@ change_with_deleted(Change, true) -> Change#{ <<"deleted">> => true };
 change_with_deleted(Change, _) -> Change.
 
 change_with_doc(Change, DocId, Rev, Ctx, true) ->
-  case ?STORE:get_doc_revision(Ctx, DocId, Rev) of
-    {ok, Doc} -> Change#{ <<"doc">> => Doc };
-    Error ->
-      ?LOG_ERROR("change error while fetching document docid=~p rev=~p error=~p~n",
-                 [DocId, Rev, Error]),
-      Change#{ <<"doc">> => null }
-  end;
+  {ok, Doc} = ?STORE:get_doc_revision(Ctx, DocId, Rev),
+  Change#{ <<"doc">> => Doc };
 change_with_doc(Change, _, _, _, _) ->
   Change.
 
