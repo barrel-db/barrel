@@ -22,14 +22,23 @@
 -define(LOG_ERROR(Fmt, Args), ?DISPATCH_LOG(error, Fmt, Args)).
 
 -define(DISPATCH_LOG(Level, Fmt, Args),
-        %% same as OTP logger does when using the macro
-        catch (barrel_config:get('$barrel_logger')):loglog(Level, Fmt, Args,
-                                                           #{mfa => {?MODULE,
-                                                                     ?FUNCTION_NAME,
-                                                                     ?FUNCTION_ARITY},
-                                                             file => ?FILE,
-                                                             line => ?LINE}),
-        ok).
+        case barrel_config:get('$barrel_logger') of
+          logger ->
+            logger:log(Level, Fmt, Args,
+                       #{mfa => {?MODULE,
+                                 ?FUNCTION_NAME,
+                                 ?FUNCTION_ARITY},
+                         file => ?FILE,
+                         line => ?LINE});
+          lager ->
+            lager:log(Level, [{mfa, {?MODULE,
+                                    ?FUNCTION_NAME,
+                                    ?FUNCTION_ARITY}},
+                              {file, ?FILE},
+                              {line, ?LINE}], Fmt, Args);
+          _ ->
+            ok
+        end).
 
 -define(barrel(Name), {n, l, {barrel, Name}}).
 -define(IMAX1, 16#ffffFFFFffffFFFF).
