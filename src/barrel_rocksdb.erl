@@ -708,7 +708,10 @@ default_db_options() ->
 cf_options(false) ->
   default_cf_options();
 cf_options(CacheRef) ->
-  BlockOptions = [{block_cache, CacheRef}, {cache_index_and_filter_blocks, true}],
+  BlockOptions = [{block_cache, CacheRef},
+                  {cache_index_and_filter_blocks, true},
+                  {partition_filters, true},
+                  {cache_index_and_filter_blocks_with_high_priority, true}],
   default_cf_options() ++ [{block_based_table_options, BlockOptions}].
 
 default_cf_options() ->
