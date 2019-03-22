@@ -31,9 +31,10 @@
                          file => ?FILE,
                          line => ?LINE});
           lager ->
-            lager:log(Level, [{mfa, {?MODULE,
-                                    ?FUNCTION_NAME,
-                                    ?FUNCTION_ARITY}},
+            lager:log(Level, [{pid, self()},
+                              {mfa, {?MODULE,
+                                     ?FUNCTION_NAME,
+                                     ?FUNCTION_ARITY}},
                               {file, ?FILE},
                               {line, ?LINE}], Fmt, Args);
           _ ->
