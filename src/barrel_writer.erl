@@ -188,7 +188,8 @@ merge_revtree(Record, DocInfo) ->
                     deleted => NewDeleted,
                     attachments => Atts },
       RevTree1 = barrel_revtree:add(RevInfo, RevTree),
-      {ok, DocInfo#{ rev => NewRev,
+      {WinningRev, _, _} = barrel_revtree:winning_revision(RevTree1),
+      {ok, DocInfo#{ rev => WinningRev,
                      revtree => RevTree1,
                      deleted => NewDeleted }, NewRev, Doc};
     [_NewRev] ->
