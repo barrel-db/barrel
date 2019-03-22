@@ -164,6 +164,8 @@ do_fetch_doc(Ctx, DocId, Options) ->
         error ->
           {error, not_found}
       end;
+    {error, not_found} ->
+      {error, not_found};
     Error ->
       ?LOG_ERROR("error fetching docinfo docid=~p error=~p~n",
                  [DocId, Error]),
