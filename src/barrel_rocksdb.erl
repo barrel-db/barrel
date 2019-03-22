@@ -201,7 +201,7 @@ merge_docs_del_count(Batch, BarrelId, Val) ->
   rocksdb:batch_merge(Batch, Key, integer_to_binary(Val)).
 
 write_batch(WB) ->
-  try db_write_batch(WB, [])
+  try db_write_batch(WB, [{sync, true}])
   after rocksdb:release_batch(WB)
   end.
 
@@ -629,7 +629,7 @@ init_cache() ->
       WriteBufferSize = barrel_config:get(rocksdb_write_buffer_size),
       Capacity = erlang:max(1 bsl 20, CacheSize - WriteBufferSize),
       {ok, Ref} = rocksdb:new_cache(lru, Capacity),
-      ok = rocksdb:set_strict_capacity_limit(Ref, true),
+      %%ok = rocksdb:set_strict_capacity_limit(Ref, true),
       ?LOG_INFO("Rocksdb cache initialized. type=lru, capacity=~p~n", [Capacity]),
       Ref
   end.
@@ -708,7 +708,7 @@ default_db_options() ->
 cf_options(false) ->
   default_cf_options();
 cf_options(CacheRef) ->
-  BlockOptions = [{block_cache, CacheRef}],
+  BlockOptions = [{block_cache, CacheRef}, {cache_index_and_filter_blocks, true}],
   default_cf_options() ++ [{block_based_table_options, BlockOptions}].
 
 default_cf_options() ->
