@@ -254,7 +254,7 @@ merge_revtree_with_conflict(#{ revs := [LeafRev|Revs],
   case barrel_revtree:contains(LeafRev, RevTree) of
     true ->
       %% revision already stored. This only happen when doing all_or_nothing.
-      {ok, DocInfo};
+      {ok, DocInfo, LeafRev, Doc};
     false ->
       %% Find the point where this doc's history branches from the current rev:
       {Parent, Path} = find_parent(Revs, RevTree, []),
