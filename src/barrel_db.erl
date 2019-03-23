@@ -57,6 +57,10 @@ create_barrel(Name) ->
 open_barrel(Name) ->
   try
     case barrel_registry:reference_of(Name) of
+      {ok, undefined} ->
+        %% race condition, retry
+        timer:sleep(10),
+        open_barrel(Name);
       {ok, _} = OK ->
         OK;
       error ->

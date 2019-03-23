@@ -90,9 +90,9 @@ init([Name]) ->
   erlang:process_flag(trap_exit, true),
   case init_(Name) of
     {ok, Barrel, LastSeq} ->
+      gproc:set_value(?barrel(Name), Barrel),
       ?LOG_INFO("barrel opened name=~p seq=~p~n", [Name, LastSeq]),
       ocp:record('barrel/dbs/active_num', 1),
-      gproc:set_value(?barrel(Name), Barrel),
       {ok, Barrel#{updated_seq => LastSeq}};
     {error, Reason} ->
       ?LOG_ERROR("error opening barrel name=~p error=~p~n", [Name, Reason]),
