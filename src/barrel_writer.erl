@@ -85,15 +85,17 @@ flush_loop(Bin, Stream, _ChunkSize) ->
 start_link(Name) ->
   gen_server:start_link({via, barrel_registry, Name}, ?MODULE, [Name], []).
 
+
 init([Name]) ->
+  erlang:process_flag(trap_exit, true),
   case init_(Name) of
     {ok, Barrel, LastSeq} ->
+      ?LOG_INFO("barrel opened name=~p seq=~p~n", [Name, LastSeq]),
       ocp:record('barrel/dbs/active_num', 1),
-      %% we trap exit there to to handle barrel closes
-      erlang:process_flag(trap_exit, true),
       gproc:set_value(?barrel(Name), Barrel),
       {ok, Barrel#{updated_seq => LastSeq}};
     {error, Reason} ->
+      ?LOG_ERROR("error opening barrel name=~p error=~p~n", [Name, Reason]),
       {stop, Reason}
   end.
 
@@ -141,7 +143,8 @@ handle_cast({update_doc, From, #{ id := DocId, ref := Ref } = Record, MergePolic
 handle_cast(_Msg, State) ->
   {noreply, State}.
 
-terminate(_Reason, State) ->
+terminate(_Reason, #{ name := Name } = State) ->
+  ?LOG_INFO("closing barrel=~p~n", [Name]),
   ocp:record('barrel/dbs/active_num', -1),
   ok = try_close_barrel(State),
   ok.
