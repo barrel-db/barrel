@@ -186,7 +186,10 @@ do_merge(Record, DI, merge_with_conflict) ->
 
 merge_revtree(Record, #{ deleted := true } = DocInfo) ->
   #{ rev := WinningRev,  revtree := RevTree } = DocInfo,
-  #{ revs := Revs, deleted := NewDeleted, doc := Doc, attachments := Atts } = Record,
+  #{ revs := Revs,
+     deleted := NewDeleted,
+     doc := Doc,
+     attachments := Atts } = Record,
   Depth = length(Revs),
   case Depth == 1 andalso not NewDeleted of
     true ->
@@ -207,7 +210,10 @@ merge_revtree(Record, #{ deleted := true } = DocInfo) ->
   end;
 merge_revtree(Record, DocInfo) ->
   #{ revtree := RevTree} = DocInfo,
-  #{ revs := Revs, deleted := NewDeleted, doc := Doc, attachments := Atts } = Record,
+  #{ revs := Revs,
+     deleted := NewDeleted,
+     doc := Doc,
+     attachments := Atts } = Record,
   case Revs of
     [NewRev] when map_size(RevTree) =:= 0  ->
       RevInfo = #{  id => NewRev,
