@@ -103,41 +103,48 @@ handle_call(_Msg, _From, State) ->
   {reply, bad_call, State}.
 
 handle_cast({update_doc, From, #{ id := DocId, ref := Ref } = Record, MergePolicy},
-            #{ name := Name, ref := BRef, updated_seq := Seq } = State) ->
+            #{ name := Name, ref := BarrelRef, updated_seq := Seq } = State) ->
 
-  {DocStatus,
-   #{ seq := OldSeq,
-      deleted := OldDel } = DI} = case ?STORE:get_doc_info(BRef, DocId) of
-                                    {ok, DI1} ->
-                                      {found, DI1};
-                                    {error, not_found} ->
-                                      {not_found, new_docinfo(DocId)}
-                                  end,
+  case get_docinfo(BarrelRef, DocId) of
+    {ok, {DocStatus, DI}} ->
+      #{ seq := OldSeq, deleted := OldDel } = DI,
+      MergeResult = try
+                      do_merge(Record, DI, MergePolicy)
+                    catch
+                      C:E:T ->
+                        ?LOG_ERROR("merge error, docid=~p error=~p~n", [DocId, E]),
+                        ?LOG_DEBUG("merge error, docid=~p class=~p error=~p traceback= p~n",
+                                   [DocId, C, E, T]),
+                        {error, {merge_error, E}}
+                    end,
 
-  MergeFun = case MergePolicy of
-               merge -> fun merge_revtree/2;
-               merge_with_conflict -> fun merge_revtree_with_conflict/2
-             end,
 
-
-  case MergeFun(Record, DI) of
-    {ok, #{ rev := Rev } = DI2, DocRev, DocBody} when DI2 =/= DI ->
-      Seq2 = Seq + 1,
-      case DocStatus of
-        not_found ->
-          ?STORE:insert_doc(BRef, DI2#{ seq => Seq2 }, DocRev, DocBody);
-        found ->
-          ?STORE:update_doc(BRef, DI2#{ seq => Seq2 }, DocRev, DocBody, OldSeq, OldDel)
-      end,
-      barrel_event:notify(Name, db_updated),
-      From ! {Ref, {ok, DocId, Rev}},
-      {noreply, State#{ updated_seq => Seq2 }};
-    {ok, #{ rev := Rev}, _DocRev, _DocBody} ->
-      From ! {Ref, {ok, DocId, Rev}},
-      {noreply, State};
+      case MergeResult of
+        {ok, #{ rev := Rev } = DI2, DocRev, DocBody} when DI2 =/= DI ->
+          Seq2 = Seq + 1,
+          case DocStatus of
+            not_found ->
+              ?STORE:insert_doc(
+                 BarrelRef, DI2#{ seq => Seq2 }, DocRev, DocBody
+                );
+            found ->
+              ?STORE:update_doc(
+                 BarrelRef, DI2#{ seq => Seq2 }, DocRev, DocBody, OldSeq, OldDel
+                )
+          end,
+          barrel_event:notify(Name, db_updated),
+          From ! {Ref, {ok, DocId, Rev}},
+          {noreply, State#{ updated_seq => Seq2 }};
+        {ok, #{ rev := Rev}, _DocRev, _DocBody} ->
+          From ! {Ref, {ok, DocId, Rev}},
+          {noreply, State};
+        Error ->
+          From ! {Ref, Error},
+          {noreply, State}
+      end;
     Error ->
       From ! {Ref, Error},
-      {noreply, State}
+          {noreply, State}
   end;
 
 handle_cast(_Msg, State) ->
@@ -159,6 +166,23 @@ new_docinfo(DocId) ->
     seq => 0,
     deleted => false,
     revtree => barrel_revtree:new()}.
+
+get_docinfo(BarrelRef, DocId) ->
+ case ?STORE:get_doc_info(BarrelRef, DocId) of
+   {ok, DI1} ->
+     {ok, {found, DI1}};
+   {error, not_found} ->
+     {ok, {not_found, new_docinfo(DocId)}};
+   Error ->
+     ?LOG_ERROR("~s: error fetching docid=~p errror=~p~n", [Error]),
+     Error
+ end.
+
+do_merge(Record, DI, merge) ->
+  merge_revtree(Record, DI);
+do_merge(Record, DI, merge_with_conflict) ->
+  merge_revtree_with_conflict(Record, DI).
+
 
 merge_revtree(Record, #{ deleted := true } = DocInfo) ->
   #{ rev := WinningRev,  revtree := RevTree } = DocInfo,
