@@ -64,7 +64,6 @@
 
 -define(db_ref, persistent_term:get({?MODULE, db_ref})).
 -define(db, maps:get(ref, persistent_term:get({?MODULE, db_ref}))).
--define(ioq, barrel_ioq).
 
 %% -------------------
 %% store api
@@ -136,7 +135,7 @@ barrel_infos(Name) ->
   BarrelKey = barrel_rocksdb_keys:local_barrel_ident(Name),
   {ok, Snapshot} = rocksdb:snapshot(?db),
   ReadOpts = [{snapshot, Snapshot}],
-  case db_get(BarrelKey, ReadOpts) of
+  case rocksdb:get(?db, BarrelKey, ReadOpts) of
     {ok, Ident} ->
       %% NOTE: we should rather use the multiget API from rocksdb there
       %% but until it's not exposed just get the results for each Keys
@@ -201,17 +200,17 @@ merge_docs_del_count(Batch, BarrelId, Val) ->
   rocksdb:batch_merge(Batch, Key, integer_to_binary(Val)).
 
 write_batch(WB) ->
-  try db_write_batch(WB, [{sync, true}])
+  try rocksdb:write_batch(?db, WB, [{sync, true}])
   after rocksdb:release_batch(WB)
   end.
 
 put_local_doc(BarrelId, DocId, LocalDoc) ->
   LocalKey = barrel_rocksdb_keys:local_doc(BarrelId, DocId),
-  db_put(LocalKey, term_to_binary(LocalDoc), []).
+  rocksdb:put(?db, LocalKey, term_to_binary(LocalDoc), []).
 
 delete_local_doc(BarrelId, DocId) ->
   LocalKey = barrel_rocksdb_keys:local_doc(BarrelId, DocId),
-  db_delete(LocalKey, []).
+  rocksdb:delete(?db, LocalKey, []).
 
 init_ctx(BarrelId, IsRead) ->
   Snapshot = case IsRead of
@@ -240,14 +239,14 @@ read_options(_) -> [].
 get_doc_info(#{ barrel_id := BarrelId } = Ctx, DocId) ->
   ReadOptions = read_options(Ctx),
   DIKey = barrel_rocksdb_keys:doc_info(BarrelId, DocId),
-  case db_get(DIKey, ReadOptions) of
+  case rocksdb:get(?db, DIKey, ReadOptions) of
     {ok, Bin} -> {ok, binary_to_term(Bin)};
     not_found -> {error, not_found};
     Error -> Error
   end;
 get_doc_info(BarrelId, DocId) ->
   DIKey = barrel_rocksdb_keys:doc_info(BarrelId, DocId),
-  case db_get(DIKey, []) of
+  case rocksdb:get(?db, DIKey, []) of
     {ok, Bin} -> {ok, binary_to_term(Bin)};
     not_found -> {error, not_found};
     Error -> Error
@@ -257,7 +256,7 @@ get_doc_info(BarrelId, DocId) ->
 get_doc_revision(#{ barrel_id := BarrelId } = Ctx, DocId, Rev) ->
   ReadOptions = read_options(Ctx),
   RevKey = barrel_rocksdb_keys:doc_rev(BarrelId, DocId, Rev),
-  case db_get(RevKey, ReadOptions) of
+  case rocksdb:get(?db, RevKey, ReadOptions) of
     {ok, Bin} -> {ok, binary_to_term(Bin)};
     not_found -> {error, not_found};
     Error -> Error
@@ -296,16 +295,16 @@ fold_docs(#{ barrel_id := BarrelId } = Ctx, UserFun, UserAcc, Options) ->
   {Limit, Next, FirstMove} =
     case maps:find(limit_to_first, Options) of
       {ok, L} ->
-        {L, fun() -> db_iterator_move(Itr, next) end, first};
+        {L, fun() -> rocksdb:iterator_move(Itr, next) end, first};
       error ->
         case maps:find(limit_to_last, Options) of
           {ok, L} ->
-            {L, fun() -> db_iterator_move(Itr, prev) end, last};
+            {L, fun() -> rocksdb:iterator_move(Itr, prev) end, last};
           error ->
-            {1 bsl 32 - 1, fun() -> db_iterator_move(Itr, next) end, first}
+            {1 bsl 32 - 1, fun() -> rocksdb:iterator_move(Itr, next) end, first}
         end
     end,
-  First = case {db_iterator_move(Itr, FirstMove), IsNext} of
+  First = case {rocksdb:iterator_move(Itr, FirstMove), IsNext} of
             {{ok, _, _}, true} ->
               Next();
             {Else, _} ->
@@ -341,7 +340,7 @@ fold_changes(#{ barrel_id := BarrelId } = Ctx, Since, UserFun, UserAcc) ->
   ReadOptions = [{iterate_lower_bound, LowerBound},
                   {iterate_upper_bound, UpperBound}] ++ read_options(Ctx),
   {ok, Itr} = rocksdb:iterator(?db, ReadOptions),
-  First = db_iterator_move(Itr, first),
+  First = rocksdb:iterator_move(Itr, first),
   try do_fold_changes(First, Itr, UserFun, UserAcc)
   after rocksdb:iterator_close(Itr)
   end.
@@ -350,15 +349,15 @@ do_fold_changes({ok, _, Value}, Itr, UserFun, UserAcc) ->
   #{ id := DocId } = DI = binary_to_term(Value),
   case UserFun(DocId, DI, UserAcc) of
     {ok, UserAcc2} ->
-      do_fold_changes(db_iterator_move(Itr, next), Itr, UserFun, UserAcc2);
+      do_fold_changes(rocksdb:iterator_move(Itr, next), Itr, UserFun, UserAcc2);
     {stop, UserAcc2} ->
       UserAcc2;
     ok ->
-      do_fold_changes(db_iterator_move(Itr, next), Itr, UserFun, UserAcc);
+      do_fold_changes(rocksdb:iterator_move(Itr, next), Itr, UserFun, UserAcc);
     stop ->
       UserAcc;
     skip ->
-      do_fold_changes(db_iterator_move(Itr, next), Itr, UserFun, UserAcc)
+      do_fold_changes(rocksdb:iterator_move(Itr, next), Itr, UserFun, UserAcc)
   end;
 
 do_fold_changes(_, _, _, UserAcc) ->
@@ -366,7 +365,7 @@ do_fold_changes(_, _, _, UserAcc) ->
 
 get_local_doc(BarrelId, DocId) ->
   LocalKey = barrel_rocksdb_keys:local_doc(BarrelId, DocId),
-  case db_get(LocalKey, []) of
+  case rocksdb:get(?db, LocalKey, []) of
     {ok, DocBin} -> {ok, binary_to_term(DocBin)};
     not_found -> {error, not_found};
     Error -> Error
@@ -377,7 +376,7 @@ get_local_doc(BarrelId, DocId) ->
 
 open_view(Id, ViewId) ->
   ViewKey = barrel_rocksdb_keys:view_meta(Id, ViewId),
-  case db_get(ViewKey, []) of
+  case rocksdb:get(?db, ViewKey, []) of
     {ok, InfoBin} ->
       {ok, binary_to_term(InfoBin)};
     Error ->
@@ -386,7 +385,7 @@ open_view(Id, ViewId) ->
 
 update_view(Id, ViewId, View) ->
   ViewKey = barrel_rocksdb_keys:view_meta(Id, ViewId),
-  db_put(ViewKey, term_to_binary(View), []).
+  rocksdb:put(?db, ViewKey, term_to_binary(View), []).
 
 delete_view(Id, ViewId) ->
   Start = barrel_rocksdb_keys:view_meta(Id, ViewId),
@@ -395,25 +394,25 @@ delete_view(Id, ViewId) ->
   rocksdb:delete_range(?db, Start, End, []).
 
 put_view_upgrade_task(Id, ViewId, Task) ->
-  db_put(barrel_rocksdb_keys:view_upgrade_task(Id, ViewId),
+  rocksdb:put(?db, barrel_rocksdb_keys:view_upgrade_task(Id, ViewId),
               term_to_binary(Task),
               []
              ).
 
 get_view_upgrade_task(Id, ViewId) ->
-  case db_get(barrel_rocksdb_keys:view_upgrade_task(Id, ViewId), []) of
+  case rocksdb:get(?db, barrel_rocksdb_keys:view_upgrade_task(Id, ViewId), []) of
     {ok, TaskBin} -> {ok, binary_to_term(TaskBin)};
     Error -> Error
   end.
 
 delete_view_upgrade_task(Id, ViewId) ->
-  db_delete(barrel_rocksdb_keys:view_upgrade_task(Id, ViewId), []).
+  rocksdb:delete(?db, barrel_rocksdb_keys:view_upgrade_task(Id, ViewId), []).
 
 update_view_index(Id, ViewId, DocId, KVs) ->
   %% get the reverse maps for the document.
   %% reverse maps contains old keys indexed
   RevMapKey = barrel_rocksdb_keys:view_doc_key(Id, ViewId, DocId),
-  OldReverseMaps = case db_get(RevMapKey, []) of
+  OldReverseMaps = case rocksdb:get(?db, RevMapKey, []) of
                      {ok, Bin} ->
                        binary_to_term(Bin);
                      not_found ->
@@ -438,7 +437,7 @@ update_view_index(Id, ViewId, DocId, KVs) ->
                 end, ToDelete),
   rocksdb:batch_put(Batch, RevMapKey, term_to_binary(ReverseMaps1)),
    %% write the batch
-  ok = db_write_batch(Batch, [{sync, true}]),
+  ok = rocksdb:write_batch(?db, Batch, [{sync, true}]),
   ok = rocksdb:release_batch(Batch),
   ok.
 
@@ -483,9 +482,9 @@ fold_view_index(Id, ViewId, UserFun, UserAcc, Options) ->
 
   case Reverse of
     false ->
-      Next = fun() -> db_iterator_move(Itr, next) end,
+      Next = fun() -> rocksdb:iterator_move(Itr, next) end,
       Len = byte_size(LowerBound),
-      First = case db_iterator_move(Itr, first) of
+      First = case rocksdb:iterator_move(Itr, first) of
                 {ok, << LowerBound:Len/binary, _/binary >>, _} when BeginOrEqual =:= false ->
                   Next();
                 Else  ->
@@ -494,8 +493,8 @@ fold_view_index(Id, ViewId, UserFun, UserAcc, Options) ->
 
       do_fold(First, Next, Itr, WrapperFun, UserAcc, Limit);
     true ->
-      First = db_iterator_move(Itr, last),
-      Next = fun() -> db_iterator_move(Itr, prev) end,
+      First = rocksdb:iterator_move(Itr, last),
+      Next = fun() -> rocksdb:iterator_move(Itr, prev) end,
       do_fold(First, Next, Itr, WrapperFun, UserAcc, Limit)
   end.
 
@@ -544,7 +543,7 @@ write_stream({Prefix, Batch, Blobs, Sz}, Bin) ->
 
 
 close_stream({_Prefix, Batch, Blobs, Sz}) ->
-  Result = try db_write_batch(Batch, [{sync, true}])
+  Result = try rocksdb:write_batch(?db, Batch, [{sync, true}])
            after rocksdb:release_batch(Batch)
            end,
 
@@ -559,7 +558,7 @@ close_stream({_Prefix, Batch, Blobs, Sz}) ->
 fetch_blob(#{ barrel_id := BarrelId } = Ctx, DocId, Name, BlobRef) ->
    Prefix = barrel_rocksdb_keys:att_prefix(BarrelId, DocId, Name),
    ChunkKey = barrel_rocksdb_keys:att_chunk(Prefix, BlobRef),
-   db_get(ChunkKey, read_options(Ctx)).
+   rocksdb:get(?db, ChunkKey, read_options(Ctx)).
 
 start_link() ->
   gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
@@ -570,9 +569,6 @@ init([]) ->
   CacheRef = init_cache(),
   {ok, DbRef} = init_db(Path, CacheRef),
   ok = persistent_term:put({?MODULE, db_ref}, DbRef),
-  NThreads = erlang:system_info(dirty_io_schedulers),
-  ok = jobs:add_queue(?ioq, [{standard_counter, NThreads}]),
-
   {TRef, LogStatInterval} = case barrel_config:get(rocksdb_log_stats) of
                               false ->
                                 {undefined, false};
@@ -608,7 +604,6 @@ terminate(_Reason, #{ ref := #{ ref := Ref }, cache_ref := CacheRef }) ->
   _ = persistent_term:erase({?MODULE, db_ref}),
   ok = rocksdb:close(Ref),
   ok = rocksdb:release_cache(CacheRef),
-  _ = jobs:delete_queue(?ioq),
   ok.
 
 init_cache() ->
@@ -757,42 +752,8 @@ default_cf_options() ->
 
 
 db_get_int(Key, Default, ReadOptions) ->
-  case db_get(Key, ReadOptions) of
+  case rocksdb:get(?db, Key, ReadOptions) of
     {ok, Val} -> {ok, binary_to_integer(Val)};
     not_found -> {ok, Default};
     Error -> Error
   end.
-
-db_get(Key, ReadOptions) ->
-  with_ioq(get, [Key, ReadOptions]).
-
-db_put(Key, Value, WriteOptions) ->
-  with_ioq(put, [Key, Value, WriteOptions]).
-
-db_delete(Key, WriteOptions) ->
-   with_ioq(delete, [Key, WriteOptions]).
-
-db_iterator_move(Itr, Move) ->
-  case jobs:ask(?ioq) of
-    {ok, JobId} ->
-      try rocksdb:iterator_move(Itr, Move)
-      after jobs:done(JobId)
-      end;
-    {error, Reason} ->
-        erlang:error(Reason)
-  end.
-
-db_write_batch(WB, WriteOptions) ->
-  with_ioq(write_batch, [WB, WriteOptions]).
-
-with_ioq(Fun, Args) ->
-  case jobs:ask(?ioq) of
-    {ok, JobId} ->
-      try erlang:apply(rocksdb, Fun, [?db| Args])
-      after jobs:done(JobId)
-      end;
-    {error, Reason} ->
-        erlang:error(Reason)
-  end.
-
-
