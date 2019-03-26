@@ -15,7 +15,7 @@
  {<<"quickrand">>,{pkg,<<"quickrand">>,<<"1.7.5">>},1},
  {<<"recon">>,{pkg,<<"recon">>,<<"2.3.4">>},0},
  {<<"rfc3339">>,{pkg,<<"rfc3339">>,<<"0.9.0">>},2},
- {<<"rocksdb">>,{pkg,<<"rocksdb">>,<<"1.0.0">>},0},
+ {<<"rocksdb">>,{pkg,<<"rocksdb">>,<<"1.1.0">>},0},
  {<<"uuid">>,{pkg,<<"uuid_erl">>,<<"1.7.5">>},0},
  {<<"worker_pool">>,{pkg,<<"worker_pool">>,<<"4.0.0">>},0},
  {<<"wts">>,{pkg,<<"wts">>,<<"0.3.0">>},1}]}.
@@ -33,7 +33,7 @@
  {<<"quickrand">>, <<"E3086A153EB13A057FC19192D05E2D4C6BB2BDBB55746A699BEAE9847AC17CA8">>},
  {<<"recon">>, <<"B406C2FCCDEAA0D94E23B5E30AE3D635A2D461E363A5C9C6316897037CF050D2">>},
  {<<"rfc3339">>, <<"2075653DC9407541C84B1E15F8BDA2ABE95FB17C9694025E079583F2D19C1060">>},
- {<<"rocksdb">>, <<"887399657F50CBDB2C680051B0CDC9435BAF96BD1193CA3C868A7217670567E5">>},
+ {<<"rocksdb">>, <<"635F7D52C2B3E5399617C080BA5FE30AB255FD5D9D8180FFDD298E11EA1D62F4">>},
  {<<"uuid">>, <<"3862FF9A21C42566DFD0376B97512FA202922897129E09A05E2AFA0D9CAFD97A">>},
  {<<"worker_pool">>, <<"CD94D94D3B1A2442E54DB001B0B3BA0BD1F9D8098F4253F57228C021524BB55B">>},
  {<<"wts">>, <<"5CDF22C775CB1EBAE24C326A5DB6074D753C42F4BD12A9AA47CC62D3E2C71AD1">>}]}
