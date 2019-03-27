@@ -634,9 +634,12 @@ init_cache() ->
 
 
 init_rate_limiter() ->
-  RateBytesPerSec = barrel_config:get(rocksdb_write_bytes_per_sec, 1024 * 1000),
+  RateBytesPerSec = barrel_config:get(rocksdb_write_bytes_per_sec, undefined),
   init_rate_limiter(RateBytesPerSec).
 
+
+init_rate_limiter(undefined) ->
+  undefined;
 init_rate_limiter(RateBytesPerSec) when is_integer(RateBytesPerSec) ->
   AutoTuned = barrel_config:get(rocksdb_writes_auto_tuned, true),
   {ok, Limiter} = rocksdb:new_rate_limiter(RateBytesPerSec, AutoTuned),
@@ -647,7 +650,11 @@ init_rate_limiter(_) ->
 
 init_db(Dir, CacheRef, RateLimiter) ->
   Retries = application:get_env(barrel, rocksdb_open_retries, ?DB_OPEN_RETRIES),
-  DbOpts = default_db_options(RateLimiter) ++ cf_options(CacheRef),
+  DbOpts0 = default_db_options() ++ cf_options(CacheRef),
+  DbOpts = case RateLimiter of
+             undefined -> DbOpts0;
+             _ -> [{rate_limiter, RateLimiter} | DbOpts0]
+           end,
   case open_db(Dir, DbOpts, Retries, false) of
     {ok, Ref} ->
       %% find last ident
@@ -694,7 +701,7 @@ open_db(Dir, DbOpts, RetriesLeft, _LastError) ->
       Error
   end.
 
-default_db_options(RateLimiter) ->
+default_db_options() ->
   [
     {create_if_missing, true},
     {create_missing_column_families, true},
@@ -712,9 +719,7 @@ default_db_options(RateLimiter) ->
     %% manifest file to grow unbounded. Assuming each manifest entry is about 1
     %% KB, this allows for 128 K entries. This could account for several hours to
     %% few months of runtime without rolling based on the workload.
-    {max_manifest_file_size, 128 bsl 20}, %% 128 MB,
-    {rate_limiter, RateLimiter}
-
+    {max_manifest_file_size, 128 bsl 20} %% 128 MB,
   ].
 
 cf_options(false) ->
