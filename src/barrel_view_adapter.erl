@@ -248,7 +248,7 @@ refresh_view(#{ barrel := #{ name := BarrelId } = Barrel,
       ?LOG_DEBUG("end indexing barrel=~p view=~p~n", [Barrel, maps:get(view, NState)]),
       NState#{ attempt => 1 } ;
     true ->
-      ?LOG_INFO("retry indexing barrel=~p view=~p seq=~p~n", [Barrel, View, Start]),
+      ?LOG_DEBUG("retry indexing barrel=~p view=~p seq=~p~n", [Barrel, View, Start]),
       ok = barrel_view:update(BarrelId, ViewId, {view_refresh, LastSeq}),
       retry_refresh_review(State)
   end.
