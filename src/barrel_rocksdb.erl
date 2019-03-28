@@ -712,8 +712,8 @@ default_db_options() ->
     %% Periodically sync both the WAL and SST writes to smooth out disk
     %% usage. Not performing such syncs can be faster but can cause
     %% performance blips when the OS decides it needs to flush data.
-    {wal_bytes_per_sync, 512 bsl 10},  %% 512 KB
-    {bytes_per_sync, 512 bsl 10}, %% 512 KB,
+    %{wal_bytes_per_sync, 512 bsl 10},  %% 512 KB
+    %{bytes_per_sync, 512 bsl 10}, %% 512 KB,
 
     %% Because we open a long running rocksdb instance, we do not want the
     %% manifest file to grow unbounded. Assuming each manifest entry is about 1
@@ -757,7 +757,7 @@ default_cf_options() ->
     {target_file_size_base, 4 bsl 20}, %% 4MB
     {target_file_size_multiplier, 2},
     {compression, snappy},
-    {prefix_extractor, {fixed_prefix_transform, 10}},
+    %{prefix_extractor, {fixed_prefix_transform, 10}},
     {merge_operator, counter_merge_operator},
     %% Disable subcompactions since they're a less stable feature, and not
     %% necessary for our workload, where frequent fsyncs naturally prevent
@@ -766,7 +766,7 @@ default_cf_options() ->
     %% Increase parallelism for compactions and flushes based on the
     %% number of cpus. Always use at least 2 threads, otherwise
     %% compactions and flushes may fight with each other.
-    {total_threads, 2}
+    {total_threads, erlang:max(2, erlang:system_info(schedulers))}
   ].
 
 %% -------------------

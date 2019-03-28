@@ -67,13 +67,20 @@ init() ->
                       {storage, barrel_rocksdb},
                       %% rocksdb storage
                       {rocksdb_root_dir, DataDir},
-                      {rocksdb_cache_size, 128 bsl 20}, %% 128 MB,
+                      {rocksdb_cache_size, default_memory()},
                       {rocksdb_write_buffer_size, 64 bsl 20}, %% 64 MB
                       {rocksdb_ioq, index_worker_threads()},
                       {rocksdb_log_stats, false}
                      ]],
 
   ok.
+
+
+default_memory() ->
+  MaxSize = barrel_memory:get_total_memory(),
+  %% reserve 1GB for system and binaries, and use 30% of the rest
+  Mem = (MaxSize - 1024 * 1024) * 0.3,
+  erlang:trunc(Mem).
 
 data_dir() ->
   Default = filename:join([?DATA_DIR, node(), "barrel"]),
