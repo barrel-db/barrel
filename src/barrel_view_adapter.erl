@@ -292,7 +292,7 @@ maybe_checkpoint(State0, Seq, Ts) ->
 store_checkpoint(#{ barrel := Barrel,
                     view := View,
                     batch_server := BatchServer } = State, Seq) ->
-  ok = gen_batch_server:call(BatchServer, wait_commit),
+  ok = gen_batch_server:call(BatchServer, wait_commit, infinity),
   View1 = View#{ indexed_seq => Seq },
   ok = update_view(Barrel, View1),
   State#{ view => View1 }.
