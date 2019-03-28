@@ -30,4 +30,7 @@ init(Parent, {fold_view, BarrelId, ViewId, To, Options}) ->
             end,
 
  ok = ?STORE:fold_view_index(Ref, ViewId, FoldFun, ok, Options),
- To ! {self(), done}.
+ To ! {self(), done},
+ %% remove the link to avoid a message to linked processes
+ %% that are trapping exit signals
+ true = unlink(To).
