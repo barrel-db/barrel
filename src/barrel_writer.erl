@@ -38,7 +38,11 @@ update_docs(Barrel, Docs, MergePolicy) ->
   {ok, [update_doc(Barrel, Doc, MergePolicy) || Doc <- Docs]}.
 
 
-update_doc(#{ name := Name, ref := BarrelRef }, Doc, MergePolicy) ->
+update_doc(Barrel, Doc, MergePolicy) ->
+  jobs:run(barrel_write_queue,
+           fun() -> update_doc_1(Barrel, Doc, MergePolicy) end).
+
+update_doc_1(#{ name := Name, ref := BarrelRef }, Doc, MergePolicy) ->
    Start = erlang:timestamp(),
    #{ ref := Ref } = Record0 = barrel_doc:make_record(Doc),
    Record1 = flush_attachments(BarrelRef, Record0),

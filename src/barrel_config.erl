@@ -54,9 +54,18 @@ init() ->
    {Key, Default} <- [
                       {fold_timeout, 5000},
                       {index_worker_threads, 128},
+
+                      {server_max_memory, 8 bsl 30}, %% 8GB.
+
+                      %% rate keeper
+                      {metrics_update_rate, 100},
+
+                      {transactions_per_bytes, 1000},
+
+
                       %% storage backend
                       {storage, barrel_rocksdb},
-                      %% docs storage
+                      %% rocksdb storage
                       {rocksdb_root_dir, DataDir},
                       {rocksdb_cache_size, 128 bsl 20}, %% 128 MB,
                       {rocksdb_write_buffer_size, 64 bsl 20}, %% 64 MB

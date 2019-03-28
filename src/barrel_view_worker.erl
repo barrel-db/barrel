@@ -57,7 +57,9 @@ process_doc(#{ <<"id">> := DocId } = Doc,
             BarrelId, ViewId, ViewMod, ViewConfig) ->
   {ok, Barrel} = barrel_db:open_barrel(BarrelId),
   KVs = ViewMod:handle_doc(Doc, ViewConfig),
-  ok = update_view_index(Barrel, ViewId, DocId, KVs),
+  ok = jobs:run(barrel_write_queue,
+                fun() -> update_view_index(Barrel, ViewId, DocId, KVs) end
+               ),
   {ok, DocId}.
 
 update_view_index(#{ ref := Ref }, ViewId, DocId, KVs) ->

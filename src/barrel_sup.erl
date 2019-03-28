@@ -82,6 +82,9 @@ init([]) ->
     #{ id => index_pool,
        start => {wpool, start_pool, [barrel_view_pool, PoolOptions]} },
 
+    #{ id => ratekeeper,
+       start => {barrel_ratekeeper, start_link, []} },
+
     %% safe supervisor
     #{id => barrel_safe_sup,
       start => {supervisor, start_link, [{local, barrel_safe_sup}, ?MODULE, safe]},
