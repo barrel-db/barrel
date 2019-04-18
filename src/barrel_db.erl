@@ -30,10 +30,7 @@
   update_docs/4,
   revsdiff/3,
   fold_docs/4,
-  fold_changes/5,
-  put_local_doc/3,
-  delete_local_doc/2,
-  get_local_doc/2
+  fold_changes/5
 ]).
 
 
@@ -368,16 +365,6 @@ update_docs(Barrel, Docs, Options, interactive_edit) ->
   barrel_writer:update_docs(Barrel, Docs, MergePolicy);
 update_docs(Barrel, Docs, _Options, replicated_changes) ->
   barrel_writer:update_docs(Barrel, Docs, merge).
-
-put_local_doc(#{ ref := Ref }, DocId, Doc) ->
-  ?STORE:put_local_doc(Ref, DocId, Doc).
-
-delete_local_doc(#{ ref := Ref }, DocId) ->
-  ?STORE:delete_local_doc(Ref, DocId).
-
-
-get_local_doc(#{ ref := Ref }, DocId) ->
-   ?STORE:get_local_doc(Ref, DocId).
 
 maybe_add_deleted(Doc, true) -> Doc#{ <<"_deleted">> => true };
 maybe_add_deleted(Doc, false) -> Doc.

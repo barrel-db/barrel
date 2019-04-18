@@ -34,10 +34,7 @@
   delete_docs/2,
   fold_docs/4,
   fold_changes/5,
-  save_replicated_docs/2,
-  put_local_doc/3,
-  delete_local_doc/2,
-  get_local_doc/2
+  save_replicated_docs/2
 ]).
 
 -export([start_view/4]).
@@ -225,17 +222,6 @@ fold_docs(Barrel, Fun, AccIn, Options) ->
 fold_changes(Barrel, Since, Fun, AccIn, Options) ->
   barrel_db:fold_changes(Barrel, Since, Fun, AccIn, Options).
 
-
-
-
-put_local_doc(Barrel, DocId, Doc) ->
-  barrel_db:put_local_doc(Barrel, DocId, Doc).
-
-delete_local_doc(Barrel, DocId) ->
-  barrel_db:delete_local_doc(Barrel, DocId).
-
-get_local_doc(Barrel, DocId) ->
-  barrel_db:get_local_doc(Barrel, DocId).
 
 start_view(Barrel, View, ViewMod, ViewConfig) ->
   Conf =

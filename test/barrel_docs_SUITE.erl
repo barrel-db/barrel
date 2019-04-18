@@ -23,7 +23,6 @@
   update_non_existing_doc/1,
   replicate_none_existing_doc/1,
   delete_doc/1,
-  local_doc/1,
   save_docs/1,
   all_or_nothing/1,
   fold_docs/1,
@@ -36,7 +35,6 @@ all() ->
     update_non_existing_doc,
     replicate_none_existing_doc,
     delete_doc,
-    local_doc,
     save_docs,
     all_or_nothing,
     fold_docs,
@@ -104,23 +102,6 @@ delete_doc(_Config) ->
   {ok, Doc2} = barrel:fetch_doc(Barrel, <<"a">>, #{ rev => Rev2}),
   undefined = maps:get(<<"v">>, Doc2, undefined),
   ok.
-
-
-local_doc(_Config) ->
-  {ok, Barrel} = barrel_db:open_barrel(<<"test">>),
-  LocalDoc = #{ <<"id">> => <<"adoc">>, <<"value">> => <<"local">> },
-  RepDoc = #{ <<"id">> => <<"adoc">>, <<"value">> => <<"replicated">> },
-  ok = barrel:put_local_doc(Barrel, <<"adoc">>, LocalDoc),
-  {ok, _, Rev} = barrel:save_doc(Barrel, RepDoc),
-  {ok, #{ <<"value">> := <<"local">> }} = barrel:get_local_doc(Barrel, <<"adoc">>),
-  {ok, #{ <<"value">> := <<"replicated">>, <<"_rev">> := Rev }} = barrel:fetch_doc(Barrel, <<"adoc">>, #{}),
-  {ok, _, _} = barrel:delete_doc(Barrel, <<"adoc">>, Rev),
-  {error, not_found} = barrel:fetch_doc(Barrel, <<"adoc">>, #{}),
-  {ok, #{ <<"value">> := <<"local">> }} = barrel:get_local_doc(Barrel, <<"adoc">>),
-  ok = barrel:delete_local_doc(Barrel, <<"adoc">>),
-  {error, not_found} = barrel:get_local_doc(Barrel, <<"adoc">>).
-
-
 
 save_docs(_Config) ->
   {ok,  Barrel}= barrel_db:open_barrel(<<"test">>),
