@@ -32,7 +32,7 @@
 -define(TIMEOUT, 5000).
 
 
--define(CHUNK_SIZE, 1024 * 1000).
+-define(CHUNK_SIZE, 5 * 1024 * 1000). %% 5 MB.
 
 update_docs(Barrel, Docs, MergePolicy) ->
   {ok, [update_doc(Barrel, Doc, MergePolicy) || Doc <- Docs]}.
