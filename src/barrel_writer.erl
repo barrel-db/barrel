@@ -42,13 +42,18 @@ update_doc(Barrel, Doc, MergePolicy) ->
   jobs:run(barrel_write_queue,
            fun() -> update_doc_1(Barrel, Doc, MergePolicy) end).
 
-update_doc_1(#{ name := Name, ref := BarrelRef }, Doc, MergePolicy) ->
+update_doc_1(#{ name := Name, ref := BarrelRef }, Doc, MergePolicy0) ->
    Start = erlang:timestamp(),
    #{ ref := Ref } = Record0 = barrel_doc:make_record(Doc),
-   Record1 = flush_attachments(BarrelRef, Record0),
+   {MergePolicy, Record} = case flush_attachments(BarrelRef, Record0) of
+                             {true, Record1} ->
+                               {merge_with_conflict, Record1};
+                             {false, _} ->
+                               {MergePolicy0, Record0}
+                           end,
    Server =  barrel_registry:where_is(Name),
 
-   gen_server:cast(Server, {update_doc, self(), Record1, MergePolicy}),
+   gen_server:cast(Server, {update_doc, self(), Record, MergePolicy}),
    receive
      {Ref, Result} ->
        Now = erlang:timestamp(),
@@ -60,31 +65,17 @@ update_doc_1(#{ name := Name, ref := BarrelRef }, Doc, MergePolicy) ->
            exit(timeout)
    end.
 
-flush_attachments(BarrelRef, #{ id := DocId, attachments := Atts0 } = Record) ->
+flush_attachments(BarrelRef, #{ id := DocId, attachments := Atts0 } = Record) when map_size(Atts0) > 0 ->
   Atts1 = maps:map(
             fun(AttName, AttDoc0) ->
                 {Data, AttDoc1} = maps:take(<<"data">>, AttDoc0),
-                {ok, BlobsRefs, Sz} = flush_att(BarrelRef, DocId, AttName, Data),
-                AttDoc1#{ <<"blobs">> => BlobsRefs, <<"content_length">> => Sz }
+                {ok, AttRecord} = barrel_db_attachments:put_attachment(BarrelRef, DocId, AttName, Data),
+                AttRecord#{ doc => AttDoc1 }
             end,
             Atts0),
-  Record#{ attachments => Atts1 }.
-
-
-flush_att(BarrelRef, DocId, Name, Bin) ->
-  {ok, Stream} = ?STORE:open_stream(BarrelRef, DocId, Name),
-  ChunkSize = barrel_config:get(rocksdb_stream_chunk_size, ?CHUNK_SIZE),
-  flush_loop(Bin, Stream, ChunkSize).
-
-flush_loop(Bin, Stream, ChunkSize) when byte_size(Bin) >= ChunkSize ->
-  << Chunk:ChunkSize/binary, Rest/binary >> = Bin,
-  Stream2 = ?STORE:write_stream(Stream, Chunk),
-  flush_loop(Rest, Stream2, ChunkSize);
-flush_loop(<<"">>, Stream, _ChunkSize) ->
-  ?STORE:close_stream(Stream);
-flush_loop(Bin, Stream, _ChunkSize) ->
-  Stream2 = ?STORE:write_stream(Stream, Bin),
-  ?STORE:close_stream(Stream2).
+  {true, Record#{ attachments => Atts1 }};
+flush_attachments(_, Record) ->
+  {false, Record}.
 
 start_link(Name) ->
   gen_server:start_link({via, barrel_registry, Name}, ?MODULE, [Name], []).

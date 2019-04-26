@@ -179,20 +179,10 @@ maybe_add_sequence(Doc, Seq, true) -> Doc#{ <<"_seq">> => Seq }.
 
 maybe_fetch_attachments(Ctx, DocId, #{ attachments := Atts }, Doc) when map_size(Atts) > 0 ->
   Atts1 = maps:map(
-            fun(Name, AttDoc) ->
-                {Blobs, AttDoc1} = maps:take(<<"blobs">>, AttDoc),
-                Data = iolist_to_binary(
-                         [begin
-                             case?STORE:fetch_blob(Ctx, DocId, Name, BlobRef) of
-                               {ok, Bin} -> Bin;
-                               Error ->
-                                 ?LOG_ERROR("error fetching attachment docid=~p name=~p, error=~p",
-                                            [DocId, Name, Error]),
-                                 exit(Error)
-                             end
-                          end || BlobRef <- Blobs]
-                        ),
-                AttDoc1#{ <<"data">> => Data }
+            fun(Name, AttRecord) ->
+                #{ attachment := Att, doc := AttDoc } = AttRecord,
+                {ok, AttBin} = barrel_db_attachments:fetch_attachment(Ctx, DocId, Name, Att),
+                AttDoc#{ <<"data">> => AttBin }
             end, Atts),
   Doc#{ <<"_attachments">> => Atts1};
 

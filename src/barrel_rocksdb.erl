@@ -42,11 +42,8 @@
          fold_view_index/5
         ]).
 
--export([open_stream/3,
-         write_stream/2,
-         close_stream/1]).
-
--export([fetch_blob/4]).
+-export([put_attachment/4,
+         fetch_attachment/4]).
 
 
 -export([start_link/0]).
@@ -523,42 +520,17 @@ do_fold_1(_, _, _, Acc, _) ->
   Acc.
 
 
-blob_ref(Bin) ->
-  << "sha256-",
-     (barrel_lib:to_hex(crypto:hash(sha256, Bin)))/binary >>.
+put_attachment(BarrelId, DocId, AttName, AttBin) ->
+ Uid = barrel_lib:make_uid(AttName),
+ AttKey = barrel_rocksdb_keys:att_prefix(BarrelId, DocId, Uid),
+ case rocksdb:put(?db, AttKey, AttBin, []) of
+   ok -> {ok, AttKey};
+   Error -> Error
+ end.
 
+fetch_attachment(Ctx, _DocId, _AttName, AttKey) ->
+  rocksdb:get(?db, AttKey, read_options(Ctx)).
 
-open_stream(BarrelId, DocId, AttName) ->
-  Prefix = barrel_rocksdb_keys:att_prefix(BarrelId, DocId, AttName),
-  {ok, Batch} = rocksdb:batch(),
-  {ok, {Prefix, Batch, [], 0}}.
-
-
-write_stream({Prefix, Batch, Blobs, Sz}, Bin) ->
-  BlobRef = blob_ref(Bin),
-  BlobSize = byte_size(Bin),
-  ChunkKey = barrel_rocksdb_keys:att_chunk(Prefix, BlobRef),
-  ok = rocksdb:batch_put(Batch, ChunkKey, Bin),
-  {Prefix, Batch, [BlobRef | Blobs], Sz + BlobSize}.
-
-
-close_stream({_Prefix, Batch, Blobs, Sz}) ->
-  Result = try rocksdb:write_batch(?db, Batch, [{sync, true}])
-           after rocksdb:release_batch(Batch)
-           end,
-
-  case Result of
-    ok ->
-      {ok, lists:reverse(Blobs), Sz};
-    Error ->
-      Error
-  end.
-
-
-fetch_blob(#{ barrel_id := BarrelId } = Ctx, DocId, Name, BlobRef) ->
-   Prefix = barrel_rocksdb_keys:att_prefix(BarrelId, DocId, Name),
-   ChunkKey = barrel_rocksdb_keys:att_chunk(Prefix, BlobRef),
-   rocksdb:get(?db, ChunkKey, read_options(Ctx)).
 
 start_link() ->
   gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
