@@ -33,6 +33,8 @@
   fold_changes/5
 ]).
 
+-export([fetch_attachment/3]).
+
 
 -include_lib("barrel.hrl").
 
@@ -188,6 +190,34 @@ maybe_fetch_attachments(Ctx, DocId, #{ attachments := Atts }, Doc) when map_size
 
 maybe_fetch_attachments(_, _, _, Doc) ->
   Doc.
+
+fetch_attachment(Barrel, DocId, AttName) ->
+  with_ctx(
+    Barrel,
+    fun(Ctx) ->
+        do_fetch_attachment(Ctx, DocId, AttName)
+    end
+   ).
+
+do_fetch_attachment(Ctx, DocId, AttName) ->
+  case ?STORE:get_doc_info(Ctx, DocId) of
+    {ok, #{ deleted := true } = _DI} ->
+      {error, not_found};
+    {ok, #{ rev := WinningRev, revtree := RevTree }=_DI} ->
+      case maps:find(WinningRev, RevTree) of
+        {ok, #{ attachments := Atts }} ->
+          case maps:find(AttName, Atts) of
+            {ok, #{ attachment := Att }} ->
+              barrel_db_attachments:fetch_attachment(Ctx, DocId, AttName, Att);
+            error ->
+              {error, not_found}
+          end;
+        error ->
+          {error, not_found}
+      end;
+    Error ->
+      Error
+  end.
 
 
 revsdiff(Barrel, DocId, RevIds) ->

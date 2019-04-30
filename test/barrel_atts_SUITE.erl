@@ -69,4 +69,6 @@ basic_test(_Config) ->
 
    {ok, <<"a">>, Rev2} = barrel:save_doc(Barrel, Doc1#{ <<"v">> => 2 }),
    {ok, #{ <<"_rev">> := Rev2} } = _Doc2 = barrel:fetch_doc(Barrel, <<"a">>, #{}),
+
+   {ok, <<"test">>} = barrel:fetch_attachment(Barrel, <<"a">>, <<"att">>),
    ok.

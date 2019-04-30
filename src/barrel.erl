@@ -37,6 +37,8 @@
   save_replicated_docs/2
 ]).
 
+-export([fetch_attachment/3]).
+
 -export([start_view/4]).
 -export([fold_view/5]).
 
@@ -111,6 +113,10 @@ barrel_infos(Name) ->
   FetchResult :: {ok, Doc :: barrel_doc:doc()} | {error, not_found} | {error, term()}.
 fetch_doc(Barrel, DocId, Options) ->
   barrel_db:fetch_doc(Barrel, DocId, Options).
+
+
+fetch_attachment(Barrel, DocId, AttName) ->
+  barrel_db:fetch_attachment(Barrel, DocId, AttName).
 
 %% @doc create or replace a doc.
 %% Barrel will try to create a document if no `rev' property is passed to the document
