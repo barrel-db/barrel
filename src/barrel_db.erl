@@ -130,6 +130,7 @@ fetch_doc(Barrel, DocId, Options) ->
 do_fetch_doc(Ctx, DocId, Options) ->
   UserRev = maps:get(rev, Options, <<"">>),
   WithSeq = maps:get(seq, Options, false),
+  WithAttachments = maps:get(attachments, Options, true),
   case ?STORE:get_doc_info(Ctx, DocId) of
     {ok, #{ deleted := true } = _DI} when UserRev =:= <<>> ->
       {error, not_found};
@@ -143,11 +144,12 @@ do_fetch_doc(Ctx, DocId, Options) ->
           Del = maps:get(deleted, RevInfo, false),
           case ?STORE:get_doc_revision(Ctx, DocId, Rev) of
             {ok, Doc} ->
-              Doc1 = maybe_add_sequence(Doc, Seq, WithSeq),
-              Doc2 = maybe_fetch_attachments(Ctx, DocId, RevInfo, Doc1),
+              WithAttachments = maps:get(attachments, Options, true),
               WithHistory = maps:get(history, Options, false),
               MaxHistory = maps:get(max_history, Options, ?IMAX1),
               Ancestors = maps:get(ancestors, Options, []),
+              Doc1 = maybe_add_sequence(Doc, Seq, WithSeq),
+              Doc2 = maybe_fetch_attachments(Ctx, DocId, RevInfo, Doc1, WithAttachments),
               case WithHistory of
                 false ->
                   {ok, maybe_add_deleted(Doc2#{ <<"_rev">> => Rev }, Del)};
@@ -178,8 +180,14 @@ do_fetch_doc(Ctx, DocId, Options) ->
 maybe_add_sequence(Doc, _, false) -> Doc;
 maybe_add_sequence(Doc, Seq, true) -> Doc#{ <<"_seq">> => Seq }.
 
-
-maybe_fetch_attachments(Ctx, DocId, #{ attachments := Atts }, Doc) when map_size(Atts) > 0 ->
+maybe_fetch_attachments(_Ctx, _DocId, #{ attachments := Atts }, Doc, false) when map_size(Atts) > 0 ->
+ Atts1 = maps:map(
+            fun(_Name, AttRecord) ->
+                #{ doc := AttDoc } = AttRecord,
+                AttDoc#{ <<"follow">> => true }
+            end, Atts),
+  Doc#{ <<"_attachments">> => Atts1};
+maybe_fetch_attachments(Ctx, DocId, #{ attachments := Atts }, Doc, true) when map_size(Atts) > 0 ->
   Atts1 = maps:map(
             fun(Name, AttRecord) ->
                 #{ attachment := Att, doc := AttDoc } = AttRecord,
@@ -187,8 +195,7 @@ maybe_fetch_attachments(Ctx, DocId, #{ attachments := Atts }, Doc) when map_size
                 AttDoc#{ <<"data">> => AttBin }
             end, Atts),
   Doc#{ <<"_attachments">> => Atts1};
-
-maybe_fetch_attachments(_, _, _, Doc) ->
+maybe_fetch_attachments(_, _, _, Doc, _) ->
   Doc.
 
 fetch_attachment(Barrel, DocId, AttName) ->

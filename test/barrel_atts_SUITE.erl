@@ -65,7 +65,16 @@ basic_test(_Config) ->
                              <<"data">> := <<"test">>
                             }
              }
-        } = Doc1 } = barrel:fetch_doc(Barrel, <<"a">>, #{}),
+        } = Doc1 } = barrel:fetch_doc(Barrel, <<"a">>, #{ attachments => true }),
+
+  {ok, #{ <<"_rev">> := Rev,
+          <<"_attachments">> := #{
+              <<"att">> := #{ 
+                             <<"follow">> := true
+                            }
+             }
+        } } = barrel:fetch_doc(Barrel, <<"a">>, #{ attachments => false }),
+
 
    {ok, <<"a">>, Rev2} = barrel:save_doc(Barrel, Doc1#{ <<"v">> => 2 }),
    {ok, #{ <<"_rev">> := Rev2} } = _Doc2 = barrel:fetch_doc(Barrel, <<"a">>, #{}),
