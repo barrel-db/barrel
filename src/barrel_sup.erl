@@ -109,8 +109,8 @@ init(safe) ->
        start => {barrel_tx, start_link, []}
       },
      %% barrel db supervisor
-     #{id => barrel_writer_sup,
-       start => {barrel_writer_sup, start_link, []}
+     #{id => barrel_db_sup,
+       start => {barrel_db_sup, start_link, []}
       },
 
      #{id => barrel_view_sup_sup,

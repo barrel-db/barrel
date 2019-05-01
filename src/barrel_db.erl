@@ -96,10 +96,10 @@ delete_barrel(Name) ->
   ).
 
 start_barrel(Name) ->
-  supervisor:start_child(barrel_writer_sup, [Name]).
+  supervisor:start_child(barrel_db_sup, [Name]).
 
 stop_barrel(Name) ->
-  case supervisor:terminate_child(barrel_writer_sup, barrel_registry:where_is(Name)) of
+  case supervisor:terminate_child(barrel_db_sup, barrel_registry:where_is(Name)) of
     ok -> ok;
     {error, simple_one_for_one} -> ok
   end.
@@ -389,9 +389,9 @@ update_docs(Barrel, Docs, Options, interactive_edit) ->
                   true -> merge_with_conflict;
                   false -> merge
                 end,
-  barrel_writer:update_docs(Barrel, Docs, MergePolicy);
+  barrel_db_writer:update_docs(Barrel, Docs, MergePolicy);
 update_docs(Barrel, Docs, _Options, replicated_changes) ->
-  barrel_writer:update_docs(Barrel, Docs, merge).
+  barrel_db_writer:update_docs(Barrel, Docs, merge).
 
 maybe_add_deleted(Doc, true) -> Doc#{ <<"_deleted">> => true };
 maybe_add_deleted(Doc, false) -> Doc.

@@ -13,7 +13,7 @@
 %% the License.
 
 
--module(barrel_writer).
+-module(barrel_db_writer).
 -behavior(gen_server).
 
 -export([update_docs/3]).
@@ -78,7 +78,7 @@ flush_attachments(_, Record) ->
   {false, Record}.
 
 start_link(Name) ->
-  gen_server:start_link({via, barrel_registry, Name}, ?MODULE, [Name], []).
+  gen_server:start_link({via, gproc, ?barrel(Name)}, ?MODULE, [Name], []).
 
 
 init([Name]) ->
