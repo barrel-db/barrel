@@ -10,6 +10,8 @@
 -author("benoitc").
 
 
+-export([init_barrel/1]).
+
 -export([create_barrel/1,
          open_barrel/1,
          delete_barrel/1,
@@ -64,6 +66,32 @@
 
 %% -------------------
 %% store api
+%%
+
+init_barrel(Name) ->
+  #{ ref := Ref, counters := Counters } = ?db_ref,
+  BarrelKey = barrel_rocksdb_keys:local_barrel_ident(Name),
+  case rocksdb:get(Ref, BarrelKey, []) of
+    {ok, Ident} ->
+      LastSeq = get_last_seq(Ident, []),
+      {ok, Ident, LastSeq};
+    not_found ->
+       ok = counters:add(Counters, 1, 1),
+       Id = counters:get(Counters, 1),
+       BinId = << Id:32/integer >>,
+       {ok, WB} = rocksdb:batch(),
+       ok = rocksdb:batch_put(WB, BarrelKey, BinId),
+       ok = rocksdb:batch_put(WB, barrel_rocksdb_keys:docs_count(BinId), integer_to_binary(0)),
+       ok = rocksdb:batch_put(WB, barrel_rocksdb_keys:docs_del_count(BinId), integer_to_binary(0)),
+       ok = rocksdb:batch_put(WB, barrel_rocksdb_keys:purge_seq(BinId), integer_to_binary(0)),
+       ok = rocksdb:write_batch(Ref, WB, [{sync, true}]),
+       ok = rocksdb:release_batch(WB),
+       {ok, BinId, 0};
+    Error ->
+      Error
+  end.
+
+
 
 create_barrel(Name) ->
   #{ ref := Ref, counters := Counters } = ?db_ref,

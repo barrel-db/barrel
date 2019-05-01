@@ -50,7 +50,6 @@ init_per_suite(Config) ->
 
 
 init_per_testcase(_, Config) ->
-  ok = barrel:create_barrel(<<"test">>),
   Config.
 
 end_per_testcase(_, _Config) ->
@@ -66,7 +65,7 @@ end_per_suite(Config) ->
 
 
 save_doc(_Config) ->
-  {ok,  Barrel}= barrel_db:open_barrel(<<"test">>),
+  {ok,  Barrel}= barrel_db:get_barrel(<<"test">>),
   Doc0 = #{ <<"id">> => <<"a">>, <<"v">> => 1},
   {ok, <<"a">>, Rev} = barrel:save_doc(Barrel, Doc0),
   {ok, #{ <<"_rev">> := Rev } = Doc1} = barrel:fetch_doc(Barrel, <<"a">>, #{}),
@@ -77,7 +76,7 @@ save_doc(_Config) ->
   ok.
 
 update_non_existing_doc(_Config) ->
-  {ok,  Barrel}= barrel_db:open_barrel(<<"test">>),
+  {ok,  Barrel}= barrel_db:get_barrel(<<"test">>),
   Doc0 = #{ <<"id">> => <<"a">>, <<"v">> => 1, <<"_rev">> => <<"1-76d70d853c9fcf1f83a6b4b6cf3776633d28f480cb0dd7ee8b68d5bfc434360a">>},
   {error, {conflict, revision_conflict}}  = barrel:save_doc(Barrel, Doc0).
 
@@ -87,14 +86,14 @@ replicate_none_existing_doc(_Config) ->
   RepDoc = #{ <<"id">> => <<"a">>,
               <<"history">> => [<<"1-76d70d853c9fcf1f83a6b4b6cf3776633d28f480cb0dd7ee8b68d5bfc434360a">>],
               <<"doc">> => Doc},
-  {ok,  Barrel}= barrel_db:open_barrel(<<"test">>),
+  {ok,  Barrel}= barrel_db:get_barrel(<<"test">>),
   ok = barrel:save_replicated_docs(Barrel, [RepDoc]),
   {ok, #{ <<"_rev">> := Rev} } = barrel:fetch_doc(Barrel, <<"a">>, #{}),
   Rev = <<"1-76d70d853c9fcf1f83a6b4b6cf3776633d28f480cb0dd7ee8b68d5bfc434360a">>.
 
 delete_doc(_Config) ->
   Doc0 = #{ <<"id">> => <<"a">>, <<"v">> => 1},
-  {ok,  Barrel}= barrel_db:open_barrel(<<"test">>),
+  {ok,  Barrel}= barrel_db:get_barrel(<<"test">>),
   {ok, <<"a">>, Rev} = barrel:save_doc(Barrel, Doc0),
   {ok, #{ <<"_rev">> := Rev }} = barrel:fetch_doc(Barrel, <<"a">>, #{}),
   {ok, <<"a">>, Rev2} = barrel:delete_doc(Barrel, <<"a">>, Rev),
@@ -104,7 +103,7 @@ delete_doc(_Config) ->
   ok.
 
 save_docs(_Config) ->
-  {ok,  Barrel}= barrel_db:open_barrel(<<"test">>),
+  {ok,  Barrel}= barrel_db:get_barrel(<<"test">>),
   Docs = [
     #{ <<"id">> => <<"a">>, <<"v">> => 1},
     #{ <<"id">> => <<"b">>, <<"v">> => 1}
@@ -116,7 +115,7 @@ save_docs(_Config) ->
   ok.
 
 all_or_nothing(_Config) ->
-  {ok,  Barrel}= barrel_db:open_barrel(<<"test">>),
+  {ok,  Barrel}= barrel_db:get_barrel(<<"test">>),
   Doc0 = #{ <<"id">> => <<"a">>, <<"v">> => 1},
   {ok, <<"a">>, Rev1} = barrel:save_doc(Barrel, Doc0),
   {ok, [{ok, <<"a">>, Rev2}]} = barrel:save_docs(Barrel, [Doc0#{ <<"_rev">> => Rev1}], #{ all_or_nothing => true}),
@@ -133,7 +132,7 @@ fold_docs(_Config) ->
     #{ <<"id">> => <<"d">>, <<"v">> => 4},
     #{ <<"id">> => <<"e">>, <<"v">> => 5}
   ],
-  {ok,  Barrel}= barrel_db:open_barrel(<<"test">>),
+  {ok,  Barrel}= barrel_db:get_barrel(<<"test">>),
   {ok, _Saved} = barrel:save_docs(Barrel, Docs),
   5 = length(_Saved),
   Fun = fun(#{ <<"id">> := Id }, Acc) -> {ok, [ Id | Acc ]} end,
@@ -149,7 +148,7 @@ fold_docs(_Config) ->
   ok.
 
 fold_changes(_Config) ->
-  {ok,  Barrel}= barrel_db:open_barrel(<<"test">>),
+  {ok,  Barrel}= barrel_db:get_barrel(<<"test">>),
   Docs = [
     #{ <<"id">> => <<"a">>, <<"v">> => 1},
     #{ <<"id">> => <<"b">>, <<"v">> => 2},

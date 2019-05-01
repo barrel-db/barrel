@@ -55,7 +55,7 @@ get_view(ViewKey) ->
 
 process_doc(#{ <<"id">> := DocId } = Doc,
             BarrelId, ViewId, ViewMod, ViewConfig) ->
-  {ok, Barrel} = barrel_db:open_barrel(BarrelId),
+  {ok, Barrel} = barrel_db:get_barrel(BarrelId),
   KVs = ViewMod:handle_doc(Doc, ViewConfig),
   ok = update_view_index(Barrel, ViewId, DocId, KVs),
   {ok, DocId}.

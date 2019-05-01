@@ -43,7 +43,7 @@ init(#{ barrel := BarrelId,
         mod := ViewMod,
         config := ViewConfig0 }) ->
   process_flag(trap_exit, true),
-  {ok, Barrel} = barrel_db:open_barrel(BarrelId),
+  {ok, Barrel} = barrel_db:get_barrel(BarrelId),
   {ok, ViewConfig} = ViewMod:init(ViewConfig0),
   Version = ViewMod:version(),
   View0 = case open_view(BarrelId, ViewId) of
