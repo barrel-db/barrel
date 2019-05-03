@@ -42,6 +42,8 @@ end_per_suite(Config) ->
 restart_test(_Config) ->
   {ok, _} = application:ensure_all_started(barrel),
   ok = barrel:create_barrel(<<"test">>),
+  ok = application:stop(barrel),
+  ok = application:start(barrel),
   {error, _} = barrel:create_barrel(<<"test">>),
   ok = barrel:create_barrel(<<"test2">>),
   ok = application:stop(barrel),

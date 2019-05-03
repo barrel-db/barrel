@@ -19,7 +19,8 @@
 
 -export([
   create_barrel/1,
-  get_barrel/1,
+  open_barrel/1,
+  close_barrel/1,
   delete_barrel/1,
   barrel_infos/1
 ]).
@@ -46,14 +47,19 @@
     error:badarg -> erlang:error(bad_provider_config)
   end).
 
+create_barrel(Name) ->
+  with_locked_barrel(
+    Name,
+    fun() -> ?STORE:create_barrel(Name) end
+  ).
 
-get_barrel(Name) ->
+open_barrel(Name) ->
   try
     case barrel_registry:reference_of(Name) of
       {ok, undefined} ->
         %% race condition, retry
         timer:sleep(10),
-        get_barrel(Name);
+        open_barrel(Name);
       {ok, _} = OK ->
         OK;
       error ->
@@ -63,9 +69,9 @@ get_barrel(Name) ->
                ),
         case Res of
           {ok, _} ->
-            get_barrel(Name);
+            open_barrel(Name);
           {error,{already_started, _}} ->
-            get_barrel(Name);
+            open_barrel(Name);
           Error ->
             Error
         end
@@ -73,31 +79,21 @@ get_barrel(Name) ->
   catch
     exit:Reason when Reason =:= normal ->
       timer:sleep(10),
-      get_barrel(Name)
+      open_barrel(Name)
   end.
+
+close_barrel(Name) ->
+  stop_barrel(Name).
+
 
 delete_barrel(Name) ->
   with_locked_barrel(
     Name,
     fun() ->
-        ok = stop_barrel(Name),
-        ?STORE:delete_barrel(Name)
-    end).
-
-create_barrel(Name) ->
-  Res = with_locked_barrel(
-          Name,
-          fun() -> start_barrel(Name) end
-         ),
-  case Res of
-    {ok, _} ->
-      ok;
-    {error,{already_started, _}} ->
-      {error, barrel_already_exists};
-    Error ->
-      Error
-  end.
-
+      ok = stop_barrel(Name),
+      ?STORE:delete_barrel(Name)
+    end
+  ).
 
 start_barrel(Name) ->
   supervisor:start_child(barrel_db_sup, [Name]).

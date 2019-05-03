@@ -298,7 +298,7 @@ find_parent([], _RevTree, Acc) ->
 %% init & terminate a barrel server
 
 init_(Name) ->
-  case ?STORE:init_barrel(Name) of
+  case ?STORE:open_barrel(Name) of
     {ok, BarrelRef, LastSeq} ->
       Store = #{ name => Name, ref => BarrelRef},
       {ok, Store, LastSeq};

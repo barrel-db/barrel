@@ -36,6 +36,7 @@ init_per_suite(Config) ->
 
 
 init_per_testcase(_, Config) ->
+  ok = barrel:create_barrel(<<"test">>),
   Config.
 
 end_per_testcase(_, _Config) ->
@@ -50,7 +51,7 @@ end_per_suite(Config) ->
   Config.
 
 local_doc(_Config) ->
-  {ok, Barrel} = barrel_db:get_barrel(<<"test">>),
+  {ok, Barrel} = barrel_db:open_barrel(<<"test">>),
   LocalDoc = #{ <<"id">> => <<"adoc">>, <<"value">> => <<"local">> },
   RepDoc = #{ <<"id">> => <<"adoc">>, <<"value">> => <<"replicated">> },
   ok = barrel_local:put_doc(Barrel, <<"adoc">>, LocalDoc),

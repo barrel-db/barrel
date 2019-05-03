@@ -50,7 +50,7 @@ end_per_suite(Config) ->
 
 
 basic_test(_Config) ->
-  {ok, Barrel} = barrel_db:get_barrel(<<"test">>),
+  {ok, Barrel} = barrel:open_barrel(<<"test">>),
   {ok, ViewPid} = barrel:start_view(<<"test">>, <<"ars">>, barrel_ars_view, #{}),
 
   Docs = [
@@ -72,7 +72,7 @@ basic_test(_Config) ->
 
 
 fwd_test(_Config) ->
-   {ok, Barrel} = barrel_db:get_barrel(<<"test">>),
+   {ok, Barrel} = barrel:open_barrel(<<"test">>),
    {ok, ViewPid} = barrel:start_view(<<"test">>, <<"ars">>, barrel_ars_view, #{}),
 
   Docs = [
@@ -109,7 +109,7 @@ fwd_test(_Config) ->
 
 
 rev_test(_Config) ->
-   {ok, Barrel} = barrel_db:get_barrel(<<"test">>),
+   {ok, Barrel} = barrel:open_barrel(<<"test">>),
    {ok, ViewPid} = barrel:start_view(<<"test">>, <<"ars">>, barrel_ars_view, #{}),
 
   Docs = [
@@ -149,7 +149,7 @@ rev_test(_Config) ->
 
 
 limit_test(_Config) ->
-  {ok, Barrel} = barrel_db:get_barrel(<<"test">>),
+  {ok, Barrel} = barrel:open_barrel(<<"test">>),
    {ok, ViewPid} = barrel:start_view(<<"test">>, <<"ars">>, barrel_ars_view, #{}),
 
   Docs = [
@@ -196,7 +196,7 @@ limit_test(_Config) ->
 
 
 r1_test(_Config) ->
-  {ok, Barrel} = barrel_db:get_barrel(<<"test">>),
+  {ok, Barrel} = barrel:open_barrel(<<"test">>),
   {ok, ViewPid} = barrel:start_view(<<"test">>, <<"ars">>, barrel_ars_view, #{}),
 
   Ids = [<<"9gUOXd0V5JePkx3HCU">>,<<"9gUOXd0V5JePkx3HCV">>,<<"9gUOXd0V5JePkx3HCW">>,
