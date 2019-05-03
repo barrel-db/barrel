@@ -53,7 +53,7 @@ handle_info(Info, State) ->
 
 terminate(_Reason, #{ tref := TRef }) ->
   _ = erlang:cancel_timer(TRef),
-  _ = jobs:delete_queue(barrel_write_queue),
+  ok = jobs:delete_queue(barrel_write_queue),
   ok.
 
 

@@ -93,7 +93,7 @@ create_barrel(Name) ->
     {ok, _} ->
       ok;
     {error,{already_started, _}} ->
-      ok;
+      {error, barrel_already_exists};
     Error ->
       Error
   end.
