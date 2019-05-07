@@ -35,41 +35,39 @@
 -define(CHUNK_SIZE, 5 * 1024 * 1000). %% 5 MB.
 
 update_docs(Barrel, Docs, MergePolicy) ->
-  {ok, [update_doc(Barrel, Doc, MergePolicy) || Doc <- Docs]}.
+  TRef = erlang:send_after(5000, self(), update_timeout),
+  Results = [update_doc(Barrel, Doc, MergePolicy) || Doc <- Docs],
+  erlang:cancel_timer(TRef),
+  {ok, Results}.
 
-
-update_doc(Barrel, Doc, MergePolicy) ->
+update_doc(#{ ref := BarrelRef } = Barrel, Doc, MergePolicy) ->
+  StartTime = erlang:timestamp(),
+  Record0 = barrel_doc:make_record(Doc),
+  {_, Record1} = flush_attachments(BarrelRef, Record0),
   jobs:run(barrel_write_queue,
-           fun() -> update_doc_1(Barrel, Doc, MergePolicy) end).
+           fun() -> update_doc_1(Barrel, Record1, MergePolicy, StartTime) end).
 
-update_doc_1(#{ name := Name, ref := BarrelRef }, Doc, MergePolicy0) ->
-   Start = erlang:timestamp(),
-   #{ ref := Ref } = Record0 = barrel_doc:make_record(Doc),
-   {MergePolicy, Record} = case flush_attachments(BarrelRef, Record0) of
-                             {true, Record1} ->
-                               {merge_with_conflict, Record1};
-                             {false, _} ->
-                               {MergePolicy0, Record0}
-                           end,
-   Server =  barrel_registry:where_is(Name),
 
-   gen_server:cast(Server, {update_doc, self(), Record, MergePolicy}),
+
+update_doc_1(#{ name := Name }, #{ ref := Ref } = Record, MergePolicy, StartTime) ->
+   gen_server:cast({via, gproc, ?barrel(Name)}, {update_doc, self(), Record, MergePolicy}),
    receive
      {Ref, Result} ->
        Now = erlang:timestamp(),
-       ocp:record('barrel/db/update_doc_duration', timer:now_diff(Now, Start)),
+       ocp:record('barrel/db/update_doc_duration', timer:now_diff(Now, StartTime)),
        ocp:record('barrel/db/update_doc_num', 1),
-       Result
-   after 5000 ->
-           ocp:record('barrel/db/update_doc_timeout', 1),
-           exit(timeout)
+       Result;
+     update_timeout ->
+       ocp:record('barrel/db/update_doc_timeout', 1),
+       exit(timeout)
    end.
 
 flush_attachments(BarrelRef, #{ id := DocId, attachments := Atts0 } = Record) when map_size(Atts0) > 0 ->
   Atts1 = maps:map(
             fun(AttName, AttDoc0) ->
                 {Data, AttDoc1} = maps:take(<<"data">>, AttDoc0),
-                {ok, AttRecord} = barrel_db_attachments:put_attachment(BarrelRef, DocId, AttName, Data),
+                {ok, AttRecord} =
+                  barrel_db_attachments:put_attachment(BarrelRef, DocId, AttName, Data),
                 AttRecord#{ doc => AttDoc1 }
             end,
             Atts0),
