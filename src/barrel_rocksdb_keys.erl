@@ -29,6 +29,8 @@
   db_prefix_end/1
 ]).
 
+-export([counter_key/2]).
+
 -export([
   doc_info/2,
   doc_info_max/1,
@@ -73,6 +75,12 @@ decode_barrel_ident(<< _:3/binary, Key/binary >>) ->
 
 db_prefix(BarrelId) ->
   << ?db_prefix/binary, BarrelId/binary >>.
+
+counter_key(Prefix, Name) ->
+   barrel_encoding:encode_binary_ascending(
+     << ?counter_prefix/binary, Prefix/binary >>,
+     Name
+    ).
 
 %% ----
 %% barrels local metadata
