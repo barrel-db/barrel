@@ -53,3 +53,5 @@
 -define(view_upgrade_suffix, <<"bg">>).
 -define(view_meta_suffix, <<"m">>).
 
+
+-define(counter_prefix, << ?meta1_prefix, "c" >>).

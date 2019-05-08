@@ -45,6 +45,11 @@
 -export([put_attachment/4,
          fetch_attachment/4]).
 
+-export([get_counter/2,
+         add_counter/3,
+         set_counter/3,
+         delete_counter/2]).
+
 
 -export([start_link/0]).
 
@@ -149,6 +154,32 @@ barrel_infos(Name) ->
     not_found ->
       {error, barrel_not_found}
   end.
+
+
+
+%% -------------------
+%% meta
+
+
+get_counter(Prefix, Name) ->
+  CounterKey = barrel_rocksdb_keys:counter_key(Prefix, Name),
+  case rocksdb:get(?db, CounterKey, []) of
+    {ok, Bin} -> {ok, binary_to_integer(Bin)};
+    not_found -> not_found
+  end.
+
+set_counter(Prefix, Name, Value) ->
+  CounterKey = barrel_rocksdb_keys:counter_key(Prefix, Name),
+  rocksdb:put(?db, CounterKey, integer_to_binary(Value), []).
+
+
+add_counter(Prefix, Name, Value) ->
+  CounterKey = barrel_rocksdb_keys:counter_key(Prefix, Name),
+  rocksdb:merge(?db, CounterKey, integer_to_binary(Value), []).
+
+delete_counter(Prefix, Name) ->
+  CounterKey = barrel_rocksdb_keys:counter_key(Prefix, Name),
+  rocksdb:delete(?db, CounterKey, []).
 
 
 %% -------------------

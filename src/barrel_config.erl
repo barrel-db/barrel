@@ -62,6 +62,11 @@ init() ->
 
                       {transactions_per_bytes, 1000},
 
+                      %% we recycle attachments every 30mn if they are not used.
+                      {attachment_timeout, 1000 * 60 * 30},
+                      %% number of attachments to keep open
+                      {keep_attachment_file_num, 1000},
+
 
                       %% storage backend
                       {storage, barrel_rocksdb},
