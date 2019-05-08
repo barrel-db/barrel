@@ -14,6 +14,15 @@
 
 -define(STORE, (barrel_config:storage())).
 
+%% -----------------
+%% -- attachements
+
+-define(att(Path), {n, l, {barrel_attachment, Path}}).
+-define(att_proc(Path), {via, gproc, ?att(Path)}).
+
+%% -----------------
+%% -- loggin
+
 
 -define(LOG_DEBUG(Fmt, Args), ?DISPATCH_LOG(debug, Fmt, Args)).
 -define(LOG_INFO(Fmt, Args), ?DISPATCH_LOG(info, Fmt, Args)).
