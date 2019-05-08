@@ -20,7 +20,8 @@
     rocksdb,
     gen_batch_server,
     opencensus,
-    jobs
+    jobs,
+    lru
    ]},
   {env, []},
   {modules, []},
