@@ -180,18 +180,21 @@ do_fetch_doc(Ctx, DocId, Options) ->
 maybe_add_sequence(Doc, _, false) -> Doc;
 maybe_add_sequence(Doc, Seq, true) -> Doc#{ <<"_seq">> => Seq }.
 
-maybe_fetch_attachments(_Ctx, _DocId, #{ attachments := Atts }, Doc, false) when map_size(Atts) > 0 ->
+maybe_fetch_attachments(_Ctx, _DocId,
+                        #{ attachments := Atts }, Doc, false) when map_size(Atts) > 0 ->
  Atts1 = maps:map(
             fun(_Name, AttRecord) ->
                 #{ doc := AttDoc } = AttRecord,
                 AttDoc#{ <<"follow">> => true }
             end, Atts),
   Doc#{ <<"_attachments">> => Atts1};
-maybe_fetch_attachments(Ctx, DocId, #{ attachments := Atts }, Doc, true) when map_size(Atts) > 0 ->
+maybe_fetch_attachments(_Ctx, _DocId,
+                        #{ attachments := Atts }, Doc, true) when map_size(Atts) > 0 ->
   Atts1 = maps:map(
-            fun(Name, AttRecord) ->
+            fun(_Name, AttRecord) ->
                 #{ attachment := Att, doc := AttDoc } = AttRecord,
-                {ok, AttBin} = barrel_db_attachments:fetch_attachment(Ctx, DocId, Name, Att),
+                {ok, ReaderFun, Ctx} = barrel_fs_att:fetch_attachment(Att),
+                {ok, AttBin} = read_data(ReaderFun, Ctx, <<>>),
                 AttDoc#{ <<"data">> => AttBin }
             end, Atts),
   Doc#{ <<"_attachments">> => Atts1};
@@ -215,7 +218,8 @@ do_fetch_attachment(Ctx, DocId, AttName) ->
         {ok, #{ attachments := Atts }} ->
           case maps:find(AttName, Atts) of
             {ok, #{ attachment := Att }} ->
-              barrel_db_attachments:fetch_attachment(Ctx, DocId, AttName, Att);
+              {ok, ReaderFun, ReadCtx} = barrel_fs_att:fetch_attachment(Att),
+              read_data(ReaderFun, ReadCtx, <<>>);
             error ->
               {error, not_found}
           end;
@@ -226,6 +230,16 @@ do_fetch_attachment(Ctx, DocId, AttName) ->
       Error
   end.
 
+
+read_data(ReaderFun, Ctx0, Acc) ->
+  case ReaderFun(Ctx0) of
+    {ok, Bin, Ctx1} ->
+      read_data(ReaderFun, Ctx1, << Acc/binary, Bin/binary >> );
+    eob ->
+      {ok, Acc};
+    Error ->
+      Error
+  end.
 
 revsdiff(Barrel, DocId, RevIds) ->
   with_ctx(

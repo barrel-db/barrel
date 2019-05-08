@@ -6,6 +6,7 @@
 -export([evict/1]).
 -export([fetch_attachment/1,
          fetch_attachment/2]).
+
 -export([put_attachment/4]).
 %% gen_statem callbacks
 -export([
@@ -55,16 +56,13 @@ put_attachment(BarrelId, DocId, AttName, {ReaderFun, ReaderState}) ->
       Error
   end.
 
-
-
-
 write_blob1(ReaderFun, ReaderState, Fd, State) ->
   case ReaderFun(ReaderState) of
     {ok, eob, NewReaderState} ->
       file:close(Fd),
       file:sync(Fd), %% we sync on each write
       Digest = crypto:hash_final(State),
-      {ok, NewReaderState, barrel_lib:to_hex(Digest)};
+      {ok, barrel_lib:to_hex(Digest), NewReaderState};
     {ok, Bin, NewReaderState} ->
       ok = file:write(Fd, Bin),
       file:sync(Fd), %% we sync on each write
@@ -91,32 +89,9 @@ fetch_attachment(Path, Window) ->
                   end
               end,
 
-  %% get process maintaining the attachment
-  %% first we check if it's cached, then see if it's sill loaded
-  %% else we load it and create its process
-  Proc = case lru:get(attachment_files, Path) of
-           undefined ->
-             case gproc:where(?att(Path)) of
-               Pid when is_pid(Pid) ->
-                 cache_and_activate(Path, Pid),
-                 Pid;
-               undefined ->
-                 case supervisor:start_child(barrel_fs_att_sup, [Path]) of
-                   {ok, Pid} ->
-                     cache_and_activate(Path, Pid),
-                     Pid;
-                   {error, {already_started, Pid}} ->
-                     cache_and_activate(Path, Pid),
-                     Pid;
-                   Error ->
-                     exit(Error)
-                 end
-             end;
-           Pid ->
-             Pid
-         end,
+  Proc = get_proc(Path),
   Ctx = {Proc, 0},
-  {ok, {ReaderFun, Ctx}}.
+  {ok, ReaderFun, Ctx}.
 
 
 
@@ -129,13 +104,39 @@ wakeup(Pid) ->
 
 
 refc(Path) ->
-   gen_statem:cast(?att_proc(Path), refc).
+   gen_statem:cast(get_proc(Path), refc).
 
+
+%% get process maintaining the attachment
+%% first we check if it's cached, then see if it's sill loaded
+%% else we load it and create its process
+get_proc(Path) ->
+  case lru:get(attachment_files, Path) of
+    undefined ->
+      case gproc:where(?att(Path)) of
+        Pid when is_pid(Pid) ->
+          cache_and_activate(Path, Pid),
+          Pid;
+        undefined ->
+          case supervisor:start_child(barrel_fs_att_sup, [Path]) of
+            {ok, Pid} ->
+              cache_and_activate(Path, Pid),
+              Pid;
+            {error, {already_started, Pid}} ->
+              cache_and_activate(Path, Pid),
+              Pid;
+            Error ->
+              exit(Error)
+          end
+      end;
+    Pid ->
+      Pid
+  end.
 
 
 
 pread(AttPid, Pos, Size) ->
-  gen_statem:cast(AttPid, {pread, Pos, Size}).
+  gen_statem:call(AttPid, {pread, Pos, Size}).
 
 
 start_link(Path) ->
@@ -235,11 +236,13 @@ evicted(EventType, EventContent, Data) ->
 %% handlers
 
 handle_read(Pos, Sz, From, #{ fd := Fd, eof := Eof } = Data) ->
-   Reply = case file:pread(Fd, Pos, Sz) of
-            {ok, Data} ->
+  Reply = case file:pread(Fd, Pos, Sz) of
+            {ok, Bin} ->
               NextPos = erlang:min(Pos + Sz, Eof),
-              {ok, Data, NextPos};
-            Error ->
+              {ok, Bin, NextPos};
+            eof ->
+              eob;
+            {error, _} = Error ->
               Error
           end,
   {keep_state, Data, [{reply, From, Reply}]}.
@@ -294,8 +297,8 @@ maybe_delete(#{ path := Path, fd := Fd, state := State }= Data) ->
 
 
 tempdir() ->
-  Dir = filename:joit([barrel_config:get(data_dir), ".temp"]),
-  ok = filelib:ensure_dir(Dir),
+  Dir = filename:join([barrel_config:get(data_dir), ".barrel_tmp"]),
+  ok = filelib:ensure_dir(filename:join([Dir, "dummy"])),
   Dir.
 
 tempfile(BarrelId, DocId, AttName) ->
@@ -305,8 +308,9 @@ tempfile(BarrelId, DocId, AttName) ->
 
 
 temp_file_1(TempDir, Prefix) ->
-  Name = filename:join([TempDir, barrel_lib:make_uid(Prefix)]),
-  case file:open(Name, [write, append]) of
+  Uid = barrel_lib:make_uid(Prefix),
+  Name = filename:join([TempDir, Uid]),
+  case file:open(Name, [raw, append]) of
     {ok, Fd} ->
       {ok, Fd, Name};
     _Error ->
@@ -320,6 +324,6 @@ att_dir() ->
   Dir.
 
 att_path(<< P1:2/binary, P2:2/binary, P3:2/binary, P4:2/binary, Name/binary >>) ->
-  AttFile = filename:join(att_dir(),[<<"sha256">>, P1, P2, P3, P4, Name]),
+  AttFile = filename:join([att_dir(), <<"sha256">>, P1, P2, P3, P4, Name]),
   ok = filelib:ensure_dir(AttFile),
   AttFile.

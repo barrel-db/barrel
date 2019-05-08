@@ -40,10 +40,10 @@ update_docs(Barrel, Docs, MergePolicy) ->
   erlang:cancel_timer(TRef),
   {ok, Results}.
 
-update_doc(#{ ref := BarrelRef } = Barrel, Doc, MergePolicy) ->
+update_doc(#{ name := Name } = Barrel, Doc, MergePolicy) ->
   StartTime = erlang:timestamp(),
   Record0 = barrel_doc:make_record(Doc),
-  {_, Record1} = flush_attachments(BarrelRef, Record0),
+  {_, Record1} = flush_attachments(Name, Record0),
   jobs:run(barrel_write_queue,
            fun() -> update_doc_1(Barrel, Record1, MergePolicy, StartTime) end).
 
@@ -62,13 +62,22 @@ update_doc_1(#{ name := Name }, #{ ref := Ref } = Record, MergePolicy, StartTime
        exit(timeout)
    end.
 
-flush_attachments(BarrelRef, #{ id := DocId, attachments := Atts0 } = Record) when map_size(Atts0) > 0 ->
+flush_attachments(Name, #{ id := DocId, attachments := Atts0 } = Record) when map_size(Atts0) > 0 ->
   Atts1 = maps:map(
             fun(AttName, AttDoc0) ->
                 {Data, AttDoc1} = maps:take(<<"data">>, AttDoc0),
-                {ok, AttRecord} =
-                  barrel_db_attachments:put_attachment(BarrelRef, DocId, AttName, Data),
-                AttRecord#{ doc => AttDoc1 }
+
+                ReaderFun = fun
+                              (Bin) when is_binary(Bin) ->
+                                io:format("i send you that fucking bin you know~n", []),
+                                {ok, Bin, eob};
+                              (eob) ->
+                                {ok, eob, undefined}
+                            end,
+
+                {ok, AttRecord, _} =
+                  barrel_fs_att:put_attachment(Name, DocId, AttName, {ReaderFun, Data}),
+                #{ attachment => AttRecord, doc =>AttDoc1 }
             end,
             Atts0),
   {true, Record#{ attachments => Atts1 }};

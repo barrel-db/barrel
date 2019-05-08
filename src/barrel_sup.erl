@@ -88,7 +88,7 @@ init([]) ->
        start => {barrel_ratekeeper, start_link, []} },
 
     #{ id => lru,
-       start => {lru, start_link, [attachment_files, AttLruOpts]} },
+       start => {lru, start_link, [{local, attachment_files}, AttLruOpts]} },
 
 
     %% safe supervisor
