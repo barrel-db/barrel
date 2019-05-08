@@ -175,7 +175,7 @@ set_counter(Prefix, Name, Value) ->
 
 add_counter(Prefix, Name, Value) ->
   CounterKey = barrel_rocksdb_keys:counter_key(Prefix, Name),
-  rocksdb:merger(?db, CounterKey, integer_to_binary(Value), []).
+  rocksdb:merge(?db, CounterKey, integer_to_binary(Value), []).
 
 delete_counter(Prefix, Name) ->
   CounterKey = barrel_rocksdb_keys:counter_key(Prefix, Name),

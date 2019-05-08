@@ -104,7 +104,7 @@ wakeup(Pid) ->
 
 
 refc(Path) ->
-   gen_statem:cast(get_proc(Path), refc).
+   gen_statem:call(get_proc(Path), refc).
 
 
 %% get process maintaining the attachment

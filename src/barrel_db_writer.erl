@@ -69,14 +69,16 @@ flush_attachments(Name, #{ id := DocId, attachments := Atts0 } = Record) when ma
 
                 ReaderFun = fun
                               (Bin) when is_binary(Bin) ->
-                                io:format("i send you that fucking bin you know~n", []),
                                 {ok, Bin, eob};
                               (eob) ->
                                 {ok, eob, undefined}
                             end,
 
                 {ok, AttRecord, _} =
-                  barrel_fs_att:put_attachment(Name, DocId, AttName, {ReaderFun, Data}),
+                  jobs:run(barrel_write_queue,
+                           fun() ->
+                               barrel_fs_att:put_attachment(Name, DocId, AttName, {ReaderFun, Data})
+                           end),
                 #{ attachment => AttRecord, doc =>AttDoc1 }
             end,
             Atts0),
