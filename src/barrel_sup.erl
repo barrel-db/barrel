@@ -56,6 +56,8 @@ init([]) ->
                  {worker, {barrel_view_worker, undefined}}],
 
 
+  AttLruOpts = [{max_objs, barrel_config:get(keep_attachment_file_num)}],
+
   %% init metrics
   ok = barrel_metrics:init(),
 
@@ -85,6 +87,10 @@ init([]) ->
     #{ id => ratekeeper,
        start => {barrel_ratekeeper, start_link, []} },
 
+    #{ id => lru,
+       start => {lru, start_link, [attachment_files, AttLruOpts]} },
+
+
     %% safe supervisor
     #{id => barrel_safe_sup,
       start => {supervisor, start_link, [{local, barrel_safe_sup}, ?MODULE, safe]},
@@ -111,6 +117,10 @@ init(safe) ->
      %% barrel db supervisor
      #{id => barrel_db_sup,
        start => {barrel_db_sup, start_link, []}
+      },
+
+     #{id => barrel_fs_att_sup,
+       start => {barrel_fs_att_sup, start_link, []}
       },
 
      #{id => barrel_view_sup_sup,
