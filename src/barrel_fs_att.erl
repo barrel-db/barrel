@@ -195,7 +195,7 @@ active({call, From}, refc, Data) ->
   handle_refc(From, Data);
 
 active(cast, evicted, Data) ->
-  {next_state, evicted, Data, [{timeout, timeout()}]};
+  {next_state, evicted, Data, timeout()};
 
 active(cast, wakeup, Data) ->
   {keep_state, Data};
