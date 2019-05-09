@@ -56,17 +56,20 @@ update_doc(#{ name := Name } = Barrel, Doc, MergePolicy) ->
 
 
 update_doc_1(#{ name := Name }, #{ ref := Ref } = Record, MergePolicy, StartTime) ->
-   gen_server:cast({via, gproc, ?barrel(Name)}, {update_doc, self(), Record, MergePolicy}),
-   receive
-     {Ref, Result} ->
-       Now = erlang:timestamp(),
-       ocp:record('barrel/db/update_doc_duration', timer:now_diff(Now, StartTime)),
-       ocp:record('barrel/db/update_doc_num', 1),
-       Result;
-     update_timeout ->
-       ocp:record('barrel/db/update_doc_timeout', 1),
-       exit(timeout)
-   end.
+  SpanCtx = ocp:current_span_ctx(),
+  Tags = ocp:current_tags(),
+  gen_server:cast({via, gproc, ?barrel(Name)},
+                  {{update_doc, self(), Record, MergePolicy}, SpanCtx, Tags}),
+  receive
+    {Ref, Result} ->
+      Now = erlang:timestamp(),
+      ocp:record('barrel/db/update_doc_duration', timer:now_diff(Now, StartTime)),
+      ocp:record('barrel/db/update_doc_num', 1),
+      Result;
+    update_timeout ->
+      ocp:record('barrel/db/update_doc_timeout', 1),
+      exit(timeout)
+  end.
 
 flush_attachments(Name, Record) ->
   _ = ocp:with_child_span(?MFA_SPAN_NAME, #{ <<"log">> => <<"flush attachments" >> }),
@@ -122,12 +125,19 @@ init([Name]) ->
 handle_call(_Msg, _From, State) ->
   {reply, bad_call, State}.
 
-handle_cast({update_doc, From, #{ id := DocId, ref := Ref } = Record, MergePolicy},
+handle_cast({{update_doc, From, #{ id := DocId, ref := Ref } = Record, MergePolicy},
+             SpanCtx, Tags},
             #{ name := Name, ref := BarrelRef, updated_seq := Seq } = State) ->
 
+  ocp:with_span_ctx(SpanCtx),
+  ocp:with_tags(Tags),
   case get_docinfo(BarrelRef, DocId) of
     {ok, {DocStatus, DI}} ->
       #{ seq := OldSeq, deleted := OldDel } = DI,
+      _ = ocp:with_child_span(
+            <<"barrel_db_writer:do_merge/2">>,
+            #{ <<"log">> => <<"merge document">>,
+               <<"merge_policy">> => barrel_lib:to_binary(MergePolicy) }),
       MergeResult = try
                       do_merge(Record, DI, MergePolicy)
                     catch
@@ -136,9 +146,9 @@ handle_cast({update_doc, From, #{ id := DocId, ref := Ref } = Record, MergePolic
                         ?LOG_DEBUG("merge error, docid=~p class=~p error=~p traceback= p~n",
                                    [DocId, C, E, T]),
                         {error, {merge_error, E}}
+                    after
+                      ocp:finish_span()
                     end,
-
-
       case MergeResult of
         {ok, #{ rev := Rev } = DI2, DocRev, DocBody} when DI2 =/= DI ->
           Seq2 = Seq + 1,
