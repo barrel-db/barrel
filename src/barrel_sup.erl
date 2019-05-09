@@ -56,7 +56,12 @@ init([]) ->
                  {worker, {barrel_view_worker, undefined}}],
 
 
-  AttLruOpts = [{max_objs, barrel_config:get(keep_attachment_file_num)}],
+  EvictFun = fun(Path, _AttPid) ->
+                 barrel_fs_att:evict(Path)
+             end,
+
+  AttLruOpts = [{max_objs, barrel_config:get(keep_attachment_file_num)},
+                {evict_fun, EvictFun}],
 
   %% init metrics
   ok = barrel_metrics:init(),
