@@ -90,7 +90,7 @@ fetch_attachment(Path, Window) ->
   ocp:record('barrel/attachments/fetch_num', 1),
   StartTime = erlang:timestamp(),
   ReaderFun = fun({AttPid, Pos}) ->
-                  _ = maybe_add_link(Link),
+                  oc_trace:add_link(Link, ocp:current_span_ctx()),
                   case pread(AttPid, Pos, Window) of
                     {ok, Data, NewPos} ->
                       Ctx = {AttPid, NewPos},
