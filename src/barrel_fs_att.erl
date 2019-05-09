@@ -29,9 +29,13 @@
 -define(DEFAULT_WINDOW, 8192).
 
 put_attachment(BarrelId, DocId, AttName, {ReaderFun, ReaderState}) ->
+  ocp:record('barrel/attachments/put_num', 1),
+  StartTime = erlang:timestamp(),
   {ok, Fd, TempFile} = tempfile(BarrelId, DocId, AttName),
   try do_write_blob(Fd, TempFile, {ReaderFun, ReaderState})
   after
+    ocp:record('barrel/attachments/put_duration',
+               timer:now_diff(erlang:timestamp(), StartTime)),
     file:close(Fd)
   end.
 
@@ -79,12 +83,16 @@ fetch_attachment(Path) ->
   fetch_attachment(Path, ?DEFAULT_WINDOW).
 
 fetch_attachment(Path, Window) ->
+  ocp:record('barrel/attachments/fetch_num', 1),
+  StartTime = erlang:timestamp(),
   ReaderFun = fun({AttPid, Pos}) ->
                   case pread(AttPid, Pos, Window) of
                     {ok, Data, NewPos} ->
                       Ctx = {AttPid, NewPos},
                       {ok, Data, Ctx};
                     Else ->
+                      ocp:record('barrel/attachments/fetch_duration',
+                                 timer:now_diff(erlang:timestamp(), StartTime)),
                       Else
                   end
               end,
@@ -144,6 +152,7 @@ init([Path]) ->
   case file:open(Path, [read, raw, binary]) of
     {ok, Fd} ->
       {ok, Eof} = file:position(Fd, eof),
+      ocp:record('barrel/attachments/active', 1),
       {ok, active, #{ path => Path, fd => Fd, eof => Eof, state => State }};
     {error, enoent} ->
       {stop, attachment_not_found};
@@ -167,6 +176,7 @@ callback_mode() -> state_functions.
 terminate(_Reason, _State, #{ fd := nil }) ->
   ok;
 terminate(_Reason, _State, #{ fd := Fd }) ->
+  ocp:record('barrel/attachments/active', -1),
   ok = file:close(Fd),
   ok.
 
@@ -213,6 +223,7 @@ evicted({call, From}, {pread, Pos, Sz}, Data) ->
 evicted({call, From}, delete, Data) ->
  case maybe_delete(Data) of
    {true, Data1} ->
+     ocp:record('barrel/attachments/active', -1),
      {stop, normal, Data1, [{reply, From, ok}]};
    {false, Data1} ->
      {keep_state, Data1, [{reply, From, ok}]}
@@ -227,6 +238,7 @@ evicted(cast, wakeup, Data) ->
 
 
 evicted(timeout, _Undefined, #{ fd := Fd } = Data) ->
+  ocp:record('barrel/attachments/active', -1),
   ok = file:close(Fd),
   {stop, normal, Data#{ fd => nil }};
 
@@ -296,12 +308,13 @@ maybe_delete(#{ path := Path, fd := Fd, state := State }= Data) ->
           spawn(file, delete, [DelFile]),
           {true, Data#{ fd => nil, state => 0 }};
         Error ->
+          ocp:record('barrel/attachments/active', -1),
           ?LOG_ERROR("error while deleting attachment=~p~n", [Path]),
           exit(Error)
       end;
     true ->
       ?STORE:add_counter(<<"att">>, Path, -1) ,
-      {false, Data#{ fd => nil, state => State + 1 }}
+      {false, Data#{ state => State + 1 }}
   end.
 
 

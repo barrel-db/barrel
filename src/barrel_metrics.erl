@@ -18,7 +18,12 @@
          {'barrel/views/active_num', "number of active views", '1'},
          {'barrel/views/active_workers', "number of active workers indexing documents", '1'},
          {'barrel/views/index_duration', "duration while processing a document", 'ms'},
-         {'barrel/views/docs_indexed', "number of docs indexed", '1'}
+         {'barrel/views/docs_indexed', "number of docs indexed", '1'},
+         {'barrel/attachments/put_num', "number of attachments put", '1'},
+         {'barrel/attachments/put_duration', "duration when putting an attachment", 'ms'},
+         {'barrel/attachments/fetch_num', "number of attachments fetched", '1'},
+         {'barrel/attachments/fetch_duration', "duration when fetching an attachment", 'ms'},
+         {'barrel/attachments/active', "number of active attachments", '1'}
         ]).
 
 
