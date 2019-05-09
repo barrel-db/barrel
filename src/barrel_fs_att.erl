@@ -99,9 +99,6 @@ fetch_attachment(Path, Window) ->
 evict(Path) ->
   gen_statem:cast(?att_proc(Path), evicted).
 
-wakeup(Pid) ->
-  gen_statem:cast(Pid, wakeup).
-
 
 refc(Path) ->
    gen_statem:call(get_proc(Path), refc).
@@ -179,7 +176,7 @@ code_change(_OldVsn, State, Data, _Extra) ->
 
 
 active({call, From}, {pread, Pos, Sz}, Data) ->
-  handle_read(Pos, Sz, From, Data);
+  handle_read(Pos, Sz, From, active, Data);
 
 active({call, From}, delete, #{ path := Path } = Data0) ->
  case maybe_delete(Data0) of
@@ -192,7 +189,7 @@ active({call, From}, delete, #{ path := Path } = Data0) ->
  end;
 
 active({call, From}, refc, Data) ->
-  handle_refc(From, Data);
+  handle_refc(From, active, Data);
 
 active(cast, evicted, Data) ->
   {next_state, evicted, Data, timeout()};
@@ -208,7 +205,7 @@ active(EventType, EventContent, Data) ->
 
 
 evicted({call, From}, {pread, Pos, Sz}, Data) ->
-  handle_read(Pos, Sz, From, Data);
+  handle_read(Pos, Sz, From, evicted, Data);
 
 evicted({call, From}, delete, Data) ->
  case maybe_delete(Data) of
@@ -219,7 +216,7 @@ evicted({call, From}, delete, Data) ->
  end;
 
 evicted({call, From}, refc, Data) ->
-  handle_refc(From, Data);
+  handle_refc(From, evicted, Data);
 
 
 evicted(cast, wakeup, Data) ->
@@ -235,7 +232,7 @@ evicted(EventType, EventContent, Data) ->
 
 %% handlers
 
-handle_read(Pos, Sz, From, #{ fd := Fd, eof := Eof } = Data) ->
+handle_read(Pos, Sz, From, State, #{ fd := Fd, eof := Eof } = Data) ->
   Reply = case file:pread(Fd, Pos, Sz) of
             {ok, Bin} ->
               NextPos = erlang:min(Pos + Sz, Eof),
@@ -245,16 +242,27 @@ handle_read(Pos, Sz, From, #{ fd := Fd, eof := Eof } = Data) ->
             {error, _} = Error ->
               Error
           end,
-  {keep_state, Data, [{reply, From, Reply}]}.
+
+  case State of
+    active ->
+      {keep_state, Data, [{reply, From, Reply}]};
+    evicted ->
+      {next_state, active, Data,  [{reply, From, Reply}]}
+  end.
 
 handle_event(EventType, State, Content, Data) ->
   ?LOG_INFO("~s got unknown event: type=~p, state=~p, content=~p",
             [?MODULE_STRING, EventType, State, Content]),
   {keep_state, Data}.
 
-handle_refc(From, #{ path := Path, state := State } = Data) ->
+handle_refc(From, State, #{ path := Path, state := AttState } = Data) ->
    ?STORE:add_counter(<<"att">>, Path, -1) ,
-   {keep_state, Data#{ state => State + 1 }, [{reply, From, ok}]}.
+   case State of
+     active ->
+      {keep_state, Data#{ state => AttState + 1 }, [{reply, From, ok}]};
+     evicted ->
+       {next_state, active, Data#{ state => AttState + 1 }, [{reply, From, ok}]}
+   end.
 
 %% helpers
 
@@ -263,12 +271,7 @@ timeout() ->
 
 
 cache_and_activate(Path, Pid) ->
-  lru:add_with(attachment_files,
-               Path,
-               fun() ->
-                   wakeup(Pid),
-                   {ok, Pid}
-               end).
+  lru:add(attachment_files, Path, Pid).
 
 maybe_delete(#{ path := Path, fd := Fd, state := State }= Data) ->
   if
