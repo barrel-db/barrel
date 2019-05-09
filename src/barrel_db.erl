@@ -48,12 +48,22 @@
   end).
 
 create_barrel(Name) ->
+  ?start_span(#{ <<"log">> => <<"create barrel">>,
+                 <<"barrel">> => Name }),
   with_locked_barrel(
     Name,
-    fun() -> ?STORE:create_barrel(Name) end
+    fun() ->
+        try ?STORE:create_barrel(Name)
+        after
+          ?end_span
+        end
+
+    end
   ).
 
 open_barrel(Name) ->
+  ?start_span(#{ <<"log">> => <<"open barrel">>,
+                 <<"barrel">> => Name }),
   try
     case barrel_registry:reference_of(Name) of
       {ok, undefined} ->
@@ -80,18 +90,31 @@ open_barrel(Name) ->
     exit:Reason when Reason =:= normal ->
       timer:sleep(10),
       open_barrel(Name)
+  after
+    ?end_span
   end.
 
 close_barrel(Name) ->
-  stop_barrel(Name).
+  ?start_span(#{ <<"log">> => <<"close barrel">>,
+                 <<"barrel">> => Name }),
+  try stop_barrel(Name)
+  after
+    ?end_span
+  end.
 
 
 delete_barrel(Name) ->
+  ?start_span(#{ <<"log">> => <<"delete barrel">>,
+                 <<"barrel">> => Name }),
   with_locked_barrel(
     Name,
     fun() ->
-      ok = stop_barrel(Name),
-      ?STORE:delete_barrel(Name)
+        try
+          ok = stop_barrel(Name),
+          ?STORE:delete_barrel(Name)
+        after
+          ?end_span
+        end
     end
   ).
 
@@ -108,12 +131,17 @@ barrel_infos(Name) ->
   ?STORE:barrel_infos(Name).
 
 with_ctx(#{ ref := Ref  }, Fun) ->
+  ?start_span(#{ <<"log">> => <<"start a read context">> }),
   {ok, Ctx} = ?STORE:init_ctx(Ref, true),
   try Fun(Ctx)
-  after ?STORE:release_ctx(Ctx)
+  after
+    ?STORE:release_ctx(Ctx),
+    ?end_span
   end.
 
+
 fetch_doc(Barrel, DocId, Options) ->
+  ?start_span(#{ <<"log">> => <<"fetch a doc">> }),
   with_ctx(
     Barrel,
     fun(Ctx) ->
@@ -121,6 +149,7 @@ fetch_doc(Barrel, DocId, Options) ->
         ocp:record('barrel/db/fetch_doc_num', 1),
         try do_fetch_doc(Ctx, DocId, Options)
         after
+          ?end_span,
           ocp:record('barrel/db/fetch_doc_duration',
                      timer:now_diff(erlang:timestamp(), Start))
         end
@@ -202,10 +231,14 @@ maybe_fetch_attachments(_, _, _, Doc, _) ->
   Doc.
 
 fetch_attachment(Barrel, DocId, AttName) ->
+  ?start_span(#{ <<"log">> => <<"fetch attachment">> }),
   with_ctx(
     Barrel,
     fun(Ctx) ->
-        do_fetch_attachment(Ctx, DocId, AttName)
+        try do_fetch_attachment(Ctx, DocId, AttName)
+        after
+          ?end_span
+        end
     end
    ).
 
@@ -242,10 +275,14 @@ read_data(ReaderFun, Ctx0, Acc) ->
   end.
 
 revsdiff(Barrel, DocId, RevIds) ->
+  ?start_span(#{ <<"log">> => <<"get misisng revisions">> }),
   with_ctx(
     Barrel,
     fun(Ctx) ->
-      do_revsdiff(Ctx, DocId, RevIds)
+      try do_revsdiff(Ctx, DocId, RevIds)
+      after
+        ?end_span
+      end
     end
   ).
 
@@ -284,6 +321,7 @@ do_revsdiff(Ctx, DocId, RevIds) ->
   end.
 
 fold_docs(Barrel, UserFun, UserAcc, Options) ->
+  ?start_span(#{ <<"log">> => <<"fold docs">> }),
   with_ctx(
     Barrel,
     fun(Ctx) ->
@@ -293,7 +331,8 @@ fold_docs(Barrel, UserFun, UserAcc, Options) ->
       try ?STORE:fold_docs(Ctx, WrapperFun, UserAcc, Options)
       after
         ocp:record('barrel/docs/fold_docs_duration',
-                   timer:now_diff(erlang:timestamp(), Start))
+                   timer:now_diff(erlang:timestamp(), Start)),
+        ?end_span
       end
     end
    ).
@@ -332,6 +371,7 @@ fold_docs_fun(Ctx, UserFun, Options) ->
 
 
 fold_changes(Barrel, Since, UserFun, UserAcc, Options) ->
+  ?start_span(#{ <<"log">> => <<"fold changes">> }),
   with_ctx(
     Barrel,
     fun(Ctx) ->
@@ -340,7 +380,8 @@ fold_changes(Barrel, Since, UserFun, UserAcc, Options) ->
         try fold_changes_1(Ctx, Since, UserFun, UserAcc, Options)
         after
           ocp:record('barrel/db/fold_change_duration',
-                     timer:now_diff(erlang:timestamp(), Start))
+                     timer:now_diff(erlang:timestamp(), Start)),
+          ?end_span
         end
     end
    ).
@@ -413,5 +454,9 @@ maybe_add_deleted(Doc, false) -> Doc.
 %% TODO: replace with our own internal locking system?
 -spec with_locked_barrel(barrel_name(), fun()) -> any().
 with_locked_barrel(BarrelName, Fun) ->
+  ?start_span(#{ <<"log">> => <<"lock barrel">> }),
   LockId = {{barrel, BarrelName}, self()},
-  global:trans(LockId, Fun).
+  try global:trans(LockId, Fun)
+  after
+    ?end_span
+  end.

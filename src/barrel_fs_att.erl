@@ -25,10 +25,12 @@
 
 
 -include("barrel.hrl").
+-include_lib("opencensus/include/opencensus.hrl").
 
 -define(DEFAULT_WINDOW, 8192).
 
 put_attachment(BarrelId, DocId, AttName, {ReaderFun, ReaderState}) ->
+  ?start_span(#{ <<"log">> => <<"put attachment">> }),
   ocp:record('barrel/attachments/put_num', 1),
   StartTime = erlang:timestamp(),
   {ok, Fd, TempFile} = tempfile(BarrelId, DocId, AttName),
@@ -36,7 +38,8 @@ put_attachment(BarrelId, DocId, AttName, {ReaderFun, ReaderState}) ->
   after
     ocp:record('barrel/attachments/put_duration',
                timer:now_diff(erlang:timestamp(), StartTime)),
-    file:close(Fd)
+    _ = file:close(Fd),
+    ?end_span
   end.
 
  do_write_blob(Fd, TempFile, {ReaderFun, ReaderState}) ->
@@ -63,17 +66,17 @@ put_attachment(BarrelId, DocId, AttName, {ReaderFun, ReaderState}) ->
 write_blob1(ReaderFun, ReaderState, Fd, State) ->
   case ReaderFun(ReaderState) of
     {ok, eob, NewReaderState} ->
-      file:close(Fd),
-      file:sync(Fd), %% we sync on each write
+      _ = file:close(Fd),
+      _ = file:sync(Fd), %% we sync on each write
       Digest = crypto:hash_final(State),
       {ok, barrel_lib:to_hex(Digest), NewReaderState};
     {ok, Bin, NewReaderState} ->
       ok = file:write(Fd, Bin),
-      file:sync(Fd), %% we sync on each write
+      _  =  file:sync(Fd), %% we sync on each write
       NState = crypto:hash_update(State, Bin),
       write_blob1(ReaderFun, NewReaderState, Fd, NState);
     Error ->
-      file:close(Fd),
+      _ = file:close(Fd),
       Error
   end.
 
@@ -83,9 +86,14 @@ fetch_attachment(Path) ->
   fetch_attachment(Path, ?DEFAULT_WINDOW).
 
 fetch_attachment(Path, Window) ->
+  ParentSpanCtx = ocp:with_child_span(?MFA_SPAN_NAME,
+                                      #{ <<"log">> => <<" fetch attachment">> }),
+  #span_ctx{trace_id = TraceId, span_id = ParentSpanId} = ParentSpanCtx,
+  Link = oc_trace:link(?LINK_TYPE_PARENT_LINKED_SPAN, TraceId, ParentSpanId, #{}),
   ocp:record('barrel/attachments/fetch_num', 1),
   StartTime = erlang:timestamp(),
   ReaderFun = fun({AttPid, Pos}) ->
+                  oc_trace:add_link(Link, ocp:current_span_ctx()),
                   case pread(AttPid, Pos, Window) of
                     {ok, Data, NewPos} ->
                       Ctx = {AttPid, NewPos},
@@ -100,6 +108,7 @@ fetch_attachment(Path, Window) ->
   Proc = get_proc(Path),
   Proc ! start_read,
   Ctx = {Proc, 0},
+  ocp:finish_span(),
   {ok, ReaderFun, Ctx}.
 
 
@@ -117,6 +126,13 @@ refc(Path) ->
 %% first we check if it's cached, then see if it's sill loaded
 %% else we load it and create its process
 get_proc(Path) ->
+  ?start_span(#{ <<"log">> => <<"get attachment process">> }),
+  try do_get_proc(Path)
+  after
+    ?end_span
+  end.
+
+do_get_proc(Path) ->
   case lru:get(attachment_files, Path) of
     undefined ->
       case gproc:where(?att(Path)) of
@@ -302,7 +318,7 @@ maybe_delete(#{ path := Path, fd := Fd, state := State }= Data) ->
       DelFile = filename:join([barrel_config:get(data_dir),
                                ".delete",
                                binary_to_list(uuid:get_v4())]),
-      filelib:ensure_dir(DelFile),
+      _ = filelib:ensure_dir(DelFile),
       case file:rename(Path, DelFile) of
         ok ->
           spawn(file, delete, [DelFile]),

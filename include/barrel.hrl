@@ -52,3 +52,24 @@
 
 -define(barrel(Name), {n, l, {barrel, Name}}).
 -define(IMAX1, 16#ffffFFFFffffFFFF).
+
+
+-define(MFA_SPAN_NAME,
+        iolist_to_binary(
+          io_lib:format("~s:~s/~p",
+                        [?MODULE_STRING, ?FUNCTION_NAME, ?FUNCTION_ARITY]
+                       )
+         )
+       ).
+
+-define(start_span,
+        _ = ocp:with_child_span(?MFA_SPAN_NAME)
+       ).
+
+-define(start_span(Attrs),
+        _ = ocp:with_child_span(?MFA_SPAN_NAME, Attrs)
+       ).
+
+-define(end_span,
+        ocp:finish_span()
+       ).

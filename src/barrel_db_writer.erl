@@ -35,8 +35,14 @@
 -define(CHUNK_SIZE, 5 * 1024 * 1000). %% 5 MB.
 
 update_docs(Barrel, Docs, MergePolicy) ->
+  ?start_span(#{ <<"log">> => <<"update doc">>,
+                 <<"merge_policy">> => barrel_lib:to_binary(MergePolicy) }),
   TRef = erlang:send_after(5000, self(), update_timeout),
-  Results = [update_doc(Barrel, Doc, MergePolicy) || Doc <- Docs],
+  Results = try
+              [update_doc(Barrel, Doc, MergePolicy) || Doc <- Docs]
+            after
+              ?end_span
+            end,
   erlang:cancel_timer(TRef),
   {ok, Results}.
 
@@ -62,7 +68,16 @@ update_doc_1(#{ name := Name }, #{ ref := Ref } = Record, MergePolicy, StartTime
        exit(timeout)
    end.
 
-flush_attachments(Name, #{ id := DocId, attachments := Atts0 } = Record) when map_size(Atts0) > 0 ->
+flush_attachments(Name, Record) ->
+  _ = ocp:with_child_span(?MFA_SPAN_NAME, #{ <<"log">> => <<"flush attachments" >> }),
+  try do_flush_attachments(Name, Record)
+  after
+    ?end_span
+  end.
+
+do_flush_attachments(Name,
+                     #{ id := DocId,
+                        attachments := Atts0 } = Record) when map_size(Atts0) > 0 ->
   Atts1 = maps:map(
             fun(AttName, AttDoc0) ->
                 {Data, AttDoc1} = maps:take(<<"data">>, AttDoc0),
@@ -77,13 +92,14 @@ flush_attachments(Name, #{ id := DocId, attachments := Atts0 } = Record) when ma
                 {ok, AttRecord, _} =
                   jobs:run(barrel_write_queue,
                            fun() ->
-                               barrel_fs_att:put_attachment(Name, DocId, AttName, {ReaderFun, Data})
+                               barrel_fs_att:put_attachment(Name, DocId,
+                                                            AttName, {ReaderFun, Data})
                            end),
                 #{ attachment => AttRecord, doc =>AttDoc1 }
             end,
             Atts0),
   {true, Record#{ attachments => Atts1 }};
-flush_attachments(_, Record) ->
+do_flush_attachments(_, Record) ->
   {false, Record}.
 
 start_link(Name) ->
