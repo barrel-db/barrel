@@ -90,6 +90,7 @@ fetch_attachment(Path, Window) ->
               end,
 
   Proc = get_proc(Path),
+  Proc ! start_read,
   Ctx = {Proc, 0},
   {ok, ReaderFun, Ctx}.
 
@@ -134,7 +135,6 @@ get_proc(Path) ->
 
 pread(AttPid, Pos, Size) ->
   gen_statem:call(AttPid, {pread, Pos, Size}).
-
 
 start_link(Path) ->
   gen_statem:start_link(?att_proc(Path), ?MODULE, [Path], []).
@@ -200,6 +200,9 @@ active(cast, wakeup, Data) ->
 active(timeout, _Content, Data) ->
   {keep_state, Data};
 
+active(info, start_read, Data) ->
+  {keep_state, Data};
+
 active(EventType, EventContent, Data) ->
   handle_event(EventType, active, EventContent,Data).
 
@@ -226,6 +229,9 @@ evicted(cast, wakeup, Data) ->
 evicted(timeout, _Undefined, #{ fd := Fd } = Data) ->
   ok = file:close(Fd),
   {stop, normal, Data#{ fd => nil }};
+
+evicted(info, start_read, Data) ->
+  {next_state, active, Data};
 
 evicted(EventType, EventContent, Data) ->
   handle_event(EventType, active, EventContent,Data).
