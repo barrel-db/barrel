@@ -10,6 +10,7 @@
 
 -define(DATA_DIR, "data").
 -define(DEFAULT_ADAPTER, "barrel_rocksdb").
+-define(TS_FILE, "BARREL_TS").
 
 
 -define(STORE, (barrel_config:storage())).

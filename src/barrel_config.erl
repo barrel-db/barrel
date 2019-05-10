@@ -52,6 +52,8 @@ init() ->
 
   [env_or_default(Key, Default) ||
    {Key, Default} <- [
+                      {barrel_timestamp_file, default_timestamp_file()},
+
                       {fold_timeout, 5000},
                       {index_worker_threads, 128},
 
@@ -102,3 +104,8 @@ env_or_default(Key, Default) ->
 
 index_worker_threads() ->
   erlang:max(10, erlang:system_info(dirty_io_schedulers)).
+
+default_timestamp_file() ->
+  FullPath = filename:join(barrel_config:get(data_dir), ?TS_FILE),
+      ok = filelib:ensure_dir(FullPath),
+  FullPath.

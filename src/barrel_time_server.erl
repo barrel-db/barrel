@@ -33,7 +33,6 @@
 
 -include("barrel.hrl").
 
--define(TS_FILE, "BARREL_TS").
 -define(DEFAULT_INTERVAL, 1000).
 -define(ALLOWABLE_DOWNTIME, 2592000000).
 
@@ -106,14 +105,22 @@ read_timestamp() ->
 -spec write_timestamp() -> ok.
 write_timestamp() ->
   MTime = calendar:now_to_universal_time(os:timestamp()),
-  file:write_file_info(persist_file(), #file_info{mtime=MTime}, [{time, universal}, raw]).
+  case file:write_file_info(persist_file(), #file_info{mtime=MTime}, [{time, universal}, raw]) of
+    ok ->
+      ok;
+    {error, enoent} ->
+      %% create an empty file
+      ok = file:write_file(persist_file(), <<>>),
+      write_timestamp();
+    Error ->
+      Error
+  end.
+
 
 curr_time_millis() -> erlang:system_time(millisecond).
 
 persist_file() ->
-  FullPath = filename:join(barrel_config:get(data_dir), ?TS_FILE),
-  ok = filelib:ensure_dir(FullPath),
-  FullPath.
+  barrel_config:get(barrel_timestamp_file).
 
 
 get_interval() ->
