@@ -266,7 +266,7 @@ fold_loop(StreamPid, Fun, Acc, Limit) when Limit > 0 ->
           fold_loop(StreamPid, Fun, Acc2, Limit -1);
         {stop, Acc2} ->
           clear_fold(),
-          _ = barrel_view:stop_kvs_steam(StreamPid),
+          _ = barrel_view:stop_kvs_stream(StreamPid),
           Acc2;
         {skip, Acc2} ->
           fold_loop(StreamPid, Fun, Acc2, Limit);
@@ -277,7 +277,7 @@ fold_loop(StreamPid, Fun, Acc, Limit) when Limit > 0 ->
 
         stop ->
           clear_fold(),
-          _ = barrel_view:stop_kvs_steam(StreamPid),
+          _ = barrel_view:stop_kvs_stream(StreamPid),
           Acc
       end;
     {StreamPid, done} ->
