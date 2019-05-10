@@ -84,13 +84,9 @@ fetch_attachment(Path) ->
   fetch_attachment(Path, ?DEFAULT_WINDOW).
 
 fetch_attachment(Path, Window) ->
-  ParentSpanCtx = ocp:with_child_span(?MFA_SPAN_NAME,
-                                      #{ <<"log">> => <<" fetch attachment">> }),
-  Link = maybe_link(ParentSpanCtx),
   ocp:record('barrel/attachments/fetch_num', 1),
   StartTime = erlang:timestamp(),
   ReaderFun = fun({AttPid, Pos}) ->
-                  oc_trace:add_link(Link, ocp:current_span_ctx()),
                   case pread(AttPid, Pos, Window) of
                     {ok, Data, NewPos} ->
                       Ctx = {AttPid, NewPos},
@@ -105,7 +101,6 @@ fetch_attachment(Path, Window) ->
   Proc = get_proc(Path),
   Proc ! start_read,
   Ctx = {Proc, 0},
-  ocp:finish_span(),
   {ok, ReaderFun, Ctx}.
 
 %% internal only used for eviction
@@ -360,8 +355,3 @@ att_path(<< P1:2/binary, P2:2/binary, P3:2/binary, P4:2/binary, Name/binary >>) 
   AttFile = filename:join([att_dir(), <<"sha256">>, P1, P2, P3, P4, Name]),
   ok = filelib:ensure_dir(AttFile),
   AttFile.
-
-maybe_link(#span_ctx{trace_id = TraceId, span_id = ParentSpanId}) ->
-  oc_trace:link(?LINK_TYPE_PARENT_LINKED_SPAN, TraceId, ParentSpanId, #{});
-maybe_link(undefined) ->
-  undefined.

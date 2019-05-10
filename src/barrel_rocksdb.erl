@@ -260,11 +260,16 @@ delete_local_doc(BarrelId, DocId) ->
 init_ctx(BarrelId, IsRead) ->
   Snapshot = case IsRead of
                true ->
-                 {ok, S} = rocksdb:snapshot(?db),
+                 ?start_span(#{ <<"log">> => <<"rocksdb: get a database snapshot">> }),
+                 {ok, S} = try rocksdb:snapshot(?db)
+                           after
+                             ?end_span
+                           end,
                  S;
                false ->
                  undefined
              end,
+
   {ok, #{ barrel_id => BarrelId,
           snapshot => Snapshot }}.
 

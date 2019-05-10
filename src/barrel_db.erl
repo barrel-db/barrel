@@ -131,22 +131,20 @@ barrel_infos(Name) ->
   ?STORE:barrel_infos(Name).
 
 with_ctx(#{ ref := Ref  }, Fun) ->
-  ?start_span(#{ <<"log">> => <<"start a read context">> }),
   {ok, Ctx} = ?STORE:init_ctx(Ref, true),
   try Fun(Ctx)
   after
-    ?STORE:release_ctx(Ctx),
-    ?end_span
+    ?STORE:release_ctx(Ctx)
   end.
 
 
 fetch_doc(Barrel, DocId, Options) ->
-  ?start_span(#{ <<"log">> => <<"fetch a doc">> }),
   with_ctx(
     Barrel,
     fun(Ctx) ->
         Start = erlang:timestamp(),
         ocp:record('barrel/db/fetch_doc_num', 1),
+        ?start_span(#{ <<"log">> => <<"fetch a doc">> }),
         try do_fetch_doc(Ctx, DocId, Options)
         after
           ?end_span,
@@ -191,7 +189,7 @@ do_fetch_doc(Ctx, DocId, Options) ->
             not_found ->
               {error, not_found};
             Error ->
-              ?LOG_ERROR("error fetc revision document docid=~p rev=~p error=~p~n",
+              ?LOG_ERROR("error fetch revision document docid=~p rev=~p error=~p~n",
                          [DocId, Rev, Error]),
               Error
           end;
@@ -219,6 +217,7 @@ maybe_fetch_attachments(_Ctx, _DocId,
   Doc#{ <<"_attachments">> => Atts1};
 maybe_fetch_attachments(_Ctx, _DocId,
                         #{ attachments := Atts }, Doc, true) when map_size(Atts) > 0 ->
+  ?start_span(#{ <<"log">> => <<"fetch attachments">> }),
   Atts1 = maps:map(
             fun(_Name, AttRecord) ->
                 #{ attachment := Att, doc := AttDoc } = AttRecord,
@@ -226,15 +225,16 @@ maybe_fetch_attachments(_Ctx, _DocId,
                 {ok, AttBin} = read_data(ReaderFun, Ctx, <<>>),
                 AttDoc#{ <<"data">> => AttBin }
             end, Atts),
+  ?end_span,
   Doc#{ <<"_attachments">> => Atts1};
 maybe_fetch_attachments(_, _, _, Doc, _) ->
   Doc.
 
 fetch_attachment(Barrel, DocId, AttName) ->
-  ?start_span(#{ <<"log">> => <<"fetch attachment">> }),
   with_ctx(
     Barrel,
     fun(Ctx) ->
+        ?start_span(#{ <<"log">> => <<"fetch attachment">> }),
         try do_fetch_attachment(Ctx, DocId, AttName)
         after
           ?end_span
@@ -263,8 +263,14 @@ do_fetch_attachment(Ctx, DocId, AttName) ->
       Error
   end.
 
-
 read_data(ReaderFun, Ctx0, Acc) ->
+  ?start_span(#{ <<"log">> => <<"load attachment data">> }),
+  try do_read_data(ReaderFun, Ctx0, Acc)
+  after
+    ?end_span
+  end.
+
+do_read_data(ReaderFun, Ctx0, Acc) ->
   case ReaderFun(Ctx0) of
     {ok, Bin, Ctx1} ->
       read_data(ReaderFun, Ctx1, << Acc/binary, Bin/binary >> );
@@ -275,10 +281,10 @@ read_data(ReaderFun, Ctx0, Acc) ->
   end.
 
 revsdiff(Barrel, DocId, RevIds) ->
-  ?start_span(#{ <<"log">> => <<"get misisng revisions">> }),
   with_ctx(
     Barrel,
     fun(Ctx) ->
+      ?start_span(#{ <<"log">> => <<"get missing revisions">> }),
       try do_revsdiff(Ctx, DocId, RevIds)
       after
         ?end_span
@@ -321,18 +327,18 @@ do_revsdiff(Ctx, DocId, RevIds) ->
   end.
 
 fold_docs(Barrel, UserFun, UserAcc, Options) ->
-  ?start_span(#{ <<"log">> => <<"fold docs">> }),
   with_ctx(
     Barrel,
     fun(Ctx) ->
       WrapperFun = fold_docs_fun(Ctx, UserFun, Options),
       ocp:record('barrel/db/fold_docs_num', 1),
       Start = erlang:timestamp(),
+      ?start_span(#{ <<"log">> => <<"fold docs">> }),
       try ?STORE:fold_docs(Ctx, WrapperFun, UserAcc, Options)
       after
+        ?end_span,
         ocp:record('barrel/docs/fold_docs_duration',
-                   timer:now_diff(erlang:timestamp(), Start)),
-        ?end_span
+                   timer:now_diff(erlang:timestamp(), Start))
       end
     end
    ).
@@ -371,17 +377,17 @@ fold_docs_fun(Ctx, UserFun, Options) ->
 
 
 fold_changes(Barrel, Since, UserFun, UserAcc, Options) ->
-  ?start_span(#{ <<"log">> => <<"fold changes">> }),
   with_ctx(
     Barrel,
     fun(Ctx) ->
         ocp:record('barrel/db/fold_changes_num', 1),
         Start = erlang:timestamp(),
+        ?start_span(#{ <<"log">> => <<"fold changes">> }),
         try fold_changes_1(Ctx, Since, UserFun, UserAcc, Options)
         after
+          ?end_span,
           ocp:record('barrel/db/fold_change_duration',
-                     timer:now_diff(erlang:timestamp(), Start)),
-          ?end_span
+                     timer:now_diff(erlang:timestamp(), Start))
         end
     end
    ).

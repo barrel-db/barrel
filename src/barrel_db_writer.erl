@@ -35,7 +35,7 @@
 -define(CHUNK_SIZE, 5 * 1024 * 1000). %% 5 MB.
 
 update_docs(Barrel, Docs, MergePolicy) ->
-  ?start_span(#{ <<"log">> => <<"update doc">>,
+  ?start_span(#{ <<"log">> => <<"update docs">>,
                  <<"merge_policy">> => barrel_lib:to_binary(MergePolicy) }),
   TRef = erlang:send_after(5000, self(), update_timeout),
   Results = try
@@ -46,12 +46,22 @@ update_docs(Barrel, Docs, MergePolicy) ->
   erlang:cancel_timer(TRef),
   {ok, Results}.
 
-update_doc(#{ name := Name } = Barrel, Doc, MergePolicy) ->
+update_doc(Barrel, Doc, MergePolicy) ->
+    ?start_span(#{ <<"log">> => <<"update doc">>,
+                 <<"merge_policy">> => barrel_lib:to_binary(MergePolicy) }),
+    try do_update_doc(Barrel, Doc, MergePolicy)
+    after
+      ?end_span
+    end.
+
+do_update_doc(#{ name := Name } = Barrel, Doc, MergePolicy) ->
   StartTime = erlang:timestamp(),
   Record0 = barrel_doc:make_record(Doc),
   {_, Record1} = flush_attachments(Name, Record0),
   jobs:run(barrel_write_queue,
-           fun() -> update_doc_1(Barrel, Record1, MergePolicy, StartTime) end).
+           fun() ->
+               update_doc_1(Barrel, Record1, MergePolicy, StartTime)
+           end).
 
 
 
