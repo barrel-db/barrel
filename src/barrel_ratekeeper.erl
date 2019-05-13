@@ -27,6 +27,13 @@ init([]) ->
   ok = jobs:add_queue(barrel_write_queue,
                       [{standard_rate, TransactionsPerBytes}]),
 
+
+  IOQ = barrel_config:get(ioq),
+  ok = jobs:add_queue(barrel_ioq,
+                      [{standard_counter, IOQ}]),
+
+
+
   {ok, #{ tref => TRef,
           update_rate => UpdateRate }}.
 
@@ -54,6 +61,7 @@ handle_info(Info, State) ->
 terminate(_Reason, #{ tref := TRef }) ->
   _ = erlang:cancel_timer(TRef),
   _ = jobs:delete_queue(barrel_write_queue),
+  _ = jobs:delete_queue(barrel_ioq),
   ok.
 
 

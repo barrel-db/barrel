@@ -63,6 +63,7 @@ init() ->
                       {metrics_update_rate, 100},
 
                       {transactions_per_bytes, 1000},
+                      {ioq, 64},
 
                       %% we recycle attachments every 60000 if they are not used.
                       {attachment_timeout, 60000},

@@ -73,7 +73,7 @@
 create_barrel(Name) ->
   #{ ref := Ref, counters := Counters } = ?db_ref,
   BarrelKey = barrel_rocksdb_keys:local_barrel_ident(Name),
-  case rocksdb:get(Ref, BarrelKey, []) of
+  case rdb_get(Ref, BarrelKey, []) of
     {ok, _Ident} ->
       {error, barrel_already_exists};
     not_found ->
@@ -92,7 +92,7 @@ create_barrel(Name) ->
 
 open_barrel(Name) ->
   BarrelKey = barrel_rocksdb_keys:local_barrel_ident(Name),
-  case rocksdb:get(?db, BarrelKey, []) of
+  case rdb_get(?db, BarrelKey, []) of
     {ok, Ident} ->
       LastSeq = get_last_seq(Ident, []),
       {ok, Ident, LastSeq};
@@ -107,7 +107,7 @@ get_last_seq(Ident, ReadOpts0) ->
     [{iterate_lower_bound, barrel_rocksdb_keys:doc_seq_prefix(Ident)} | ReadOpts0],
   {ok, Itr} = rocksdb:iterator(?db, ReadOpts),
   MaxSeq = barrel_rocksdb_keys:doc_seq_max(Ident),
-  LastSeq = case rocksdb:iterator_move(Itr, {seek_for_prev, MaxSeq}) of
+  LastSeq = case rdb_iterator_move(Itr, {seek_for_prev, MaxSeq}) of
               {ok, SeqKey, _} ->
                 barrel_rocksdb_keys:decode_doc_seq(Ident, SeqKey);
               _ -> 0
@@ -118,7 +118,7 @@ get_last_seq(Ident, ReadOpts0) ->
 
 delete_barrel(Name) ->
   BarrelKey = barrel_rocksdb_keys:local_barrel_ident(Name),
-  case rocksdb:get(?db, BarrelKey, []) of
+  case rdb_get(?db, BarrelKey, []) of
     {ok, Ident} ->
       %% first delete atomically all barrel metadata
       ok = rocksdb:delete(?db, BarrelKey, []),
@@ -137,7 +137,7 @@ barrel_infos(Name) ->
   BarrelKey = barrel_rocksdb_keys:local_barrel_ident(Name),
   {ok, Snapshot} = rocksdb:snapshot(?db),
   ReadOpts = [{snapshot, Snapshot}],
-  case rocksdb:get(?db, BarrelKey, ReadOpts) of
+  case rdb_get(?db, BarrelKey, ReadOpts) of
     {ok, Ident} ->
       %% NOTE: we should rather use the multiget API from rocksdb there
       %% but until it's not exposed just get the results for each Keys
@@ -163,14 +163,14 @@ barrel_infos(Name) ->
 
 get_counter(Prefix, Name) ->
   CounterKey = barrel_rocksdb_keys:counter_key(Prefix, Name),
-  case rocksdb:get(?db, CounterKey, []) of
+  case rdb_get(?db, CounterKey, []) of
     {ok, Bin} -> {ok, binary_to_integer(Bin)};
     not_found -> not_found
   end.
 
 set_counter(Prefix, Name, Value) ->
   CounterKey = barrel_rocksdb_keys:counter_key(Prefix, Name),
-  rocksdb:put(?db, CounterKey, integer_to_binary(Value), []).
+  rdb_put(?db, CounterKey, integer_to_binary(Value), []).
 
 
 add_counter(Prefix, Name, Value) ->
@@ -251,7 +251,7 @@ write_batch(WB) ->
 
 put_local_doc(BarrelId, DocId, LocalDoc) ->
   LocalKey = barrel_rocksdb_keys:local_doc(BarrelId, DocId),
-  rocksdb:put(?db, LocalKey, term_to_binary(LocalDoc), []).
+  rdb_put(?db, LocalKey, term_to_binary(LocalDoc), []).
 
 delete_local_doc(BarrelId, DocId) ->
   LocalKey = barrel_rocksdb_keys:local_doc(BarrelId, DocId),
@@ -295,14 +295,14 @@ get_doc_info(Ctx, DocId) ->
 do_get_doc_info(#{ barrel_id := BarrelId } = Ctx, DocId) ->
   ReadOptions = read_options(Ctx),
   DIKey = barrel_rocksdb_keys:doc_info(BarrelId, DocId),
-  case rocksdb:get(?db, DIKey, ReadOptions) of
+  case rdb_get(?db, DIKey, ReadOptions) of
     {ok, Bin} -> {ok, binary_to_term(Bin)};
     not_found -> {error, not_found};
     Error -> Error
   end;
 do_get_doc_info(BarrelId, DocId) ->
   DIKey = barrel_rocksdb_keys:doc_info(BarrelId, DocId),
-  case rocksdb:get(?db, DIKey, []) of
+  case rdb_get(?db, DIKey, []) of
     {ok, Bin} -> {ok, binary_to_term(Bin)};
     not_found -> {error, not_found};
     Error -> Error
@@ -320,7 +320,7 @@ get_doc_revision(Ctx, DocId, Rev) ->
 do_get_doc_revision(#{ barrel_id := BarrelId } = Ctx, DocId, Rev) ->
   ReadOptions = read_options(Ctx),
   RevKey = barrel_rocksdb_keys:doc_rev(BarrelId, DocId, Rev),
-  case rocksdb:get(?db, RevKey, ReadOptions) of
+  case rdb_get(?db, RevKey, ReadOptions) of
     {ok, Bin} -> {ok, binary_to_term(Bin)};
     not_found -> {error, not_found};
     Error -> Error
@@ -359,16 +359,16 @@ fold_docs(#{ barrel_id := BarrelId } = Ctx, UserFun, UserAcc, Options) ->
   {Limit, Next, FirstMove} =
     case maps:find(limit_to_first, Options) of
       {ok, L} ->
-        {L, fun() -> rocksdb:iterator_move(Itr, next) end, first};
+        {L, fun() -> rdb_iterator_move(Itr, next) end, first};
       error ->
         case maps:find(limit_to_last, Options) of
           {ok, L} ->
-            {L, fun() -> rocksdb:iterator_move(Itr, prev) end, last};
+            {L, fun() -> rdb_iterator_move(Itr, prev) end, last};
           error ->
-            {1 bsl 32 - 1, fun() -> rocksdb:iterator_move(Itr, next) end, first}
+            {1 bsl 32 - 1, fun() -> rdb_iterator_move(Itr, next) end, first}
         end
     end,
-  First = case {rocksdb:iterator_move(Itr, FirstMove), IsNext} of
+  First = case {rdb_iterator_move(Itr, FirstMove), IsNext} of
             {{ok, _, _}, true} ->
               Next();
             {Else, _} ->
@@ -404,7 +404,7 @@ fold_changes(#{ barrel_id := BarrelId } = Ctx, Since, UserFun, UserAcc) ->
   ReadOptions = [{iterate_lower_bound, LowerBound},
                   {iterate_upper_bound, UpperBound}] ++ read_options(Ctx),
   {ok, Itr} = rocksdb:iterator(?db, ReadOptions),
-  First = rocksdb:iterator_move(Itr, first),
+  First = rdb_iterator_move(Itr, first),
   try do_fold_changes(First, Itr, UserFun, UserAcc)
   after rocksdb:iterator_close(Itr)
   end.
@@ -413,15 +413,15 @@ do_fold_changes({ok, _, Value}, Itr, UserFun, UserAcc) ->
   #{ id := DocId } = DI = binary_to_term(Value),
   case UserFun(DocId, DI, UserAcc) of
     {ok, UserAcc2} ->
-      do_fold_changes(rocksdb:iterator_move(Itr, next), Itr, UserFun, UserAcc2);
+      do_fold_changes(rdb_iterator_move(Itr, next), Itr, UserFun, UserAcc2);
     {stop, UserAcc2} ->
       UserAcc2;
     ok ->
-      do_fold_changes(rocksdb:iterator_move(Itr, next), Itr, UserFun, UserAcc);
+      do_fold_changes(rdb_iterator_move(Itr, next), Itr, UserFun, UserAcc);
     stop ->
       UserAcc;
     skip ->
-      do_fold_changes(rocksdb:iterator_move(Itr, next), Itr, UserFun, UserAcc)
+      do_fold_changes(rdb_iterator_move(Itr, next), Itr, UserFun, UserAcc)
   end;
 
 do_fold_changes(_, _, _, UserAcc) ->
@@ -429,7 +429,7 @@ do_fold_changes(_, _, _, UserAcc) ->
 
 get_local_doc(BarrelId, DocId) ->
   LocalKey = barrel_rocksdb_keys:local_doc(BarrelId, DocId),
-  case rocksdb:get(?db, LocalKey, []) of
+  case rdb_get(?db, LocalKey, []) of
     {ok, DocBin} -> {ok, binary_to_term(DocBin)};
     not_found -> {error, not_found};
     Error -> Error
@@ -440,7 +440,7 @@ get_local_doc(BarrelId, DocId) ->
 
 open_view(Id, ViewId) ->
   ViewKey = barrel_rocksdb_keys:view_meta(Id, ViewId),
-  case rocksdb:get(?db, ViewKey, []) of
+  case rdb_get(?db, ViewKey, []) of
     {ok, InfoBin} ->
       {ok, binary_to_term(InfoBin)};
     Error ->
@@ -449,7 +449,7 @@ open_view(Id, ViewId) ->
 
 update_view(Id, ViewId, View) ->
   ViewKey = barrel_rocksdb_keys:view_meta(Id, ViewId),
-  rocksdb:put(?db, ViewKey, term_to_binary(View), []).
+  rdb_put(?db, ViewKey, term_to_binary(View), []).
 
 delete_view(Id, ViewId) ->
   Start = barrel_rocksdb_keys:view_meta(Id, ViewId),
@@ -458,13 +458,13 @@ delete_view(Id, ViewId) ->
   rocksdb:delete_range(?db, Start, End, []).
 
 put_view_upgrade_task(Id, ViewId, Task) ->
-  rocksdb:put(?db, barrel_rocksdb_keys:view_upgrade_task(Id, ViewId),
+  rdb_put(?db, barrel_rocksdb_keys:view_upgrade_task(Id, ViewId),
               term_to_binary(Task),
               []
              ).
 
 get_view_upgrade_task(Id, ViewId) ->
-  case rocksdb:get(?db, barrel_rocksdb_keys:view_upgrade_task(Id, ViewId), []) of
+  case rdb_get(?db, barrel_rocksdb_keys:view_upgrade_task(Id, ViewId), []) of
     {ok, TaskBin} -> {ok, binary_to_term(TaskBin)};
     Error -> Error
   end.
@@ -476,7 +476,7 @@ update_view_index(Id, ViewId, DocId, KVs) ->
   %% get the reverse maps for the document.
   %% reverse maps contains old keys indexed
   RevMapKey = barrel_rocksdb_keys:view_doc_key(Id, ViewId, DocId),
-  OldReverseMaps = case rocksdb:get(?db, RevMapKey, []) of
+  OldReverseMaps = case rdb_get(?db, RevMapKey, []) of
                      {ok, Bin} ->
                        binary_to_term(Bin);
                      not_found ->
@@ -546,9 +546,9 @@ fold_view_index(Id, ViewId, UserFun, UserAcc, Options) ->
 
   case Reverse of
     false ->
-      Next = fun() -> rocksdb:iterator_move(Itr, next) end,
+      Next = fun() -> rdb_iterator_move(Itr, next) end,
       Len = byte_size(LowerBound),
-      First = case rocksdb:iterator_move(Itr, first) of
+      First = case rdb_iterator_move(Itr, first) of
                 {ok, << LowerBound:Len/binary, _/binary >>, _} when BeginOrEqual =:= false ->
                   Next();
                 Else  ->
@@ -557,8 +557,8 @@ fold_view_index(Id, ViewId, UserFun, UserAcc, Options) ->
 
       do_fold(First, Next, Itr, WrapperFun, UserAcc, Limit);
     true ->
-      First = rocksdb:iterator_move(Itr, last),
-      Next = fun() -> rocksdb:iterator_move(Itr, prev) end,
+      First = rdb_iterator_move(Itr, last),
+      Next = fun() -> rdb_iterator_move(Itr, prev) end,
       do_fold(First, Next, Itr, WrapperFun, UserAcc, Limit)
   end.
 
@@ -590,13 +590,39 @@ do_fold_1(_, _, _, Acc, _) ->
 put_attachment(BarrelId, DocId, AttName, AttBin) ->
  Uid = barrel_lib:make_uid(AttName),
  AttKey = barrel_rocksdb_keys:att_prefix(BarrelId, DocId, Uid),
- case rocksdb:put(?db, AttKey, AttBin, []) of
+ case rdb_put(?db, AttKey, AttBin, []) of
    ok -> {ok, AttKey};
    Error -> Error
  end.
 
 fetch_attachment(Ctx, _DocId, _AttName, AttKey) ->
-  rocksdb:get(?db, AttKey, read_options(Ctx)).
+  rdb_get(?db, AttKey, read_options(Ctx)).
+
+
+
+rdb_get(Db, Key, Options) ->
+  jobs:run(
+    barrel_ioq,
+    fun() ->
+        rocksdb:get(Db, Key,  Options)
+    end).
+
+rdb_put(Db, Key, Value, Options) ->
+  jobs:run(
+    barrel_ioq,
+    fun() ->
+       rocksdb:put(Db, Key, Value, Options)
+    end).
+
+rdb_iterator_move(Itr, Op) ->
+  jobs:run(
+    barrel_ioq,
+    fun() ->
+        rocksdb:iterator_move(Itr, Op)
+    end).
+
+
+
 
 
 start_link() ->
@@ -813,7 +839,7 @@ default_cf_options() ->
 
 
 db_get_int(Key, Default, ReadOptions) ->
-  case rocksdb:get(?db, Key, ReadOptions) of
+  case rdb_get(?db, Key, ReadOptions) of
     {ok, Val} -> {ok, binary_to_integer(Val)};
     not_found -> {ok, Default};
     Error -> Error

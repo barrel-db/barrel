@@ -71,7 +71,7 @@ write_blob1(ReaderFun, ReaderState, Fd, State) ->
       Digest = crypto:hash_final(State),
       {ok, barrel_lib:to_hex(Digest), NewReaderState};
     {ok, Bin, NewReaderState} ->
-      ok = file:write(Fd, Bin),
+      ok = fwrite(Fd, Bin),
       _  =  file:sync(Fd), %% we sync on each write
       NState = crypto:hash_update(State, Bin),
       write_blob1(ReaderFun, NewReaderState, Fd, NState);
@@ -110,6 +110,15 @@ evict(Path) ->
 
 refc(Path) ->
    gen_statem:call(get_proc(Path), refc).
+
+
+fwrite(Fd, Bin) ->
+  jobs:run(
+    barrel_ioq,
+    fun() ->
+        file:write(Fd, Bin)
+    end).
+
 
 
 %% get process maintaining the attachment
