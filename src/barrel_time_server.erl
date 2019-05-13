@@ -96,7 +96,7 @@ read_timestamp() ->
       {ok, Ts};
     {error, enoent} ->
       %% create an empty file
-      ok = file:write_file(persist_file(), <<>>),
+      ok = file:write_file(persist_file(), <<>>, [raw, write]),
       read_timestamp();
     Error ->
       Error
@@ -120,7 +120,9 @@ write_timestamp() ->
 curr_time_millis() -> erlang:system_time(millisecond).
 
 persist_file() ->
-  barrel_config:get(barrel_timestamp_file).
+  File = barrel_config:get(barrel_timestamp_file),
+  ok = filelib:ensure_dir(File),
+  File.
 
 
 get_interval() ->
