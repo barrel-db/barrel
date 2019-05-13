@@ -278,7 +278,7 @@ read_data(ReaderFun, Ctx0, Acc) ->
 do_read_data(ReaderFun, Ctx0, Acc) ->
   case ReaderFun(Ctx0) of
     {ok, Bin, Ctx1} ->
-      read_data(ReaderFun, Ctx1, << Acc/binary, Bin/binary >> );
+      do_read_data(ReaderFun, Ctx1, << Acc/binary, Bin/binary >> );
     eob ->
       {ok, Acc};
     Error ->
