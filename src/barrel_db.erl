@@ -218,17 +218,22 @@ maybe_fetch_attachments(_Ctx, _DocId,
 maybe_fetch_attachments(_Ctx, _DocId,
                         #{ attachments := Atts }, Doc, true) when map_size(Atts) > 0 ->
   ?start_span(#{ <<"log">> => <<"fetch attachments">> }),
-  Atts1 = maps:map(
-            fun(_Name, AttRecord) ->
-                #{ attachment := Att, doc := AttDoc } = AttRecord,
-                {ok, ReaderFun, Ctx} = barrel_fs_att:fetch_attachment(Att),
-                {ok, AttBin} = read_data(ReaderFun, Ctx, <<>>),
-                AttDoc#{ <<"data">> => AttBin }
-            end, Atts),
-  ?end_span,
+  Atts1 = try do_fetch_attachments(Atts)
+          after
+            ?end_span
+          end,
   Doc#{ <<"_attachments">> => Atts1};
 maybe_fetch_attachments(_, _, _, Doc, _) ->
   Doc.
+
+do_fetch_attachments(Atts) ->
+  maps:map(
+    fun(_Name, AttRecord) ->
+        #{ attachment := Att, doc := AttDoc } = AttRecord,
+        {ok, ReaderFun, Ctx} = barrel_fs_att:fetch_attachment(Att),
+        {ok, AttBin} = read_data(ReaderFun, Ctx, <<>>),
+        AttDoc#{ <<"data">> => AttBin }
+    end, Atts).
 
 fetch_attachment(Barrel, DocId, AttName) ->
   with_ctx(
