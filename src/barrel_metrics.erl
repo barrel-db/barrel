@@ -23,7 +23,13 @@
          {'barrel/attachments/put_duration', "duration when putting an attachment", 'ms'},
          {'barrel/attachments/fetch_num', "number of attachments fetched", '1'},
          {'barrel/attachments/fetch_duration', "duration when fetching an attachment", 'ms'},
-         {'barrel/attachments/active', "number of active attachments", '1'}
+         {'barrel/attachments/active', "number of active attachments", '1'},
+
+
+         %% rate keeper
+         {'barrel/storage/get_latency', "latency of get", 'ms'},
+         {'barrel/storage/put_latency', "latency of put", 'ms'}
+
         ]).
 
 

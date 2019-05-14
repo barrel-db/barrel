@@ -73,7 +73,7 @@
 create_barrel(Name) ->
   #{ ref := Ref, counters := Counters } = ?db_ref,
   BarrelKey = barrel_rocksdb_keys:local_barrel_ident(Name),
-  case rocksdb:get(Ref, BarrelKey, []) of
+  case rdb_get(Ref, BarrelKey, []) of
     {ok, _Ident} ->
       {error, barrel_already_exists};
     not_found ->
@@ -92,7 +92,7 @@ create_barrel(Name) ->
 
 open_barrel(Name) ->
   BarrelKey = barrel_rocksdb_keys:local_barrel_ident(Name),
-  case rocksdb:get(?db, BarrelKey, []) of
+  case rdb_get(?db, BarrelKey, []) of
     {ok, Ident} ->
       LastSeq = get_last_seq(Ident, []),
       {ok, Ident, LastSeq};
@@ -118,7 +118,7 @@ get_last_seq(Ident, ReadOpts0) ->
 
 delete_barrel(Name) ->
   BarrelKey = barrel_rocksdb_keys:local_barrel_ident(Name),
-  case rocksdb:get(?db, BarrelKey, []) of
+  case rdb_get(?db, BarrelKey, []) of
     {ok, Ident} ->
       %% first delete atomically all barrel metadata
       ok = rocksdb:delete(?db, BarrelKey, []),
@@ -137,7 +137,7 @@ barrel_infos(Name) ->
   BarrelKey = barrel_rocksdb_keys:local_barrel_ident(Name),
   {ok, Snapshot} = rocksdb:snapshot(?db),
   ReadOpts = [{snapshot, Snapshot}],
-  case rocksdb:get(?db, BarrelKey, ReadOpts) of
+  case rdb_get(?db, BarrelKey, ReadOpts) of
     {ok, Ident} ->
       %% NOTE: we should rather use the multiget API from rocksdb there
       %% but until it's not exposed just get the results for each Keys
@@ -163,7 +163,7 @@ barrel_infos(Name) ->
 
 get_counter(Prefix, Name) ->
   CounterKey = barrel_rocksdb_keys:counter_key(Prefix, Name),
-  case rocksdb:get(?db, CounterKey, []) of
+  case rdb_get(?db, CounterKey, []) of
     {ok, Bin} -> {ok, binary_to_integer(Bin)};
     not_found -> not_found
   end.
@@ -295,14 +295,14 @@ get_doc_info(Ctx, DocId) ->
 do_get_doc_info(#{ barrel_id := BarrelId } = Ctx, DocId) ->
   ReadOptions = read_options(Ctx),
   DIKey = barrel_rocksdb_keys:doc_info(BarrelId, DocId),
-  case rocksdb:get(?db, DIKey, ReadOptions) of
+  case rdb_get(?db, DIKey, ReadOptions) of
     {ok, Bin} -> {ok, binary_to_term(Bin)};
     not_found -> {error, not_found};
     Error -> Error
   end;
 do_get_doc_info(BarrelId, DocId) ->
   DIKey = barrel_rocksdb_keys:doc_info(BarrelId, DocId),
-  case rocksdb:get(?db, DIKey, []) of
+  case rdb_get(?db, DIKey, []) of
     {ok, Bin} -> {ok, binary_to_term(Bin)};
     not_found -> {error, not_found};
     Error -> Error
@@ -320,7 +320,7 @@ get_doc_revision(Ctx, DocId, Rev) ->
 do_get_doc_revision(#{ barrel_id := BarrelId } = Ctx, DocId, Rev) ->
   ReadOptions = read_options(Ctx),
   RevKey = barrel_rocksdb_keys:doc_rev(BarrelId, DocId, Rev),
-  case rocksdb:get(?db, RevKey, ReadOptions) of
+  case rdb_get(?db, RevKey, ReadOptions) of
     {ok, Bin} -> {ok, binary_to_term(Bin)};
     not_found -> {error, not_found};
     Error -> Error
@@ -429,7 +429,7 @@ do_fold_changes(_, _, _, UserAcc) ->
 
 get_local_doc(BarrelId, DocId) ->
   LocalKey = barrel_rocksdb_keys:local_doc(BarrelId, DocId),
-  case rocksdb:get(?db, LocalKey, []) of
+  case rdb_get(?db, LocalKey, []) of
     {ok, DocBin} -> {ok, binary_to_term(DocBin)};
     not_found -> {error, not_found};
     Error -> Error
@@ -440,7 +440,7 @@ get_local_doc(BarrelId, DocId) ->
 
 open_view(Id, ViewId) ->
   ViewKey = barrel_rocksdb_keys:view_meta(Id, ViewId),
-  case rocksdb:get(?db, ViewKey, []) of
+  case rdb_get(?db, ViewKey, []) of
     {ok, InfoBin} ->
       {ok, binary_to_term(InfoBin)};
     Error ->
@@ -464,7 +464,7 @@ put_view_upgrade_task(Id, ViewId, Task) ->
              ).
 
 get_view_upgrade_task(Id, ViewId) ->
-  case rocksdb:get(?db, barrel_rocksdb_keys:view_upgrade_task(Id, ViewId), []) of
+  case rdb_get(?db, barrel_rocksdb_keys:view_upgrade_task(Id, ViewId), []) of
     {ok, TaskBin} -> {ok, binary_to_term(TaskBin)};
     Error -> Error
   end.
@@ -476,7 +476,7 @@ update_view_index(Id, ViewId, DocId, KVs) ->
   %% get the reverse maps for the document.
   %% reverse maps contains old keys indexed
   RevMapKey = barrel_rocksdb_keys:view_doc_key(Id, ViewId, DocId),
-  OldReverseMaps = case rocksdb:get(?db, RevMapKey, []) of
+  OldReverseMaps = case rdb_get(?db, RevMapKey, []) of
                      {ok, Bin} ->
                        binary_to_term(Bin);
                      not_found ->
@@ -596,7 +596,8 @@ put_attachment(BarrelId, DocId, AttName, AttBin) ->
  end.
 
 fetch_attachment(Ctx, _DocId, _AttName, AttKey) ->
-  rocksdb:get(?db, AttKey, read_options(Ctx)).
+  rdb_get(?db, AttKey, read_options(Ctx)).
+
 
 
 start_link() ->
@@ -813,8 +814,29 @@ default_cf_options() ->
 
 
 db_get_int(Key, Default, ReadOptions) ->
-  case rocksdb:get(?db, Key, ReadOptions) of
+  case rdb_get(?db, Key, ReadOptions) of
     {ok, Val} -> {ok, binary_to_integer(Val)};
     not_found -> {ok, Default};
     Error -> Error
   end.
+
+
+get_rate() ->
+  counters:get(persistent_term:get({barrel_rk, rate}), 1).
+
+maybe_wait(0) -> ok;
+maybe_wait(Rate) ->
+  timer:sleep(trunc(10 * Rate)).
+
+
+
+rdb_get(Db, Key, Options) ->
+  maybe_wait(get_rate()),
+  StartTime = erlang:timestamp(),
+  try
+    rocksdb:get(Db, Key, Options)
+  after
+    ocp:record('barrel/storage/get_latency',
+               timer:now_diff(erlang:timestamp(), StartTime))
+  end.
+
