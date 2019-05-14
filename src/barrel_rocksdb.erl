@@ -605,9 +605,9 @@ start_link() ->
 init([]) ->
   erlang:process_flag(trap_exit, true),
   Path = barrel_config:get(rocksdb_root_dir),
-  CacheRef = init_cache(),
   RateLimiter = init_rate_limiter(),
-  {ok, DbRef} = init_db(Path, CacheRef, RateLimiter),
+  Cache = init_cache(),
+  {ok, DbRef} = init_db(Path, RateLimiter, Cache),
   ok = persistent_term:put({?MODULE, db_ref}, DbRef),
   {TRef, LogStatInterval} = case barrel_config:get(rocksdb_log_stats) of
                               false ->
@@ -620,12 +620,12 @@ init([]) ->
   ?LOG_INFO("Rocksdb storage initialized in ~p~n", [Path]),
   {ok, #{ path => Path,
           ref => DbRef,
-          cache_ref => CacheRef,
           rate_limiter => RateLimiter,
+          cache => Cache,
           tref => TRef,
           log_stat_interval => LogStatInterval }}.
 
-handle_call(cache_info, _From, #{ cache_ref := Ref } = State) ->
+handle_call(cache_info, _From, #{ cache := Ref } = State) ->
   {reply, rocksdb:cache_info(Ref), State};
 
 handle_call(_Msg, _From, State) ->
@@ -641,17 +641,19 @@ handle_info(stats, #{ ref :=  #{ ref := Ref }, log_stat_interval := Interval } 
   {noreply, State#{ tref => TRef }}.
 
 
-terminate(_Reason, #{ ref := #{ ref := Ref }, cache_ref := CacheRef }) ->
+terminate(_Reason, #{ ref := #{ ref := Ref, cache := Cache } }) ->
   _ = persistent_term:erase({?MODULE, db_ref}),
   ok = rocksdb:close(Ref),
-  ok = rocksdb:release_cache(CacheRef),
-
+  ok = release_cache(Cache),
   ok.
+
+
+
 
 init_cache() ->
   case barrel_config:get(rocksdb_cache_size) of
     false ->
-      false;
+      undefined;
     Sz ->
       {ok, CacheSize} =  barrel_lib:parse_size_unit(Sz),
       %% Reserve 1 MB worth of memory from the cache. Under high
@@ -671,6 +673,9 @@ init_cache() ->
       Ref
   end.
 
+release_cache(undefined) -> ok;
+release_cache(Cache) ->
+  rocksdb:release_cache(Cache).
 
 init_rate_limiter() ->
   RateBytesPerSec = barrel_config:get(rocksdb_write_bytes_per_sec, undefined),
@@ -687,12 +692,13 @@ init_rate_limiter(_) ->
   erlang:exit({badarg, rocksdb_writes_auto_tuned}).
 
 
-init_db(Dir, CacheRef, RateLimiter) ->
+init_db(Dir, RateLimiter, Cache) ->
   Retries = application:get_env(barrel, rocksdb_open_retries, ?DB_OPEN_RETRIES),
-  DbOpts0 = default_db_options() ++ cf_options(CacheRef),
   DbOpts = case RateLimiter of
-             undefined -> DbOpts0;
-             _ -> [{rate_limiter, RateLimiter} | DbOpts0]
+             undefined ->
+               db_options(Cache);
+             _ ->
+               [{rate_limiter, RateLimiter} | db_options(Cache)]
            end,
   case open_db(Dir, DbOpts, Retries, false) of
     {ok, Ref} ->
@@ -740,73 +746,70 @@ open_db(Dir, DbOpts, RetriesLeft, _LastError) ->
       Error
   end.
 
-default_db_options() ->
-  [
-    {create_if_missing, true},
-    {create_missing_column_families, true},
-    {max_open_files, 10000},
-    {allow_concurrent_memtable_write, true},
-    {enable_write_thread_adaptive_yield, true},
 
-    %% Periodically sync both the WAL and SST writes to smooth out disk
-    %% usage. Not performing such syncs can be faster but can cause
-    %% performance blips when the OS decides it needs to flush data.
-    %{wal_bytes_per_sync, 512 bsl 10},  %% 512 KB
-    %{bytes_per_sync, 512 bsl 10}, %% 512 KB,
-
-    %% Because we open a long running rocksdb instance, we do not want the
-    %% manifest file to grow unbounded. Assuming each manifest entry is about 1
-    %% KB, this allows for 128 K entries. This could account for several hours to
-    %% few months of runtime without rolling based on the workload.
-    {max_manifest_file_size, 128 bsl 20} %% 128 MB,
-  ].
-
-cf_options(false) ->
-  default_cf_options();
-cf_options(CacheRef) ->
-  BlockOptions = [{block_cache, CacheRef},
-                  {cache_index_and_filter_blocks, true},
-                  {partition_filters, true},
-                  {cache_index_and_filter_blocks_with_high_priority, true}],
-  default_cf_options() ++ [{block_based_table_options, BlockOptions}].
-
-default_cf_options() ->
+db_options(Cache) ->
   WriteBufferSize =  barrel_config:get(rocksdb_write_buffer_size),
+  SharedCache = case Cache of
+                  undefined -> [];
+                  _ -> [{block_cache, Cache}]
+                end,
   [
-    {write_buffer_size, WriteBufferSize}, %% 64MB
-    {max_write_buffer_number, 4},
-    {min_write_buffer_number_to_merge, 1},
-    {level0_file_num_compaction_trigger, 2},
-    {level0_slowdown_writes_trigger, 20},
-    {level0_stop_writes_trigger, 32},
+   {create_if_missing, true},
+   {create_missing_column_families, true},
+   {max_open_files, 10000},
+   {allow_concurrent_memtable_write, true},
+   {enable_write_thread_adaptive_yield, true},
 
-    {min_write_buffer_number_to_merge, 1},
+   %% Periodically sync both the WAL and SST writes to smooth out disk
+   %% usage. Not performing such syncs can be faster but can cause
+   %% performance blips when the OS decides it needs to flush data.
+   {wal_bytes_per_sync, 512 bsl 10},  %% 512 KB
+   {bytes_per_sync, 512 bsl 10}, %% 512 KB,
 
-    %%       level-size  file-size  max-files
-    %% L1:      64 MB       4 MB         16
-    %% L2:     640 MB       8 MB         80
-    %% L3:    6.25 GB      16 MB        400
-    %% L4:    62.5 GB      32 MB       2000
-    %% L5:     625 GB      64 MB      10000
-    %% L6:     6.1 TB     128 MB      50000
-    %%
-    {max_bytes_for_level_base, 64 bsl 20},
+   %% Because we open a long running rocksdb instance, we do not want the
+   %% manifest file to grow unbounded. Assuming each manifest entry is about 1
+   %% KB, this allows for 128 K entries. This could account for several hours to
+   %% few months of runtime without rolling based on the workload.
+   {max_manifest_file_size, 128 bsl 20},%% 128 MB,
 
-    {max_bytes_for_level_multiplier, 10},
-    {target_file_size_base, 4 bsl 20}, %% 4MB
-    {target_file_size_multiplier, 2},
-    {compression, snappy},
-    %{prefix_extractor, {fixed_prefix_transform, 10}},
-    {merge_operator, counter_merge_operator},
-    %% Disable subcompactions since they're a less stable feature, and not
-    %% necessary for our workload, where frequent fsyncs naturally prevent
-    %% foreground writes from getting too far ahead of compactions.
-    {max_subcompactions, 1},
-    %% Increase parallelism for compactions and flushes based on the
-    %% number of cpus. Always use at least 2 threads, otherwise
-    %% compactions and flushes may fight with each other.
-    {total_threads, erlang:max(2, erlang:system_info(schedulers))}
+   {write_buffer_size, WriteBufferSize}, %% 64MB
+   {max_write_buffer_number, 4},
+   {min_write_buffer_number_to_merge, 1},
+   {level0_file_num_compaction_trigger, 2},
+   {level0_slowdown_writes_trigger, 20},
+   {level0_stop_writes_trigger, 32},
+
+   {min_write_buffer_number_to_merge, 1},
+
+   %%       level-size  file-size  max-files
+   %% L1:      64 MB       4 MB         16
+   %% L2:     640 MB       8 MB         80
+   %% L3:    6.25 GB      16 MB        400
+   %% L4:    62.5 GB      32 MB       2000
+   %% L5:     625 GB      64 MB      10000
+   %% L6:     6.1 TB     128 MB      50000
+   %%
+   {max_bytes_for_level_base, 64 bsl 20},
+
+   {max_bytes_for_level_multiplier, 10},
+   {target_file_size_base, 4 bsl 20}, %% 4MB
+   {target_file_size_multiplier, 2},
+   {compression, snappy},
+   %{prefix_extractor, {fixed_prefix_transform, 10}},
+   {merge_operator, counter_merge_operator},
+   %% Disable subcompactions since they're a less stable feature, and not
+   %% necessary for our workload, where frequent fsyncs naturally prevent
+   %% foreground writes from getting too far ahead of compactions.
+   {max_subcompactions, 1},
+   %% Increase parallelism for compactions and flushes based on the
+   %% number of cpus. Always use at least 4 threads, otherwise
+   %% compactions and flushes may fight with each other.
+   {total_threads, erlang:max(4, erlang:system_info(schedulers))},
+   {block_based_table_options, SharedCache ++ [{cache_index_and_filter_blocks, true},
+                                               {partition_filters, true},
+                                               {cache_index_and_filter_blocks_with_high_priority, true}]}
   ].
+
 
 %% -------------------
 %% internals

@@ -72,11 +72,13 @@ init() ->
                       %% storage backend
                       {storage, barrel_rocksdb},
                       %% rocksdb storage
+
+                      %% rocksdb config
                       {rocksdb_root_dir, DataDir},
-                      {rocksdb_cache_size, default_memory()},
-                      {rocksdb_write_buffer_size, 64 bsl 20}, %% 64 MB
                       {rocksdb_ioq, index_worker_threads()},
-                      {rocksdb_log_stats, false}
+                      {rocksdb_log_stats, false},
+                      {rocksdb_cache_size, default_memory()},
+                      {rocksdb_write_buffer_size, 64 bsl 20} %% 64 MB
                      ]],
 
   ok.
