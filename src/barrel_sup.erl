@@ -130,6 +130,11 @@ init(safe) ->
 
      #{id => barrel_view_sup_sup,
        start => {barrel_view_sup, start_link, []}
+      },
+
+     %% barrel view supervisor
+     #{id => barrel_fold_process_sup,
+       start => {barrel_fold_process_sup, start_link, []}
       }
 
     ],

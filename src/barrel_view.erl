@@ -2,7 +2,11 @@
 -behaviour(gen_server).
 
 
--export([fold/5]).
+-export([get_range/3,
+         await_kvs/1,
+         stop_kvs_stream/1
+        ]).
+
 -export([await_refresh/2,
          await_refresh/3]).
 -export([update/3]).
@@ -17,16 +21,22 @@
 
 -include("barrel.hrl").
 
-fold(Barrel, View, UserFun, UserAcc, Options) ->
-  {ok, #{ ref := Ref }} = barrel:open_barrel(Barrel),
-  FoldFun = fun({DocId, Key, Value}, Acc) ->
-                Row = #{ key => Key,
-                         value => Value,
-                         id => DocId },
-                UserFun(Row, Acc)
-            end,
+get_range(Barrel, View, Options) ->
+  supervisor:start_child(barrel_fold_process_sup,
+                         [{fold_view, Barrel, View, self(), Options}]).
 
-  ?STORE:fold_view_index(Ref, View, FoldFun, UserAcc, Options).
+await_kvs(StreamRef) ->
+  Timeout = barrel_config:get(fold_timeout),
+  receive
+    {StreamRef, {ok, Row}} ->
+      {ok, Row};
+    {StreamRef, done} ->
+      OldTrapExit = erlang:erase(old_trap_exit),
+      process_flag(trap_exit, OldTrapExit),
+      done
+  after Timeout ->
+          erlang:exit(fold_timeout)
+  end.
 
 await_refresh(Barrel, View) ->
   await_refresh(Barrel, View, barrel_config:get(fold_timeout)).
@@ -50,6 +60,8 @@ update(Barrel, View, Msg) ->
   ViewRef = process_name(Barrel, View),
   erlang:send(ViewRef, Msg, []).
 
+stop_kvs_stream(Pid) ->
+  supervisor:terminate_child(barrel_fold_process_sup, Pid).
 
 start_link(#{barrel := Barrel,  view := View} = Conf) ->
   Name = process_name(Barrel, View),
