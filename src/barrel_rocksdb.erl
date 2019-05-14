@@ -641,7 +641,7 @@ handle_info(stats, #{ ref :=  #{ ref := Ref }, log_stat_interval := Interval } 
   {noreply, State#{ tref => TRef }}.
 
 
-terminate(_Reason, #{ ref := #{ ref := Ref, cache := Cache } }) ->
+terminate(_Reason, #{ ref := #{ ref := Ref }, cache := Cache }) ->
   _ = persistent_term:erase({?MODULE, db_ref}),
   ok = rocksdb:close(Ref),
   ok = release_cache(Cache),
