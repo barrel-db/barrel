@@ -50,6 +50,8 @@ init() ->
   DataDir = data_dir(),
   barrel_config:set(data_dir, DataDir),
 
+  AttDir = filename:join(DataDir, "attachments"),
+
   [env_or_default(Key, Default) ||
    {Key, Default} <- [
                       {barrel_timestamp_file, default_timestamp_file()},
@@ -68,6 +70,8 @@ init() ->
                       {attachment_timeout, 60000},
                       %% number of attachments to keep open
                       {keep_attachment_file_num, 1000},
+                      %% attachment dir
+                      {attachment_dir, AttDir},
 
                       %% storage backend
                       {storage, barrel_rocksdb},

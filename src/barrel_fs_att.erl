@@ -347,9 +347,7 @@ temp_file_1(TempDir, Prefix) ->
   end.
 
 att_dir() ->
-  Dir = filename:join([barrel_config:get(data_dir), "attachments"]),
-  ok = filelib:ensure_dir(Dir),
-  Dir.
+  barrel_config:get(attachment_dir).
 
 att_path(<< P1:2/binary, P2:2/binary, P3:2/binary, P4:2/binary, Name/binary >>) ->
   AttFile = filename:join([att_dir(), <<"sha256">>, P1, P2, P3, P4, Name]),
