@@ -36,6 +36,7 @@
 
 update_docs(Barrel, Docs, MergePolicy) ->
   ?start_span(#{ <<"log">> => <<"update docs">>,
+                 <<"batch_size">> => length(Docs),
                  <<"merge_policy">> => barrel_lib:to_binary(MergePolicy) }),
   TRef = erlang:send_after(5000, self(), update_timeout),
   Results = try
