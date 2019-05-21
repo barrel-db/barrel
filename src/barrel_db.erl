@@ -157,7 +157,6 @@ fetch_doc(Barrel, DocId, Options) ->
 do_fetch_doc(Ctx, DocId, Options) ->
   UserRev = maps:get(rev, Options, <<"">>),
   WithSeq = maps:get(seq, Options, false),
-  WithAttachments = maps:get(attachments, Options, true),
   case ?STORE:get_doc_info(Ctx, DocId) of
     {ok, #{ deleted := true } = _DI} when UserRev =:= <<>> ->
       {error, not_found};
