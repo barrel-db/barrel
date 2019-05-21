@@ -325,7 +325,7 @@ maybe_delete(#{ path := Path, fd := Fd, state := State }= Data) ->
 
 
 tempdir() ->
-  Dir = filename:join([barrel_config:get(data_dir), ".barrel_tmp"]),
+  Dir = filename:join([att_dir(), ".barrel_tmp"]),
   ok = filelib:ensure_dir(filename:join([Dir, "dummy"])),
   Dir.
 
