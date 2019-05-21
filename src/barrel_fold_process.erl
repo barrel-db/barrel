@@ -33,4 +33,5 @@ init(Parent, {fold_view, BarrelId, ViewId, To, Options}) ->
  To ! {self(), done},
  %% remove the link to avoid a message to linked processes
  %% that are trapping exit signals
- true = unlink(To).
+ true = unlink(To),
+ exit(normal).
