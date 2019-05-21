@@ -171,7 +171,7 @@ do_fetch_doc(Ctx, DocId, Options) ->
           Del = maps:get(deleted, RevInfo, false),
           case ?STORE:get_doc_revision(Ctx, DocId, Rev) of
             {ok, Doc} ->
-              WithAttachments = maps:get(attachments, Options, true),
+              WithAttachments = maps:get(attachments, Options, false),
               WithHistory = maps:get(history, Options, false),
               MaxHistory = maps:get(max_history, Options, ?IMAX1),
               Ancestors = maps:get(ancestors, Options, []),
