@@ -211,7 +211,7 @@ maybe_fetch_attachments(_Ctx, _DocId,
  Atts1 = maps:map(
             fun(_Name, AttRecord) ->
                 #{ doc := AttDoc } = AttRecord,
-                AttDoc#{ <<"follow">> => true }
+                AttDoc#{ <<"stub">> => true }
             end, Atts),
   Doc#{ <<"_attachments">> => Atts1};
 maybe_fetch_attachments(_Ctx, _DocId,
