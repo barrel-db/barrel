@@ -15,7 +15,6 @@ start_link(Fold) ->
   proc_lib:start_link(?MODULE, init, [self(), Fold]).
 
 init(Parent, {fold_view, BarrelId, ViewId, To, Options}) ->
-  {ok, #{ ref := Ref }} = barrel:open_barrel(BarrelId),
   proc_lib:init_ack(Parent, {ok, self()}),
   %% link to the client
   true = link(To),
@@ -29,9 +28,8 @@ init(Parent, {fold_view, BarrelId, ViewId, To, Options}) ->
                 ok
             end,
 
- ok = ?STORE:fold_view_index(Ref, ViewId, FoldFun, ok, Options),
+ ok = ?STORE:fold_view_index(BarrelId, ViewId, FoldFun, ok, Options),
  To ! {self(), done},
  %% remove the link to avoid a message to linked processes
  %% that are trapping exit signals
- true = unlink(To),
- exit(normal).
+ true = unlink(To).

@@ -42,14 +42,18 @@
   local_doc/2
 ]).
 
--export([view_prefix/2,
-         view_meta/2,
-         view_prefix_end/2,
-         view_upgrade_task/2,
-         view_doc_key/3,
-         view_key/3,
+-export([view_prefix/2, view_prefix_end/2]).
+
+-export([view_revmap_key/2]).
+-export([view_indexed_seq/1]).
+-export([view_version/1]).
+-export([view_checkpoint/1]).
+
+-export([view_key/3,
          encode_view_key/2,
          decode_view_key/2]).
+
+
 
 -export([att_prefix/3,
          att_chunk/2]).
@@ -155,19 +159,26 @@ local_doc(BarrelId, DocId) ->
 view_prefix(BarrelId, ViewId) ->
   << (db_prefix(BarrelId))/binary, ?view_key/binary, ViewId/binary >>.
 
-view_meta(BarrelId, ViewId) ->
-  << (view_prefix(BarrelId, ViewId))/binary, ?view_meta_suffix/binary >>.
-
 
 view_prefix_end(BarrelId, ViewId) ->
   barrel_rocksdb_util:bytes_prefix_end(view_prefix(BarrelId, ViewId)).
 
 
-view_upgrade_task(BarrelId, ViewId) ->
-  << (view_prefix(BarrelId, ViewId))/binary, ?view_upgrade_suffix/binary >>.
 
-view_doc_key(BarrelId, ViewId, DocId) ->
-   << (view_prefix(BarrelId, ViewId))/binary, ?reverse_map_prefix/binary, DocId/binary >>.
+
+view_revmap_key(ViewKey, DocId) ->
+  << ViewKey/binary,  ?reverse_map_prefix/binary, DocId/binary >>.
+
+
+view_indexed_seq(ViewRef) ->
+  << ViewRef/binary, ?view_indexed_suffix/binary >>.
+
+view_version(ViewRef) ->
+  << ViewRef/binary, ?view_version_suffix/binary >>.
+
+
+view_checkpoint(ViewRef) ->
+  << ViewRef/binary, ?view_checkpoint_suffix/binary >>.
 
 view_key(BarrelId, ViewId, Key) when is_list(Key) ->
   Prefix = << (view_prefix(BarrelId, ViewId))/binary >>,

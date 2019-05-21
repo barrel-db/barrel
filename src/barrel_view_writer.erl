@@ -1,58 +1,93 @@
-%% TODO: find a better nam
 -module(barrel_view_writer).
--behaviour(gen_batch_server).
 
+-include("barrel.hrl").
+
+-include("barrel_view.hrl").
+
+%% gen_batch_server callbacks
 -export([init/1,
          handle_batch/2,
          terminate/2]).
 
-init([Barrel, View]) ->
-  {ok, #{ barrel => Barrel,
-          view => View
-        }}.
+init(View) ->
+  {ok, View}.
 
+handle_batch(Batch, #view{barrel=Barrel} = View) ->
+  {ok, #{ ref := Ref }} = barrel_db:open_barrel(Barrel),
+  {ok, Ctx} = ?STORE:init_ctx(Ref, true),
 
-handle_batch(Batch, #{ barrel := Barrel, view := View } = State) ->
-  {Waiters, Docs} = prepare_batch(Batch, [], #{}),
-  %% process docs
-  DocIds = lists:foldl(
-             fun(#{ <<"id">> := DocId } = Doc, Acc) ->
-                 wpool:cast(barrel_view_pool,
-                                  {process_doc, {Barrel, View}, self(), Doc}),
-                 [DocId | Acc]
-             end,
-             [], Docs),
-
-  ok = await_pool(DocIds),
-  Actions = [{reply, From, ok} || From <- Waiters],
-  {ok, Actions, State}.
+  ok = try process_batch(Batch, #{}, Ctx, View)
+       after
+         ?STORE:release_ctx(Ctx)
+       end,
+  {ok, View}.
 
 terminate(_Reason, _State) ->
   ok.
 
-%% deduplicate docs (only take the more recent one and extract waiters
-prepare_batch([{call, From, wait_commit} | Rest], Waiters, Docs) ->
-  prepare_batch(Rest, [From | Waiters], Docs);
-prepare_batch([{cast, {index_doc, #{ <<"id">> := DocId,
-                                     <<"_seq">> := Seq}= Doc}} | Rest],
-              Waiters, Docs) ->
-  case maps:find(DocId, Docs) of
-    {ok, #{ <<"_seq">> := CurrentSeq }} when CurrentSeq < Seq ->
-      prepare_batch(Rest, Waiters, maps:put(DocId, Doc, Docs));
-    {ok, _} ->
-      prepare_batch(Rest, Waiters, Docs);
-    error ->
-      prepare_batch(Rest, Waiters, maps:put(DocId, Doc, Docs))
+
+
+process_batch([{cast, {recover, #{<<"id">> := DocId,
+                                    <<"seq">> := Seq,
+                                    <<"doc">> := Doc }}} | Rest],
+                Cache0,
+                Ctx,
+                #view{mod=Mod,
+                      config=Config,
+                      ref=ViewRef } = View) ->
+
+  case cache_get(DocId, Cache0, Ctx) of
+    {CachedSeq, Cache1} when  CachedSeq >= Seq ->
+      process_batch(Rest, Cache1, Ctx, View);
+    {_, Cache1} ->
+       KVs = Mod:handle_doc(Doc, Config),
+       case ?STORE:update_view_index(ViewRef, DocId, KVs) of
+         ok ->
+           process_batch(Rest, Cache1#{ DocId => Seq }, Ctx, View);
+         Error ->
+           ?LOG_ERROR("error while updating index. error=~p~n", [Error]),
+           exit(Error)
+       end
   end;
-prepare_batch([], Waiters, Docs) ->
-  {Waiters, maps:values(Docs)}.
+process_batch([{cast, {change, #{<<"id">> := DocId,
+                                   <<"seq">> := Seq,
+                                   <<"doc">> := Doc }}} | Rest],
+              Cache, Ctx,
+              #view{mod=Mod,
+                    config=Config,
+                    ref=ViewRef } = View) ->
 
+  KVs = Mod:handle_doc(Doc, Config),
+  case ?STORE:update_view_index(ViewRef, DocId, KVs) of
+    ok ->
+      process_batch(Rest, Cache#{ DocId => Seq }, Ctx, View);
+    Error ->
+      ?LOG_ERROR("error while updating index. error=~p~n", [Error]),
+      exit(Error)
+  end;
 
-%% TODO: add timeout
-await_pool([]) ->
-  ok;
-await_pool(DocIds) ->
-  receive
-    {ok, DocId} ->
-      await_pool(DocIds -- [DocId])
+process_batch([{cast, {recover_checkpoint, LastSeq}} |Rest], Cache, Ctx,
+              #view{ref=ViewRef} = View) ->
+  ?STORE:update_view_checkpoint(ViewRef, LastSeq),
+   process_batch(Rest, Cache, Ctx, View);
+process_batch([{cast, {done, LastSeq, MainPid}} |Rest], Cache, Ctx, View) ->
+  ?STORE:update_indexed_seq(View#view.ref, LastSeq),
+  MainPid ! {index_updated, LastSeq},
+  process_batch(Rest, Cache, Ctx, View);
+process_batch([], _Cache, _Ctx, _View) ->
+  ok.
+
+cache_get(DocId, Cache, Ctx) ->
+  case maps:get(DocId, Cache, undefined) of
+    undefined ->
+      case ?STORE:get_doc_info(DocId, Ctx) of
+        {ok, #{ seq := Seq }} ->
+          {Seq, Cache#{ DocId => Seq }};
+        {error, not_found} ->
+          {undefind, Cache};
+        Error ->
+          exit(Error)
+      end;
+    Seq ->
+      {Seq, Cache}
   end.

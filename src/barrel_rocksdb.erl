@@ -32,13 +32,10 @@
          fold_changes/4,
          get_local_doc/2]).
 
--export([open_view/2,
-         update_view/3,
-         delete_view/2,
-         update_view_index/4,
-         put_view_upgrade_task/3,
-         get_view_upgrade_task/2,
-         delete_view_upgrade_task/2,
+-export([open_view/3,
+         update_indexed_seq/2,
+         update_view_checkpoint/2,
+         update_view_index/3,
          fold_view_index/5
         ]).
 
@@ -416,44 +413,50 @@ get_local_doc(BarrelId, DocId) ->
 %% -------------------
 %% view
 
-open_view(Id, ViewId) ->
-  ViewKey = barrel_rocksdb_keys:view_meta(Id, ViewId),
-  case rocksdb:get(?db, ViewKey, []) of
-    {ok, InfoBin} ->
-      {ok, binary_to_term(InfoBin)};
+open_view(Id, ViewId, Version) ->
+  ViewRef = barrel_rocksdb_keys:view_prefix(Id, ViewId),
+
+  SeqKey = barrel_rocksdb_keys:view_indexed_seq(ViewRef),
+  VersionKey = barrel_rocksdb_keys:view_version(ViewRef),
+
+  case init_view_metadata([VersionKey, SeqKey], []) of
+    {ok, [IndexedSeq, Version]} ->
+      {ok, ViewRef, IndexedSeq, Version};
+    not_found ->
+      {ok, WB} = rocksdb:batch(),
+      rocksdb:batch_put(WB, SeqKey, term_to_binary(0)),
+      rocksdb:batch_put(WB, SeqKey, term_to_binary(Version)),
+      ok = try rocksdb:write_batch(?db, WB, [])
+           after rocksdb:release_batch(WB)
+           end,
+      {ok, ViewRef, 0, Version};
     Error ->
       Error
   end.
 
-update_view(Id, ViewId, View) ->
-  ViewKey = barrel_rocksdb_keys:view_meta(Id, ViewId),
-  rocksdb:put(?db, ViewKey, term_to_binary(View), []).
+init_view_metadata([Key | Rest], Acc) ->
+  case rocksdb:get(?db, Key, #{}) of
+    {ok, Val} ->
+      init_view_metadata(Rest, [binary_to_term(Val) | Acc]);
+    Error ->
+      Error
+  end;
+init_view_metadata([], Acc) ->
+  {ok, Acc}.
 
-delete_view(Id, ViewId) ->
-  Start = barrel_rocksdb_keys:view_meta(Id, ViewId),
-  End = barrel_rocksdb_keys:view_prefix_end(Id, ViewId),
-  %% delete  all range
-  rocksdb:delete_range(?db, Start, End, []).
 
-put_view_upgrade_task(Id, ViewId, Task) ->
-  rocksdb:put(?db, barrel_rocksdb_keys:view_upgrade_task(Id, ViewId),
-              term_to_binary(Task),
-              []
-             ).
+update_indexed_seq(ViewRef, Seq) ->
+  Key = barrel_rocksdb_keys:view_indexed_seq(ViewRef),
+  rocksdb:put(?db, Key, term_to_binary(Seq), []).
 
-get_view_upgrade_task(Id, ViewId) ->
-  case rocksdb:get(?db, barrel_rocksdb_keys:view_upgrade_task(Id, ViewId), []) of
-    {ok, TaskBin} -> {ok, binary_to_term(TaskBin)};
-    Error -> Error
-  end.
+update_view_checkpoint(ViewRef, Seq) ->
+  Key = barrel_rocksdb_keys:view_checkpoint(ViewRef),
+  rocksdb:put(?db, Key, term_to_binary(Seq), []).
 
-delete_view_upgrade_task(Id, ViewId) ->
-  rocksdb:delete(?db, barrel_rocksdb_keys:view_upgrade_task(Id, ViewId), []).
-
-update_view_index(Id, ViewId, DocId, KVs) ->
+update_view_index(ViewRef,DocId, KVs) ->
   %% get the reverse maps for the document.
   %% reverse maps contains old keys indexed
-  RevMapKey = barrel_rocksdb_keys:view_doc_key(Id, ViewId, DocId),
+  RevMapKey = barrel_rocksdb_keys:view_revmap_key(ViewRef, DocId),
   OldReverseMaps = case rocksdb:get(?db, RevMapKey, []) of
                      {ok, Bin} ->
                        binary_to_term(Bin);
@@ -463,10 +466,9 @@ update_view_index(Id, ViewId, DocId, KVs) ->
   %% we add new keys as prefixed keys with empty values to the index
   %% old keys are deleted once since they are only supposed to be unique
   %% and have only one update
-  ViewPrefix = barrel_rocksdb_keys:view_prefix(Id, ViewId),
   {ok, Batch} = rocksdb:batch(),
   ReverseMaps = lists:foldl(fun({K0, V0}, Acc) ->
-                                K1 = barrel_rocksdb_keys:encode_view_key(K0, ViewPrefix),
+                                K1 = barrel_rocksdb_keys:encode_view_key(K0, ViewRef),
                                 V1 = term_to_binary(V0),
                                 rocksdb:batch_put(Batch, append_docid(K1, DocId), V1),
                                 [K1 | Acc]
@@ -532,7 +534,6 @@ fold_view_index(Id, ViewId, UserFun, UserAcc, Options) ->
                 Else  ->
                   Else
               end,
-
       do_fold(First, Next, Itr, WrapperFun, UserAcc, Limit);
     true ->
       First = rocksdb:iterator_move(Itr, last),

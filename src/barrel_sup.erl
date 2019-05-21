@@ -50,12 +50,6 @@ init([]) ->
   %% storage mod
   StoreMod = barrel_config:storage(),
 
-  %% index pool options
-  NumThreads = barrel_config:get(index_worker_threads),
-  PoolOptions = [{workers, NumThreads},
-                 {worker, {barrel_view_worker, undefined}}],
-
-
   EvictFun = fun(Path, _AttPid) ->
                  barrel_fs_att:evict(Path)
              end,
@@ -86,8 +80,7 @@ init([]) ->
               restart => permanent,
               type => worker },
 
-    #{ id => index_pool,
-       start => {wpool, start_pool, [barrel_view_pool, PoolOptions]} },
+
 
     #{ id => ratekeeper,
        start => {barrel_ratekeeper, start_link, []} },

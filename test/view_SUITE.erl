@@ -51,13 +51,13 @@ end_per_suite(Config) ->
 
 basic_test(_Config) ->
   {ok, Barrel} = barrel:open_barrel(<<"test">>),
-  {ok, ViewPid} = barrel:start_view(<<"test">>, <<"ars">>, barrel_ars_view, #{}),
+  {ok, ViewPid} = barrel:start_view(<<"test">>, <<"ars">>, barrel_ars_view, 1),
 
   Docs = [
     #{ <<"id">> => <<"a">>, <<"v">> => 1, <<"o">> => #{ <<"o1">> => 1, << "o2">> => 1}}
   ],
   {ok, _Saved} = barrel:save_docs(Barrel, Docs),
-  barrel_view:await_refresh(<<"test">>, <<"ars">>),
+  ok = barrel_view:await_refresh(<<"test">>, <<"ars">>),
   [<<"a">>] = barrel:fold_view(<<"test">>, <<"ars">>,
                                fun(#{ id := Id }, Acc) ->
                                    {ok, [Id | Acc]}
@@ -73,7 +73,7 @@ basic_test(_Config) ->
 
 fwd_test(_Config) ->
    {ok, Barrel} = barrel:open_barrel(<<"test">>),
-   {ok, ViewPid} = barrel:start_view(<<"test">>, <<"ars">>, barrel_ars_view, #{}),
+   {ok, ViewPid} = barrel:start_view(<<"test">>, <<"ars">>, barrel_ars_view, 1),
 
   Docs = [
     #{ <<"id">> => <<"a">> },
@@ -110,7 +110,7 @@ fwd_test(_Config) ->
 
 rev_test(_Config) ->
    {ok, Barrel} = barrel:open_barrel(<<"test">>),
-   {ok, ViewPid} = barrel:start_view(<<"test">>, <<"ars">>, barrel_ars_view, #{}),
+   {ok, ViewPid} = barrel:start_view(<<"test">>, <<"ars">>, barrel_ars_view, 1),
 
   Docs = [
     #{ <<"id">> => <<"a">> },
@@ -150,7 +150,7 @@ rev_test(_Config) ->
 
 limit_test(_Config) ->
   {ok, Barrel} = barrel:open_barrel(<<"test">>),
-   {ok, ViewPid} = barrel:start_view(<<"test">>, <<"ars">>, barrel_ars_view, #{}),
+   {ok, ViewPid} = barrel:start_view(<<"test">>, <<"ars">>, barrel_ars_view, 1),
 
   Docs = [
     #{ <<"id">> => <<"a">> },
@@ -197,7 +197,7 @@ limit_test(_Config) ->
 
 r1_test(_Config) ->
   {ok, Barrel} = barrel:open_barrel(<<"test">>),
-  {ok, ViewPid} = barrel:start_view(<<"test">>, <<"ars">>, barrel_ars_view, #{}),
+  {ok, ViewPid} = barrel:start_view(<<"test">>, <<"ars">>, barrel_ars_view, 1),
 
   Ids = [<<"9gUOXd0V5JePkx3HCU">>,<<"9gUOXd0V5JePkx3HCV">>,<<"9gUOXd0V5JePkx3HCW">>,
  <<"9gUOXd0V5JePkx3HCX">>,<<"9gUOXd0V5JePkx3HCY">>,<<"9gUOXd0V5JePkx3HCZ">>,

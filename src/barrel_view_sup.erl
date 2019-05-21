@@ -14,7 +14,6 @@ init([]) ->
   _ = ets:new(?VIEWS, [named_table, public, set,
                        {read_concurrency, true}]),
   Spec = #{ id => view,
-            start => {barrel_view, start_link, []},
-            type => worker },
+            start => {barrel_view, start_link, []}},
   SupFlags = #{ strategy => simple_one_for_one },
   {ok, {SupFlags, [Spec]}}.

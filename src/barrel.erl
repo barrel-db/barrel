@@ -39,7 +39,7 @@
 
 -export([fetch_attachment/3]).
 
--export([start_view/4]).
+-export([start_view/4, start_view/5]).
 -export([fold_view/5]).
 
 -include_lib("barrel/include/barrel.hrl").
@@ -228,11 +228,14 @@ fold_docs(Barrel, Fun, AccIn, Options) ->
 fold_changes(Barrel, Since, Fun, AccIn, Options) ->
   barrel_db:fold_changes(Barrel, Since, Fun, AccIn, Options).
 
+start_view(Barrel, View, ViewMod, Version) ->
+  start_view(Barrel, View, ViewMod, Version, #{}).
 
-start_view(Barrel, View, ViewMod, ViewConfig) ->
+start_view(Barrel, View, ViewMod, Version, ViewConfig) ->
   Conf =
     #{ barrel => Barrel,
-       view => View,
+       view_id => View,
+       version => Version,
        mod => ViewMod,
        config => ViewConfig },
   supervisor:start_child(barrel_view_sup, [Conf]).

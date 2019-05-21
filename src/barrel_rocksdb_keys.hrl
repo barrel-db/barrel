@@ -54,4 +54,11 @@
 -define(view_meta_suffix, <<"m">>).
 
 
+-define(view_indexed_suffix, <<"seq">>).
+-define(view_version_suffix, <<"version">>).
+-define(view_checkpoint_suffix, <<"checkpoint">>).
+
+-define(view_bg_max_suffix, <<"bg-max">>).
+-define(view_bg_start_suffix, <<"bg-start">>).
+
 -define(counter_prefix, << ?meta1_prefix, "c" >>).

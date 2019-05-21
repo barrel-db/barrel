@@ -1,149 +1,134 @@
 -module(barrel_view).
--behaviour(gen_server).
-
-
--export([get_range/3,
-         await_kvs/1,
-         stop_kvs_stream/1
-        ]).
-
--export([await_refresh/2,
-         await_refresh/3]).
--export([update/3]).
 
 -export([start_link/1]).
+-export([await_refresh/2]).
+-export([get_range/3]).
 
 -export([init/1,
-         handle_call/3,
-         handle_cast/2,
-         handle_info/2,
-         terminate/2]).
+         callback_mode/0,
+         terminate/3]).
+
+-export([idle/3,
+         indexing/3]).
+
+-export([handle_event/4]).
 
 -include("barrel.hrl").
+-include("barrel_view.hrl").
 
 get_range(Barrel, View, Options) ->
   supervisor:start_child(barrel_fold_process_sup,
                          [{fold_view, Barrel, View, self(), Options}]).
 
-await_kvs(StreamRef) ->
-  Timeout = barrel_config:get(fold_timeout),
-  receive
-    {StreamRef, {ok, Row}} ->
-      {ok, Row};
-    {StreamRef, done} ->
-      OldTrapExit = erlang:erase(old_trap_exit),
-      process_flag(trap_exit, OldTrapExit),
-      done
-  after Timeout ->
-          erlang:exit(fold_timeout)
-  end.
+await_refresh(BarrelId, ViewId) ->
+  gen_statem:call(?view_proc(BarrelId, ViewId), refresh_index).
 
-await_refresh(Barrel, View) ->
-  await_refresh(Barrel, View, barrel_config:get(fold_timeout)).
 
-await_refresh(Barrel, View, Timeout) ->
-  {ok, #{updated_seq := Seq}} = ?STORE:barrel_infos(Barrel),
-  case gen_server:call(process_name(Barrel, View),
-                       {await_refresh, self(), Seq}) of
-    ok ->
-      ok;
-    {wait, Ref} ->
-      receive
-        {Ref, view_refresh} ->
-          ok
-      after Timeout ->
-              exit(refresh_timeout)
-      end
-  end.
+start_link(#{ barrel := BarrelId, view_id := ViewId } = Conf) ->
+  gen_statem:start_link(?view_proc(BarrelId, ViewId), ?MODULE, Conf, []).
 
-update(Barrel, View, Msg) ->
-  ViewRef = process_name(Barrel, View),
-  erlang:send(ViewRef, Msg, []).
+init(#{barrel := BarrelId,
+       view_id := ViewId,
+       version := Version,
+       mod := ViewMod,
+       config := ViewConfig0 }) ->
 
-stop_kvs_stream(Pid) ->
-  supervisor:terminate_child(barrel_fold_process_sup, Pid).
-
-start_link(#{barrel := Barrel,  view := View} = Conf) ->
-  Name = process_name(Barrel, View),
-  gen_server:start_link({local, Name}, ?MODULE, Conf, []).
-
-init(Conf) ->
   process_flag(trap_exit, true),
-  {ok, Adapter} = barrel_view_adapter:start_link(Conf),
-  ocp:record('barrel/views/active_num', 1),
-  ?LOG_INFO("view started conf=~p~n", [Conf]),
-  {ok, Conf#{ waiters => [], adapter => Adapter, wait_refresh => false, conf => Conf }}.
+  {ok, ViewConfig1} = ViewMod:init(ViewConfig0),
+  _ = barrel_event:reg(BarrelId),
 
-handle_call({get_range, To, Options}, _From, #{ barrel := Barrel, view := View } = State) ->
-  {ok, Pid} =
-    supervisor:start_child(barrel_fold_process_sup,
-                           [{fold_view, Barrel, View, To, Options}]),
-  {reply, {ok, Pid}, State};
+  case ?STORE:open_view(BarrelId, ViewId, Version) of
+    {ok, ViewRef, LastIndexedSeq, _OldVersion} ->
+      View = #view{barrel=BarrelId,
+                   ref=ViewRef,
+                   mod=ViewMod,
+                   config=ViewConfig1},
+      {ok, Writer} = gen_batch_server:start_link(barrel_view_writer, View),
+      {ok, idle, #{ barrel => BarrelId,
+                    view => View,
+                    since => LastIndexedSeq,
+                    writer => Writer,
+                    waiters_map => #{}}};
+    Error ->
+      {stop, Error}
+  end.
 
 
-handle_call({await_refresh, Pid, Seq}, _From,
-            #{ waiters := Waiters,
-               indexed_seq := IndexedSeq } = State) ->
+callback_mode() -> state_functions.
 
-  if
-    IndexedSeq >= Seq ->
-      {reply, ok, State};
-    true ->
-      Ref = erlang:make_ref(),
-      {reply, {wait, Ref}, maybe_refresh(State#{ waiters => [{Pid, Ref, Seq} | Waiters] })}
-  end;
+terminate(_Reason, _State, _Data) ->
+  _ = barrel_event:unreg(),
 
-handle_call({await_refresh, Pid, Seq}, _From,
-            #{ waiters := Waiters } = State) ->
-  Ref = erlang:make_ref(),
-  {reply, {wait, Ref}, State#{ waiters => [{Pid, Ref, Seq} | Waiters] }};
-
-handle_call(_Msg, _From, State) ->
-  {reply, bad_call, State}.
-
-handle_cast(_Msg, State) ->
-  {noreply, State}.
-
-handle_info({view_refresh, Seq}, #{waiters := Waiters} = State) ->
-  Waiters2 = notify(Waiters, Seq),
-  {noreply, State#{ waiters => Waiters2, indexed_seq => Seq, wait_refresh => false }};
-
-handle_info({'EXIT', Reason, Pid}, #{ adapter := Pid, conf := Conf } = State) ->
-  ?LOG_INFO("view adapter exited reason=~p conf=~p~n", [Reason, Conf]),
-  {ok, Adapter} = barrel_view_adapter:start_link(Conf),
-  {noreply, State#{ adapter => Adapter }};
-
-handle_info(_Info, State) ->
-  {noreply, State}.
-
-terminate(_Reason, #{ adapter := Adapter }) ->
-  ocp:record('barrel/views/active_num', -1),
-  ok = barrel_view_adapter:stop(Adapter),
   ok.
 
-maybe_refresh(#{ wait_refresh := true } = State) -> State;
-maybe_refresh(#{ adapter := Adapter } = State) ->
-  Adapter ! refresh_view,
-  State#{ wait_refresh => true }.
+
+idle({call, From}, refresh_index, Data) ->
+  {keep_state, Data, [{reply, From, ok}]};
+
+idle(info, {'$barrel_event', _, db_updated}, Data) ->
+  NewData = fold_changes(Data),
+  {next_state, indexing, NewData};
+
+idle(EventType, Msg, Data) ->
+  handle_event(EventType, idle, Msg, Data).
 
 
-notify(Waiters, IndexedSeq) ->
-  lists:foldl(fun
-                ({Pid, Ref, Seq}, Acc) when Seq =< IndexedSeq ->
-                  case erlang:is_process_alive(Pid) of
-                    true ->
-                      Pid ! {Ref, view_refresh};
-                    false ->
-                      ok
-                  end,
-                  Acc;
-                (Waiter, Acc) ->
-                  [Waiter | Acc]
-              end,
-              [], lists:reverse(Waiters)).
+indexing({call, From}, refresh_index, #{ since := Since,
+                                         waiters_map := WaitersMap } = Data) ->
+  Waiters = maps:get(Since, WaitersMap),
+  {keep_state, Data#{ waiters_map => WaitersMap#{ Since => [From | Waiters] } }};
 
-process_name(BarrelId, ViewId) ->
-  list_to_atom(?MODULE_STRING ++
-               barrel_lib:to_list(BarrelId) ++ "_" ++
-               barrel_lib:to_list(ViewId )).
+indexing(info, {'$barrel_event', BarrelId, db_updated}, #{ barrel := BarrelId } = Data) ->
+  NewData = fold_changes(Data),
+  {keep_state, NewData};
 
+
+indexing(info, {index_updated, Seq}, #{ waiters_map := WaitersMap0 } = Data) ->
+  WaitersMap2 = case maps:is_key(Seq, WaitersMap0) of
+                  true ->
+
+                    {Waiters, WaitersMap1} = maps:take(Seq, WaitersMap0),
+                    _ = [gen_statem:reply(W, ok) || W <- Waiters],
+                    WaitersMap1;
+                  false ->
+                    WaitersMap0
+                end,
+  case maps:size(WaitersMap2) of
+    0 ->
+      {next_state, idle, Data#{ waiters_map => #{} }};
+    _ ->
+      {keep_state, Data#{ waiters_map =>WaitersMap2}}
+  end;
+
+indexing(EventType, Msg, Data) ->
+  handle_event(EventType, indexing, Msg, Data).
+
+handle_event(info, _StateType, {'EXIT', Pid, _Reason},
+             #{ writer := Pid,
+                waiters_map := WaitersMap,
+                view := View } = State) ->
+  _ = notify_all(WaitersMap, write_error),
+  NewWriter = barrel_view_writer:start_link(View),
+  {next_state, idle, State#{ writer => NewWriter, waiters_map := #{} }}.
+
+
+
+
+fold_changes(#{ barrel := BarrelId, since := Since, writer := Writer,
+                waiters_map := WaitersMap } = Data) ->
+  FoldFun = fun(Change, Acc) -> {ok, [{change, Change} | Acc]} end,
+  {ok, Barrel} = barrel:open_barrel(BarrelId),
+  {ok, Changes, LastSeq} = barrel_db:fold_changes(
+                             Barrel, Since, FoldFun, [], #{ include_doc => true }
+                            ),
+  Batch = lists:reverse([{done, LastSeq, self()} | Changes]),
+  ok = gen_batch_server:cast_batch(Writer, Batch),
+
+  Data#{ since => LastSeq,
+         waiters_map => WaitersMap#{ LastSeq => [] }}.
+
+notify_all(WaitersMap, Msg) ->
+  maps:fold(fun(_Seq, Waiters, _) ->
+                     _ = [gen_statem:reply(W, Msg) || W <- Waiters],
+                     ok
+                end, ok, WaitersMap).
