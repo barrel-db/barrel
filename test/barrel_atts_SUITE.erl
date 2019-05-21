@@ -70,7 +70,7 @@ basic_test(_Config) ->
   {ok, #{ <<"_rev">> := Rev,
           <<"_attachments">> := #{
               <<"att">> := #{ 
-                             <<"follow">> := true
+                             <<"stub">> := true
                             }
              }
         } } = barrel:fetch_doc(Barrel, <<"a">>, #{ attachments => false }),
