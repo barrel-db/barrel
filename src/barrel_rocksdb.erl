@@ -153,7 +153,6 @@ barrel_infos(Name) ->
   end.
 
 
-
 %% -------------------
 %% meta
 

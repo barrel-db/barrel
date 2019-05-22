@@ -73,6 +73,8 @@ init() ->
                       %% attachment dir
                       {attachment_dir, AttDir},
 
+                      {index_worker_threads, index_worker_threads()},
+
                       %% storage backend
                       {storage, barrel_rocksdb},
                       %% rocksdb storage

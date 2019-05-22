@@ -173,6 +173,7 @@ handle_cast({{update_doc, From, #{ id := DocId, ref := Ref } = Record, MergePoli
                  BarrelRef, DI2#{ seq => Seq2 }, DocRev, DocBody, OldSeq, OldDel
                 )
           end,
+          ?LOG_DEBUG("notify db_updated name=~p~n", [Name]),
           barrel_event:notify(Name, db_updated),
           From ! {Ref, {ok, DocId, Rev}},
           {noreply, State#{ updated_seq => Seq2 }};

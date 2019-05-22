@@ -16,7 +16,7 @@ handle_batch(Batch, #view{barrel=Barrel} = View) ->
   {ok, #{ ref := Ref }} = barrel_db:open_barrel(Barrel),
   {ok, Ctx} = ?STORE:init_ctx(Ref, true),
 
-  ok = try process_batch(Batch, #{}, Ctx, View)
+  ok = try process_batch(Batch, [], #{}, Ctx, View)
        after
          ?STORE:release_ctx(Ctx)
        end,
@@ -30,51 +30,36 @@ terminate(_Reason, _State) ->
 process_batch([{cast, {recover, #{<<"id">> := DocId,
                                     <<"seq">> := Seq,
                                     <<"doc">> := Doc }}} | Rest],
-                Cache0,
-                Ctx,
-                #view{mod=Mod,
-                      config=Config,
-                      ref=ViewRef } = View) ->
+                Refs, Cache0, Ctx, View) ->
 
   case cache_get(DocId, Cache0, Ctx) of
     {CachedSeq, Cache1} when  CachedSeq >= Seq ->
-      process_batch(Rest, Cache1, Ctx, View);
+      process_batch(Rest, Refs, Cache1, Ctx, View);
     {_, Cache1} ->
-       KVs = Mod:handle_doc(Doc, Config),
-       case ?STORE:update_view_index(ViewRef, DocId, KVs) of
-         ok ->
-           process_batch(Rest, Cache1#{ DocId => Seq }, Ctx, View);
-         Error ->
-           ?LOG_ERROR("error while updating index. error=~p~n", [Error]),
-           exit(Error)
-       end
+      Ref = make_ref(),
+      jobs:enqueue(barrel_view_queue, {Ref, Doc, View, self()}),
+      process_batch(Rest, [Ref | Refs], Cache1#{ DocId => Seq }, Ctx, View)
   end;
 process_batch([{cast, {change, #{<<"id">> := DocId,
                                    <<"seq">> := Seq,
                                    <<"doc">> := Doc }}} | Rest],
-              Cache, Ctx,
-              #view{mod=Mod,
-                    config=Config,
-                    ref=ViewRef } = View) ->
+              Refs, Cache, Ctx, View) ->
 
-  KVs = Mod:handle_doc(Doc, Config),
-  case ?STORE:update_view_index(ViewRef, DocId, KVs) of
-    ok ->
-      process_batch(Rest, Cache#{ DocId => Seq }, Ctx, View);
-    Error ->
-      ?LOG_ERROR("error while updating index. error=~p~n", [Error]),
-      exit(Error)
-  end;
+  Ref = make_ref(),
+  jobs:enqueue(barrel_view_queue, {Ref, Doc, View, self()}),
+  process_batch(Rest, [Ref | Refs], Cache#{ DocId => Seq }, Ctx, View);
 
-process_batch([{cast, {recover_checkpoint, LastSeq}} |Rest], Cache, Ctx,
+process_batch([{cast, {recover_checkpoint, LastSeq}} |Rest], Refs, Cache, Ctx,
               #view{ref=ViewRef} = View) ->
+  ok = wait_for_updates(lists:reverse(Refs)),
   ?STORE:update_view_checkpoint(ViewRef, LastSeq),
-   process_batch(Rest, Cache, Ctx, View);
-process_batch([{cast, {done, LastSeq, MainPid}} |Rest], Cache, Ctx, View) ->
+   process_batch(Rest, [], Cache, Ctx, View);
+process_batch([{cast, {done, LastSeq, MainPid}} |Rest], Refs, Cache, Ctx, View) ->
+  ok = wait_for_updates(lists:reverse(Refs)),
   ?STORE:update_indexed_seq(View#view.ref, LastSeq),
   MainPid ! {index_updated, LastSeq},
-  process_batch(Rest, Cache, Ctx, View);
-process_batch([], _Cache, _Ctx, _View) ->
+  process_batch(Rest, [], Cache, Ctx, View);
+process_batch([], _Refs, _Cache, _Ctx, _View) ->
   ok.
 
 cache_get(DocId, Cache, Ctx) ->
@@ -91,3 +76,14 @@ cache_get(DocId, Cache, Ctx) ->
     Seq ->
       {Seq, Cache}
   end.
+
+
+wait_for_updates([]) -> ok;
+wait_for_updates([Ref | Rest]) ->
+  receive
+    {Ref, ok} ->
+      wait_for_updates(Rest);
+    {Ref, Error} ->
+      erlang:exit(Error)
+  end.
+
