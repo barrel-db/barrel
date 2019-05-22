@@ -12,7 +12,7 @@
 -export([idle/3,
          indexing/3]).
 
--export([handle_event/4]).
+%-export([handle_event/4]).
 
 -include("barrel.hrl").
 -include("barrel_view.hrl").
@@ -57,7 +57,6 @@ init(#{barrel := BarrelId,
       {stop, Error}
   end.
 
-
 callback_mode() -> state_functions.
 
 terminate(_Reason, _State, #{ writer := Writer }) ->
@@ -95,11 +94,12 @@ indexing(info, {index_updated, Seq}, #{ waiters_map := WaitersMap0 } = Data) ->
                   error ->
                     WaitersMap0
                 end,
+  Data2 = Data#{ waiters_map =>WaitersMap2},
   case maps:size(WaitersMap2) of
     0 ->
-      {next_state, idle, Data};
+      {next_state, idle, Data2, 0};
     _ ->
-      {keep_state, Data#{ waiters_map =>WaitersMap2}}
+      {keep_state, Data2}
   end;
 
 indexing(EventType, Msg, Data) ->
@@ -116,9 +116,9 @@ handle_event(info, _StateType, {'EXIT', Pid, Reason},
   {next_state, idle, State#{ writer => NewWriter, waiters_map := #{} }};
 
 handle_event(Event, State, Msg, Data) ->
-  ?LOG_ERROR("received unknown message: event=~p, state=~p, msg=~p~n",
+  ?LOG_INFO("received unknown message: event=~p, state=~p, msg=~p~n",
              [Event, State, Msg]),
-  {stop, Data}.
+  {keep_state, Data}.
 
 
 
@@ -130,11 +130,18 @@ fold_changes(#{ barrel := BarrelId, since := Since, writer := Writer,
   {ok, Changes, LastSeq} = barrel_db:fold_changes(
                              Barrel, Since, FoldFun, [], #{ include_doc => true }
                             ),
-  Batch = lists:reverse([{done, LastSeq, self()} | Changes]),
-  ok = gen_batch_server:cast_batch(Writer, Batch),
 
-  Data#{ since => LastSeq,
-         waiters_map => WaitersMap#{ LastSeq => [] }}.
+
+  if
+    LastSeq /= Since ->
+      Batch = lists:reverse([{done, LastSeq, self()} | Changes]),
+      ok = gen_batch_server:cast_batch(Writer, Batch),
+
+      Data#{ since => LastSeq,
+             waiters_map => WaitersMap#{ LastSeq => [] }};
+    true ->
+      Data
+  end.
 
 notify_all(WaitersMap, Msg) ->
   maps:fold(fun(_Seq, Waiters, _) ->
