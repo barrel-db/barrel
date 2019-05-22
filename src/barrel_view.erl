@@ -109,7 +109,12 @@ handle_event(info, _StateType, {'EXIT', Pid, _Reason},
                 view := View } = State) ->
   _ = notify_all(WaitersMap, write_error),
   NewWriter = barrel_view_writer:start_link(View),
-  {next_state, idle, State#{ writer => NewWriter, waiters_map := #{} }}.
+  {next_state, idle, State#{ writer => NewWriter, waiters_map := #{} }};
+
+handle_event(Event, State, Msg, Data) ->
+  ?LOG_ERROR("received unknown message: event=~p, state=~p, msg=~p~n",
+             [Event, State, Msg]),
+  {stop, Data}.
 
 
 
