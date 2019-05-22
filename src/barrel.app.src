@@ -13,6 +13,7 @@
     mimerl,
     uuid,
     gproc,
+    jobs,
     hooks,
     ehash,
     recon,
@@ -20,7 +21,6 @@
     rocksdb,
     gen_batch_server,
     opencensus,
-    jobs,
     lru
    ]},
   {env, []},
