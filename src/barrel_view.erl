@@ -3,6 +3,7 @@
 -export([start_link/1]).
 -export([await_refresh/2]).
 -export([get_range/3]).
+-export([stop_kvs_stream/1]).
 
 -export([init/1,
          callback_mode/0,
@@ -19,6 +20,9 @@
 get_range(Barrel, View, Options) ->
   supervisor:start_child(barrel_fold_process_sup,
                          [{fold_view, Barrel, View, self(), Options}]).
+
+stop_kvs_stream(Pid) ->
+  supervisor:terminate_child(barrel_fold_process_sup, Pid).
 
 await_refresh(BarrelId, ViewId) ->
   gen_statem:call(?view_proc(BarrelId, ViewId), refresh_index).
