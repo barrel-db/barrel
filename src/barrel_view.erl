@@ -56,9 +56,9 @@ init(#{barrel := BarrelId,
 
 callback_mode() -> state_functions.
 
-terminate(_Reason, _State, _Data) ->
+terminate(_Reason, _State, #{ writer := Writer }) ->
   _ = barrel_event:unreg(),
-
+  gen_batch_server:stop(Writer),
   ok.
 
 
@@ -84,18 +84,16 @@ indexing(info, {'$barrel_event', BarrelId, db_updated}, #{ barrel := BarrelId }Â
 
 
 indexing(info, {index_updated, Seq}, #{ waiters_map := WaitersMap0 } = Data) ->
-  WaitersMap2 = case maps:is_key(Seq, WaitersMap0) of
-                  true ->
-
-                    {Waiters, WaitersMap1} = maps:take(Seq, WaitersMap0),
+  WaitersMap2 = case maps:take(Seq, WaitersMap0) of
+                  {Waiters, WaitersMap1} ->
                     _ = [gen_statem:reply(W, ok) || W <- Waiters],
                     WaitersMap1;
-                  false ->
+                  error ->
                     WaitersMap0
                 end,
   case maps:size(WaitersMap2) of
     0 ->
-      {next_state, idle, Data#{ waiters_map => #{} }};
+      {next_state, idle, Data};
     _ ->
       {keep_state, Data#{ waiters_map =>WaitersMap2}}
   end;
@@ -103,11 +101,13 @@ indexing(info, {index_updated, Seq}, #{ waiters_map := WaitersMap0 } = Data) ->
 indexing(EventType, Msg, Data) ->
   handle_event(EventType, indexing, Msg, Data).
 
-handle_event(info, _StateType, {'EXIT', Pid, _Reason},
+handle_event(info, _StateType, {'EXIT', Pid, Reason},
              #{Â writer := Pid,
                 waiters_map := WaitersMap,
                 view := View } = State) ->
+  ?LOG_ERROR("view writer error=~p~n", [Reason]),
   _ = notify_all(WaitersMap, write_error),
+  flush_updates(),
   NewWriter = barrel_view_writer:start_link(View),
   {next_state, idle, State#{ writer => NewWriter, waiters_map := #{} }};
 
@@ -137,3 +137,11 @@ notify_all(WaitersMap, Msg) ->
                      _ = [gen_statem:reply(W, Msg) || W <- Waiters],
                      ok
                 end, ok, WaitersMap).
+
+flush_updates() ->
+  receive
+    {index_updated, _} ->
+      flush_updates()
+  after 0 ->
+          ok
+  end.
