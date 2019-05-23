@@ -34,7 +34,8 @@ worker(Barrel, Bin) ->
   io:format("time=~p, res=~p~n", [T, Res]),
   case Res of
     {ok, DocId, _} ->
-      spawn(fun() -> read_doc(Barrel, DocId) end);
+      _Pid = spawn(fun() -> read_doc(Barrel, DocId) end),
+      ok;
     _ ->
       ok
   end,

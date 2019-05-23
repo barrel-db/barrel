@@ -61,7 +61,7 @@ callback_mode() -> state_functions.
 
 terminate(_Reason, _State, #{ writer := Writer }) ->
   _ = barrel_event:unreg(),
-  gen_batch_server:stop(Writer),
+  _ = gen_batch_server:stop(Writer),
   ok.
 
 

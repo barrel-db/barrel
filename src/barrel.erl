@@ -45,7 +45,7 @@
 -include_lib("barrel/include/barrel.hrl").
 
 -type barrel_infos() :: #{
-  updated_seq := non_neg_integer(),
+  updated_seq := {non_neg_integer(), non_neg_integer()},
   docs_count := non_neg_integer(),
   docs_del_count := non_neg_integer()
 }.

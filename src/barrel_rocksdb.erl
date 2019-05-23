@@ -435,7 +435,7 @@ open_view(Id, ViewId, Version) ->
   end.
 
 init_view_metadata([Key | Rest], Acc) ->
-  case rocksdb:get(?db, Key, #{}) of
+  case rocksdb:get(?db, Key, []) of
     {ok, Val} ->
       init_view_metadata(Rest, [binary_to_term(Val) | Acc]);
     Error ->
@@ -510,9 +510,9 @@ fold_view_index(Id, ViewId, UserFun, UserAcc, Options) ->
                    End1
                end,
   Reverse = maps:get(reverse, Options, false),
-  Snapshot = maps:get(snapshot, Options, false),
+  WithSnapshot = maps:get(snapshot, Options, false),
   Limit = maps:get(limit, Options, 1 bsl 64 - 1),
-  ReadOpts0 = case Snapshot of
+  ReadOpts0 = case WithSnapshot of
                 true ->
                   {ok, Snapshot} = rocksdb:snapshot(?db),
                   [{snapshot, Snapshot}];

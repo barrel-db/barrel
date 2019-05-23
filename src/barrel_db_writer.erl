@@ -44,7 +44,7 @@ update_docs(Barrel, Docs, MergePolicy) ->
             after
               ?end_span
             end,
-  erlang:cancel_timer(TRef),
+  _ = erlang:cancel_timer(TRef),
   {ok, Results}.
 
 update_doc(Barrel, Doc, MergePolicy) ->
@@ -148,8 +148,8 @@ handle_cast({{update_doc, From, #{ id := DocId, ref := Ref } = Record, MergePoli
              SpanCtx, Tags},
             #{ name := Name, ref := BarrelRef, updated_seq := {Epoch, Seq} } = State) ->
 
-  ocp:with_span_ctx(SpanCtx),
-  ocp:with_tags(Tags),
+  _ = ocp:with_span_ctx(SpanCtx),
+  _ = ocp:with_tags(Tags),
   case get_docinfo(BarrelRef, DocId) of
     {ok, {DocStatus, DI}} ->
       #{ seq := OldSeq, deleted := OldDel } = DI,

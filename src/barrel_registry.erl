@@ -48,7 +48,7 @@ send(BarrelName, Msg) ->
 where_is(BarrelName) ->
   whereis_name(BarrelName).
 
--spec reference_of(barrel_name()) -> {ok, map()} | error.
+-spec reference_of(barrel_name()) -> {ok, map()} | {ok, undefined} | error.
 reference_of(Name) ->
   case gproc:lookup_values(?barrel(Name)) of
     [{_Pid, Barrel}] ->
