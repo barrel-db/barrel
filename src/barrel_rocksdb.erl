@@ -429,7 +429,7 @@ open_view(Id, ViewId, Version) ->
       ok = try rocksdb:write_batch(?db, WB, [])
            after rocksdb:release_batch(WB)
            end,
-      {ok, ViewRef, 0, Version};
+      {ok, ViewRef, {0, 0}, Version};
     Error ->
       Error
   end.
@@ -625,9 +625,6 @@ terminate(_Reason, #{ ref := #{ ref := Ref }, cache := Cache }) ->
   ok = rocksdb:close(Ref),
   ok = release_cache(Cache),
   ok.
-
-
-
 
 init_cache() ->
   case barrel_config:get(rocksdb_cache_size) of

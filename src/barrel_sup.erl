@@ -80,6 +80,8 @@ init([]) ->
               restart => permanent,
               type => worker },
 
+    #{ id => local_epoch_store,
+       start => {barrel_local_epoch_store, start_link, []} },
 
 
     #{ id => ratekeeper,

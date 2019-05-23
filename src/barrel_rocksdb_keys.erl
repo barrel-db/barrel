@@ -119,17 +119,21 @@ doc_info_max(BarrelId) ->
      (barrel_rocksdb_util:bytes_prefix_end(?docs_info_suffix))/binary >>.
 
 %% @doc document sequence key
-doc_seq(BarrelId, Seq) ->
+doc_seq(BarrelId, {Epoch, Seq}) ->
   barrel_encoding:encode_uint64_ascending(
-    << (db_prefix(BarrelId))/binary, ?docs_sec_suffix/binary >>,
+    barrel_encoding:encode_uint64_ascending(
+      << (db_prefix(BarrelId))/binary, ?docs_sec_suffix/binary >>,
+      Epoch
+     ),
     Seq
-  ).
+   ).
 
 decode_doc_seq(BarrelId, SeqKey) ->
   case binary:split(SeqKey, doc_seq_prefix(BarrelId)) of
-    [<<>>, SeqPart] ->
+    [<<>>, EpochPart] ->
+      {Epoch, SeqPart} = barrel_encoding:decode_uint64_ascending(EpochPart),
       {Seq, _} = barrel_encoding:decode_uint64_ascending(SeqPart),
-      Seq;
+      {Epoch, Seq};
     [] ->
       erlang:error(badarg)
   end.
@@ -139,7 +143,7 @@ doc_seq_prefix(BarrelId) -> << (db_prefix(BarrelId))/binary, ?docs_sec_suffix/bi
 
 %% @doc max document sequence key
 doc_seq_max(BarrelId) ->
-  doc_seq(BarrelId, 1 bsl 64 - 1).
+  doc_seq(BarrelId, {1  bsl 64 - 1, 1 bsl 64 - 1}).
 
 %% @doc document revision key
 doc_rev(BarrelId, DocId, DocRev) ->

@@ -17,7 +17,7 @@
 ]).
 
 -export([storage/0]).
-
+-export([epoch_store/0]).
 -export([data_dir/0]).
 
 -include("barrel.hrl").
@@ -26,6 +26,8 @@
 storage() ->
   persistent_term:get({?MODULE, storage}).
 
+epoch_store() ->
+  persistent_term:get({?MODULE, epoch_store}).
 
 get(Key) ->
   persistent_term:get({?MODULE, Key}).
@@ -55,6 +57,7 @@ init() ->
   [env_or_default(Key, Default) ||
    {Key, Default} <- [
                       {barrel_timestamp_file, default_timestamp_file()},
+                      {epoch_store, barrel_local_epoch_store},
 
                       {fold_timeout, 5000},
                       {index_worker_threads, 128},

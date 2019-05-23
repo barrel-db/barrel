@@ -396,7 +396,13 @@ fold_changes(Barrel, Since, UserFun, UserAcc, Options) ->
     end
    ).
 
-fold_changes_1(Ctx, Since, UserFun, UserAcc, Options) ->
+fold_changes_1(Ctx, Since0, UserFun, UserAcc, Options) ->
+  {SinceEpoch, SinceSeq}= Since = case Since0 of
+                                    first -> {0, 0};
+                                    {_, _} -> Since0;
+                                    _ ->
+                                      erlang:error(badarg)
+                                  end,
   %% get options
   IncludeDoc = maps:get(include_doc, Options, false),
   WithHistory = maps:get(with_history, Options, false),
@@ -404,7 +410,7 @@ fold_changes_1(Ctx, Since, UserFun, UserAcc, Options) ->
     fun
       (_, DI, {Acc0, _}) ->
         #{id := DocId,
-          seq := Seq,
+          seq := {Epoch, Seq}=LSN,
           deleted := Deleted,
           rev := Rev,
           revtree := RevTree } = DI,
@@ -414,7 +420,7 @@ fold_changes_1(Ctx, Since, UserFun, UserAcc, Options) ->
                   end,
         Change0 = #{
           <<"id">> => DocId,
-          <<"seq">> => Seq,
+          <<"seq">> => << (integer_to_binary(Epoch))/binary, "-", (integer_to_binary(Seq))/binary >> ,
           <<"rev">> => Rev,
           <<"changes">> => Changes
         },
@@ -424,19 +430,19 @@ fold_changes_1(Ctx, Since, UserFun, UserAcc, Options) ->
         ),
         case UserFun(Change, Acc0) of
           {ok, Acc1} ->
-            {ok, {Acc1, Seq}};
+            {ok, {Acc1, LSN}};
           {stop, Acc1} ->
-            {stop, {Acc1, Seq}};
+            {stop, {Acc1, LSN}};
           ok ->
-            {ok, {Acc0, Seq}};
+            {ok, {Acc0, LSN}};
           stop ->
-            {stop, {Acc0, Seq}};
+            {stop, {Acc0, LSN}};
           skip ->
             skip
         end
     end,
   AccIn = {UserAcc, Since},
-  {AccOut, LastSeq} = ?STORE:fold_changes(Ctx, Since + 1, WrapperFun, AccIn),
+  {AccOut, LastSeq} = ?STORE:fold_changes(Ctx, {SinceEpoch, SinceSeq + 1}, WrapperFun, AccIn),
   {ok, AccOut, LastSeq}.
 
 change_with_deleted(Change, true) -> Change#{ <<"deleted">> => true };

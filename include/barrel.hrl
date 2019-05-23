@@ -14,6 +14,9 @@
 
 
 -define(STORE, (barrel_config:storage())).
+-define(EPOCH_STORE, (barrel_config:epoch_store())).
+
+
 
 %% -----------------
 %% -- attachements
@@ -74,3 +77,11 @@
 -define(end_span,
         ocp:finish_span()
        ).
+
+
+-define(TRY_UPDATE(F), try F()
+                       catch C:E:T ->
+                               ?LOG_ERROR("update error=~p~n", [E]),
+                               ?LOG_DEBUG("update class=~p error=~p traceback=~p~n", [C,E,T]),
+                               exit(update_error)
+                       end).

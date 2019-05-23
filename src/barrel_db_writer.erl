@@ -71,14 +71,21 @@ update_doc_1(#{ name := Name }, #{ ref := Ref } = Record, MergePolicy, StartTime
   Tags = ocp:current_tags(),
   gen_server:cast({via, gproc, ?barrel(Name)},
                   {{update_doc, self(), Record, MergePolicy}, SpanCtx, Tags}),
+
+  MRef = erlang:monitor(process, gproc:where(?barrel(Name))),
   receive
     {Ref, Result} ->
+      erlang:demonitor(MRef, [flush]),
       Now = erlang:timestamp(),
       ocp:record('barrel/db/update_doc_duration', timer:now_diff(Now, StartTime)),
       ocp:record('barrel/db/update_doc_num', 1),
       Result;
+    {'DOWN', MRef, process, _Pid, Reason} ->
+      ?LOG_ERROR("merge process down, name=~p, reason=~p~n", [Name, Reason]),
+      exit({merge_down, Reason});
     update_timeout ->
       ocp:record('barrel/db/update_doc_timeout', 1),
+      erlang:demonnitor(MRef, [flush]),
       exit(timeout)
   end.
 
@@ -122,12 +129,13 @@ start_link(Name) ->
 
 init([Name]) ->
   erlang:process_flag(trap_exit, true),
+  Epoch = ?EPOCH_STORE:get_epoch(),
   case init_(Name) of
     {ok, Barrel, LastSeq} ->
       gproc:set_value(?barrel(Name), Barrel),
       ?LOG_INFO("barrel opened name=~p seq=~p~n", [Name, LastSeq]),
       ocp:record('barrel/dbs/active_num', 1),
-      {ok, Barrel#{updated_seq => LastSeq}};
+      {ok, Barrel#{updated_seq => {Epoch, 0}}};
     {error, Reason} ->
       ?LOG_ERROR("error opening barrel name=~p error=~p~n", [Name, Reason]),
       {stop, Reason}
@@ -138,7 +146,7 @@ handle_call(_Msg, _From, State) ->
 
 handle_cast({{update_doc, From, #{ id := DocId, ref := Ref } = Record, MergePolicy},
              SpanCtx, Tags},
-            #{ name := Name, ref := BarrelRef, updated_seq := Seq } = State) ->
+            #{ name := Name, ref := BarrelRef, updated_seq := {Epoch, Seq} } = State) ->
 
   ocp:with_span_ctx(SpanCtx),
   ocp:with_tags(Tags),
@@ -166,16 +174,16 @@ handle_cast({{update_doc, From, #{ id := DocId, ref := Ref } = Record, MergePoli
           case DocStatus of
             not_found ->
               ?STORE:insert_doc(
-                 BarrelRef, DI2#{ seq => Seq2 }, DocRev, DocBody
+                 BarrelRef, DI2#{ seq => {Epoch, Seq2} }, DocRev, DocBody
                 );
             found ->
               ?STORE:update_doc(
-                 BarrelRef, DI2#{ seq => Seq2 }, DocRev, DocBody, OldSeq, OldDel
+                 BarrelRef, DI2#{ seq => {Epoch, Seq2} }, DocRev, DocBody, OldSeq, OldDel
                 )
           end,
           barrel_event:notify(Name, db_updated),
           From ! {Ref, {ok, DocId, Rev}},
-          {noreply, State#{ updated_seq => Seq2 }};
+          {noreply, State#{ updated_seq => {Epoch, Seq2} }};
         {ok, #{ rev := Rev}, _DocRev, _DocBody} ->
           From ! {Ref, {ok, DocId, Rev}},
           {noreply, State};
@@ -204,7 +212,7 @@ terminate(_Reason, #{ name := Name } = State) ->
 new_docinfo(DocId) ->
   #{id => DocId,
     rev => <<"">>,
-    seq => 0,
+    seq => {0, 0},
     deleted => false,
     revtree => barrel_revtree:new()}.
 
