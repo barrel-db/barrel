@@ -107,7 +107,7 @@ get_last_seq(Ident, ReadOpts0) ->
   LastSeq = case rocksdb:iterator_move(Itr, {seek_for_prev, MaxSeq}) of
               {ok, SeqKey, _} ->
                 barrel_rocksdb_keys:decode_doc_seq(Ident, SeqKey);
-              _ -> 0
+              _ -> {0, 0}
             end,
   _ = rocksdb:iterator_close(Itr),
   LastSeq.
