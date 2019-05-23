@@ -12,14 +12,10 @@
 -export([idle/3,
          indexing/3]).
 
--export([index_worker/0]).
-
-
 %-export([handle_event/4]).
 
 -include("barrel.hrl").
 -include("barrel_view.hrl").
-
 
 get_range(Barrel, View, Options) ->
   supervisor:start_child(barrel_fold_process_sup,
@@ -101,7 +97,7 @@ indexing(info, {index_updated, Seq}, #{ waiters_map := WaitersMap0 } = Data) ->
   Data2 = Data#{ waiters_map =>WaitersMap2},
   case maps:size(WaitersMap2) of
     0 ->
-      {next_state, idle, Data2};
+      {next_state, idle, Data2, 0};
     _ ->
       {keep_state, Data2}
   end;
@@ -160,19 +156,3 @@ flush_updates() ->
   after 0 ->
           ok
   end.
-
-
-index_worker() ->
-  [{_Ts, Job}] = jobs:dequeue(barrel_index_queue, 1),
-   {JobRef, Doc, View, ViewPid} = Job,
-
-  Res = (catch handle_doc(Doc, View)),
-  io:format(user, "ref=~p result=~p~n", [JobRef, Res]),
-  ViewPid ! {JobRef, Res}.
-
-handle_doc( #{ <<"id">> := DocId } = Doc,
-             #view{mod=Mod, config=Config, ref=ViewRef} ) ->
-  KVs = Mod:handle_doc(Doc, Config),
-  ?STORE:update_view_index(ViewRef, DocId, KVs).
-
-

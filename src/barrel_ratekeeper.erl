@@ -27,11 +27,6 @@ init([]) ->
   ok = jobs:add_queue(barrel_write_queue,
                       [{standard_rate, TransactionsPerBytes}]),
 
-  jobs:add_queue(barrel_index_queue, [passive]),
-  jobs:add_queue(barrel_index_workers,
-                 [{standard_counter, barrel_config:get(index_worker_threads)},
-                  {producer, fun barrel_view:index_worker/0}]),
-
   {ok, #{ tref => TRef,
           update_rate => UpdateRate }}.
 
@@ -59,9 +54,6 @@ handle_info(Info, State) ->
 terminate(_Reason, #{ tref := TRef }) ->
   _ = erlang:cancel_timer(TRef),
   _ = jobs:delete_queue(barrel_write_queue),
-
-  _ = jobs:delete_queue(barrel_index_queue),
-  _ = jobs:delete_queue(barrel_index_workers),
   ok.
 
 
