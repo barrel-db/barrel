@@ -140,12 +140,10 @@ barrel_infos(Name) ->
       %% but until it's not exposed just get the results for each Keys
       {ok, DocsCount} = db_get_int(barrel_rocksdb_keys:docs_count(Ident), 0, ReadOpts),
       {ok, DelDocsCount} = db_get_int(barrel_rocksdb_keys:docs_del_count(Ident), 0, ReadOpts),
-      {ok, PurgeSeq} = db_get_int(barrel_rocksdb_keys:purge_seq(Ident), 0, ReadOpts),
       %% get last sequence
       LastSeq = get_last_seq(Ident, ReadOpts),
       _ = rocksdb:release_snapshot(Snapshot),
       {ok, #{ updated_seq => LastSeq,
-              purge_seq => PurgeSeq,
               docs_count => DocsCount,
               docs_del_count => DelDocsCount }};
     not_found ->

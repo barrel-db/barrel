@@ -119,7 +119,7 @@ handle_call({register_write, Key, Pid, SnapshotId}, _From, State) ->
     false ->
       case is_uncommited(Key, Pid) of
         true ->
-          _ = ets:insert(?uncommited_keys, [{Key, Pid},  {{Pid, Key}, Key}]),
+          ets:insert(?uncommited_keys, [{Key, Pid},  {{Pid, Key}, Key}]),
           NewState = maybe_monitor(Pid, State),
           {reply, true, NewState};
         false ->
