@@ -143,7 +143,7 @@ doc_seq_prefix(BarrelId) -> << (db_prefix(BarrelId))/binary, ?docs_sec_suffix/bi
 
 %% @doc max document sequence key
 doc_seq_max(BarrelId) ->
-  doc_seq(BarrelId, {1  bsl 64 - 1, 1 bsl 64 - 1}).
+  doc_seq(BarrelId, {1  bsl 64 - 1, 0}).
 
 %% @doc document revision key
 doc_rev(BarrelId, DocId, DocRev) ->

@@ -16,7 +16,6 @@ init(Config) -> {ok, Config}.
 
 %% initial version ignore the config
 handle_doc(Doc, _Config) ->
-  ?LOG_DEBUG("~s, received doc=~p~n", [?MODULE_STRING, Doc]),
   analyze(Doc).
 
 
