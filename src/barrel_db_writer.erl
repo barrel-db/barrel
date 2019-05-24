@@ -129,7 +129,7 @@ start_link(Name) ->
 
 init([Name]) ->
   erlang:process_flag(trap_exit, true),
-  Epoch = ?EPOCH_STORE:get_epoch(),
+  Epoch = ?EPOCH_STORE:get_epoch(Name),
   case init_(Name) of
     {ok, Barrel, LastSeq} ->
       gproc:set_value(?barrel(Name), Barrel),
