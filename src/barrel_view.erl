@@ -69,13 +69,8 @@ idle({call, From}, refresh_index, Data) ->
   {keep_state, Data, [{reply, From, ok}]};
 
 idle(info, {'$barrel_event', _, db_updated}, Data) ->
-  {HasChanges, NewData} = fold_changes(Data),
-  case HasChanges of
-    true ->
-      {next_state, indexing, NewData};
-    false ->
-      {keep_state, Data}
-  end;
+  NewData = fold_changes(Data),
+  {next_state, indexing, NewData};
 
 idle(EventType, Msg, Data) ->
   handle_event(EventType, idle, Msg, Data).
@@ -87,7 +82,7 @@ indexing({call, From}, refresh_index, #{ since := Since,
   {keep_state, Data#{ waiters_map => WaitersMap#{ Since => [From | Waiters] } }};
 
 indexing(info, {'$barrel_event', BarrelId, db_updated}, #{ barrel := BarrelId } = Data) ->
-  {_HasChanges, NewData} = fold_changes(Data),
+  NewData = fold_changes(Data),
   {keep_state, NewData};
 
 
@@ -102,7 +97,7 @@ indexing(info, {index_updated, Seq}, #{ waiters_map := WaitersMap0 } = Data) ->
   Data2 = Data#{ waiters_map =>WaitersMap2},
   case maps:size(WaitersMap2) of
     0 ->
-      {next_state, idle, Data2};
+      {next_state, idle, Data2, 0};
     _ ->
       {keep_state, Data2}
   end;
@@ -135,14 +130,17 @@ fold_changes(#{ barrel := BarrelId, since := Since, writer := Writer,
   {ok, Changes, LastSeq} = barrel_db:fold_changes(
                              Barrel, Since, FoldFun, [], #{ include_doc => true }
                             ),
+
+
   if
     LastSeq /= Since ->
       Batch = lists:reverse([{done, LastSeq, self()} | Changes]),
       ok = gen_batch_server:cast_batch(Writer, Batch),
-      {true, Data#{ since => LastSeq,
-                    waiters_map => WaitersMap#{ LastSeq => [] } }};
+
+      Data#{ since => LastSeq,
+             waiters_map => WaitersMap#{ LastSeq => [] }};
     true ->
-      {false, Data}
+      Data
   end.
 
 notify_all(WaitersMap, Msg) ->

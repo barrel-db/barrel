@@ -15,6 +15,7 @@ init(View) ->
 handle_batch(Batch, #view{barrel=Barrel} = View) ->
   {ok, #{ ref := Ref }} = barrel_db:open_barrel(Barrel),
   {ok, Ctx} = ?STORE:init_ctx(Ref, true),
+
   ok = try process_batch(Batch, #{}, Ctx, View)
        after
          ?STORE:release_ctx(Ctx)
