@@ -51,11 +51,19 @@ init(#{barrel := BarrelId,
                    mod=ViewMod,
                    config=ViewConfig1},
       {ok, Writer} = gen_batch_server:start_link(barrel_view_writer, View),
-      {ok, idle, #{ barrel => BarrelId,
-                    view => View,
-                    since => LastIndexedSeq,
-                    writer => Writer,
-                    waiters_map => #{}}};
+
+      Data0 = #{ barrel => BarrelId,
+                 view => View,
+                 since => LastIndexedSeq,
+                 writer => Writer,
+                 waiters_map => #{}},
+
+      case fold_changes(Data0) of
+        {true, Data1} ->
+          {ok, indexing, Data1};
+        {false, _} ->
+          {ok, idle, Data0}
+      end;
     Error ->
       {stop, Error}
   end.
@@ -104,7 +112,8 @@ indexing({call, From}, {refresh_index, Last},
             waiters_map := WaitersMap } = Data) when map_size(WaitersMap) > 0 ->
 
 
-  MinSeq = lists:min(maps:keys(WaitersMap)),
+  Pending = maps:keys(WaitersMap),
+  MinSeq = lists:min(Pending),
   if
     Last < MinSeq ->
       {keep_state, Data, [{reply, From, {ok, Since}}]};
@@ -165,9 +174,6 @@ handle_event(Event, State, Msg, Data) ->
              [Event, State, Msg, Data]),
   {keep_state, Data}.
 
-
-
-
 fold_changes(#{ barrel := BarrelId, since := Since, writer := Writer,
                waiters_map := WaitersMap } = Data) ->
   FoldFun = fun(Change, Acc) -> {ok, [{change, Change} | Acc]} end,
@@ -176,10 +182,9 @@ fold_changes(#{ barrel := BarrelId, since := Since, writer := Writer,
                              Barrel, Since, FoldFun, [], #{ include_doc => true }
                             ),
   if
-    LastSeq /= Since ->
+    LastSeq =/= Since ->
       Batch = lists:reverse([{done, LastSeq, self()} | Changes]),
       ok = gen_batch_server:cast_batch(Writer, Batch),
-
       {true, Data#{ since => LastSeq,
                     waiters_map => WaitersMap#{ LastSeq => [] }}};
     true ->
