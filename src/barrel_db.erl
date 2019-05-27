@@ -414,6 +414,7 @@ fold_changes_1(Ctx, Since0, UserFun, UserAcc, Options) ->
   %% get options
   IncludeDoc = maps:get(include_doc, Options, false),
   WithHistory = maps:get(with_history, Options, false),
+  IsTerm = maps:get(erlang_term, Options, false),
   WrapperFun =
     fun
       (_, DI, {Acc0, _}) ->
@@ -426,15 +427,23 @@ fold_changes_1(Ctx, Since0, UserFun, UserAcc, Options) ->
                     false -> [Rev];
                     true -> barrel_revtree:history(Rev, RevTree)
                   end,
-        Change0 = #{
-          <<"id">> => DocId,
-          <<"seq">> => << (integer_to_binary(Epoch))/binary, "-", (integer_to_binary(Seq))/binary >> ,
-          <<"rev">> => Rev,
-          <<"changes">> => Changes
-        },
+        Change0 =
+          case IsTerm of
+            false ->
+              #{ <<"id">> => DocId,
+                 <<"seq">> => << (integer_to_binary(Epoch))/binary, "-", (integer_to_binary(Seq))/binary >> ,
+                 <<"rev">> => Rev,
+                 <<"changes">> => Changes
+               };
+            true ->
+              #{ id => DocId,
+                 seq => LSN,
+                 rev => Rev,
+                 changes => Changes }
+          end,
         Change = change_with_doc(
-          change_with_deleted(Change0, Deleted),
-          DocId, Rev, Ctx, IncludeDoc
+          change_with_deleted(Change0, Deleted, IsTerm),
+          DocId, Rev, Ctx, IncludeDoc, IsTerm
         ),
         case UserFun(Change, Acc0) of
           {ok, Acc1} ->
@@ -453,13 +462,22 @@ fold_changes_1(Ctx, Since0, UserFun, UserAcc, Options) ->
   {AccOut, LastSeq} = ?STORE:fold_changes(Ctx, {SinceEpoch, SinceSeq + 1}, WrapperFun, AccIn),
   {ok, AccOut, LastSeq}.
 
-change_with_deleted(Change, true) -> Change#{ <<"deleted">> => true };
-change_with_deleted(Change, _) -> Change.
 
-change_with_doc(Change, DocId, Rev, Ctx, true) ->
+change_with_deleted(Change, true, false) ->
+  Change#{ <<"deleted">> => true };
+change_with_deleted(Change, true, true) ->
+  Change#{ deleted => true };
+change_with_deleted(Change, _, _) ->
+  Change.
+
+change_with_doc(Change, DocId, Rev, Ctx, true, false) ->
   {ok, Doc} = ?STORE:get_doc_revision(Ctx, DocId, Rev),
   Change#{ <<"doc">> => Doc };
-change_with_doc(Change, _, _, _, _) ->
+
+change_with_doc(Change, DocId, Rev, Ctx, true, true) ->
+  {ok, Doc} = ?STORE:get_doc_revision(Ctx, DocId, Rev),
+  Change#{ doc => Doc };
+change_with_doc(Change, _, _, _, _, _) ->
   Change.
 
 update_docs(Barrel, Docs, Options, interactive_edit) ->
