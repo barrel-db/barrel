@@ -13,7 +13,8 @@
 -export([create_barrel/1,
          open_barrel/1,
          delete_barrel/1,
-         barrel_infos/1]).
+         barrel_infos/1,
+         last_updated_seq/1]).
 
 
 %% write api
@@ -152,6 +153,8 @@ barrel_infos(Name) ->
       {error, barrel_not_found}
   end.
 
+last_updated_seq(Ident) ->
+   get_last_seq(Ident, []).
 
 
 %% -------------------

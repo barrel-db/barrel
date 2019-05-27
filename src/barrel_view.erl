@@ -25,7 +25,7 @@ stop_kvs_stream(Pid) ->
   supervisor:terminate_child(barrel_fold_process_sup, Pid).
 
 await_refresh(BarrelId, ViewId) ->
-  {ok, #{ updated_seq := Seq }} = barrel_db:barrel_infos(BarrelId),
+  Seq = barrel_db:last_updated_seq(BarrelId),
   gen_statem:call(?view_proc(BarrelId, ViewId), {refresh_index, Seq}).
 
 await_refresh(BarrelId, ViewId, Seq) ->
@@ -42,7 +42,6 @@ init(#{barrel := BarrelId,
 
   process_flag(trap_exit, true),
   {ok, ViewConfig1} = ViewMod:init(ViewConfig0),
-  _ = barrel_event:reg(BarrelId),
 
   case ?STORE:open_view(BarrelId, ViewId, Version) of
     {ok, ViewRef, LastIndexedSeq, _OldVersion} ->
@@ -50,19 +49,26 @@ init(#{barrel := BarrelId,
                    ref=ViewRef,
                    mod=ViewMod,
                    config=ViewConfig1},
-      {ok, Writer} = gen_batch_server:start_link(barrel_view_writer, View),
 
-      Data0 = #{ barrel => BarrelId,
+      Data = #{ barrel => BarrelId,
                  view => View,
                  since => LastIndexedSeq,
-                 writer => Writer,
-                 waiters_map => #{}},
+                 writer => undefined,
+                 postponed => false,
+                 waiters => []},
 
-      case fold_changes(Data0) of
-        {true, Data1} ->
-          {ok, indexing, Data1};
-        {false, _} ->
-          {ok, idle, Data0}
+      _ = barrel_event:reg(BarrelId),
+
+      case maybe_update(Data) of
+        true ->
+          Writer = barrel_view_updater:run(#{ barrel => BarrelId,
+                                              view => View,
+                                              since => LastIndexedSeq }),
+
+          {ok, indexing, Data#{ writer => Writer }};
+        false ->
+          %%_ = barrel_event:reg_once(BarrelId),
+          {ok, idle, Data}
       end;
     Error ->
       {stop, Error}
@@ -70,29 +76,54 @@ init(#{barrel := BarrelId,
 
 callback_mode() -> state_functions.
 
-terminate(_Reason, _State, #{ writer := Writer }) ->
-  _ = barrel_event:unreg(),
-  _ = gen_batch_server:stop(Writer),
-  ok.
 
+terminate(Reason, _State, #{ barrel := Barrel,
+                             writer := Writer,
+                             waiters := Waiters }) ->
+  _ = barrel_event:unreg(Barrel),
+  notify_all(Waiters, Reason),
 
-idle({call, From}, refresh_index, #{ since := Since } = Data) ->
-  {keep_state, Data, [{reply, From, {ok, Since} }]};
+  MRef = erlang:monitor(process, Writer),
+  try
+    _ = (catch unlink(Writer)),
+    _ = (catch exit(Writer, shutdown)),
+    receive
+      {'DOWN', MRef, _, _, _} ->
+        ok
+    end
+  after
+    erlang:demonitor(MRef, [flush])
+  end.
 
-idle({call, From}, {refresh_index, Last}, #{ since := Since } = Data) ->
+idle({call, From}, {refresh_index, Last}, #{ barrel := Barrel,
+                                             view := View,
+                                             since := Since,
+                                             waiters := Waiters } = Data) ->
   if
     Last =< Since ->
       {keep_state, Data, [{reply, From, {ok, Since} }]};
     true ->
-      {keep_state, Data, [postpone]}
+      %_ = barrel_event:unreg(Barrel),
+      NewWriter = barrel_view_updater:run(#{ barrel => Barrel,
+                                             view => View,
+                                             since => Since }),
+      Waiters2 = [{From, Last} | Waiters],
+      {next_state, indexing, Data#{ writer => NewWriter,
+                                    waiters => Waiters2  }}
   end;
 
+idle(info, {'$barrel_event', Barrel, db_updated},
+     #{ barrel := Barrel,
+        view := View,
+        since := Since} = Data) ->
 
-idle(info, {'$barrel_event', _, db_updated}, Data) ->
-  {HasChanged, NewData} = fold_changes(Data),
-  case HasChanged of
+  case maybe_update(Data) of
     true ->
-      {next_state, indexing, NewData};
+      NewWriter = barrel_view_updater:run(#{ barrel => Barrel,
+                                             view => View,
+                                             since => Since }),
+
+      {next_state, indexing, Data#{ writer => NewWriter}};
     false ->
       {keep_state, Data}
   end;
@@ -101,106 +132,83 @@ idle(EventType, Msg, Data) ->
   handle_event(EventType, idle, Msg, Data).
 
 
-indexing({call, From}, refresh_index, #{ since := Since,
-                                         waiters_map := WaitersMap } = Data) ->
-  Waiters = maps:get(Since, WaitersMap),
-  {keep_state, Data#{ waiters_map => WaitersMap#{ Since => [From | Waiters] } }};
-
-
 indexing({call, From}, {refresh_index, Last},
-         #{ since := Since,
-            waiters_map := WaitersMap } = Data) when map_size(WaitersMap) > 0 ->
+         #{ since := Since, waiters := Waiters } = Data)  ->
 
-
-  Pending = maps:keys(WaitersMap),
-  MinSeq = lists:min(Pending),
   if
-    Last < MinSeq ->
+    Last =< Since ->
       {keep_state, Data, [{reply, From, {ok, Since}}]};
     true ->
-      WaitersMap2 = case maps:is_key(Last, WaitersMap) of
-                      true ->
-                        Waiters = maps:get(Last, WaitersMap),
-                        WaitersMap#{ Last => [From | Waiters] };
-                      false ->
-                        Waiters = maps:get(Since, WaitersMap),
-                        WaitersMap#{ Since => [From | Waiters] }
-                    end,
-      {keep_state, Data#{ waiters_map => WaitersMap2 }}
+      Waiters2 = [{From, Last} | Waiters],
+      {keep_state, Data#{ waiters => Waiters2 }}
   end;
-indexing({call, From}, {refresh_index, Last},
-         #{ since := Since, waiters_map := WaitersMap } = Data)  ->
 
-  io:format(user, "last=~p since=~p map=~p~n", [Last, Since, WaitersMap]),
-  Waiters = maps:get(Since, WaitersMap),
-  WaitersMap2 = WaitersMap#{ Since => [From | Waiters] },
-  {keep_state, Data#{ waiters_map => WaitersMap2 }};
-indexing(info, {'$barrel_event', BarrelId, db_updated}, #{ barrel := BarrelId } = Data) ->
-  {_HasChaned, NewData} = fold_changes(Data),
-  {keep_state, NewData};
+indexing(info, {index_updated, IndexedSeq}, #{ waiters := Waiters } = Data) ->
+
+  Waiters2 = lists:filter(fun({W, WSeq}) when WSeq =< IndexedSeq ->
+                              gen_statem:reply(W, {ok, IndexedSeq}),
+                              false;
+                             (_) ->
+                              true
+                          end, Waiters),
+  {keep_state, Data#{ since => IndexedSeq,
+                      waiters => Waiters2}};
 
 
-indexing(info, {index_updated, Seq}, #{ waiters_map := WaitersMap0 } = Data) ->
-  WaitersMap2 = case maps:take(Seq, WaitersMap0) of
-                  {Waiters, WaitersMap1} ->
-                    _ = [gen_statem:reply(W, {ok, Seq}) || W <- Waiters],
-                    WaitersMap1;
-                  error ->
-                    WaitersMap0
-                end,
-  Data2 = Data#{ waiters_map =>WaitersMap2},
-  case maps:size(WaitersMap2) of
-    0 ->
+indexing(info, {'EXIT', Pid, {index_updated, IndexedSeq}},
+         #{ writer := Pid,
+            barrel := Barrel,
+            view := View,
+            waiters := Waiters0 } = Data) ->
+
+  Waiters1 = lists:filter(fun({W, WSeq}) when WSeq =< IndexedSeq ->
+                              gen_statem:reply(W, {ok, IndexedSeq}),
+                              false;
+                             (_) ->
+                              true
+                          end, Waiters0),
+  Data2 = Data#{ since => IndexedSeq,
+                 waiters => Waiters1,
+                 writer => undefined,
+                 postponed => false },
+  case Waiters1 of
+    [] ->
+      %%_ = barrel_event:reg_once(Barrel),
       {next_state, idle, Data2};
     _ ->
-      {keep_state, Data2}
+      %% still have some updates
+      NewWriter = barrel_view_updater:run(#{ barrel => Barrel,
+                                             view => View,
+                                             since => IndexedSeq }),
+      {keep_state, Data2#{ writer => NewWriter }}
   end;
+
+indexing(info, {'$barrel_event', _, db_updated}, #{ postponed := true } = Data) ->
+  {keep_state, Data};
+
+indexing(info, {'$barrel_event', _, db_updated}, Data) ->
+  {keep_state, Data#{ postponed => true }, [postpone]};
+
 
 indexing(EventType, Msg, Data) ->
   handle_event(EventType, indexing, Msg, Data).
 
-handle_event(info, _StateType, {'EXIT', Pid, Reason},
-             #{ writer := Pid,
-                waiters_map := WaitersMap,
-                view := View } = State) ->
-  ?LOG_ERROR("view writer error=~p~n", [Reason]),
-  _ = notify_all(WaitersMap, write_error),
-  flush_updates(),
-  NewWriter = barrel_view_writer:start_link(View),
-  {next_state, idle, State#{ writer => NewWriter, waiters_map := #{} }};
+
+handle_event(info, StateType, {'EXIT', Pid, Reason}, #{ writer := Pid }) ->
+  ?LOG_ERROR("exit error: state=~p error=~p~n", [StateType, Reason]),
+  {stop, Reason};
 
 handle_event(Event, State, Msg, Data) ->
   ?LOG_INFO("received unknown message: event=~p, state=~p, msg=~p data=~p~n",
              [Event, State, Msg, Data]),
   {keep_state, Data}.
 
-fold_changes(#{ barrel := BarrelId, since := Since, writer := Writer,
-               waiters_map := WaitersMap } = Data) ->
-  FoldFun = fun(Change, Acc) -> {ok, [{change, Change} | Acc]} end,
-  {ok, Barrel} = barrel:open_barrel(BarrelId),
-  {ok, Changes, LastSeq} = barrel_db:fold_changes(
-                             Barrel, Since, FoldFun, [], #{ include_doc => true }
-                            ),
-  if
-    LastSeq =/= Since ->
-      Batch = lists:reverse([{done, LastSeq, self()} | Changes]),
-      ok = gen_batch_server:cast_batch(Writer, Batch),
-      {true, Data#{ since => LastSeq,
-                    waiters_map => WaitersMap#{ LastSeq => [] }}};
-    true ->
-      {false, Data}
-  end.
+notify_all(Waiters, Msg) ->
+  _ = [gen_statem:reply(W, Msg) || W <- Waiters],
+  ok.
 
-notify_all(WaitersMap, Msg) ->
-  maps:fold(fun(_Seq, Waiters, _) ->
-                     _ = [gen_statem:reply(W, Msg) || W <- Waiters],
-                     ok
-                end, ok, WaitersMap).
 
-flush_updates() ->
-  receive
-    {index_updated, _} ->
-      flush_updates()
-  after 0 ->
-          ok
-  end.
+
+maybe_update(#{ barrel := BarrelId, since := IndexedSeq }) ->
+  UpdatedSeq =  barrel_db:last_updated_seq(BarrelId),
+  (IndexedSeq < UpdatedSeq).

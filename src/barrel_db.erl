@@ -22,7 +22,8 @@
   open_barrel/1,
   close_barrel/1,
   delete_barrel/1,
-  barrel_infos/1
+  barrel_infos/1,
+  last_updated_seq/1
 ]).
 
 -export([
@@ -130,13 +131,20 @@ stop_barrel(Name) ->
 barrel_infos(Name) ->
   ?STORE:barrel_infos(Name).
 
+last_updated_seq(Name) ->
+  case open_barrel(Name) of
+    {ok, #{ ref := Ref}} ->
+      ?STORE:last_updated_seq(Ref);
+    Error ->
+      Error
+  end.
+
 with_ctx(#{ ref := Ref  }, Fun) ->
   {ok, Ctx} = ?STORE:init_ctx(Ref, true),
   try Fun(Ctx)
   after
     ?STORE:release_ctx(Ctx)
   end.
-
 
 fetch_doc(Barrel, DocId, Options) ->
   with_ctx(

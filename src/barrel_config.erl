@@ -76,6 +76,9 @@ init() ->
                       %% attachment dir
                       {attachment_dir, AttDir},
 
+                      {view_max_items, 500},
+                      {view_max_size, 128 bsl 20}, %% 128 MB
+
                       %% storage backend
                       {storage, barrel_rocksdb},
                       %% rocksdb storage
