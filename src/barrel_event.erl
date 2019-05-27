@@ -22,7 +22,8 @@
 -export([notify/2, notify/3]).
 
 -export([reg/1]).
--export([unreg/0]).
+-export([unreg/0, unreg/1]).
+-export([reg_once/1]).
 -export([mreg/1]).
 -export([reg_all/0]).
 -export([reg_index/2]).
@@ -68,6 +69,9 @@ notify(DbName, DDoc, Event) -> cast({notify, DbName, DDoc, Event}).
 
 reg(DbName) -> mreg([DbName]).
 
+reg_once(DbName) ->
+  call({register_once, self(), DbName}).
+
 mreg(DbNames) when is_list(DbNames) -> call({register_dbs, self(), DbNames}).
 
 reg_all() -> mreg(['all_dbs']).
@@ -92,6 +96,9 @@ mreg_index_other(Indexes, Pid) when is_list(Indexes), is_pid(Pid) -> call({regis
 reg_all_index_other(Pid) -> mreg_index_other(['all_indexes'], Pid).
 
 unreg() -> call({unregister, self()}).
+
+unreg(DbName) ->
+  call({unregister, self(), DbName}).
 
 unreg_other(Pid) when is_pid(Pid) -> call({unregister, Pid}).
 
@@ -134,6 +141,15 @@ handle_call({register_indexes, Pid, Indexes}, _From, State) ->
 
 handle_call({unregister, Pid}, _From, State) ->
   do_unregister(Pid),
+  {reply, ok, State};
+
+
+handle_call({register_once, Pid, DbName}, _From, State) ->
+  do_register_once(Pid, DbName),
+  {reply, ok, State};
+
+handle_call({unregister, Pid, DbName}, _From, State) ->
+  ets:delete(?TAB, {{db, DbName}, Pid}),
   {reply, ok, State};
 
 handle_call(_Msg, _From, State) ->
@@ -181,7 +197,12 @@ notify_listeners(DbName, Event) ->
   Msg = {'$barrel_event', DbName, Event},
   Pattern = ets:fun2ms(fun({{{db, Db}, _}, Pid}) when Db =:= DbName; Db =:= 'all_dbs' -> Pid end),
   Subs = ets:select(?TAB, Pattern),
-  lists:foreach(fun(Pid) -> Pid ! Msg end, Subs).
+  lists:foreach(fun({Pid, once}) ->
+                    ets:delete(?TAB, {{db, DbName}, Pid}),
+                    Pid ! Msg;
+                   (Pid) ->
+                    Pid ! Msg
+                end, Subs).
 
 notify_listeners(DbName, DDoc, Event) ->
   Msg = {'$barrel_event', DbName, DDoc, Event},
@@ -200,6 +221,11 @@ do_register_dbs(Pid, DbNames) ->
                     Key = {{db, Db}, Pid},
                     ets:insert(?TAB, {Key, Pid})
                 end, DbNames),
+  maybe_monitor(Pid).
+
+do_register_once(Pid, DbName) ->
+  Key = {{db, DbName}, Pid},
+  ets:insert(?TAB, {Key, {Pid, once}}),
   maybe_monitor(Pid).
 
 maybe_monitor(Pid) ->
