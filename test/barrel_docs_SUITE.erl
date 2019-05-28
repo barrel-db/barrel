@@ -20,6 +20,7 @@
 
 -export([
   save_doc/1,
+  delete_barrel/1,
   update_non_existing_doc/1,
   replicate_none_existing_doc/1,
   delete_doc/1,
@@ -32,6 +33,7 @@
 all() ->
   [
     save_doc,
+    delete_barrel,
     update_non_existing_doc,
     replicate_none_existing_doc,
     delete_doc,
@@ -64,7 +66,6 @@ end_per_suite(Config) ->
   os:cmd("rm -rf /tmp/default_rocksdb_test"),
   Config.
 
-
 save_doc(_Config) ->
   {ok,  Barrel}= barrel_db:open_barrel(<<"test">>),
   Doc0 = #{ <<"id">> => <<"a">>, <<"v">> => 1},
@@ -74,6 +75,20 @@ save_doc(_Config) ->
   {ok, #{ <<"_rev">> := Rev2} } = _Doc2 = barrel:fetch_doc(Barrel, <<"a">>, #{}),
   {error, {conflict, revision_conflict}} =  barrel:save_doc(Barrel, Doc1#{ <<"v">> => 2 }),
   {error, {conflict, doc_exists}} = barrel:save_doc(Barrel, Doc0),
+  ok.
+
+delete_barrel(_Config) ->
+  ok = barrel:create_barrel(<<"test1">>),
+  {ok, Barrel} = barrel:open_barrel(<<"test1">>),
+  Doc0 = #{ <<"id">> => <<"a">>, <<"v">> => 1},
+  {ok, <<"a">>, _Rev} = barrel:save_doc(Barrel, Doc0),
+  {ok, #{ <<"id">> := <<"a">> }} = barrel:fetch_doc(Barrel, <<"a">>, #{}),
+  ok = barrel:delete_barrel(<<"test1">>),
+  {error, barrel_not_found} = barrel:open_barrel(<<"test1">>),
+  ok = barrel:create_barrel(<<"test1">>),
+  {ok, Barrel1} = barrel:open_barrel(<<"test1">>),
+  {error, not_found} = barrel:fetch_doc(Barrel1, <<"a">>, #{}),
+  ok = barrel:delete_barrel(<<"test1">>),
   ok.
 
 update_non_existing_doc(_Config) ->
