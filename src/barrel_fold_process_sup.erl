@@ -11,6 +11,7 @@ start_link() ->
 init([]) ->
   Spec = #{ id => barrel_fold_process,
             start => {barrel_fold_process, start_link, []},
-            restart => temporary },
+            restart => temporary,
+            shutdown => brutal_kill },
   SupFlags = #{ strategy => simple_one_for_one },
   {ok, {SupFlags, [Spec]}}.
