@@ -21,7 +21,8 @@
     gen_batch_server,
     opencensus,
     jobs,
-    lru
+    lru,
+    erlang_term
    ]},
   {env, []},
   {modules, []},
