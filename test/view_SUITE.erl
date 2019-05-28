@@ -300,7 +300,7 @@ fold_test(_Config) ->
               {Pid, Res} ->
                 supervisor:terminate_child(barrel_view_sup, ViewPid),
                 Res;
-              timeout ->
+              fold_timeout ->
                 supervisor:terminate_child(barrel_view_sup, ViewPid),
                 exit(fold_timeout)
             end,
