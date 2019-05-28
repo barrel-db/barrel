@@ -27,8 +27,8 @@ init(Parent, {fold_view, BarrelId, ViewId, To, Options}) ->
                 To ! {self(), {ok, Row}},
                 ok
             end,
-
- ok = ?STORE:fold_view_index(BarrelId, ViewId, FoldFun, ok, Options),
+ {ok, #{ ref := Ref }} = barrel_db:open_barrel(BarrelId),
+ ok = ?STORE:fold_view_index(Ref, ViewId, FoldFun, ok, Options),
  To ! {self(), done},
  %% remove the link to avoid a message to linked processes
  %% that are trapping exit signals

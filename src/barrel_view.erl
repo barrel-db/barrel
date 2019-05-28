@@ -43,7 +43,8 @@ init(#{barrel := BarrelId,
   process_flag(trap_exit, true),
   {ok, ViewConfig1} = ViewMod:init(ViewConfig0),
 
-  case ?STORE:open_view(BarrelId, ViewId, Version) of
+  {ok, #{ ref := Ref }} = barrel_db:open_barrel(BarrelId),
+  case ?STORE:open_view(Ref, ViewId, Version) of
     {ok, ViewRef, LastIndexedSeq, _OldVersion} ->
       View = #view{barrel=BarrelId,
                    ref=ViewRef,

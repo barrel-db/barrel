@@ -113,7 +113,6 @@ get_last_seq(Ident, ReadOpts0) ->
   _ = rocksdb:iterator_close(Itr),
   LastSeq.
 
-
 delete_barrel(Name) ->
   BarrelKey = barrel_rocksdb_keys:local_barrel_ident(Name),
   case rocksdb:get(?db, BarrelKey, []) of
@@ -418,7 +417,6 @@ get_local_doc(BarrelId, DocId) ->
 
 open_view(Id, ViewId, Version) ->
   ViewRef = barrel_rocksdb_keys:view_prefix(Id, ViewId),
-
   SeqKey = barrel_rocksdb_keys:view_indexed_seq(ViewRef),
   VersionKey = barrel_rocksdb_keys:view_version(ViewRef),
 
@@ -428,7 +426,7 @@ open_view(Id, ViewId, Version) ->
     not_found ->
       {ok, WB} = rocksdb:batch(),
       rocksdb:batch_put(WB, SeqKey, term_to_binary(0)),
-      rocksdb:batch_put(WB, SeqKey, term_to_binary(Version)),
+      rocksdb:batch_put(WB, VersionKey, term_to_binary(Version)),
       ok = try rocksdb:write_batch(?db, WB, [])
            after rocksdb:release_batch(WB)
            end,
@@ -483,13 +481,29 @@ update_view_index(ViewRef,DocId, KVs) ->
                     rocksdb:batch_single_delete(Batch, append_docid(K, DocId))
                 end, ToDelete),
   rocksdb:batch_put(Batch, RevMapKey, term_to_binary(ReverseMaps1)),
-   %% write the batch
+  %% write the batch
   ok = rocksdb:write_batch(?db, Batch, [{sync, true}]),
   ok = rocksdb:release_batch(Batch),
   ok.
 
 append_docid(KeyBin, DocId) ->
   barrel_encoding:encode_binary_ascending(KeyBin, DocId).
+
+
+next_term(I) when is_integer(I) ->
+  I + 1;
+next_term(true) ->
+  false;
+next_term(false) ->
+  true;
+next_term(null) ->
+  <<>>;
+next_term(B) when is_binary(B) ->
+  barrel_rocksdb_util:bytes_prefix_end(B).
+
+next_key(Key) ->
+  [End|R] = lists:reverse(Key),
+  lists:reverse([next_term(End) | R]).
 
 
 fold_view_index(Id, ViewId, UserFun, UserAcc, Options) ->
@@ -503,15 +517,23 @@ fold_view_index(Id, ViewId, UserFun, UserAcc, Options) ->
   BeginOrEqual = maps:get(begin_or_equal, Options, true),
   Begin = maps:get(begin_key, Options, [<<>>]),
   LowerBound = barrel_rocksdb_keys:encode_view_key(Begin, Prefix),
-  End = maps:get(end_key, Options, [?key_max]),
-  EndOrEqual = maps:get(end_or_equal, Options, true),
-  End1 = barrel_rocksdb_keys:encode_view_key(End, Prefix),
-  UpperBound = case EndOrEqual of
+
+  End = maps:get(end_key, Options, next_key(Begin)),
+  UpperBound = case maps:get(end_or_equal, Options, true) of
                  true ->
-                   barrel_rocksdb_util:bytes_next(End1);
+                    barrel_rocksdb_keys:encode_view_key(next_key(End), Prefix);
                  false ->
-                   End1
+                   barrel_rocksdb_keys:encode_view_key(End, Prefix)
                end,
+
+
+ %% End1 = barrel_rocksdb_keys:encode_view_key(End, Prefix),
+ %% UpperBound = case EndOrEqual of
+ %%                true ->
+ %%                  barrel_rocksdb_util:bytes_prefix_end(End1);
+ %%                false ->
+ %%                  End1
+ %%              end,
   Reverse = maps:get(reverse, Options, false),
   WithSnapshot = maps:get(snapshot, Options, false),
   Limit = maps:get(limit, Options, 1 bsl 64 - 1),

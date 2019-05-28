@@ -26,12 +26,7 @@
 %% @doc return the newt possibile key by appending 16#00 to it
 -spec bytes_next(binary()) -> binary().
 bytes_next(B) ->
-  L = bit_size(B) - 1,
-  case B of
-    << 16#00:1 >> -> B;
-    << _:L, 16#00:1 >> -> B;
-    _ -> << B/binary, 16#00 >>
-  end.
+  << B/binary, 16#00 >>.
 
 %% @doc return ending prefix
 
