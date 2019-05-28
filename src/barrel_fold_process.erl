@@ -17,7 +17,7 @@ start_link(Fold) ->
 init(Parent, {fold_view, BarrelId, ViewId, To, Options}) ->
   proc_lib:init_ack(Parent, {ok, self()}),
   %% link to the client
-  true = link(To),
+
   FoldFun = fun({DocId, Key, Value}, _) ->
                 Row = #{ key => Key,
                          value => Value,
@@ -28,8 +28,11 @@ init(Parent, {fold_view, BarrelId, ViewId, To, Options}) ->
                 ok
             end,
  {ok, #{ ref := Ref }} = barrel_db:open_barrel(BarrelId),
- ok = ?STORE:fold_view_index(Ref, ViewId, FoldFun, ok, Options),
+ ok = try ?STORE:fold_view_index(Ref, ViewId, FoldFun, ok, Options)
+      catch
+        C:E:T ->
+          io:format(user, "error c=~p e=~p t=~p~n", [C, E, T]),
+          exit(E)
+      end,
  To ! {self(), done},
- %% remove the link to avoid a message to linked processes
- %% that are trapping exit signals
- true = unlink(To).
+ ok.

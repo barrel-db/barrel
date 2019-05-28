@@ -249,15 +249,16 @@ fold_view(Barrel, View, Fun, Acc, Options) ->
                           {1 bsl 64 -1, Options}
                       end,
 
-  OldTrapExit = process_flag(trap_exit, true),
-  erlang:put(old_trap_exit, OldTrapExit),
+
   {ok, StreamPid} = barrel_view:get_range(Barrel, View, Options1),
+  MRef = erlang:monitor(process, StreamPid),
   ocp:record('barrel/views/fold_count', 1),
   Start = erlang:timestamp(),
   try fold_loop(StreamPid, Fun, Acc, Limit)
   after
     ocp:record('barrel/views/fold_duration',
-               timer:now_diff(erlang:timestamp(), Start))
+               timer:now_diff(erlang:timestamp(), Start)),
+    erlang:demonitor(MRef, [flush])
   end.
 
 fold_loop(StreamPid, Fun, Acc, Limit) when Limit > 0 ->
@@ -268,7 +269,6 @@ fold_loop(StreamPid, Fun, Acc, Limit) when Limit > 0 ->
         {ok, Acc2} ->
           fold_loop(StreamPid, Fun, Acc2, Limit -1);
         {stop, Acc2} ->
-          clear_fold(),
           _ = barrel_view:stop_kvs_stream(StreamPid),
           Acc2;
         {skip, Acc2} ->
@@ -277,24 +277,19 @@ fold_loop(StreamPid, Fun, Acc, Limit) when Limit > 0 ->
           fold_loop(StreamPid, Fun, Acc, Limit -1);
         skip ->
           fold_loop(StreamPid, Fun, Acc, Limit);
-
         stop ->
-          clear_fold(),
           _ = barrel_view:stop_kvs_stream(StreamPid),
           Acc
       end;
     {StreamPid, done} ->
-      clear_fold(),
-      Acc
+      Acc;
+    {'DOWN', _MRef, process, StreamPid, normal} ->
+      Acc;
+    {'DOWN', _MRef, process, StreamPid, Reason} ->
+      erlang:exit({stream_down, Reason})
   after Timeout ->
           erlang:exit(fold_timeout)
   end;
 fold_loop(_StreamPid, _Fun, Acc, 0) ->
-  clear_fold(),
   Acc.
-
-
-clear_fold() ->
-  OldTrapExit = erlang:get(old_trap_exit),
-  process_flag(trap_exit, OldTrapExit).
 
