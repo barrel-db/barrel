@@ -38,7 +38,6 @@ update_docs(Barrel, Docs, MergePolicy) ->
   ?start_span(#{ <<"log">> => <<"update docs">>,
                  <<"batch_size">> => length(Docs),
                  <<"merge_policy">> => barrel_lib:to_binary(MergePolicy) }),
-  TRef = erlang:send_after(5000, self(), update_timeout),
   Results = try
               [update_doc(Barrel, Doc, MergePolicy) || Doc <- Docs]
             after
@@ -59,6 +58,7 @@ do_update_doc(#{ name := Name } = Barrel, Doc, MergePolicy) ->
   StartTime = erlang:timestamp(),
   Record0 = barrel_doc:make_record(Doc),
   {_, Record1} = flush_attachments(Name, Record0),
+  TRef = erlang:send_after(5000, self(), update_timeout),
   jobs:run(barrel_write_queue,
            fun() ->
                update_doc_1(Barrel, Record1, MergePolicy, StartTime)
@@ -85,7 +85,7 @@ update_doc_1(#{ name := Name }, #{ ref := Ref } = Record, MergePolicy, StartTime
       exit({merge_down, Reason});
     update_timeout ->
       ocp:record('barrel/db/update_doc_timeout', 1),
-      erlang:demonnitor(MRef, [flush]),
+      erlang:demonitor(MRef, [flush]),
       exit(timeout)
   end.
 
