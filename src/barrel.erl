@@ -290,6 +290,7 @@ fold_loop(StreamPid, Fun, Acc, Limit) when Limit > 0 ->
   after Timeout ->
           erlang:exit(fold_timeout)
   end;
-fold_loop(_StreamPid, _Fun, Acc, 0) ->
+fold_loop(StreamPid, _Fun, Acc, 0) ->
+  _ = barrel_view:stop_kvs_stream(StreamPid),
   Acc.
 
