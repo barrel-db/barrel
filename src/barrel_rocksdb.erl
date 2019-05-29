@@ -425,7 +425,7 @@ open_view(Id, ViewId, Version) ->
       {ok, ViewRef, IndexedSeq, Version};
     not_found ->
       {ok, WB} = rocksdb:batch(),
-      rocksdb:batch_put(WB, SeqKey, term_to_binary(0)),
+      rocksdb:batch_put(WB, SeqKey, term_to_binary({0, 0})),
       rocksdb:batch_put(WB, VersionKey, term_to_binary(Version)),
       ok = try rocksdb:write_batch(?db, WB, [])
            after rocksdb:release_batch(WB)
