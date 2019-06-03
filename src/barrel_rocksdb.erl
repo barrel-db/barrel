@@ -75,8 +75,7 @@ create_barrel(Name) ->
     {ok, _Ident} ->
       {error, barrel_already_exists};
     not_found ->
-       ok = counters:add(Counters, 1, 1),
-       Id = counters:get(Counters, 1),
+       Id = atomics:add_get(Counters, 1, 1),
        BinId = << Id:32/integer >>,
        {ok, WB} = rocksdb:batch(),
        ok = rocksdb:batch_put(WB, BarrelKey, BinId),
@@ -713,8 +712,8 @@ init_db(Dir, RateLimiter, Cache) ->
                   end,
       ok = rocksdb:iterator_close(Itr),
       %% we stotre the last ident in an atomic counter
-      DbCounters = counters:new(1, []),
-      counters:put(DbCounters, 1, LastIdent),
+      DbCounters = atomics:new(1, []),
+      atomics:put(DbCounters, 1, LastIdent),
       {ok, #{ ref => Ref, counters => DbCounters }};
     Error ->
       Error
