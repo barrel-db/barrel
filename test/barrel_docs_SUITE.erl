@@ -25,8 +25,8 @@
   replicate_none_existing_doc/1,
   delete_doc/1,
   save_docs/1,
-  all_or_nothing/1,
   fold_docs/1,
+  all_or_nothing/1,
   fold_changes/1
 ]).
 
@@ -103,7 +103,7 @@ replicate_none_existing_doc(_Config) ->
               <<"history">> => [<<"1-76d70d853c9fcf1f83a6b4b6cf3776633d28f480cb0dd7ee8b68d5bfc434360a">>],
               <<"doc">> => Doc},
   {ok,  Barrel}= barrel_db:open_barrel(<<"test">>),
-  ok = barrel:save_replicated_docs(Barrel, [RepDoc]),
+  {ok, [{ok, <<"a">>, Rev}]} = barrel:save_docs(Barrel, [RepDoc], #{ merge_policy => merge_with_conflict }),
   {ok, #{ <<"_rev">> := Rev} } = barrel:fetch_doc(Barrel, <<"a">>, #{}),
   Rev = <<"1-76d70d853c9fcf1f83a6b4b6cf3776633d28f480cb0dd7ee8b68d5bfc434360a">>.
 
@@ -134,10 +134,12 @@ all_or_nothing(_Config) ->
   {ok,  Barrel}= barrel_db:open_barrel(<<"test">>),
   Doc0 = #{ <<"id">> => <<"a">>, <<"v">> => 1},
   {ok, <<"a">>, Rev1} = barrel:save_doc(Barrel, Doc0),
-  {ok, [{ok, <<"a">>, Rev2}]} = barrel:save_docs(Barrel, [Doc0#{ <<"_rev">> => Rev1}], #{ all_or_nothing => true}),
+  {ok, [{ok, <<"a">>, Rev2}]} =
+    barrel:save_docs(Barrel, [Doc0#{ <<"_rev">> => Rev1}], #{ merge_policy => merge_with_conflict }),
   true = (Rev2 =/= Rev1),
   Doc1 = #{ <<"id">> => <<"b">>, <<"v">> => 1},
-  {ok, [{ok, <<"b">>, _RevB}]} = barrel:save_docs(Barrel, [Doc1], #{ all_or_nothing => true}),
+  {ok, [{ok, <<"b">>, _RevB}]} =
+    barrel:save_docs(Barrel, [Doc1], #{ merge_policy => merge_with_conflict }),
   ok.
 
 fold_docs(_Config) ->

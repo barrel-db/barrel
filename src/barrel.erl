@@ -28,10 +28,10 @@
 
 -export([
   fetch_doc/3,
-  save_doc/2,
-  delete_doc/3,
+  save_doc/2, save_doc/3,
+  delete_doc/3, delete_doc/4,
   save_docs/2,  save_docs/3,
-  delete_docs/2,
+  delete_docs/2, delete_docs/3,
   fold_docs/4,
   fold_changes/5,
   save_replicated_docs/2
@@ -42,7 +42,7 @@
 -export([start_view/4, start_view/5]).
 -export([fold_view/5]).
 
--include_lib("barrel/include/barrel.hrl").
+-include_lib("barrel.hrl").
 
 -type barrel_infos() :: #{
   updated_seq := {non_neg_integer(), non_neg_integer()},
@@ -78,7 +78,8 @@
 }.
 
 -type save_options() :: #{
-  all_or_nothing => boolean()
+        merge_policy => fail_on_conflict | merge_with_conflict,
+        timestamp => binary()
 }.
 
 
@@ -135,9 +136,12 @@ fetch_attachment(Barrel, DocId, AttName) ->
   DocError :: {conflict, revision_conflict} | {conflict, doc_exists},
   SaveResult :: {ok, DocId , RevId} | {error, DocError} | {error, db_not_found}.
 save_doc(Barrel, Doc) ->
-  {ok, [Res]} = barrel_db:update_docs(Barrel, [Doc], #{}, interactive_edit),
+  {ok, [Res]} = barrel_db:update_docs(Barrel, [Doc], #{}),
   Res.
 
+save_doc(Barrel, Doc, Options) ->
+  {ok, [Res]} = barrel_db:update_docs(Barrel, [Doc], Options),
+  Res.
 
 %% @doc delete a document, it doesn't delete the document from the filesystem
 %% but instead create a tombstone that allows barrel to replicate a deletion.
@@ -148,10 +152,13 @@ save_doc(Barrel, Doc) ->
   DocError :: {conflict, revision_conflict} | {conflict, doc_exists},
   DeleteResult :: {ok, DocId , RevId} | {error, DocError} | {error, db_not_found}.
 delete_doc(Barrel, DocId, Rev) ->
+  delete_doc(Barrel, DocId, Rev, #{}).
+
+delete_doc(Barrel, DocId, Rev, Options) ->
   {ok, [Res]} =  barrel_db:update_docs(
     Barrel,
     [#{ <<"id">> => DocId, <<"_rev">> => Rev, <<"_deleted">> => true}],
-    #{}, interactive_edit
+    Options
   ),
   Res.
 
@@ -177,14 +184,14 @@ save_docs(Barrel, Docs) ->
   SaveResult :: {ok, DocId , RevId} | {error, DocError} | {error, db_not_found},
   SaveResults :: {ok, [SaveResult]}.
 save_docs(Barrel, Docs, Options) ->
-  barrel_db:update_docs(Barrel, Docs, Options, interactive_edit).
+  barrel_db:update_docs(Barrel, Docs, Options).
 
 -spec save_replicated_docs(Name, Docs) -> SaveResult when
   Name :: barrel(),
   Docs :: [barrel_doc:doc()],
   SaveResult :: ok.
 save_replicated_docs(Barrel, Docs) ->
-  {ok, _} = barrel_db:update_docs(Barrel, Docs, #{}, replicated_changes),
+  {ok, _} = barrel_db:update_docs(Barrel, Docs, #{ merge_policy => merge_with_conflict }),
   ok.
 
 %% @doc delete multiple docs
@@ -197,6 +204,9 @@ save_replicated_docs(Barrel, Docs) ->
   SaveResult :: {ok, DocId , RevId} | {error, DocError} | {error, db_not_found},
   SaveResults :: {ok, [SaveResult]}.
 delete_docs(Barrel, DocsOrDocsRevId) ->
+  delete_docs(Barrel, DocsOrDocsRevId, #{}).
+
+delete_docs(Barrel, DocsOrDocsRevId, Options) ->
   Docs = lists:map(
     fun
       (#{ <<"id">> := _, <<"_deleted">> := true, <<"_rev">> := _ }=Doc) -> Doc;
@@ -205,7 +215,7 @@ delete_docs(Barrel, DocsOrDocsRevId) ->
     end,
     DocsOrDocsRevId
   ),
-  save_docs(Barrel, Docs).
+  save_docs(Barrel, Docs, Options).
 
 -spec fold_docs(Name, Fun, AccIn, Options) -> AccOut when
   Name :: barrel(),

@@ -17,7 +17,6 @@
 -behavior(gen_server).
 
 -export([update_docs/3]).
--export([update_doc/3]).
 
 -export([start_link/1]).
 
@@ -34,43 +33,36 @@
 
 -define(CHUNK_SIZE, 5 * 1024 * 1000). %% 5 MB.
 
-update_docs(Barrel, Docs, MergePolicy) ->
+update_docs(Barrel, Docs, Options) ->
+  MergePolicy = maps:get(merge_policy, Options, fail_on_conflict),
   ?start_span(#{ <<"log">> => <<"update docs">>,
                  <<"batch_size">> => length(Docs),
                  <<"merge_policy">> => barrel_lib:to_binary(MergePolicy) }),
   TRef = erlang:send_after(5000, self(), update_timeout),
   Results = try
-              [update_doc(Barrel, Doc, MergePolicy) || Doc <- Docs]
+              [do_update_doc(Barrel, Doc, Options) || Doc <- Docs]
             after
               ?end_span
             end,
   _ = erlang:cancel_timer(TRef),
   {ok, Results}.
 
-update_doc(Barrel, Doc, MergePolicy) ->
-    ?start_span(#{ <<"log">> => <<"update doc">>,
-                 <<"merge_policy">> => barrel_lib:to_binary(MergePolicy) }),
-    try do_update_doc(Barrel, Doc, MergePolicy)
-    after
-      ?end_span
-    end.
-
-do_update_doc(#{ name := Name } = Barrel, Doc, MergePolicy) ->
+do_update_doc(#{ name := Name } = Barrel, Doc, Options) ->
   StartTime = erlang:timestamp(),
   Record0 = barrel_doc:make_record(Doc),
   {_, Record1} = flush_attachments(Name, Record0),
   jobs:run(barrel_write_queue,
            fun() ->
-               update_doc_1(Barrel, Record1, MergePolicy, StartTime)
+               update_doc_1(Barrel, Record1, Options, StartTime)
            end).
 
 
 
-update_doc_1(#{ name := Name }, #{ ref := Ref } = Record, MergePolicy, StartTime) ->
+update_doc_1(#{ name := Name }, #{ ref := Ref } = Record, Options, StartTime) ->
   SpanCtx = ocp:current_span_ctx(),
   Tags = ocp:current_tags(),
   gen_server:cast({via, gproc, ?barrel(Name)},
-                  {{update_doc, self(), Record, MergePolicy}, SpanCtx, Tags}),
+                  {{update_doc, self(), Record, Options}, SpanCtx, Tags}),
 
   MRef = erlang:monitor(process, gproc:where(?barrel(Name))),
   receive
@@ -144,10 +136,11 @@ init([Name]) ->
 handle_call(_Msg, _From, State) ->
   {reply, bad_call, State}.
 
-handle_cast({{update_doc, From, #{ id := DocId, ref := Ref } = Record, MergePolicy},
+handle_cast({{update_doc, From, #{ id := DocId, ref := Ref } = Record, Options},
              SpanCtx, Tags},
             #{ name := Name, ref := BarrelRef, updated_seq := {Epoch, Seq} } = State) ->
 
+  MergePolicy = maps:get(merge_policy, Options, fail_on_conflict),
   _ = ocp:with_span_ctx(SpanCtx),
   _ = ocp:with_tags(Tags),
   case get_docinfo(BarrelRef, DocId) of
@@ -227,7 +220,7 @@ get_docinfo(BarrelRef, DocId) ->
      Error
  end.
 
-do_merge(Record, DI, merge) ->
+do_merge(Record, DI, fail_on_conflict) ->
   merge_revtree(Record, DI);
 do_merge(Record, DI, merge_with_conflict) ->
   merge_revtree_with_conflict(Record, DI).

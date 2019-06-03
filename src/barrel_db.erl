@@ -28,7 +28,7 @@
 
 -export([
   fetch_doc/3,
-  update_docs/4,
+  update_docs/3,
   revsdiff/3,
   fold_docs/4,
   fold_changes/5
@@ -480,15 +480,9 @@ change_with_doc(Change, DocId, Rev, Ctx, true, true) ->
 change_with_doc(Change, _, _, _, _, _) ->
   Change.
 
-update_docs(Barrel, Docs, Options, interactive_edit) ->
-  AllOrNothing =  maps:get(all_or_nothing, Options, false),
-  MergePolicy = case AllOrNothing of
-                  true -> merge_with_conflict;
-                  false -> merge
-                end,
-  barrel_db_writer:update_docs(Barrel, Docs, MergePolicy);
-update_docs(Barrel, Docs, _Options, replicated_changes) ->
-  barrel_db_writer:update_docs(Barrel, Docs, merge).
+
+update_docs(Barrel, Docs, Options) ->
+  barrel_db_writer:update_docs(Barrel, Docs, Options).
 
 maybe_add_deleted(Doc, true) -> Doc#{ <<"_deleted">> => true };
 maybe_add_deleted(Doc, false) -> Doc.
