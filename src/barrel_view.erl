@@ -100,7 +100,6 @@ idle({call, From}, {refresh_index, Last}, #{ barrel := Barrel,
                                              view := View,
                                              since := Since,
                                              waiters := Waiters } = Data) ->
-  io:format(user, "last=~p since=~p~n", [Last, Since]),
   if
     Last =< Since ->
       {keep_state, Data, [{reply, From, {ok, Since} }]};
