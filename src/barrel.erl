@@ -19,7 +19,7 @@
 
 %% API
 -export([
-  create_barrel/1,
+  create_barrel/1, create_barrel/2,
   open_barrel/1,
   close_barrel/1,
   delete_barrel/1,
@@ -86,7 +86,10 @@
 %% @doc create a barrel, (note: for now the options is an empty map)
 -spec create_barrel(Name :: barrel()) -> ok | {error, any()}.
 create_barrel(Name) ->
-  barrel_db:create_barrel(Name).
+  create_barrel(Name, #{}).
+
+create_barrel(Name, Options) ->
+  barrel_db:create_barrel(Name, Options).
 
 -spec open_barrel(Name :: barrel()) -> {ok, barrel()} | {error, barrel_not_found} | {error, any()}.
 open_barrel(Name) ->
