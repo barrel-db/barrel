@@ -34,8 +34,8 @@
 -export([
   doc_info/2,
   doc_info_max/1,
-  doc_seq/2,
-  decode_doc_seq/2,
+  doc_seq/3,
+  decode_doc_seq/3,
   doc_seq_max/1,
   doc_seq_prefix/1,
   doc_rev/3,
@@ -119,21 +119,17 @@ doc_info_max(BarrelId) ->
      (barrel_rocksdb_util:bytes_prefix_end(?docs_info_suffix))/binary >>.
 
 %% @doc document sequence key
-doc_seq(BarrelId, {Epoch, Seq}) ->
-  barrel_encoding:encode_uint64_ascending(
+doc_seq(BarrelId, Timestamp, Seq) ->
     barrel_encoding:encode_uint64_ascending(
-      << (db_prefix(BarrelId))/binary, ?docs_sec_suffix/binary >>,
-      Epoch
-     ),
-    Seq
-   ).
+      << (doc_seq_prefix(BarrelId))/binary, Timestamp/binary >>,
+      Seq
+     ).
 
-decode_doc_seq(BarrelId, SeqKey) ->
+decode_doc_seq(BarrelId, Timestamp_Size, SeqKey) ->
   case binary:split(SeqKey, doc_seq_prefix(BarrelId)) of
-    [<<>>, EpochPart] ->
-      {Epoch, SeqPart} = barrel_encoding:decode_uint64_ascending(EpochPart),
+    [<<>>, << Ts:Timestamp_Size/binary, SeqPart/binary >>] ->
       {Seq, _} = barrel_encoding:decode_uint64_ascending(SeqPart),
-      {Epoch, Seq};
+      {Ts, Seq};
     [] ->
       erlang:error(badarg)
   end.
@@ -143,7 +139,7 @@ doc_seq_prefix(BarrelId) -> << (db_prefix(BarrelId))/binary, ?docs_sec_suffix/bi
 
 %% @doc max document sequence key
 doc_seq_max(BarrelId) ->
-  doc_seq(BarrelId, {1  bsl 64 - 1, 0}).
+  doc_seq(BarrelId, ?key_max, 0).
 
 %% @doc document revision key
 doc_rev(BarrelId, DocId, DocRev) ->

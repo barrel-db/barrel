@@ -43,8 +43,8 @@ init(#{barrel := BarrelId,
   process_flag(trap_exit, true),
   {ok, ViewConfig1} = ViewMod:init(ViewConfig0),
 
-  {ok, #{ ref := Ref }} = barrel_db:open_barrel(BarrelId),
-  case ?STORE:open_view(Ref, ViewId, Version) of
+  {ok, #{ ref := Ref, timestamp_size := Timestamp_size  }} = barrel_db:open_barrel(BarrelId),
+  case ?STORE:open_view(Ref, ViewId, Timestamp_size, Version) of
     {ok, ViewRef, LastIndexedSeq, _OldVersion} ->
       View = #view{barrel=BarrelId,
                    ref=ViewRef,
@@ -100,6 +100,7 @@ idle({call, From}, {refresh_index, Last}, #{ barrel := Barrel,
                                              view := View,
                                              since := Since,
                                              waiters := Waiters } = Data) ->
+  io:format(user, "last=~p since=~p~n", [Last, Since]),
   if
     Last =< Since ->
       {keep_state, Data, [{reply, From, {ok, Since} }]};

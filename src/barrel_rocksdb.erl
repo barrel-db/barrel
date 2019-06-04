@@ -10,11 +10,11 @@
 -author("benoitc").
 
 
--export([create_barrel/1,
+-export([create_barrel/2,
          open_barrel/1,
          delete_barrel/1,
          barrel_infos/1,
-         last_updated_seq/1]).
+         last_updated_seq/2]).
 
 
 %% write api
@@ -25,7 +25,7 @@
 
 
 %% query API
--export([init_ctx/2,
+-export([init_ctx/3,
          release_ctx/1,
          get_doc_info/2,
          get_doc_revision/3,
@@ -33,7 +33,7 @@
          fold_changes/4,
          get_local_doc/2]).
 
--export([open_view/3,
+-export([open_view/4,
          update_indexed_seq/2,
          update_view_checkpoint/2,
          update_view_index/3,
@@ -68,45 +68,50 @@
 %% -------------------
 %% store api
 
-create_barrel(Name) ->
+create_barrel(Name, Options) ->
   #{ ref := Ref, counters := Counters } = ?db_ref,
   BarrelKey = barrel_rocksdb_keys:local_barrel_ident(Name),
   case rocksdb:get(Ref, BarrelKey, []) of
     {ok, _Ident} ->
       {error, barrel_already_exists};
     not_found ->
-       Id = atomics:add_get(Counters, 1, 1),
-       BinId = << Id:32/integer >>,
-       {ok, WB} = rocksdb:batch(),
-       ok = rocksdb:batch_put(WB, BarrelKey, BinId),
-       ok = rocksdb:batch_put(WB, barrel_rocksdb_keys:docs_count(BinId), integer_to_binary(0)),
-       ok = rocksdb:batch_put(WB, barrel_rocksdb_keys:docs_del_count(BinId), integer_to_binary(0)),
-       ok = rocksdb:write_batch(Ref, WB, [{sync, true}]),
-       ok = rocksdb:release_batch(WB),
-       ok
+      Id = atomics:add_get(Counters, 1, 1),
+      BinId = << Id:32/integer >>,
+      OptionsBin = term_to_binary(Options),
+      DbVal = << BinId/binary, OptionsBin/binary >>,
+      {ok, WB} = rocksdb:batch(),
+      ok = rocksdb:batch_put(WB, BarrelKey, DbVal),
+      ok = rocksdb:batch_put(WB, barrel_rocksdb_keys:docs_count(BinId), integer_to_binary(0)),
+      ok = rocksdb:batch_put(WB, barrel_rocksdb_keys:docs_del_count(BinId), integer_to_binary(0)),
+      ok = rocksdb:write_batch(Ref, WB, [{sync, true}]),
+      ok = rocksdb:release_batch(WB),
+      ok
   end.
+
 
 open_barrel(Name) ->
   BarrelKey = barrel_rocksdb_keys:local_barrel_ident(Name),
   case rocksdb:get(?db, BarrelKey, []) of
-    {ok, Ident} ->
-      LastSeq = get_last_seq(Ident, []),
-      {ok, Ident, LastSeq};
+    {ok, << Ident:4/binary, OptionsBin/binary >>} ->
+      Options = binary_to_term(OptionsBin),
+      Timestamp_Size = maps:get(timestamp_size, Options, 0),
+      {_, LastSeq} = get_last_seq(Ident, Timestamp_Size, []),
+      {ok, Ident, Options, LastSeq};
     not_found ->
       {error, barrel_not_found};
     Error ->
       Error
   end.
 
-get_last_seq(Ident, ReadOpts0) ->
+get_last_seq(Ident, Timestamp_Size, ReadOpts0) ->
   ReadOpts =
     [{iterate_lower_bound, barrel_rocksdb_keys:doc_seq_prefix(Ident)} | ReadOpts0],
   {ok, Itr} = rocksdb:iterator(?db, ReadOpts),
   MaxSeq = barrel_rocksdb_keys:doc_seq_max(Ident),
   LastSeq = case rocksdb:iterator_move(Itr, {seek_for_prev, MaxSeq}) of
               {ok, SeqKey, _} ->
-                barrel_rocksdb_keys:decode_doc_seq(Ident, SeqKey);
-              _ -> {0, 0}
+                barrel_rocksdb_keys:decode_doc_seq(Ident, Timestamp_Size, SeqKey);
+              _ -> {<<>>, 0}
             end,
   _ = rocksdb:iterator_close(Itr),
   LastSeq.
@@ -114,7 +119,7 @@ get_last_seq(Ident, ReadOpts0) ->
 delete_barrel(Name) ->
   BarrelKey = barrel_rocksdb_keys:local_barrel_ident(Name),
   case rocksdb:get(?db, BarrelKey, []) of
-    {ok, Ident} ->
+  {ok, << Ident:4/binary, _/binary >>} ->
       %% first delete atomically all barrel metadata
       ok = rocksdb:delete(?db, BarrelKey, []),
       %% delete barrel data
@@ -133,13 +138,15 @@ barrel_infos(Name) ->
   {ok, Snapshot} = rocksdb:snapshot(?db),
   ReadOpts = [{snapshot, Snapshot}],
   case rocksdb:get(?db, BarrelKey, ReadOpts) of
-    {ok, Ident} ->
+    {ok, << Ident:4/binary, OptionsBin/binary >>} ->
+      Options = binary_to_term(OptionsBin),
+      Timestamp_Size = maps:get(timestamp_size, Options, 0),
       %% NOTE: we should rather use the multiget API from rocksdb there
       %% but until it's not exposed just get the results for each Keys
       {ok, DocsCount} = db_get_int(barrel_rocksdb_keys:docs_count(Ident), 0, ReadOpts),
       {ok, DelDocsCount} = db_get_int(barrel_rocksdb_keys:docs_del_count(Ident), 0, ReadOpts),
       %% get last sequence
-      LastSeq = get_last_seq(Ident, ReadOpts),
+      LastSeq = get_last_seq(Ident, Timestamp_Size, ReadOpts),
       _ = rocksdb:release_snapshot(Snapshot),
       {ok, #{ updated_seq => LastSeq,
               docs_count => DocsCount,
@@ -148,8 +155,13 @@ barrel_infos(Name) ->
       {error, barrel_not_found}
   end.
 
-last_updated_seq(Ident) ->
-   get_last_seq(Ident, []).
+last_updated_seq(Ident, Timestamp_Size) ->
+   seq_prop(get_last_seq(Ident, Timestamp_Size, [])).
+
+seq_prop({<<>>, Seq}) ->
+  Seq;
+seq_prop({Timestamp, Seq}) ->
+  << Timestamp/binary, "-", (integer_to_binary(Seq))/binary >>.
 
 
 %% -------------------
@@ -201,11 +213,11 @@ update_doc(BarrelId, DI, DocRev, DocBody, OldSeq, OldDel) ->
   end.
 
 do_update_doc(BarrelId, #{ deleted := Del } = DI,
-           DocRev, DocBody, OldSeq, OldDel) ->
+           DocRev, DocBody, {OldTs, OldSeq}, OldDel) ->
 
   {ok, Batch} = rocksdb:batch(),
   batch_put_doc(Batch, BarrelId, DI, DocRev, DocBody),
-  OldSeqKey = barrel_rocksdb_keys:doc_seq(BarrelId, OldSeq),
+  OldSeqKey = barrel_rocksdb_keys:doc_seq(BarrelId, OldTs, OldSeq),
   ok = rocksdb:batch_single_delete(Batch, OldSeqKey),
   case {Del, OldDel} of
     {true, false} ->
@@ -219,9 +231,9 @@ do_update_doc(BarrelId, #{ deleted := Del } = DI,
   end,
   write_batch(Batch).
 
-batch_put_doc(Batch, BarrelId, #{ id := DocId, seq := Seq } = DI, DocRev, DocBody) ->
+batch_put_doc(Batch, BarrelId, #{ id := DocId, seq := {Ts, Seq} } = DI, DocRev, DocBody) ->
   DIKey = barrel_rocksdb_keys:doc_info(BarrelId, DocId),
-  SeqKey = barrel_rocksdb_keys:doc_seq(BarrelId, Seq),
+  SeqKey = barrel_rocksdb_keys:doc_seq(BarrelId, Ts, Seq),
   RevKey = barrel_rocksdb_keys:doc_rev(BarrelId, DocId, DocRev),
   DIVal = term_to_binary(DI),
   rocksdb:batch_put(Batch, DIKey, DIVal),
@@ -250,7 +262,7 @@ delete_local_doc(BarrelId, DocId) ->
   LocalKey = barrel_rocksdb_keys:local_doc(BarrelId, DocId),
   rocksdb:delete(?db, LocalKey, []).
 
-init_ctx(BarrelId, IsRead) ->
+init_ctx(BarrelId, Timestamp_Size, IsRead) ->
   Snapshot = case IsRead of
                true ->
                  {ok, S} = rocksdb:snapshot(?db),
@@ -260,6 +272,7 @@ init_ctx(BarrelId, IsRead) ->
              end,
 
   {ok, #{ barrel_id => BarrelId,
+          timestamp_size => Timestamp_Size,
           snapshot => Snapshot }}.
 
 release_ctx(Ctx) ->
@@ -371,8 +384,8 @@ do_fold_docs({ok, Key, Value}, Next, UserFun, UserAcc, PrevTo, Limit) when Limit
 do_fold_docs(_Else, _, _, UserAcc, _, _) ->
   UserAcc.
 
-fold_changes(#{ barrel_id := BarrelId } = Ctx, Since, UserFun, UserAcc) ->
-  LowerBound = barrel_rocksdb_keys:doc_seq(BarrelId, Since),
+fold_changes(#{ barrel_id := BarrelId } = Ctx, {Timestamp, Seq}, UserFun, UserAcc) ->
+  LowerBound = barrel_rocksdb_keys:doc_seq(BarrelId, Timestamp, Seq),
   UpperBound = barrel_rocksdb_keys:doc_seq_max(BarrelId),
   ReadOptions = [{iterate_lower_bound, LowerBound},
                   {iterate_upper_bound, UpperBound}] ++ read_options(Ctx),
@@ -411,7 +424,7 @@ get_local_doc(BarrelId, DocId) ->
 %% -------------------
 %% view
 
-open_view(Id, ViewId, Version) ->
+open_view(Id, ViewId, Timestamp_size, Version) ->
   ViewRef = barrel_rocksdb_keys:view_prefix(Id, ViewId),
   SeqKey = barrel_rocksdb_keys:view_indexed_seq(ViewRef),
   VersionKey = barrel_rocksdb_keys:view_version(ViewRef),
@@ -420,13 +433,17 @@ open_view(Id, ViewId, Version) ->
     {ok, [IndexedSeq, Version]} ->
       {ok, ViewRef, IndexedSeq, Version};
     not_found ->
+      First = case Timestamp_size of
+                0 -> 0;
+                _ -> {<<>>, 0}
+              end,
       {ok, WB} = rocksdb:batch(),
-      rocksdb:batch_put(WB, SeqKey, term_to_binary({0, 0})),
+      rocksdb:batch_put(WB, SeqKey, term_to_binary(First)),
       rocksdb:batch_put(WB, VersionKey, term_to_binary(Version)),
       ok = try rocksdb:write_batch(?db, WB, [])
            after rocksdb:release_batch(WB)
            end,
-      {ok, ViewRef, {0, 0}, Version};
+      {ok, ViewRef, First, Version};
     Error ->
       Error
   end.

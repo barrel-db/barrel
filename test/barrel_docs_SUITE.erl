@@ -27,7 +27,8 @@
   save_docs/1,
   fold_docs/1,
   all_or_nothing/1,
-  fold_changes/1
+  fold_changes/1,
+  timestamp/1
 ]).
 
 all() ->
@@ -40,7 +41,8 @@ all() ->
     save_docs,
     all_or_nothing,
     fold_docs,
-    fold_changes
+    fold_changes,
+    timestamp
   ].
 
 init_per_suite(Config) ->
@@ -179,14 +181,39 @@ fold_changes(_Config) ->
   Fun = fun(#{ <<"id">> := Id }, Acc) -> {ok, [ Id | Acc ]} end,
   {ok, Changes1, LastSeq1} = barrel:fold_changes(Barrel, first, Fun, [], #{}),
   5 = length(Changes1),
-  {_, 5} = LastSeq1,
+  5 = LastSeq1,
   [<<"a">>, <<"b">>, <<"c">>, <<"d">>, <<"e">>] = lists:reverse(Changes1),
   {ok, #{ <<"_rev">> := RevC}} = barrel:fetch_doc(Barrel, <<"c">>, #{}),
   {ok, _, _} = barrel:delete_doc(Barrel, <<"c">>, RevC),
   {error, not_found} = barrel:fetch_doc(Barrel, <<"c">>, #{}),
   {ok, Changes2, LastSeq2} = barrel:fold_changes(Barrel, LastSeq1, Fun, [], #{}),
   [<<"c">>] = lists:reverse(Changes2),
-  {_, 6} = LastSeq2,
+  6 = LastSeq2,
   {ok, [], LastSeq2} = barrel:fold_changes(Barrel, LastSeq2, Fun, [], #{include_deleted => true}),
   ok.
 
+
+timestamp(_Config) ->
+  Timestamp = integer_to_binary(os:system_time(millisecond)),
+  ok = barrel_db:create_barrel(<<"test1">>, #{ timestamp_size => byte_size(Timestamp) }),
+  {ok, Barrel} = barrel:open_barrel(<<"test1">>),
+
+  Docs = [
+    #{ <<"id">> => <<"a">>, <<"v">> => 1},
+    #{ <<"id">> => <<"b">>, <<"v">> => 2},
+    #{ <<"id">> => <<"c">>, <<"v">> => 3},
+    #{ <<"id">> => <<"d">>, <<"v">> => 4},
+    #{ <<"id">> => <<"e">>, <<"v">> => 5}
+  ],
+  {ok, _Saved} = barrel:save_docs(Barrel, Docs,  #{ timestamp => Timestamp }),
+
+  Fun = fun(#{ <<"id">> := Id }, Acc) -> {ok, [ Id | Acc ]} end,
+  {ok, Changes1, LastSeq1} = barrel:fold_changes(Barrel, first, Fun, [], #{}),
+  5 = length(Changes1),
+  LastSeq1 =  << Timestamp/binary, "-5" >>,
+  [<<"a">>, <<"b">>, <<"c">>, <<"d">>, <<"e">>] = lists:reverse(Changes1),
+
+
+
+
+  ok = barrel:delete_barrel(<<"test1">>).

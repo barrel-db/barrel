@@ -18,7 +18,7 @@
 %% API
 
 -export([
-  create_barrel/1,
+  create_barrel/1, create_barrel/2,
   open_barrel/1,
   close_barrel/1,
   delete_barrel/1,
@@ -49,18 +49,33 @@
   end).
 
 create_barrel(Name) ->
+  create_barrel(Name, #{}).
+
+create_barrel(Name, Options) ->
+  ok = validate_barrel_options(Options),
   ?start_span(#{ <<"log">> => <<"create barrel">>,
                  <<"barrel">> => Name }),
   with_locked_barrel(
     Name,
     fun() ->
-        try ?STORE:create_barrel(Name)
+        try ?STORE:create_barrel(Name, Options)
         after
           ?end_span
         end
 
     end
   ).
+
+validate_barrel_options(Options) ->
+  maps:fold(fun
+              (timestamp_size, Sz, _) when is_integer(Sz), Sz >= 0 ->
+                ok;
+              (timestamp_size, _, _)  ->
+                exit(badarg);
+              (_, _, _) ->
+                ok
+            end, ok, Options).
+
 
 open_barrel(Name) ->
   ?start_span(#{ <<"log">> => <<"open barrel">>,
@@ -133,14 +148,14 @@ barrel_infos(Name) ->
 
 last_updated_seq(Name) ->
   case open_barrel(Name) of
-    {ok, #{ ref := Ref}} ->
-      ?STORE:last_updated_seq(Ref);
+    {ok, #{ ref := Ref, timestamp_size := Timestamp_Size }} ->
+      ?STORE:last_updated_seq(Ref, Timestamp_Size);
     Error ->
       Error
   end.
 
-with_ctx(#{ ref := Ref  }, Fun) ->
-  {ok, Ctx} = ?STORE:init_ctx(Ref, true),
+with_ctx(#{ ref := Ref, timestamp_size := Timestamp_Size  }, Fun) ->
+  {ok, Ctx} = ?STORE:init_ctx(Ref, Timestamp_Size, true),
   try Fun(Ctx)
   after
     ?STORE:release_ctx(Ctx)
@@ -404,22 +419,32 @@ fold_changes(Barrel, Since, UserFun, UserAcc, Options) ->
     end
    ).
 
-fold_changes_1(Ctx, Since0, UserFun, UserAcc, Options) ->
-  {SinceEpoch, SinceSeq}= Since = case Since0 of
-                                    first -> {0, 0};
-                                    {_, _} -> Since0;
-                                    _ ->
-                                      erlang:error(badarg)
-                                  end,
+seq_prop({<<>>, Seq}) ->
+  Seq;
+seq_prop({Timestamp, Seq}) ->
+  << Timestamp/binary, "-", (integer_to_binary(Seq))/binary >>.
+
+parse_since({_, _} = Since) -> Since;
+parse_since(first) -> {<<>>, 0};
+parse_since(Since) when is_integer(Since) -> {<<>>, Since};
+parse_since(Since) when is_binary(Since) ->
+  case binary:split(Since, <<"-">>) of
+    [Timestamp, SeqBin] ->
+      {Timestamp, binary_to_integer(SeqBin)};
+    _ ->
+      erlang:exit(badarg)
+  end.
+
+fold_changes_1(Ctx, Since, UserFun, UserAcc, Options) ->
+  {Timestamp, SinceSeq}= parse_since(Since),
   %% get options
   IncludeDoc = maps:get(include_doc, Options, false),
   WithHistory = maps:get(with_history, Options, false),
-  IsTerm = maps:get(erlang_term, Options, false),
   WrapperFun =
     fun
       (_, DI, {Acc0, _}) ->
         #{id := DocId,
-          seq := {Epoch, Seq}=LSN,
+          seq := Seq,
           deleted := Deleted,
           rev := Rev,
           revtree := RevTree } = DI,
@@ -427,57 +452,45 @@ fold_changes_1(Ctx, Since0, UserFun, UserAcc, Options) ->
                     false -> [Rev];
                     true -> barrel_revtree:history(Rev, RevTree)
                   end,
+        SeqProp = seq_prop(Seq),
         Change0 =
-          case IsTerm of
-            false ->
-              #{ <<"id">> => DocId,
-                 <<"seq">> => << (integer_to_binary(Epoch))/binary, "-", (integer_to_binary(Seq))/binary >> ,
-                 <<"rev">> => Rev,
-                 <<"changes">> => Changes
-               };
-            true ->
-              #{ id => DocId,
-                 seq => LSN,
-                 rev => Rev,
-                 changes => Changes }
-          end,
+          #{ <<"id">> => DocId,
+             <<"seq">> => SeqProp,
+             <<"rev">> => Rev,
+             <<"changes">> => Changes
+           },
         Change = change_with_doc(
-          change_with_deleted(Change0, Deleted, IsTerm),
-          DocId, Rev, Ctx, IncludeDoc, IsTerm
+          change_with_deleted(Change0, Deleted),
+          DocId, Rev, Ctx, IncludeDoc
         ),
         case UserFun(Change, Acc0) of
           {ok, Acc1} ->
-            {ok, {Acc1, LSN}};
+            {ok, {Acc1, SeqProp}};
           {stop, Acc1} ->
-            {stop, {Acc1, LSN}};
+            {stop, {Acc1, SeqProp}};
           ok ->
-            {ok, {Acc0, LSN}};
+            {ok, {Acc0, SeqProp}};
           stop ->
-            {stop, {Acc0, LSN}};
+            {stop, {Acc0, SeqProp}};
           skip ->
             skip
         end
     end,
   AccIn = {UserAcc, Since},
-  {AccOut, LastSeq} = ?STORE:fold_changes(Ctx, {SinceEpoch, SinceSeq + 1}, WrapperFun, AccIn),
+  {AccOut, LastSeq} = ?STORE:fold_changes(Ctx, {Timestamp, SinceSeq + 1}, WrapperFun, AccIn),
   {ok, AccOut, LastSeq}.
 
 
-change_with_deleted(Change, true, false) ->
+change_with_deleted(Change, true) ->
   Change#{ <<"deleted">> => true };
-change_with_deleted(Change, true, true) ->
-  Change#{ deleted => true };
-change_with_deleted(Change, _, _) ->
+
+change_with_deleted(Change, _) ->
   Change.
 
-change_with_doc(Change, DocId, Rev, Ctx, true, false) ->
+change_with_doc(Change, DocId, Rev, Ctx, true) ->
   {ok, Doc} = ?STORE:get_doc_revision(Ctx, DocId, Rev),
   Change#{ <<"doc">> => Doc };
-
-change_with_doc(Change, DocId, Rev, Ctx, true, true) ->
-  {ok, Doc} = ?STORE:get_doc_revision(Ctx, DocId, Rev),
-  Change#{ doc => Doc };
-change_with_doc(Change, _, _, _, _, _) ->
+change_with_doc(Change, _, _, _, _) ->
   Change.
 
 

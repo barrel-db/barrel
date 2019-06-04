@@ -55,9 +55,9 @@ update(Parent, #{ barrel := BarrelId,
 process_change(Change, BufReader, Acc) when length(Acc) >= 100 ->
   barrel_buffer:enqueue(BufReader, lists:reverse(Acc)),
   process_change(Change, BufReader, []);
-process_change(#{ id := DocId,
-                  seq := Seq,
-                  doc := Doc }, _BufReader, Acc) ->
+process_change(#{ <<"id">> := DocId,
+                  <<"seq">> := Seq,
+                  <<"doc">> := Doc }, _BufReader, Acc) ->
   {ok, [{DocId, Seq, Doc} | Acc]}.
 
 

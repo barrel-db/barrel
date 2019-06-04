@@ -35,6 +35,7 @@
 
 update_docs(Barrel, Docs, Options) ->
   MergePolicy = maps:get(merge_policy, Options, fail_on_conflict),
+  ok = validate_timestamp(Barrel, Options),
   ?start_span(#{ <<"log">> => <<"update docs">>,
                  <<"batch_size">> => length(Docs),
                  <<"merge_policy">> => barrel_lib:to_binary(MergePolicy) }),
@@ -46,6 +47,16 @@ update_docs(Barrel, Docs, Options) ->
             end,
   _ = erlang:cancel_timer(TRef),
   {ok, Results}.
+
+
+validate_timestamp(#{ timestamp_size := 0 }, #{ timestamp := _Ts }) ->
+  erlang:exit({badarg, unsupported_timestamp});
+validate_timestamp(#{ timestamp_size := Sz },  #{ timestamp := Ts }) when byte_size(Ts) =< Sz ->
+  ok;
+validate_timestamp(#{ timestamp_size := _Sz },  #{ timestamp := _Ts }) ->
+  erlang:exit({badarg, invalid_timestamp});
+validate_timestamp(_, _) ->
+  ok.
 
 do_update_doc(#{ name := Name } = Barrel, Doc, Options) ->
   StartTime = erlang:timestamp(),
@@ -121,13 +132,12 @@ start_link(Name) ->
 
 init([Name]) ->
   erlang:process_flag(trap_exit, true),
-  Epoch = ?EPOCH_STORE:get_epoch(Name),
   case init_(Name) of
     {ok, Barrel, LastSeq} ->
       gproc:set_value(?barrel(Name), Barrel),
       ?LOG_INFO("barrel opened name=~p seq=~p~n", [Name, LastSeq]),
       ocp:record('barrel/dbs/active_num', 1),
-      {ok, Barrel#{updated_seq => {Epoch, 0}}};
+      {ok, Barrel#{updated_seq => LastSeq}};
     {error, Reason} ->
       ?LOG_ERROR("error opening barrel name=~p error=~p~n", [Name, Reason]),
       {stop, Reason}
@@ -138,9 +148,12 @@ handle_call(_Msg, _From, State) ->
 
 handle_cast({{update_doc, From, #{ id := DocId, ref := Ref } = Record, Options},
              SpanCtx, Tags},
-            #{ name := Name, ref := BarrelRef, updated_seq := {Epoch, Seq} } = State) ->
+            #{ name := Name,
+               ref := BarrelRef,
+               updated_seq :=Seq } = State) ->
 
   MergePolicy = maps:get(merge_policy, Options, fail_on_conflict),
+  Timestamp = maps:get(timestamp, Options, <<>>),
   _ = ocp:with_span_ctx(SpanCtx),
   _ = ocp:with_tags(Tags),
   case get_docinfo(BarrelRef, DocId) of
@@ -167,16 +180,16 @@ handle_cast({{update_doc, From, #{ id := DocId, ref := Ref } = Record, Options},
           case DocStatus of
             not_found ->
               ?STORE:insert_doc(
-                 BarrelRef, DI2#{ seq => {Epoch, Seq2} }, DocRev, DocBody
+                 BarrelRef, DI2#{ seq => {Timestamp, Seq2} }, DocRev, DocBody
                 );
             found ->
               ?STORE:update_doc(
-                 BarrelRef, DI2#{ seq => {Epoch, Seq2} }, DocRev, DocBody, OldSeq, OldDel
+                 BarrelRef, DI2#{ seq => {Timestamp, Seq2} }, DocRev, DocBody, OldSeq, OldDel
                 )
           end,
           barrel_event:notify(Name, db_updated),
           From ! {Ref, {ok, DocId, Rev}},
-          {noreply, State#{ updated_seq => {Epoch, Seq2} }};
+          {noreply, State#{ updated_seq => Seq2 }};
         {ok, #{ rev := Rev}, _DocRev, _DocBody} ->
           From ! {Ref, {ok, DocId, Rev}},
           {noreply, State};
@@ -346,8 +359,9 @@ find_parent([], _RevTree, Acc) ->
 
 init_(Name) ->
   case ?STORE:open_barrel(Name) of
-    {ok, BarrelRef, LastSeq} ->
-      Store = #{ name => Name, ref => BarrelRef},
+    {ok, BarrelRef, Options, LastSeq} ->
+      Timestamp_Size = maps:get(timestamp_size, Options, 0),
+      Store = #{ name => Name, ref => BarrelRef, timestamp_size => Timestamp_Size},
       {ok, Store, LastSeq};
     Error ->
       Error
