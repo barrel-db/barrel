@@ -31,7 +31,6 @@ init(Parent, {fold_view, BarrelId, ViewId, To, Options}) ->
  ok = try ?STORE:fold_view_index(Ref, ViewId, FoldFun, ok, Options)
       catch
         C:E:T ->
-          io:format(user, "error c=~p e=~p t=~p~n", [C, E, T]),
           exit(E)
       end,
  To ! {self(), done},
