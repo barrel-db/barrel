@@ -121,13 +121,13 @@ start_link(Name) ->
 
 init([Name]) ->
   erlang:process_flag(trap_exit, true),
-  Epoch = ?EPOCH_STORE:get_epoch(Name),
   case init_(Name) of
-    {ok, Barrel, LastSeq} ->
+    {ok, Barrel} ->
+      StartSeq = barrel_sequence:init(Barrel),
       gproc:set_value(?barrel(Name), Barrel),
-      ?LOG_INFO("barrel opened name=~p seq=~p~n", [Name, LastSeq]),
+      ?LOG_INFO("barrel opened name=~p seq=~p~n", [Name, StartSeq]),
       ocp:record('barrel/dbs/active_num', 1),
-      {ok, Barrel#{updated_seq => {Epoch, 0}}};
+      {ok, Barrel#{updated_seq => StartSeq}};
     {error, Reason} ->
       ?LOG_ERROR("error opening barrel name=~p error=~p~n", [Name, Reason]),
       {stop, Reason}
@@ -138,7 +138,7 @@ handle_call(_Msg, _From, State) ->
 
 handle_cast({{update_doc, From, #{ id := DocId, ref := Ref } = Record, Options},
              SpanCtx, Tags},
-            #{ name := Name, ref := BarrelRef, updated_seq := {Epoch, Seq} } = State) ->
+            #{ name := Name, ref := BarrelRef, updated_seq := LastSeq } = State) ->
 
   MergePolicy = maps:get(merge_policy, Options, fail_on_conflict),
   _ = ocp:with_span_ctx(SpanCtx),
@@ -163,20 +163,20 @@ handle_cast({{update_doc, From, #{ id := DocId, ref := Ref } = Record, Options},
                     end,
       case MergeResult of
         {ok, #{ rev := Rev } = DI2, DocRev, DocBody} when DI2 =/= DI ->
-          Seq2 = Seq + 1,
+          Seq = barrel_sequence:inc(LastSeq),
           case DocStatus of
             not_found ->
               ?STORE:insert_doc(
-                 BarrelRef, DI2#{ seq => {Epoch, Seq2} }, DocRev, DocBody
+                 BarrelRef, DI2#{ seq => Seq }, DocRev, DocBody
                 );
             found ->
               ?STORE:update_doc(
-                 BarrelRef, DI2#{ seq => {Epoch, Seq2} }, DocRev, DocBody, OldSeq, OldDel
+                 BarrelRef, DI2#{ seq => Seq }, DocRev, DocBody, OldSeq, OldDel
                 )
           end,
           barrel_event:notify(Name, db_updated),
           From ! {Ref, {ok, DocId, Rev}},
-          {noreply, State#{ updated_seq => {Epoch, Seq2} }};
+          {noreply, State#{ updated_seq => Seq }};
         {ok, #{ rev := Rev}, _DocRev, _DocBody} ->
           From ! {Ref, {ok, DocId, Rev}},
           {noreply, State};
@@ -346,9 +346,9 @@ find_parent([], _RevTree, Acc) ->
 
 init_(Name) ->
   case ?STORE:open_barrel(Name) of
-    {ok, BarrelRef, LastSeq} ->
+    {ok, BarrelRef} ->
       Store = #{ name => Name, ref => BarrelRef},
-      {ok, Store, LastSeq};
+      {ok, Store};
     Error ->
       Error
   end.

@@ -179,14 +179,14 @@ fold_changes(_Config) ->
   Fun = fun(#{ <<"id">> := Id }, Acc) -> {ok, [ Id | Acc ]} end,
   {ok, Changes1, LastSeq1} = barrel:fold_changes(Barrel, first, Fun, [], #{}),
   5 = length(Changes1),
-  {_, 5} = LastSeq1,
+  {_, {_, 5}} = barrel_sequence:from_string(LastSeq1),
   [<<"a">>, <<"b">>, <<"c">>, <<"d">>, <<"e">>] = lists:reverse(Changes1),
   {ok, #{ <<"_rev">> := RevC}} = barrel:fetch_doc(Barrel, <<"c">>, #{}),
   {ok, _, _} = barrel:delete_doc(Barrel, <<"c">>, RevC),
   {error, not_found} = barrel:fetch_doc(Barrel, <<"c">>, #{}),
   {ok, Changes2, LastSeq2} = barrel:fold_changes(Barrel, LastSeq1, Fun, [], #{}),
   [<<"c">>] = lists:reverse(Changes2),
-  {_, 6} = LastSeq2,
+  {_, {_, 6}} =  barrel_sequence:from_string(LastSeq2),
   {ok, [], LastSeq2} = barrel:fold_changes(Barrel, LastSeq2, Fun, [], #{include_deleted => true}),
   ok.
 

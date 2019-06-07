@@ -90,26 +90,14 @@ open_barrel(Name) ->
   BarrelKey = barrel_rocksdb_keys:local_barrel_ident(Name),
   case rocksdb:get(?db, BarrelKey, []) of
     {ok, Ident} ->
-      LastSeq = get_last_seq(Ident, []),
-      {ok, Ident, LastSeq};
+      {ok, Ident};
     not_found ->
       {error, barrel_not_found};
     Error ->
       Error
   end.
 
-get_last_seq(Ident, ReadOpts0) ->
-  ReadOpts =
-    [{iterate_lower_bound, barrel_rocksdb_keys:doc_seq_prefix(Ident)} | ReadOpts0],
-  {ok, Itr} = rocksdb:iterator(?db, ReadOpts),
-  MaxSeq = barrel_rocksdb_keys:doc_seq_max(Ident),
-  LastSeq = case rocksdb:iterator_move(Itr, {seek_for_prev, MaxSeq}) of
-              {ok, SeqKey, _} ->
-                barrel_rocksdb_keys:decode_doc_seq(Ident, SeqKey);
-              _ -> {0, 0}
-            end,
-  _ = rocksdb:iterator_close(Itr),
-  LastSeq.
+
 
 delete_barrel(Name) ->
   BarrelKey = barrel_rocksdb_keys:local_barrel_ident(Name),
@@ -127,6 +115,19 @@ delete_barrel(Name) ->
     Error ->
       Error
   end.
+
+get_last_seq(Ident, ReadOpts0) ->
+  ReadOpts =
+    [{iterate_lower_bound, barrel_rocksdb_keys:doc_seq_prefix(Ident)} | ReadOpts0],
+  {ok, Itr} = rocksdb:iterator(?db, ReadOpts),
+  MaxSeq = barrel_rocksdb_keys:doc_seq_max(Ident),
+  LastSeq = case rocksdb:iterator_move(Itr, {seek_for_prev, MaxSeq}) of
+              {ok, SeqKey, _} ->
+                barrel_rocksdb_keys:decode_doc_seq(Ident, SeqKey);
+              _ -> {0, 0}
+            end,
+  _ = rocksdb:iterator_close(Itr),
+  LastSeq.
 
 barrel_infos(Name) ->
   BarrelKey = barrel_rocksdb_keys:local_barrel_ident(Name),

@@ -28,6 +28,10 @@
  {<<"rocksdb">>,{pkg,<<"rocksdb">>,<<"1.1.1">>},0},
  {<<"time_compat">>,{pkg,<<"time_compat">>,<<"0.0.1">>},1},
  {<<"types">>,{pkg,<<"types">>,<<"0.1.8">>},1},
+ {<<"uid">>,
+  {git,"https://github.com/fogfish/uid.git",
+       {ref,"d797d2403e1f3fd05236e5ab61d9a4e25420d608"}},
+  0},
  {<<"uuid">>,{pkg,<<"uuid_erl">>,<<"1.7.5">>},0},
  {<<"worker_pool">>,{pkg,<<"worker_pool">>,<<"4.0.0">>},0},
  {<<"wts">>,{pkg,<<"wts">>,<<"0.3.0">>},1}]}.
