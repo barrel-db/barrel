@@ -124,7 +124,7 @@ get_last_seq(Ident, ReadOpts0) ->
   LastSeq = case rocksdb:iterator_move(Itr, {seek_for_prev, MaxSeq}) of
               {ok, SeqKey, _} ->
                 barrel_rocksdb_keys:decode_doc_seq(Ident, SeqKey);
-              _ -> {0, 0}
+              _ -> barrel_sequence:sequence_min()
             end,
   _ = rocksdb:iterator_close(Itr),
   LastSeq.
@@ -142,7 +142,7 @@ barrel_infos(Name) ->
       %% get last sequence
       LastSeq = get_last_seq(Ident, ReadOpts),
       _ = rocksdb:release_snapshot(Snapshot),
-      {ok, #{ updated_seq => LastSeq,
+      {ok, #{ updated_seq => barrel_sequence:to_string(LastSeq),
               docs_count => DocsCount,
               docs_del_count => DelDocsCount }};
     not_found ->
@@ -150,7 +150,7 @@ barrel_infos(Name) ->
   end.
 
 last_updated_seq(Ident) ->
-   get_last_seq(Ident, []).
+   barrel_sequence:to_string(get_last_seq(Ident, [])).
 
 
 %% -------------------
@@ -422,12 +422,12 @@ open_view(Id, ViewId, Version) ->
       {ok, ViewRef, IndexedSeq, Version};
     not_found ->
       {ok, WB} = rocksdb:batch(),
-      rocksdb:batch_put(WB, SeqKey, term_to_binary({0, 0})),
+      rocksdb:batch_put(WB, SeqKey, term_to_binary(first)),
       rocksdb:batch_put(WB, VersionKey, term_to_binary(Version)),
       ok = try rocksdb:write_batch(?db, WB, [])
            after rocksdb:release_batch(WB)
            end,
-      {ok, ViewRef, {0, 0}, Version};
+      {ok, ViewRef, first, Version};
     Error ->
       Error
   end.

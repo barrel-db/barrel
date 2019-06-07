@@ -167,11 +167,11 @@ handle_cast({{update_doc, From, #{ id := DocId, ref := Ref } = Record, Options},
           case DocStatus of
             not_found ->
               ?STORE:insert_doc(
-                 BarrelRef, DI2#{ seq => Seq }, DocRev, DocBody
+                 BarrelRef, DI2#{ seq => barrel_sequence:encode(Seq) }, DocRev, DocBody
                 );
             found ->
               ?STORE:update_doc(
-                 BarrelRef, DI2#{ seq => Seq }, DocRev, DocBody, OldSeq, OldDel
+                 BarrelRef, DI2#{ seq => barrel_sequence:encode(Seq) }, DocRev, DocBody, OldSeq, OldDel
                 )
           end,
           barrel_event:notify(Name, db_updated),

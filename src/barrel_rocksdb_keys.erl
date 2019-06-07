@@ -120,12 +120,12 @@ doc_info_max(BarrelId) ->
 
 %% @doc document sequence key
 doc_seq(BarrelId, Seq) ->
-  << (doc_seq_prefix(BarrelId))/binary, (barrel_sequence:encode(Seq))/binary >>.
+  << (doc_seq_prefix(BarrelId))/binary, Seq/binary >>.
 
 decode_doc_seq(BarrelId, SeqKey) ->
   case binary:split(SeqKey, doc_seq_prefix(BarrelId)) of
     [<<>>, SeqBin] ->
-      barrel_sequence:decode(SeqBin);
+      SeqBin;
     [] ->
       erlang:error(badarg)
   end.

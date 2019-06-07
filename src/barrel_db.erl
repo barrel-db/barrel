@@ -407,46 +407,37 @@ fold_changes(Barrel, Since, UserFun, UserAcc, Options) ->
 fold_changes_1(Ctx, Since0, UserFun, UserAcc, Options) ->
   Since = case Since0 of
             first -> {0, 0};
-            {_, _} -> Since0;
             _ when is_binary(Since0) ->
               {_, Since1} = barrel_sequence:from_string(Since0),
-              Since1;
+              barrel_sequence:decode(Since1);
             _ ->
               erlang:error(badarg)
           end,
   %% get options
   IncludeDoc = maps:get(include_doc, Options, false),
   WithHistory = maps:get(with_history, Options, false),
-  IsTerm = maps:get(erlang_term, Options, false),
   WrapperFun =
     fun
       (_, DI, {Acc0, _}) ->
         #{id := DocId,
-          seq := Seq,
+          seq := Seq0,
           deleted := Deleted,
           rev := Rev,
           revtree := RevTree } = DI,
+        Seq = barrel_sequence:to_string(Seq0),
         Changes = case WithHistory of
                     false -> [Rev];
                     true -> barrel_revtree:history(Rev, RevTree)
                   end,
         Change0 =
-          case IsTerm of
-            false ->
-              #{ <<"id">> => DocId,
-                 <<"seq">> => barrel_sequence:to_string(Seq),
-                 <<"rev">> => Rev,
-                 <<"changes">> => Changes
-               };
-            true ->
-              #{ id => DocId,
-                 seq => Seq,
-                 rev => Rev,
-                 changes => Changes }
-          end,
+          #{ <<"id">> => DocId,
+             <<"seq">> => Seq,
+             <<"rev">> => Rev,
+             <<"changes">> => Changes
+           },
         Change = change_with_doc(
-          change_with_deleted(Change0, Deleted, IsTerm),
-          DocId, Rev, Ctx, IncludeDoc, IsTerm
+          change_with_deleted(Change0, Deleted),
+          DocId, Rev, Ctx, IncludeDoc
         ),
         case UserFun(Change, Acc0) of
           {ok, Acc1} ->
@@ -461,31 +452,21 @@ fold_changes_1(Ctx, Since0, UserFun, UserAcc, Options) ->
             skip
         end
     end,
-  AccIn = {UserAcc, Since},
-  {AccOut, LastSeq} = ?STORE:fold_changes(Ctx, barrel_sequence:inc(Since), WrapperFun, AccIn),
-  case IsTerm of
-    false ->
-      {ok, AccOut, barrel_sequence:to_string(LastSeq)};
-    true ->
-      {ok, AccOut, LastSeq}
-  end.
+  AccIn = {UserAcc, barrel_sequence:to_string(barrel_sequence:encode(Since))},
+  Start = barrel_sequence:encode(barrel_sequence:inc(Since)),
+  {AccOut, LastSeq} = ?STORE:fold_changes(Ctx, Start, WrapperFun, AccIn),
+  {ok, AccOut, LastSeq}.
 
 
-change_with_deleted(Change, true, false) ->
+change_with_deleted(Change, true) ->
   Change#{ <<"deleted">> => true };
-change_with_deleted(Change, true, true) ->
-  Change#{ deleted => true };
-change_with_deleted(Change, _, _) ->
+change_with_deleted(Change, _) ->
   Change.
 
-change_with_doc(Change, DocId, Rev, Ctx, true, false) ->
+change_with_doc(Change, DocId, Rev, Ctx, true) ->
   {ok, Doc} = ?STORE:get_doc_revision(Ctx, DocId, Rev),
   Change#{ <<"doc">> => Doc };
-
-change_with_doc(Change, DocId, Rev, Ctx, true, true) ->
-  {ok, Doc} = ?STORE:get_doc_revision(Ctx, DocId, Rev),
-  Change#{ doc => Doc };
-change_with_doc(Change, _, _, _, _, _) ->
+change_with_doc(Change, _, _, _, _) ->
   Change.
 
 

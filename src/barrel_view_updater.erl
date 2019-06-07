@@ -38,8 +38,7 @@ update(Parent, #{ barrel := BarrelId,
 
   {ok, Acc, LastSeq} =
     barrel_db:fold_changes(Barrel, Since, FoldFun, [],
-                           #{ include_doc => true,
-                              erlang_term => true }),
+                           #{ include_doc => true }),
   case Acc of
     [] -> ok;
     _ ->
@@ -55,9 +54,9 @@ update(Parent, #{ barrel := BarrelId,
 process_change(Change, BufReader, Acc) when length(Acc) >= 100 ->
   barrel_buffer:enqueue(BufReader, lists:reverse(Acc)),
   process_change(Change, BufReader, []);
-process_change(#{ id := DocId,
-                  seq := Seq,
-                  doc := Doc }, _BufReader, Acc) ->
+process_change(#{ <<"id">> := DocId,
+                  <<"seq">> := Seq,
+                  <<"doc">> := Doc }, _BufReader, Acc) ->
   {ok, [{DocId, Seq, Doc} | Acc]}.
 
 
