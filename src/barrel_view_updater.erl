@@ -11,6 +11,7 @@
 run(Data) ->
   spawn_link(?MODULE, update, [self(), Data]).
 
+-spec update(pid(), map()) -> no_return().
 update(Parent, #{ barrel := BarrelId,
                   since := Since,
                   view := View }) ->
