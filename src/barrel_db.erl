@@ -415,7 +415,7 @@ fold_changes_1(Ctx, Since0, UserFun, UserAcc, Options) ->
           end,
   %% get options
   IncludeDoc = maps:get(include_doc, Options, false),
-  WithHistory = maps:get(with_history, Options, false),
+
   WrapperFun =
     fun
       (_, DI, {Acc0, _}) ->
@@ -425,10 +425,7 @@ fold_changes_1(Ctx, Since0, UserFun, UserAcc, Options) ->
           rev := Rev,
           revtree := RevTree } = DI,
         Seq = barrel_sequence:to_string(Seq0),
-        Changes = case WithHistory of
-                    false -> [Rev];
-                    true -> barrel_revtree:history(Rev, RevTree)
-                  end,
+        Changes = [RevId || #{ id := RevId } <- barrel_revtree:conflicts(RevTree)],
         Change0 =
           #{ <<"id">> => DocId,
              <<"seq">> => Seq,

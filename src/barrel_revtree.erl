@@ -28,6 +28,7 @@
     leaves/1,
     is_leaf/2,
     missing_revs/2,
+    conflicts/1,
     winning_revision/1,
     prune/2, prune/3
 ]).
@@ -120,6 +121,20 @@ is_leaf_1([], _) -> true.
 is_deleted(#{deleted := Del}) -> Del;
 is_deleted(_) -> false.
 
+conflicts(Tree) ->
+  Leaves = leaves(Tree),
+  SortedRevInfos = lists:sort(
+                     fun(#{ id := RevIdA, deleted := DeletedA }, #{ id := RevIdB, deleted := DeletedB }) ->
+                         % sort descending by {not deleted, rev}
+                         RevA = barrel_doc:parse_revision(RevIdA),
+                         RevB = barrel_doc:parse_revision(RevIdB),
+                         {not DeletedA, RevA} > {not DeletedB, RevB}
+                     end,
+                     Leaves
+                    ),
+  SortedRevInfos.
+
+
 winning_revision(Tree) ->
   {Leaves, ActiveCount} = fold_leafs(
     fun(RevInfo, {Acc, ActiveCount1}) ->
@@ -130,7 +145,7 @@ winning_revision(Tree) ->
                      end,
       {[RevInfo#{ deleted => Deleted }| Acc], ActiveCount2 }
     end, {[], 0}, Tree),
-  
+
   SortedRevInfos = lists:sort(
     fun(#{ id := RevIdA, deleted := DeletedA }, #{ id := RevIdB, deleted := DeletedB }) ->
       % sort descending by {not deleted, rev}
@@ -232,7 +247,7 @@ parent_test() ->
 add_test() ->
   NewRev = #{ id => <<"4-four">>, parent => <<"3-three">> },
   NewTree = barrel_revtree:add(NewRev, ?FLAT_TREE),
-  
+
   ?assert(barrel_revtree:contains(<<"4-four">>, NewTree)),
   ?assertEqual(<<"3-three">>, barrel_revtree:parent(<<"4-four">>, NewTree)),
   ?assertExit({badrev, already_exists}, barrel_revtree:add(NewRev, NewTree)),
@@ -264,7 +279,7 @@ prune_test() ->
   ?assertEqual(4, maps:size(Tree1)),
   ?assertEqual(false, barrel_revtree:contains(<<"1-one">>, Tree1)),
   ?assertEqual(<<"">>, maps:get(parent, maps:get(<<"2-two">>, Tree1))),
-  
+
   %% make sure merged conflicts don't prevevent prunint
   {1, Tree2} = barrel_revtree:prune(1, "", Tree1),
   ?assertEqual(3, maps:size(Tree2)),
@@ -272,8 +287,8 @@ prune_test() ->
   ?assertEqual(<<"">>, maps:get(parent, maps:get(<<"3-three">>, Tree2))),
   ?assertEqual(true, barrel_revtree:contains(<<"4-four">>, Tree2)),
   ?assertEqual(<<"3-three-2">>, maps:get(parent, maps:get(<<"4-four">>, Tree2))),
-  
-  
+
+
   TreeB = lists:foldl(fun(Rev, T) ->
     barrel_revtree:add(Rev, T)
                       end,
@@ -282,7 +297,7 @@ prune_test() ->
                        #{ id => <<"4-four">>, parent => <<"3-three">>},
                        #{ id => <<"5-five">>, parent => <<"4-four">> },
                        #{ id => <<"6-six">>, parent => <<"5-five">> }]),
-  
+
   {0, TreeB} = barrel_revtree:prune(3, <<"1-one">>, TreeB),
   {1, TreeB1} = barrel_revtree:prune(3, <<"2-two">>, TreeB),
   {3, TreeB2} = barrel_revtree:prune(3, <<"">>, TreeB1),
@@ -290,7 +305,7 @@ prune_test() ->
   {2, TreeB3} = barrel_revtree:prune(2, <<"">>, TreeB2),
   ?assertEqual(<<"">>, maps:get(parent, maps:get(<<"5-five">>, TreeB3))),
   ?assertEqual(<<"5-five">>, maps:get(parent, maps:get(<<"6-six">>, TreeB3))),
-  
+
   TreeC = maps:map(fun(RevId, RevInfo) ->
     case lists:member(RevId, [<<"3-three">>, <<"3-three-2">>]) of
       true ->
@@ -299,7 +314,7 @@ prune_test() ->
         RevInfo
     end
                    end, ?BRANCHED_TREE),
-  
+
   {0, TreeC} = barrel_revtree:prune(3, <<"">>, TreeC),
   {1, _} = barrel_revtree:prune(2, <<"">>, TreeC),
   ok.
