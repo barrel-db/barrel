@@ -110,10 +110,6 @@ init(safe) ->
       shutdown => infinity
      },
 
-     %% transaction server
-     #{id => barrel_tx,
-       start => {barrel_tx, start_link, []}
-      },
      %% barrel db supervisor
      #{id => barrel_db_sup,
        start => {barrel_db_sup, start_link, []}
