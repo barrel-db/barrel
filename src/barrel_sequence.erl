@@ -9,6 +9,8 @@
          to_string/1, to_string/2,
          from_string/1]).
 
+-export([node_string/1]).
+
 -include("barrel.hrl").
 
 -define(enc(B, V), barrel_encoding:encode_uint64_ascending(B, V)).
@@ -69,6 +71,13 @@ from_string(Bin) ->
     _ ->
       erlang:error(badarg)
   end.
+
+
+node_string(Node) when is_binary(Node) ->
+  uid_b64:encode(Node);
+node_string(Node) ->
+  node_string(hid(Node)).
+
 
 hid(Node) ->
   <<(erlang:phash(Node, 1 bsl 32)):32>>.
