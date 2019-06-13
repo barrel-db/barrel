@@ -17,7 +17,9 @@
 
 
 -type barrel_node() :: binary() | atom().
--type sequence() :: term().
+-type sequence() :: binary().
+-type epoch() :: non_neg_integer().
+-type iseq() :: non_neg_integer().
 
 init(Barrel) ->
   Epoch = ?EPOCH_STORE:new_epoch(Barrel),
@@ -25,11 +27,13 @@ init(Barrel) ->
 
 inc({Epoch, Seq}) -> {Epoch, Seq + 1}.
 
+-spec encode({epoch(), iseq()}) -> sequence().
 encode({Epoch, Seq}) ->
   ?enc(?enc(<<>>, Epoch), Seq);
 encode(_) ->
   erlang:error(badarg).
 
+-spec decode(binary()) -> {epoch(), iseq()}.
 decode(SeqBin) ->
   {Epoch, Rest} = ?dec(SeqBin),
   {Seq, _} = ?dec(Rest),
