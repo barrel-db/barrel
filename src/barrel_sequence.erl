@@ -21,6 +21,11 @@
 -type epoch() :: non_neg_integer().
 -type iseq() :: non_neg_integer().
 
+-export_types([barrel_node/0,
+               sequence/0,
+               epoch/0,
+               iseq/0]).
+
 init(Barrel) ->
   Epoch = ?EPOCH_STORE:new_epoch(Barrel),
   {Epoch, 0}.
