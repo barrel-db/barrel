@@ -186,7 +186,7 @@ handle_cast({{update_doc, From, #{ id := DocId, ref := Ref } = Record, Options},
       end;
     Error ->
       From ! {Ref, Error},
-          {noreply, State}
+      {noreply, State}
   end;
 
 handle_cast(_Msg, State) ->
@@ -210,15 +210,15 @@ new_docinfo(DocId) ->
     revtree => barrel_revtree:new()}.
 
 get_docinfo(BarrelRef, DocId) ->
- case ?STORE:get_doc_info(BarrelRef, DocId) of
-   {ok, DI1} ->
-     {ok, {found, DI1}};
-   {error, not_found} ->
-     {ok, {not_found, new_docinfo(DocId)}};
-   Error ->
-     ?LOG_ERROR("~s: error fetching docid=~p errror=~p~n", [Error]),
-     Error
- end.
+  case ?STORE:get_doc_info(BarrelRef, DocId) of
+    {ok, DI1} ->
+      {ok, {found, DI1}};
+    {error, not_found} ->
+      {ok, {not_found, new_docinfo(DocId)}};
+    Error ->
+      ?LOG_ERROR("~s: error fetching docid=~p errror=~p~n", [Error]),
+      Error
+  end.
 
 do_merge(Record, DI, fail_on_conflict) ->
   merge_revtree(Record, DI);
@@ -276,7 +276,7 @@ merge_revtree(Record, DocInfo) ->
           RevInfo = #{  id => NewRev,
                         parent => Rev,
                         deleted => NewDeleted,
-                    attachments => Atts },
+                        attachments => Atts },
           RevTree2 = barrel_revtree:add(RevInfo, RevTree),
           {WinningRev, _, _} = barrel_revtree:winning_revision(RevTree2),
           case NewDeleted of
@@ -284,7 +284,7 @@ merge_revtree(Record, DocInfo) ->
               {ok, DocInfo#{ rev => WinningRev,
                              deleted => false,
                              revtree => RevTree2 }, NewRev, Doc};
-           true ->
+            true ->
               {ok, DocInfo#{ rev => WinningRev,
                              deleted => barrel_doc:is_deleted(RevTree2),
                              revtree => RevTree2 }, NewRev, Doc}
@@ -313,7 +313,7 @@ merge_revtree_with_conflict(#{ revs := [LeafRev|Revs],
                             Atts1 =  if
                                        RevId =:= LeafRev -> Atts;
                                        true -> #{}
-                                  end,
+                                     end,
                             RevInfo = #{ id => RevId,
                                          parent => P,
                                          deleted => Deleted,
