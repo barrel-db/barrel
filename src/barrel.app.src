@@ -22,7 +22,8 @@
     opencensus,
     jobs,
     lru,
-    erlang_term
+    erlang_term,
+    uid
    ]},
   {env, []},
   {modules, []},
