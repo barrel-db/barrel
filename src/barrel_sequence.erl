@@ -16,6 +16,9 @@
 -define(dec(B), barrel_encoding:decode_uint64_ascending(B)).
 
 
+-type barrel_node() :: binary() | atom().
+-type sequence() :: term().
+
 init(Barrel) ->
   Epoch = ?EPOCH_STORE:new_epoch(Barrel),
   {Epoch, 0}.
@@ -36,16 +39,22 @@ sequence_max() -> encode({ 1 bsl 64 -1, 0}).
 
 sequence_min() -> encode({0, 0}).
 
+%% @doc return a global sequence as string using the current node() as node.
+-spec to_string(sequence()) -> binary().
 to_string(Seq) ->
   to_string(erlang:node(), Seq).
 
+%% @doc return a global sequence as string
+-spec to_string(barrel_node(), sequence()) -> binary().
 to_string(Node, Seq) when is_binary(Node) ->
-  << (uid_b64:encode(Node))/binary, "@",  (uid_b64:encode(Seq))/binary >>;
+  << (uid_b64:encode(Node))/binary, ":",  (uid_b64:encode(Seq))/binary >>;
 to_string(Node, Seq) ->
   to_string(hid(Node), Seq).
 
+%% @doc extract the node id and its local sequence from a global sequence string
+-spec from_string(binary()) -> {barrel_node(), sequence()}.
 from_string(Bin) ->
-  case binary:split(Bin, <<"@">>) of
+  case binary:split(Bin, <<":">>) of
     [NodeBin, SeqBin] ->
       {uid_b64:decode(NodeBin), uid_b64:decode(SeqBin)};
     _ ->
