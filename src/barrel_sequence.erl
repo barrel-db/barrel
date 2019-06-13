@@ -17,7 +17,7 @@
 
 
 -type barrel_node() :: binary() | atom().
--type sequence() :: binary().
+-type sequence() :: binary() | bitstring().
 -type epoch() :: non_neg_integer().
 -type iseq() :: non_neg_integer().
 
