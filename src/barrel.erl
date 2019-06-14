@@ -45,6 +45,7 @@
 -include_lib("barrel.hrl").
 
 -type barrel_infos() :: #{
+  uid := binary(),
   updated_seq := {non_neg_integer(), non_neg_integer()},
   docs_count := non_neg_integer(),
   docs_del_count := non_neg_integer()

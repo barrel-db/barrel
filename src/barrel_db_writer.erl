@@ -346,8 +346,8 @@ find_parent([], _RevTree, Acc) ->
 
 init_(Name) ->
   case ?STORE:open_barrel(Name) of
-    {ok, BarrelRef} ->
-      Store = #{ name => Name, ref => BarrelRef},
+    {ok, BarrelRef, BarrelUid} ->
+      Store = #{ name => Name, ref => BarrelRef, uid => BarrelUid},
       {ok, Store};
     Error ->
       Error

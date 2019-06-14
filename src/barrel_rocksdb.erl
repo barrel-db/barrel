@@ -77,8 +77,10 @@ create_barrel(Name) ->
     not_found ->
        Id = atomics:add_get(Counters, 1, 1),
        BinId = << Id:32/integer >>,
+       UID = barrel_lib:make_uid(Name),
        {ok, WB} = rocksdb:batch(),
        ok = rocksdb:batch_put(WB, BarrelKey, BinId),
+       ok = rocksdb:batch_put(WB, barrel_rocksdb_keys:uid(BinId), UID),
        ok = rocksdb:batch_put(WB, barrel_rocksdb_keys:docs_count(BinId), integer_to_binary(0)),
        ok = rocksdb:batch_put(WB, barrel_rocksdb_keys:docs_del_count(BinId), integer_to_binary(0)),
        ok = rocksdb:write_batch(Ref, WB, [{sync, true}]),
@@ -90,7 +92,8 @@ open_barrel(Name) ->
   BarrelKey = barrel_rocksdb_keys:local_barrel_ident(Name),
   case rocksdb:get(?db, BarrelKey, []) of
     {ok, Ident} ->
-      {ok, Ident};
+       {ok, UID} = rocksdb:get(?db, barrel_rocksdb_keys:uid(Ident), []),
+      {ok, Ident, UID};
     not_found ->
       {error, barrel_not_found};
     Error ->
@@ -137,12 +140,14 @@ barrel_infos(Name) ->
     {ok, Ident} ->
       %% NOTE: we should rather use the multiget API from rocksdb there
       %% but until it's not exposed just get the results for each Keys
+      {ok, UID} = rocksdb:get(?db, barrel_rocksdb_keys:uid(Ident), ReadOpts),
       {ok, DocsCount} = db_get_int(barrel_rocksdb_keys:docs_count(Ident), 0, ReadOpts),
       {ok, DelDocsCount} = db_get_int(barrel_rocksdb_keys:docs_del_count(Ident), 0, ReadOpts),
       %% get last sequence
       LastSeq = get_last_seq(Ident, ReadOpts),
       _ = rocksdb:release_snapshot(Snapshot),
-      {ok, #{ updated_seq => barrel_sequence:to_string(LastSeq),
+      {ok, #{ uid => UID,
+              updated_seq => barrel_sequence:to_string(LastSeq),
               docs_count => DocsCount,
               docs_del_count => DelDocsCount }};
     not_found ->

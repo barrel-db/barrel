@@ -21,7 +21,8 @@
   decode_barrel_ident/1,
   docs_count/1,
   docs_del_count/1,
-  purge_seq/1
+  purge_seq/1,
+  uid/1
 ]).
 
 -export([
@@ -100,6 +101,11 @@ docs_del_count(BarrelId) ->
 %% @doc purge sequence key for a barrel
 purge_seq(BarrelId) ->
   << (db_prefix(BarrelId))/binary, ?purge_seq_suffix/binary >>.
+
+
+uid(BarrelId) ->
+  << (db_prefix(BarrelId))/binary, ?uid_suffix/binary >>.
+
 
 %% ----
 %% barrel replicated documents

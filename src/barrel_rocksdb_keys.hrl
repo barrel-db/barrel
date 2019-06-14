@@ -34,7 +34,7 @@
 -define(docs_count_suffix, << "docs-count" >>).
 -define(docs_del_count_suffix, << "docs-del-count" >>).
 -define(purge_seq_suffix, << "purge-seq" >>).
-
+-define(uid_suffix, << "uid" >>).
 
 -define(db_prefix, << ?system_prefix, "b" >>).
 
