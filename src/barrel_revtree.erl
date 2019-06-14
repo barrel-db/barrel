@@ -122,7 +122,11 @@ is_deleted(#{deleted := Del}) -> Del;
 is_deleted(_) -> false.
 
 conflicts(Tree) ->
-  Leaves = leaves(Tree),
+  Leaves = fold_leafs(
+    fun(RevInfo, Acc) ->
+      Deleted = is_deleted(RevInfo),
+      [RevInfo#{ deleted => Deleted }| Acc]
+    end, [], Tree),
   SortedRevInfos = lists:sort(
                      fun(#{ id := RevIdA, deleted := DeletedA }, #{ id := RevIdB, deleted := DeletedB }) ->
                          % sort descending by {not deleted, rev}
