@@ -31,6 +31,7 @@ await_refresh(BarrelId, ViewId) ->
 await_refresh(BarrelId, ViewId, Seq) ->
   gen_statem:call(?view_proc(BarrelId, ViewId), {refresh_index, Seq}).
 
+
 start_link(#{ barrel := BarrelId, view_id := ViewId } = Conf) ->
   gen_statem:start_link(?view_proc(BarrelId, ViewId), ?MODULE, Conf, []).
 
@@ -43,9 +44,11 @@ init(#{barrel := BarrelId,
   process_flag(trap_exit, true),
   {ok, ViewConfig1} = ViewMod:init(ViewConfig0),
 
-  {ok, #{ ref := Ref }} = barrel_db:open_barrel(BarrelId),
+  {ok, #{ ref := Ref, uid := UID }} = barrel_db:open_barrel(BarrelId),
   case ?STORE:open_view(Ref, ViewId, Version) of
-    {ok, ViewRef, LastIndexedSeq, _OldVersion} ->
+    {ok, ViewRef, LastIndexedSeq0, _OldVersion} ->
+      LastIndexedSeq = maybe_migrate(LastIndexedSeq0, UID),
+
       View = #view{barrel=BarrelId,
                    ref=ViewRef,
                    mod=ViewMod,
@@ -213,3 +216,10 @@ notify_all(Waiters, Msg) ->
 maybe_update(#{ barrel := BarrelId, since := IndexedSeq }) ->
   UpdatedSeq =  barrel_db:last_updated_seq(BarrelId),
   (IndexedSeq < UpdatedSeq).
+
+
+maybe_migrate({_Epoch, _Seq}=T, UID) ->
+  SeqBin = barrel_sequence:encode(T),
+  barrel_sequence:to_string(UID, SeqBin);
+maybe_migrate(S, _UID) ->
+  S.
