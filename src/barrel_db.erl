@@ -411,6 +411,7 @@ fold_changes_1(Ctx, Since0, UserFun, UserAcc, Options) ->
               {_, Since1} = barrel_sequence:from_string(Since0),
               barrel_sequence:decode(Since1);
             _ ->
+              ?LOG_ERROR("fold_changes: invalid sequence. sinnce=~p~n", [Since0]),
               erlang:error(badarg)
           end,
   %% get options
