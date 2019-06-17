@@ -92,8 +92,15 @@ open_barrel(Name) ->
   BarrelKey = barrel_rocksdb_keys:local_barrel_ident(Name),
   case rocksdb:get(?db, BarrelKey, []) of
     {ok, Ident} ->
-       {ok, UID} = rocksdb:get(?db, barrel_rocksdb_keys:uid(Ident), []),
-      {ok, Ident, UID};
+      case rocksdb:get(?db, barrel_rocksdb_keys:uid(Ident), []) of
+        {ok, UID} ->
+          {ok, Ident, UID};
+        not_found ->
+          ?LOG_INFO("migrating database to new format~n", []),
+          UID = barrel_lib:make_uid(Name),
+          ok = rocksdb:put(?db, barrel_rocksdb_keys:uid(Ident), UID, [{sync, true}]),
+          {ok, Ident, UID}
+      end;
     not_found ->
       {error, barrel_not_found};
     Error ->
