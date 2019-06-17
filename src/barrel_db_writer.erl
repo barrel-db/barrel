@@ -125,7 +125,9 @@ init([Name]) ->
     {ok, Barrel} ->
       StartSeq = barrel_sequence:init(Barrel),
       gproc:set_value(?barrel(Name), Barrel),
+      hooks:run(activate_barrel, [Name, StartSeq]),
       ?LOG_INFO("barrel opened name=~p seq=~p~n", [Name, StartSeq]),
+
       ocp:record('barrel/dbs/active_num', 1),
       {ok, Barrel#{updated_seq => StartSeq}};
     {error, Reason} ->
@@ -195,6 +197,7 @@ handle_cast(_Msg, State) ->
 terminate(_Reason, #{ name := Name } = State) ->
   ?LOG_INFO("closing barrel=~p~n", [Name]),
   ocp:record('barrel/dbs/active_num', -1),
+  hooks:run(deactivate_barrel, [Name]),
   ok = try_close_barrel(State),
   ok.
 
