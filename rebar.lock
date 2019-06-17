@@ -1,5 +1,6 @@
 {"1.1.0",
 [{<<"acceptor_pool">>,{pkg,<<"acceptor_pool">>,<<"1.0.0-rc.0">>},1},
+ {<<"aten">>,{pkg,<<"aten">>,<<"0.5.2">>},0},
  {<<"counters">>,{pkg,<<"counters">>,<<"0.2.1">>},1},
  {<<"ctx">>,{pkg,<<"ctx">>,<<"0.5.0">>},1},
  {<<"ehash">>,{pkg,<<"ehash">>,<<"0.2.1">>},0},
@@ -38,6 +39,7 @@
 [
 {pkg_hash,[
  {<<"acceptor_pool">>, <<"679D741DF87FC13599B1AEF2DF8F78F1F880449A6BEFAB7C44FB6FAE0E92A2DE">>},
+ {<<"aten">>, <<"2B4D31261D36C0A11CD6D04AE3F96C8951EB32106E9D2013A5B33BA14F7875AE">>},
  {<<"counters">>, <<"AA3D97E88F92573488987193D0F48EFCE0F3B2CD1443BF4EE760BC7F99322F0C">>},
  {<<"ctx">>, <<"78E0F16712E12D707A7F34277381B8E193D7C71EAA24D37330DC02477C09EDA5">>},
  {<<"ehash">>, <<"B3F73406C19FBA8ACE6598DB0B6252B0ECA5D8B3C0606CA7D69FAF6BAF442710">>},
