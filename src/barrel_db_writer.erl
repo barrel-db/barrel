@@ -150,8 +150,7 @@ handle_cast({{update_doc, From, #{ id := DocId, ref := Ref } = Record, Options},
   _ = ocp:with_tags(Tags),
   case get_docinfo(BarrelRef, DocId) of
     {ok, {DocStatus, DI}} ->
-      #{ seq := OldSeq0, deleted := OldDel } = DI,
-      OldSeq = maybe_migrate(OldSeq0),
+      #{ seq := OldSeq, deleted := OldDel } = DI,
       _ = ocp:with_child_span(
             <<"barrel_db_writer:do_merge/2">>,
             #{ <<"log">> => <<"merge document">>,
@@ -369,8 +368,3 @@ try_close_barrel(#{ name := BarrelName }) ->
     false ->
       ok
   end.
-
-maybe_migrate({_Epoch, _Seq}=T) ->
-  barrel_sequence:encode(T);
-maybe_migrate(S) ->
-  S.

@@ -44,11 +44,9 @@ init(#{barrel := BarrelId,
   process_flag(trap_exit, true),
   {ok, ViewConfig1} = ViewMod:init(ViewConfig0),
 
-  {ok, #{ ref := Ref, uid := UID }} = barrel_db:open_barrel(BarrelId),
+  {ok, #{ ref := Ref }} = barrel_db:open_barrel(BarrelId),
   case ?STORE:open_view(Ref, ViewId, Version) of
-    {ok, ViewRef, LastIndexedSeq0, _OldVersion} ->
-      LastIndexedSeq = maybe_migrate(LastIndexedSeq0, UID),
-
+    {ok, ViewRef, LastIndexedSeq, _OldVersion} ->
       View = #view{barrel=BarrelId,
                    ref=ViewRef,
                    mod=ViewMod,
@@ -216,10 +214,3 @@ notify_all(Waiters, Msg) ->
 maybe_update(#{ barrel := BarrelId, since := IndexedSeq }) ->
   UpdatedSeq =  barrel_db:last_updated_seq(BarrelId),
   (IndexedSeq < UpdatedSeq).
-
-
-maybe_migrate({_Epoch, _Seq}=T, UID) ->
-  SeqBin = barrel_sequence:encode(T),
-  barrel_sequence:to_string(UID, SeqBin);
-maybe_migrate(S, _UID) ->
-  S.
