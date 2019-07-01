@@ -4,6 +4,9 @@
 -type barrel_config() :: map().
 
 
+
+
+
 -define(APP, barrel).
 
 -define(VIEWS, barrel_views).
@@ -23,6 +26,20 @@
 
 -define(att(Path), {n, l, {barrel_attachment, Path}}).
 -define(att_proc(Path), {via, gproc, ?att(Path)}).
+
+
+%% -----------------
+%% -- replication
+
+-define(endpoint_listener(Name), {n, l, {barrel_endpoint_listener, Name}}).
+-define(endpoint_listener_proc(Name), {via, gproc, ?endpoint_listener(Name)}).
+
+
+-record(erlang_endpoint, {node :: node(),
+                          barrel :: barrel_name() }).
+
+-record(barrel_endpoint, {barrel :: barrel_name() }).
+
 
 %% -----------------
 %% -- loggin

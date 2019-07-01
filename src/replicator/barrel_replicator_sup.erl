@@ -7,7 +7,12 @@
 
 -behaviour(supervisor).
 
+
+
 %% API
+-export([start_replication/3,
+         stop_replication/2]).
+
 -export([start_link/0]).
 
 %% Supervisor callbacks
@@ -15,47 +20,30 @@
 
 -define(SERVER, ?MODULE).
 
-%%====================================================================
-%% API functions
-%%====================================================================
+
+start_replication(Name, Endpoint, Config) ->
+  supervisor:start_child(?SERVER, replication_spec(Name, Endpoint, Config)).
+
+stop_replication(Name, #{ id := Id }) ->
+  case supervisor:terminate_child(?SERVER, {Id, Name}) of
+    ok ->
+      supervisor:delete_child(?SERVER, {Id, Name});
+    Error ->
+      Error
+  end.
+
+
+replication_spec(Name, #{ id := Id} = Endpoint, Config) ->
+  #{ id => {Id, Name},
+     start => {barrel_replication_sup, start_link, [Name, Endpoint, Config]},
+     type => supervisor }.
+
 
 start_link() ->
-    supervisor:start_link({local, ?SERVER}, ?MODULE, []).
+  supervisor:start_link({local, ?SERVER}, ?MODULE, []).
 
-%%====================================================================
-%% Supervisor callbacks
-%%====================================================================
 
-%% Child :: #{id => Id, start => {M, F, A}}
-%% Optional keys are restart, shutdown, type, modules.
-%% Before OTP 18 tuples must be used to specify a child. e.g.
-%% Child :: {Id,StartFunc,Restart,Shutdown,Type,Modules}
 init([]) ->
-    Specs = [ %%  replication manager to store replication tasks
-        #{id => barrel_replicate,
-            start => {barrel_replicate, start_link, []},
-            restart => permanent,
-            shutdown => 2000,
-            type => worker,
-            modules => [barrel_replicate]},
-        %% monitor replication nodes to pause the replication if needed
-        #{id => monitor,
-            start => {barrel_node_checker, start_link, []},
-            restart => permanent,
-            shutdown => 2000,
-            type => worker,
-            modules => [barrel_node_checker]
-        },
-        %% tasks supervisor
-        #{id => barrel_replicate_task_sup,
-            start => {barrel_replicate_task_sup, start_link, []},
-            restart => permanent,
-            shutdown => 2000,
-            type => supervisor,
-            modules => [barrel_replicate_task_sup]}
-    ],
-    {ok, { {one_for_all, 0, 1}, Specs} }.
+  SupFlags = #{ strategy => one_for_one  },
+  {ok, {SupFlags, []}}.
 
-%%====================================================================
-%% Internal functions
-%%====================================================================
