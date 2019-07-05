@@ -281,7 +281,7 @@ history_test() ->
   ?assertEqual([<<"3-three">>, <<"2-two">>, <<"1-one">>],  barrel_revtree:history(<<"3-three">>, ?FLAT_TREE)).
 
 history_max_test() ->
-  ?assertEqual([<<"3-three">>, <<"2-two">>>],  barrel_revtree:history(<<"3-three">>, ?FLAT_TREE, 2)).
+  ?assertEqual([<<"3-three">>, <<"2-two">>],  barrel_revtree:history(<<"3-three">>, ?FLAT_TREE, 2)).
 
 
 winning_revision_test() ->
