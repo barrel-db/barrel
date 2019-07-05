@@ -31,14 +31,6 @@
 %% -----------------
 %% -- replication
 
--define(endpoint_listener(Name), {n, l, {barrel_endpoint_listener, Name}}).
--define(endpoint_listener_proc(Name), {via, gproc, ?endpoint_listener(Name)}).
-
-
--record(erlang_endpoint, {node :: node(),
-                          barrel :: barrel_name() }).
-
--record(barrel_endpoint, {barrel :: barrel_name() }).
 
 
 %% -----------------
