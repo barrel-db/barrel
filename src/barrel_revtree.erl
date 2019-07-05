@@ -23,7 +23,7 @@
     info/2,
     revisions/1,
     parent/2,
-    history/2,
+    history/2, history/3,
     fold_leafs/3,
     leaves/1,
     is_leaf/2,
@@ -36,6 +36,8 @@
 -export([is_deleted/1]).
 
 -define(IMAX1, 16#ffffFFFFffffFFFF).
+
+-define(DEFAULT_MAX_HISTORY, 200).
 
 new() -> #{}.
 
@@ -73,13 +75,23 @@ parent(RevId, Tree) ->
   end.
 
 history(RevId, Tree) ->
-  history1(maps:get(RevId, Tree, nil), Tree, []).
+  history(RevId, Tree, ?DEFAULT_MAX_HISTORY).
 
-history1(nil, _Tree, History) ->
+history(RevId, Tree, Max) ->
+  history1(maps:get(RevId, Tree, nil), Tree, [], Max).
+
+history1(nil, _Tree, History, _Max) ->
   lists:reverse(History);
-history1(#{id := Id, parent := Parent}, Tree, History) ->
-  history1(maps:get(Parent, Tree, nil), Tree, [Id | History]);
-history1(#{id := Id}, _Tree, History) ->
+history1(#{id := Id, parent := Parent}, Tree, History, Max) ->
+  NewHistory = [Id | History],
+  Len = length(NewHistory),
+  if
+    Len >= Max ->
+      lists:reverse(NewHistory);
+    true ->
+      history1(maps:get(Parent, Tree, nil), Tree, NewHistory, Max)
+  end;
+history1(#{id := Id}, _Tree, History, _Max) ->
   lists:reverse([Id | History]).
 
 fold_leafs(Fun, AccIn, Tree) ->
@@ -267,6 +279,10 @@ leafs_test() ->
 
 history_test() ->
   ?assertEqual([<<"3-three">>, <<"2-two">>, <<"1-one">>],  barrel_revtree:history(<<"3-three">>, ?FLAT_TREE)).
+
+history_max_test() ->
+  ?assertEqual([<<"3-three">>, <<"2-two">>>],  barrel_revtree:history(<<"3-three">>, ?FLAT_TREE, 2)).
+
 
 winning_revision_test() ->
   ?assertEqual({<<"3-three-2">>, true, true}, barrel_revtree:winning_revision(?BRANCHED_TREE)),
