@@ -123,9 +123,14 @@ start_barrel(Name) ->
   supervisor:start_child(barrel_db_sup, [Name]).
 
 stop_barrel(Name) ->
-  case supervisor:terminate_child(barrel_db_sup, barrel_registry:where_is(Name)) of
-    ok -> ok;
-    {error, simple_one_for_one} -> ok
+  case barrel_registry:where_is(Name) of
+    undefined -> ok;
+    Pid when is_pid(Pid) ->
+      case supervisor:terminate_child(barrel_db_sup, barrel_registry:where_is(Name)) of
+        ok -> ok;
+        {error, not_found} -> ok;
+        {error, simple_one_for_one} -> ok
+      end
   end.
 
 barrel_infos(Name) ->
