@@ -83,7 +83,7 @@ create_and_delete_db_loop(Config, Int) when Int > 0 ->
                           [?ITERATIONS - Int + 1]),
     %% Do something here.
     Name = <<(?DB_PREFIX)/binary, $_, (barrel_id:binary_id(62))/binary >>,
-    barrel:create_barrel(Name),
-    barrel:delete_barrel(Name),
+    ok = barrel:create_barrel(Name),
+    ok = barrel:delete_barrel(Name),
     {ok, _ } = barrel:barrel_infos(?DB_PREFIX),
     create_and_delete_db_loop(Config, Int - 1).

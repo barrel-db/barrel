@@ -111,7 +111,9 @@ uid(BarrelId) ->
 %% barrel replicated documents
 
 db_prefix_end(BarrelId) ->
-  barrel_rocksdb_util:bytes_prefix_end(db_prefix(BarrelId)).
+
+  << (db_prefix(BarrelId))/binary, 16#ff >>.
+  %%barrel_rocksdb_util:bytes_prefix_end(db_prefix(BarrelId)).
 
 %% @doc document info key
 doc_info(BarrelId, DocId) ->
