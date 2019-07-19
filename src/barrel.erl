@@ -311,8 +311,8 @@ fold_loop(StreamPid, _Fun, Acc, 0) ->
 
 
 start_replication(_Name, _Endpoint, _Config) ->
-  {error, not_implemented}.
+  {ok, undefined}.
 
 
 stop_replication(_RepId) ->
-  {error, not_implemented}.
+  ok.
