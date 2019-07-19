@@ -1,4 +1,4 @@
--module(barrel_erlang_endpoint).
+-module(barrel_endpoint_erlang).
 
 
 -export([start/1]).
