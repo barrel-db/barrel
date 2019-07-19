@@ -42,6 +42,9 @@
 -export([start_view/4, start_view/5]).
 -export([fold_view/5]).
 
+-export([start_replication/3,
+         stop_replication/1]).
+
 -include_lib("barrel.hrl").
 
 -type barrel_infos() :: #{
@@ -305,3 +308,11 @@ fold_loop(StreamPid, _Fun, Acc, 0) ->
   _ = barrel_view:stop_kvs_stream(StreamPid),
   Acc.
 
+
+
+start_replication(_Name, _Endpoint, _Config) ->
+  {error, not_implemented}.
+
+
+stop_replication(_RepId) ->
+  {error, not_implemented}.
