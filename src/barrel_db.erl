@@ -23,6 +23,7 @@
   close_barrel/1,
   delete_barrel/1,
   barrel_infos/1,
+  fold_names/2,
   last_updated_seq/1
 ]).
 
@@ -118,6 +119,9 @@ delete_barrel(Name) ->
         end
     end
   ).
+
+fold_names(Fun, Acc) ->
+  ?STORE:fold_names(Fun, Acc).
 
 start_barrel(Name) ->
   supervisor:start_child(barrel_db_sup, [Name]).

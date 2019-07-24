@@ -14,6 +14,7 @@
          open_barrel/1,
          delete_barrel/1,
          barrel_infos/1,
+         fold_names/2,
          last_updated_seq/1]).
 
 
@@ -125,6 +126,32 @@ delete_barrel(Name) ->
     Error ->
       Error
   end.
+
+fold_names(Fun, Acc) ->
+  ReadOpts = [{iterate_lower_bound, barrel_rocksdb_keys:local_barrel_ident(<<>>)},
+              {iterate_upper_bound, barrel_rocksdb_keys:local_barrel_ident_max()}],
+  {ok, Itr} = rocksdb:iterator(?db, ReadOpts),
+  try fold_names_loop(rocksdb:iterator_move(Itr, first), Itr, Fun, Acc)
+  after
+    rocksdb:iterator_close(Itr)
+  end.
+
+
+fold_names_loop({ok, Ident, _}, Itr, Fun, Acc) ->
+  Name = barrel_rocksdb_keys:decode_barrel_ident(Ident),
+
+  case Fun(Name, Acc) of
+    {ok, Acc1} ->
+      fold_names_loop(rocksdb:iterator_move(Itr, next), Itr, Fun, Acc1);
+    ok ->
+      fold_names_loop(rocksdb:iterator_move(Itr, next), Itr, Fun, Acc);
+    {stop, Acc1} ->
+      Acc1;
+    stop ->
+      Acc
+  end;
+fold_names_loop(_, _, _, Acc) ->
+  Acc.
 
 get_last_seq(Ident, ReadOpts0) ->
   ReadOpts =

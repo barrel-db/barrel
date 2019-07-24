@@ -20,7 +20,8 @@
 
 -export([
   local_doc/1,
-  create_and_delete_db/1
+  create_and_delete_db/1,
+  list_barrels/1
 ]).
 
 -define(ITERATIONS, 1000).
@@ -29,7 +30,8 @@
 all() ->
   [
     local_doc,
-    create_and_delete_db
+    create_and_delete_db,
+    list_barrels
   ].
 
 init_per_suite(Config) ->
@@ -87,3 +89,12 @@ create_and_delete_db_loop(Config, Int) when Int > 0 ->
     ok = barrel:delete_barrel(Name),
     {ok, _ } = barrel:barrel_infos(?DB_PREFIX),
     create_and_delete_db_loop(Config, Int - 1).
+
+
+list_barrels(_Config) ->
+  [<<"test">>] = barrel:all_names(),
+  ok = barrel:create_barrel(<<"test1">>),
+  [<<"test">>, <<"test1">>] = barrel:all_names(),
+  ok = barrel:delete_barrel(<<"test1">>),
+  [<<"test">>] = barrel:all_names(),
+  ok.

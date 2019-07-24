@@ -23,7 +23,9 @@
   open_barrel/1,
   close_barrel/1,
   delete_barrel/1,
-  barrel_infos/1
+  barrel_infos/1,
+  fold_names/2,
+  all_names/0
 ]).
 
 -export([
@@ -108,6 +110,14 @@ delete_barrel(Name) ->
 -spec barrel_infos(Name :: barrel()) -> {ok, barrel_infos()} | {error, any()}.
 barrel_infos(Name) ->
   barrel_db:barrel_infos(Name).
+
+all_names() ->
+  Fun = fun(Name, Acc) -> {ok, [Name | Acc]} end,
+  Names = fold_names(Fun, []),
+  lists:sort(Names).
+
+fold_names(Fun, Acc) ->
+  barrel_db:fold_names(Fun, Acc).
 
 
 %% @doc lookup a doc by its docid.
