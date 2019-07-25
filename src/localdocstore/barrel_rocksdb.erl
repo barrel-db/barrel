@@ -810,13 +810,13 @@ db_options(Cache) ->
    {max_manifest_file_size, 128 bsl 20},%% 128 MB,
 
    {write_buffer_size, WriteBufferSize}, %% 64MB
-   {max_write_buffer_number, 4},
-   {min_write_buffer_number_to_merge, 1},
-   {level0_file_num_compaction_trigger, 2},
-   {level0_slowdown_writes_trigger, 20},
-   {level0_stop_writes_trigger, 32},
+   %{max_write_buffer_number, 4},
+   %{min_write_buffer_number_to_merge, 1},
+   %{level0_file_num_compaction_trigger, 2},
+   %{level0_slowdown_writes_trigger, 20},
+   %{level0_stop_writes_trigger, 32},
 
-   {min_write_buffer_number_to_merge, 1},
+   %{min_write_buffer_number_to_merge, 1},
 
    %%       level-size  file-size  max-files
    %% L1:      64 MB       4 MB         16
@@ -826,18 +826,18 @@ db_options(Cache) ->
    %% L5:     625 GB      64 MB      10000
    %% L6:     6.1 TB     128 MB      50000
    %%
-   {max_bytes_for_level_base, 64 bsl 20},
+   %{max_bytes_for_level_base, 64 bsl 20},
 
-   {max_bytes_for_level_multiplier, 10},
-   {target_file_size_base, 4 bsl 20}, %% 4MB
-   {target_file_size_multiplier, 2},
+   %{max_bytes_for_level_multiplier, 10},
+   %{target_file_size_base, 4 bsl 20}, %% 4MB
+   %{target_file_size_multiplier, 2},
    {compression, snappy},
    %{prefix_extractor, {fixed_prefix_transform, 10}},
    {merge_operator, counter_merge_operator},
    %% Disable subcompactions since they're a less stable feature, and not
    %% necessary for our workload, where frequent fsyncs naturally prevent
    %% foreground writes from getting too far ahead of compactions.
-   {max_subcompactions, 1},
+   %{max_subcompactions, 1},
    %% Increase parallelism for compactions and flushes based on the
    %% number of cpus. Always use at least 4 threads, otherwise
    %% compactions and flushes may fight with each other.
