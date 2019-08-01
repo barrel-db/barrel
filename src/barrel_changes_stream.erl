@@ -3,6 +3,7 @@
 -export([next/1]).
 -export([await/1, await/2,
          ack/2]).
+-export([stop/1]).
 
 -export([start_link/3]).
 
@@ -54,6 +55,8 @@ await(StreamPid, Timeout) ->
 ack(StreamPid, ReqId) ->
   gen_statem:cast(StreamPid, {ack, ReqId}).
 
+stop(StreamPid) ->
+  gen_statem:cast(StreamPid, stop).
 
 start_link(Name, Owner, Options) ->
   gen_statem:start_link(?MODULE, [Name, Owner, Options], []).
@@ -80,7 +83,6 @@ init([Name, Owner, Options]) ->
     iterate ->
       Since1 = since(Since),
       {ok, Ctx} = ?STORE:init_ctx(Ref, true),
-      io:format(user, "ctx=~p~n", [Ctx]),
       {ok, Cont} = ?STORE:changes_iterator(Ctx, Since1),
       InitState = #{ barrel => Barrel,
                      since => Since,
@@ -113,8 +115,9 @@ iterate(cast, {next, {From, Tag}}, #{ cont := Cont,
 
 iterate(cast, close, #{ cont := Cont } = State) ->
   _ = (catch ?STORE:close_changes_iterator(Cont)),
-  {stop, normal, State}.
-
+  {stop, normal, State};
+iterate(EventType, Content, State) ->
+  handle_event(EventType, iterate, Content, State).
 
 change_doc(#{id := DocId,
              seq := Seq0,
@@ -179,7 +182,9 @@ push(info, send_changes, #{ barrel := Barrel,
       {keep_state, NewState};
     false ->
       {next_state, wait_pending, NewState}
-  end.
+  end;
+push(EventType, Content, State) ->
+  handle_event(EventType, push, Content, State).
 
 wait_pending(cast, {ack, ReqId}, #{ pending := Pending } = State) ->
   case (Pending -- [ReqId]) of
@@ -191,7 +196,13 @@ wait_pending(cast, {ack, ReqId}, #{ pending := Pending } = State) ->
       {keep_state, State};
     Pending2 ->
       {keep_state, State#{ pending => Pending2 }}
-  end.
+  end;
+wait_pending(EventType, Content, State) ->
+  handle_event(EventType, wait_pending, Content, State).
+
+
+handle_event(cast, _StateType, stop, State) ->
+  {stop, normal, State};
 
 handle_event(EventType, StateType, Content, State) ->
   ?LOG_WARNING(

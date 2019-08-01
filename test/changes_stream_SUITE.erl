@@ -12,7 +12,9 @@
    [
     basic/1,
     batch_size/1,
-    iterate/1
+    iterate/1,
+    proxy/1,
+    stop/1
    ]
   ).
 
@@ -20,7 +22,9 @@ all() ->
   [
    basic,
    batch_size,
-   iterate
+   iterate,
+   proxy,
+   stop
   ].
 
 
@@ -127,5 +131,38 @@ iterate(_Config) ->
   end,
   ok.
 
+
+proxy(_Config) ->
+  {ok,  Barrel}= barrel_db:open_barrel(<<"test">>),
+  Docs = [
+          #{ <<"id">> => <<"a">>, <<"v">> => 1},
+          #{ <<"id">> => <<"b">>, <<"v">> => 2},
+          #{ <<"id">> => <<"c">>, <<"v">> => 3},
+          #{ <<"id">> => <<"d">>, <<"v">> => 4},
+          #{ <<"id">> => <<"e">>, <<"v">> => 5}
+         ],
+  {ok, _Saved} = barrel:save_docs(Barrel, Docs),
+  5 = length(_Saved),
+
+   Fun = fun(Change, Acc) -> {ok, [ Change | Acc ]} end,
+  {ok, Changes, _LastSeq} = barrel:fold_changes(Barrel, first, Fun, [], #{}),
+  5 = length(Changes),
+
+  {ok, StreamPid} = barrel_changes_streams:subscr(node(), <<"test">>, #{}),
+  {ReqId, Changes_1} = barrel_changes_stream:await(StreamPid),
+  ok = barrel_changes_stream:ack(StreamPid, ReqId),
+
+  true = (Changes_1 =:= Changes),
+  ok.
+
+
+stop(_Config) ->
+  {ok, StreamPid} = barrel_changes_stream:start_link(<<"test">>, self(), #{}),
+  MRef = erlang:monitor(process, StreamPid),
+  ok = barrel_changes_stream:stop(StreamPid),
+  receive
+    {'DOWN', MRef, process, _, normal} ->
+     ok
+  end.
 
 

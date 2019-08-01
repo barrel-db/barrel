@@ -103,6 +103,11 @@ init([]) ->
 init(safe) ->
   Specs =
     [
+     %% changes stream server
+     #{ id => barrel_changes_streams,
+        start => {barrel_changes_streams, start_link, []}
+      },
+
      %% barrel db supervisor
      #{id => barrel_replicator_sup,
       start => {barrel_replicator_sup, start_link, []},
