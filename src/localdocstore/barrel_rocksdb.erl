@@ -31,8 +31,13 @@
          get_doc_info/2,
          get_doc_revision/3,
          fold_docs/4,
-         fold_changes/4,
          get_local_doc/2]).
+
+%% changes
+-export([changes_iterator/2,
+         close_changes_iterator/1,
+         changes_next/1,
+         fold_changes/4]).
 
 -export([open_view/3,
          update_indexed_seq/2,
@@ -339,6 +344,7 @@ get_doc_revision(#{ barrel_id := BarrelId } = Ctx, DocId, Rev) ->
     Error -> Error
   end.
 
+
 fold_docs(#{ barrel_id := BarrelId } = Ctx, UserFun, UserAcc, Options) ->
   {LowerBound, IsNext} =
     case maps:find(next_to, Options) of
@@ -410,6 +416,34 @@ do_fold_docs({ok, Key, Value}, Next, UserFun, UserAcc, PrevTo, Limit) when Limit
   end;
 do_fold_docs(_Else, _, _, UserAcc, _, _) ->
   UserAcc.
+
+
+changes_iterator(#{ barrel_id := BarrelId } = Ctx, Since) ->
+  LowerBound = barrel_rocksdb_keys:doc_seq(BarrelId, Since),
+  UpperBound = barrel_rocksdb_keys:doc_seq_max(BarrelId),
+  ReadOptions = [{iterate_lower_bound, LowerBound},
+                 {iterate_upper_bound, UpperBound}] ++ read_options(Ctx),
+
+  case rocksdb:iterator(?db, ReadOptions) of
+    {ok, Itr} ->
+      {ok, {Itr, first}};
+    Error ->
+      Error
+  end.
+
+changes_next({Itr, Move}) ->
+  case rocksdb:iterator_move(Itr, Move) of
+    {ok, _, Value} ->
+      DI = binary_to_term(Value),
+      {ok, DI, {Itr, next}};
+    {error, _} ->
+      invalid
+  end.
+
+
+close_changes_iterator({Itr, _}) ->
+  rocksdb:iterator_close(Itr).
+
 
 fold_changes(#{ barrel_id := BarrelId } = Ctx, Since, UserFun, UserAcc) ->
   LowerBound = barrel_rocksdb_keys:doc_seq(BarrelId, Since),

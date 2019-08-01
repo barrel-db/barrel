@@ -11,14 +11,16 @@
 -export(
    [
     basic/1,
-    batch_size/1
+    batch_size/1,
+    iterate/1
    ]
   ).
 
 all() ->
   [
    basic,
-   batch_size
+   batch_size,
+   iterate
   ].
 
 
@@ -70,7 +72,7 @@ basic(_Config) ->
 
 
 batch_size(_Config) ->
-    {ok,  Barrel}= barrel_db:open_barrel(<<"test">>),
+  {ok,  Barrel}= barrel_db:open_barrel(<<"test">>),
   Docs = [
           #{ <<"id">> => <<"a">>, <<"v">> => 1},
           #{ <<"id">> => <<"b">>, <<"v">> => 2},
@@ -96,6 +98,33 @@ batch_size(_Config) ->
   ok = barrel_changes_stream:ack(StreamPid, ReqId),
   ok = barrel_changes_stream:ack(StreamPid, ReqId_1),
   ok = barrel_changes_stream:ack(StreamPid, ReqId_2),
+  ok.
+
+
+iterate(_Config) ->
+  {ok,  Barrel}= barrel_db:open_barrel(<<"test">>),
+  Docs = [
+          #{ <<"id">> => <<"a">>, <<"v">> => 1},
+          #{ <<"id">> => <<"b">>, <<"v">> => 2},
+          #{ <<"id">> => <<"c">>, <<"v">> => 3},
+          #{ <<"id">> => <<"d">>, <<"v">> => 4},
+          #{ <<"id">> => <<"e">>, <<"v">> => 5}
+         ],
+  {ok, _Saved} = barrel:save_docs(Barrel, Docs),
+  5 = length(_Saved),
+
+  {ok, StreamPid} = barrel_changes_stream:start_link(<<"test">>, self(), #{ stream_mode => iterate }),
+  {ok, #{ <<"id">> := <<"a">> }} = barrel_changes_stream:next(StreamPid),
+  {ok, #{ <<"id">> := <<"b">> }} = barrel_changes_stream:next(StreamPid),
+  {ok, #{ <<"id">> := <<"c">> }} = barrel_changes_stream:next(StreamPid),
+  {ok, #{ <<"id">> := <<"d">> }} = barrel_changes_stream:next(StreamPid),
+  {ok, #{ <<"id">> := <<"e">> }} = barrel_changes_stream:next(StreamPid),
+  invalid = barrel_changes_stream:next(StreamPid),
+
+  try barrel_changes_stream:next(StreamPid)
+  catch
+    exit:timeout -> ok
+  end,
   ok.
 
 

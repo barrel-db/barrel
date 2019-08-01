@@ -1,6 +1,6 @@
 -module(barrel_changes_stream).
 
-
+-export([next/1]).
 -export([await/1, await/2,
          ack/2]).
 
@@ -11,7 +11,8 @@
          terminate/3,
          handle_event/4]).
 
--export([push/3,
+-export([iterate/3,
+         push/3,
          wait_pending/3]).
 
 -include("barrel.hrl").
@@ -20,6 +21,17 @@
 -define(CHANGES_INTERVAL, 100).
 -define(BATCH_SIZE, 100).
 -define(BATCHES_ON_FLY, 5).
+
+
+next(StreamPid) ->
+  Tag = erlang:make_ref(),
+  ok = gen_server:cast(StreamPid, {next, {self(), Tag}}),
+  receive
+    {Tag, {ok, _} = OK} -> OK;
+    {Tag, Error} -> Error
+  after 5000 ->
+          exit(timeout)
+  end.
 
 await(StreamPid) ->
  await(StreamPid, infinity).
@@ -48,24 +60,94 @@ start_link(Name, Owner, Options) ->
 
 
 init([Name, Owner, Options]) ->
-  {ok, Barrel} = barrel_db:open_barrel(Name),
+  {ok, #{ ref := Ref } = Barrel} = barrel_db:open_barrel(Name),
   Since = maps:get(since, Options, first),
-  Interval = maps:get(interval, Options, ?CHANGES_INTERVAL),
-  BatchSize = maps:get(batch_size, Options, ?BATCH_SIZE),
+  IncludeDoc = maps:get(include_docs, Options, false),
+  StreamMode = maps:get(stream_mode, Options, push),
 
-  InitState = #{ barrel => Barrel,
-                 since => Since,
-                 interval => Interval,
-                 batch_size => BatchSize,
-                 owner => Owner,
-                 pending => [] },
+  case StreamMode of
+    push ->
+      Interval = maps:get(interval, Options, ?CHANGES_INTERVAL),
+      BatchSize = maps:get(batch_size, Options, ?BATCH_SIZE),
+      InitState = #{ barrel => Barrel,
+                     since => Since,
+                     include_doc => IncludeDoc,
+                     interval => Interval,
+                     batch_size => BatchSize,
+                     owner => Owner,
+                     pending => [] },
+      {ok, push, InitState, [{next_event, info, send_changes}]};
+    iterate ->
+      Since1 = since(Since),
+      {ok, Ctx} = ?STORE:init_ctx(Ref, true),
+      io:format(user, "ctx=~p~n", [Ctx]),
+      {ok, Cont} = ?STORE:changes_iterator(Ctx, Since1),
+      InitState = #{ barrel => Barrel,
+                     since => Since,
+                     ctx => Ctx,
+                     include_doc => IncludeDoc,
+                     cont => Cont },
+      {ok, iterate, InitState}
+  end.
 
-  {ok, push, InitState, [{next_event, info, send_changes}]}.
 
 callback_mode() -> state_functions.
 
 terminate(_Reason, _StateType, _State) ->
   ok.
+
+iterate(cast, {next, {From, Tag}}, #{ cont := Cont,
+                                      ctx := Ctx,
+                                      include_doc := IncludeDoc } = State) ->
+  Result = ?STORE:changes_next(Cont),
+  case Result of
+    {ok, DI, NewCont} ->
+      ChangeDoc = change_doc(DI, IncludeDoc, Ctx),
+      From ! {Tag, {ok, ChangeDoc}},
+       {keep_state, State#{ cont => NewCont }};
+    Error ->
+      From ! {Tag, Error},
+      ok = ?STORE:close_changes_iterator(Cont),
+      {stop, normal, State}
+  end;
+
+iterate(cast, close, #{ cont := Cont } = State) ->
+  _ = (catch ?STORE:close_changes_iterator(Cont)),
+  {stop, normal, State}.
+
+
+change_doc(#{id := DocId,
+             seq := Seq0,
+             deleted := Deleted,
+             rev := Rev,
+             revtree := RevTree }, IncludeDoc, Ctx) ->
+
+  Seq = barrel_sequence:to_string(Seq0),
+  Changes = [RevId || #{ id := RevId } <- barrel_revtree:conflicts(RevTree)],
+  Change0 =
+  #{ <<"id">> => DocId,
+     <<"seq">> => Seq,
+     <<"rev">> => Rev,
+     <<"changes">> => Changes
+   },
+
+
+  change_with_doc(
+    change_with_deleted(Change0, Deleted),
+    DocId, Rev, Ctx, IncludeDoc
+   ).
+
+
+change_with_deleted(Change, true) ->
+  Change#{ <<"deleted">> => true };
+change_with_deleted(Change, _) ->
+  Change.
+
+change_with_doc(Change, DocId, Rev, Ctx, true) ->
+  {ok, Doc} = ?STORE:get_doc_revision(Ctx, DocId, Rev),
+  Change#{ <<"doc">> => Doc };
+change_with_doc(Change, _, _, _, _) ->
+  Change.
 
 
 push(info, send_changes, #{ barrel := Barrel,
@@ -117,3 +199,13 @@ handle_event(EventType, StateType, Content, State) ->
      [?MODULE_STRING, EventType, StateType, Content]
   ),
   {keep_state, State}.
+
+
+since(first) ->
+  barrel_sequence:encode({0, 0});
+since(Since0) when is_binary(Since0) ->
+  {_, Since1} = barrel_sequence:from_string(Since0),
+  Since1;
+since(Since) ->
+  ?LOG_ERROR("fold_changes: invalid sequence. sinnce=~p~n", [Since]),
+  erlang:error(badarg).
