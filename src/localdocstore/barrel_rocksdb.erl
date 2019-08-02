@@ -865,6 +865,7 @@ db_options(Cache) ->
    %{max_bytes_for_level_multiplier, 10},
    %{target_file_size_base, 4 bsl 20}, %% 4MB
    %{target_file_size_multiplier, 2},
+   {ompaction_pri, oldest_largest_seq_first},
    {compression, snappy},
    %{prefix_extractor, {fixed_prefix_transform, 10}},
    {merge_operator, counter_merge_operator},
