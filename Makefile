@@ -24,7 +24,8 @@ clean:
 	@$(REBAR) clean
 
 distclean: clean ## Clean all build and releases artifacts
-	rm -rf _build
+	@rm -rf _build
+	@rm -rf data
 
 cleantest:
 	@rm -rf _build/test
