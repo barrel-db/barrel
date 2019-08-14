@@ -40,15 +40,6 @@ test: cleantest
 
 cover:
 	@$(REBAR) cover
-eqc:
-	@$(REBAR) as eqc eunit
-
-eqcshell:
-	@$(REBAR) as eqc shell --sname barreleqc@localhost
-
-shell:
-	@$(REBAR) as eqc shell --sname barrel@localhost
-
 
 help: ## This documentation
 	@echo Build commands for barrel platform:
