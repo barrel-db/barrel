@@ -1,0 +1,17 @@
+{application, barrel_attachments,
+ [{description, "An OTP application"},
+  {vsn, "0.1.0"},
+  {registered, []},
+  {mod, {barrel_attachments_app, []}},
+  {applications,
+   [kernel,
+    stdlib,
+    lru,
+    barrel
+   ]},
+  {env,[]},
+  {modules, []},
+
+  {licenses, ["Apache 2.0"]},
+  {links, []}
+ ]}.

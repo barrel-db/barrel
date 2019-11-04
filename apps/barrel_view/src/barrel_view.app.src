@@ -1,0 +1,16 @@
+{application, barrel_view,
+ [{description, "An OTP application"},
+  {vsn, "0.1.0"},
+  {registered, []},
+  {mod, {barrel_view_app, []}},
+  {applications,
+   [kernel,
+    stdlib,
+    barrel_docdb
+   ]},
+  {env,[]},
+  {modules, []},
+
+  {licenses, ["Apache 2.0"]},
+  {links, []}
+ ]}.

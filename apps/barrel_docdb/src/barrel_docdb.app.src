@@ -1,0 +1,17 @@
+{application, barrel_docdb,
+ [{description, "An OTP application"},
+  {vsn, "0.1.0"},
+  {registered, []},
+  {mod, {barrel_docdb_app, []}},
+  {applications,
+   [kernel,
+    stdlib,
+    barrel,
+    barrel_attachments
+   ]},
+  {env,[]},
+  {modules, []},
+
+  {licenses, ["Apache 2.0"]},
+  {links, []}
+ ]}.

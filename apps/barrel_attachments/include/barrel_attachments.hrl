@@ -1,0 +1,2 @@
+-define(att(Path), {n, l, {barrel_attachment, Path}}).
+-define(att_proc(Path), {via, gproc, ?att(Path)}).
