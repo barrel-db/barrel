@@ -53,6 +53,47 @@ These rules keep the umbrella maintainable as it grows:
 - Optional heavy backends (for example FAISS) stay opt-in and out of the
   default build.
 
+## Scope and rationale
+
+This umbrella holds the Barrel data-stack libraries only: `barrel_docdb`,
+`barrel_vectordb`, `barrel_embed`, `barrel_rerank`, and `barrel_faiss`. Products
+and clients that build on top of the stack stay in their own repositories.
+
+### What the umbrella buys you
+
+- Version coordination: one resolved dependency set across the apps. It already
+  forced a single `hackney` (4.4.0) and `meck` (1.2.0) where the separate repos
+  had drifted, and surfaced the OTP 29 prefix-`catch` fix in one pass.
+- Atomic cross-app changes: `barrel_vectordb` and its backends (`barrel_embed`,
+  `barrel_rerank`, `barrel_faiss`) co-evolve. A change to the vectordb API plus
+  its adapters is one commit and one CI run, not tag-and-chase across repos.
+- One build, test, and release surface: shared profiles (the FAISS opt-in), one
+  PLT, one `rel/`.
+- A staging ground for the fabric: `barrel_object` and `barrel_fabric` are meant
+  to span docdb and vectordb, and a layer that unifies two apps needs a repo
+  that holds both. `barrel_docdb` shares no code with `barrel_vectordb` today, so
+  its place here is forward-looking, justified by that fabric work.
+
+### Out of scope (kept separate on purpose)
+
+- `barrel_memory` and `barrellm`: application/service layers that consume the
+  stack (`barrel_memory` -> `barrel_vectordb`; `barrellm` -> `barrel_docdb` +
+  `barrel_embed`). They have their own HTTP/MCP surfaces, release cadence, and
+  much older pinned deps (for example rocksdb 2.5.0, hackney 1.20.1/2.0.1).
+  Folding them in would invert the layering and drag the stack back to older
+  dependencies.
+- `barrel_memory_macos`: a native macOS (Swift) client. It talks to the memory
+  service over HTTP and cannot be a rebar3 OTP application.
+- `barrel_llm`: an empty placeholder directory. Nothing to import.
+
+### If products need co-development later
+
+Keep them as separate repos that depend on the stack, via path deps for local
+work (`{path, "../barrel/apps/barrel_vectordb"}`) or the published packages. If
+they grow, group them in their own applications umbrella (for example
+`barrel_apps`) that depends on this one, rather than flattening libraries and
+products together.
+
 ## Build layout
 
 - `apps/` holds the applications.
