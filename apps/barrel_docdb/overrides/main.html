@@ -1,0 +1,171 @@
+{% extends "base.html" %}
+
+{% block extrahead %}
+<style>
+/* Dropdown container */
+.barrel-docs-dropdown {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  margin-left: 1.5rem;
+  height: 100%;
+}
+
+.barrel-docs-dropdown > a {
+  color: rgba(255,255,255,0.7) !important;
+  text-decoration: none !important;
+  font-size: 0.8rem;
+  padding: 0.5rem 0.5rem;
+  border-radius: 4px;
+  transition: all 0.2s;
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  cursor: pointer;
+}
+
+.barrel-docs-dropdown > a:hover {
+  color: #fff !important;
+  background: rgba(255,255,255,0.1);
+}
+
+.barrel-docs-dropdown > a::after {
+  content: "";
+  border: solid rgba(255,255,255,0.5);
+  border-width: 0 1.5px 1.5px 0;
+  padding: 2px;
+  transform: rotate(45deg);
+  margin-left: 4px;
+  margin-bottom: 2px;
+}
+
+.barrel-docs-menu {
+  display: none;
+  position: absolute;
+  top: 100%;
+  left: 0;
+  background: #222929;
+  border: 1px solid rgba(0, 107, 119, 0.3);
+  border-radius: 6px;
+  padding: 0.5rem 0;
+  min-width: 160px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+  z-index: 1000;
+}
+
+/* Invisible bridge to prevent gap */
+.barrel-docs-menu::before {
+  content: "";
+  position: absolute;
+  top: -10px;
+  left: 0;
+  right: 0;
+  height: 10px;
+}
+
+.barrel-docs-dropdown:hover .barrel-docs-menu,
+.barrel-docs-dropdown:focus-within .barrel-docs-menu {
+  display: block;
+}
+
+.barrel-docs-menu a {
+  display: block;
+  padding: 0.5rem 1rem;
+  color: rgba(243,243,242,0.8) !important;
+  text-decoration: none !important;
+  font-size: 0.85rem;
+  transition: all 0.15s;
+}
+
+.barrel-docs-menu a:hover {
+  background: rgba(0, 107, 119, 0.2);
+  color: #fff !important;
+}
+
+.barrel-docs-menu a.active {
+  color: #C65E59 !important;
+  font-weight: 500;
+}
+
+.barrel-docs-menu .menu-divider {
+  height: 1px;
+  background: rgba(0, 107, 119, 0.3);
+  margin: 0.5rem 0;
+}
+
+/* Footer styling */
+.md-footer {
+  background: #222929 !important;
+  border-top: 1px solid rgba(0, 107, 119, 0.3);
+}
+
+.md-footer-meta {
+  background: #1a1f1f !important;
+}
+
+.md-footer a {
+  color: #75B6B2 !important;
+}
+
+.md-footer a:hover {
+  color: #C65E59 !important;
+}
+
+/* Custom footer content */
+.barrel-footer-link {
+  width: 100%;
+  text-align: center;
+  padding: 1rem 0;
+  margin-top: 1rem;
+  border-top: 1px solid rgba(0, 107, 119, 0.2);
+}
+
+.barrel-footer-link a {
+  color: #75B6B2 !important;
+  text-decoration: none !important;
+  font-size: 0.85rem;
+}
+
+.barrel-footer-link a:hover {
+  color: #C65E59 !important;
+}
+
+@media (max-width: 76.1875em) {
+  .barrel-docs-dropdown { display: none; }
+}
+</style>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+  // Add dropdown to header
+  var headerInner = document.querySelector('.md-header__inner');
+  if (headerInner) {
+    var dropdown = document.createElement('div');
+    dropdown.className = 'barrel-docs-dropdown';
+    dropdown.innerHTML = `
+      <a tabindex="0">Docs</a>
+      <div class="barrel-docs-menu">
+        <a href="https://docs.barrel-db.eu/vectordb/">Barrel Vector</a>
+        <a href="https://docs.barrel-db.eu/docdb/" class="active">Barrel Docs</a>
+        <a href="https://docs.barrel-db.eu/embed/">Barrel Embed</a>
+        <div class="menu-divider"></div>
+        <a href="https://docs.barrel-db.eu/">All Documentation</a>
+      </div>
+    `;
+    var title = headerInner.querySelector('.md-header__title');
+    if (title) {
+      title.parentNode.insertBefore(dropdown, title.nextSibling);
+    }
+  }
+
+  // Add link to footer
+  var footer = document.querySelector('.md-footer-meta');
+  if (footer) {
+    var footerLink = document.createElement('div');
+    footerLink.className = 'barrel-footer-link';
+    footerLink.innerHTML = `<a href="https://barrel-db.eu">barrel-db.eu &rarr;</a>`;
+    footer.appendChild(footerLink);
+  }
+});
+</script>
+{% endblock %}

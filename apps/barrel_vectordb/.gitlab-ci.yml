@@ -1,0 +1,287 @@
+stages:
+  - build
+  - test
+  - benchmark
+  - docker
+
+variables:
+  MIX_ENV: test
+  # Docker image settings
+  DOCKER_IMAGE: ${CI_REGISTRY_IMAGE}
+  DOCKER_BUILDKIT: 1
+
+default:
+  image: erlang:27
+  before_script:
+    - apt-get update && apt-get install -y cmake libsnappy-dev liblz4-dev libzstd-dev python3
+    # Configure git credentials for private dependencies using CI job token
+    - git config --global credential.helper store
+    - echo "https://gitlab-ci-token:${CI_JOB_TOKEN}@gitlab.enki.io" > ~/.git-credentials
+    - rebar3 --version
+
+cache:
+  key: ${CI_COMMIT_REF_SLUG}-v2
+  paths:
+    - ${HOME}/.cache/rebar3/
+
+# ============================================
+# Build Stage
+# ============================================
+
+compile:
+  stage: build
+  script:
+    - rebar3 compile
+  artifacts:
+    paths:
+      - _build/
+    expire_in: 1 hour
+
+# ============================================
+# Test Stage
+# ============================================
+
+eunit:
+  stage: test
+  needs:
+    - compile
+  script:
+    - rebar3 eunit --module=barrel_vectordb_tests
+    - rebar3 eunit --module=barrel_vectordb_store_tests
+    - rebar3 eunit --module=barrel_vectordb_hnsw_tests
+    - rebar3 eunit --module=barrel_vectordb_comprehensive_tests
+
+dialyzer:
+  stage: test
+  needs:
+    - compile
+  script:
+    - rebar3 dialyzer
+  allow_failure: true
+  cache:
+    key: dialyzer-${CI_COMMIT_REF_SLUG}-v2
+    paths:
+      - ${HOME}/.cache/rebar3/
+
+cover:
+  stage: test
+  needs:
+    - compile
+  script:
+    - rebar3 cover --verbose
+  coverage: '/Total\s+\|\s+(\d+(?:\.\d+)?)%/'
+  artifacts:
+    paths:
+      - _build/test/cover/
+    expire_in: 1 week
+
+# ============================================
+# Benchmark Stage
+# ============================================
+
+benchmark:
+  stage: benchmark
+  needs:
+    - compile
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+    - if: $CI_PIPELINE_SOURCE == "web"
+      when: manual
+    - if: $CI_COMMIT_TAG
+      when: manual
+  variables:
+    BENCH_ITERATIONS: "50"
+    BENCH_WARMUP: "10"
+  script:
+    - rebar3 as bench compile
+    - |
+      erl -pa _build/bench/lib/*/ebin \
+          -pa _build/bench/lib/*/bench \
+          -pa _build/default/lib/*/ebin \
+          -noshell \
+          -eval "
+      application:ensure_all_started(barrel_vectordb),
+      barrel_vectordb_bench:run_all(#{
+          iterations => ${BENCH_ITERATIONS},
+          warmup_iterations => ${BENCH_WARMUP},
+          output_format => all
+      }),
+      halt().
+      "
+  artifacts:
+    paths:
+      - bench_results.json
+      - bench_results.csv
+    expire_in: 30 days
+
+benchmark_compare:
+  stage: benchmark
+  needs:
+    - benchmark
+  rules:
+    - if: $BASELINE_JOB_ID
+      when: manual
+  script:
+    - |
+      if [ -n "$BASELINE_JOB_ID" ]; then
+        curl --output baseline.json "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/jobs/${BASELINE_JOB_ID}/artifacts/bench_results.json"
+        erl -pa _build/bench/lib/*/ebin \
+            -pa _build/bench/lib/*/bench \
+            -pa _build/default/lib/*/ebin \
+            -noshell \
+            -eval "barrel_vectordb_bench_compare:compare(\"baseline.json\", \"bench_results.json\"), halt()."
+      fi
+  allow_failure: true
+
+# ============================================
+# Docker Build Stage (using Kaniko + manifest)
+# ============================================
+
+.kaniko_build_template: &kaniko_build
+  image:
+    name: gcr.io/kaniko-project/executor:v1.23.0-debug
+    entrypoint: [""]
+  before_script:
+    - mkdir -p /kaniko/.docker
+    - echo "{\"auths\":{\"${CI_REGISTRY}\":{\"auth\":\"$(printf "%s:%s" "${CI_REGISTRY_USER}" "${CI_REGISTRY_PASSWORD}" | base64 | tr -d '\n')\"}}}" > /kaniko/.docker/config.json
+
+# Build amd64 image
+.docker_build_amd64: &docker_build_amd64
+  <<: *kaniko_build
+  tags:
+    - amd64
+  script:
+    - /kaniko/executor
+      --context "${CI_PROJECT_DIR}"
+      --dockerfile "${CI_PROJECT_DIR}/Dockerfile"
+      --destination "${DOCKER_IMAGE}:${IMAGE_TAG}-amd64"
+      --build-arg "CI_JOB_TOKEN=${CI_JOB_TOKEN}"
+      --build-arg "BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      --build-arg "VCS_REF=${CI_COMMIT_SHA}"
+      --build-arg "VERSION=${IMAGE_TAG}"
+      --custom-platform=linux/amd64
+      --cache=true
+
+# Build arm64 image
+.docker_build_arm64: &docker_build_arm64
+  <<: *kaniko_build
+  tags:
+    - arm64
+  script:
+    - /kaniko/executor
+      --context "${CI_PROJECT_DIR}"
+      --dockerfile "${CI_PROJECT_DIR}/Dockerfile"
+      --destination "${DOCKER_IMAGE}:${IMAGE_TAG}-arm64"
+      --build-arg "CI_JOB_TOKEN=${CI_JOB_TOKEN}"
+      --build-arg "BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      --build-arg "VCS_REF=${CI_COMMIT_SHA}"
+      --build-arg "VERSION=${IMAGE_TAG}"
+      --custom-platform=linux/arm64
+      --cache=true
+
+# Create multi-arch manifest
+.docker_manifest: &docker_manifest
+  image: mplatform/manifest-tool:alpine
+  before_script:
+    - mkdir -p ~/.docker
+    - echo "{\"auths\":{\"${CI_REGISTRY}\":{\"username\":\"${CI_REGISTRY_USER}\",\"password\":\"${CI_REGISTRY_PASSWORD}\"}}}" > ~/.docker/config.json
+
+# ============================================
+# Main branch builds
+# ============================================
+
+docker:main:amd64:
+  <<: *docker_build_amd64
+  stage: docker
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+  variables:
+    IMAGE_TAG: main-${CI_COMMIT_SHORT_SHA}
+
+docker:main:arm64:
+  <<: *docker_build_arm64
+  stage: docker
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+  variables:
+    IMAGE_TAG: main-${CI_COMMIT_SHORT_SHA}
+
+docker:main:manifest:
+  <<: *docker_manifest
+  stage: docker
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+  needs:
+    - docker:main:amd64
+    - docker:main:arm64
+  script:
+    - |
+      manifest-tool push from-args \
+        --platforms linux/amd64,linux/arm64 \
+        --template "${DOCKER_IMAGE}:main-${CI_COMMIT_SHORT_SHA}-ARCH" \
+        --target "${DOCKER_IMAGE}:main-${CI_COMMIT_SHORT_SHA}"
+      manifest-tool push from-args \
+        --platforms linux/amd64,linux/arm64 \
+        --template "${DOCKER_IMAGE}:main-${CI_COMMIT_SHORT_SHA}-ARCH" \
+        --target "${DOCKER_IMAGE}:main"
+
+# ============================================
+# Tagged release builds
+# ============================================
+
+docker:release:amd64:
+  <<: *docker_build_amd64
+  stage: docker
+  rules:
+    - if: $CI_COMMIT_TAG
+  variables:
+    IMAGE_TAG: ${CI_COMMIT_TAG}
+
+docker:release:arm64:
+  <<: *docker_build_arm64
+  stage: docker
+  rules:
+    - if: $CI_COMMIT_TAG
+  variables:
+    IMAGE_TAG: ${CI_COMMIT_TAG}
+
+docker:release:manifest:
+  <<: *docker_manifest
+  stage: docker
+  rules:
+    - if: $CI_COMMIT_TAG
+  needs:
+    - docker:release:amd64
+    - docker:release:arm64
+  script:
+    - |
+      VERSION=${CI_COMMIT_TAG#v}
+      manifest-tool push from-args \
+        --platforms linux/amd64,linux/arm64 \
+        --template "${DOCKER_IMAGE}:${CI_COMMIT_TAG}-ARCH" \
+        --target "${DOCKER_IMAGE}:${VERSION}"
+      manifest-tool push from-args \
+        --platforms linux/amd64,linux/arm64 \
+        --template "${DOCKER_IMAGE}:${CI_COMMIT_TAG}-ARCH" \
+        --target "${DOCKER_IMAGE}:latest"
+
+# ============================================
+# Branch builds (manual, single arch)
+# ============================================
+
+docker:branch:
+  <<: *kaniko_build
+  stage: docker
+  rules:
+    - if: $CI_COMMIT_BRANCH && $CI_COMMIT_BRANCH != "main"
+      when: manual
+  script:
+    - /kaniko/executor
+      --context "${CI_PROJECT_DIR}"
+      --dockerfile "${CI_PROJECT_DIR}/Dockerfile"
+      --destination "${DOCKER_IMAGE}:${CI_COMMIT_REF_SLUG}"
+      --build-arg "CI_JOB_TOKEN=${CI_JOB_TOKEN}"
+      --build-arg "BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      --build-arg "VCS_REF=${CI_COMMIT_SHA}"
+      --build-arg "VERSION=${CI_COMMIT_REF_SLUG}"
+      --cache=true

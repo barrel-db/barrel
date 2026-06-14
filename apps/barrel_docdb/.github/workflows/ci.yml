@@ -1,0 +1,218 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+env:
+  OTP_VERSION: '28'
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    container:
+      image: erlang:28
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install dependencies
+        run: |
+          apt-get update && apt-get install -y cmake build-essential libssl-dev zlib1g-dev libsnappy-dev liblz4-dev libzstd-dev
+          git config --global --add safe.directory '*'
+
+      - name: Cache rebar3
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/rebar3
+          key: rebar3-${{ hashFiles('rebar.lock') }}
+
+      - name: Compile
+        run: rebar3 compile
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-artifacts
+          path: |
+            _build/default/lib
+            _build/default/plugins
+          retention-days: 1
+
+  test:
+    name: Tests
+    needs: build
+    runs-on: ubuntu-latest
+    container:
+      image: erlang:28
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install dependencies
+        run: |
+          apt-get update && apt-get install -y cmake build-essential libssl-dev zlib1g-dev libsnappy-dev liblz4-dev libzstd-dev
+          git config --global --add safe.directory '*'
+
+      - name: Cache rebar3
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/rebar3
+          key: rebar3-${{ hashFiles('rebar.lock') }}
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: build-artifacts
+          path: _build/default
+
+      - name: Run Common Tests
+        run: rebar3 ct --sname test
+
+  xref:
+    name: Xref
+    needs: build
+    runs-on: ubuntu-latest
+    container:
+      image: erlang:28
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install dependencies
+        run: |
+          apt-get update && apt-get install -y cmake build-essential libssl-dev zlib1g-dev libsnappy-dev liblz4-dev libzstd-dev
+          git config --global --add safe.directory '*'
+
+      - name: Cache rebar3
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/rebar3
+          key: rebar3-${{ hashFiles('rebar.lock') }}
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: build-artifacts
+          path: _build/default
+
+      - name: Run Xref
+        run: rebar3 xref
+
+  dialyzer:
+    name: Dialyzer
+    needs: build
+    runs-on: ubuntu-latest
+    container:
+      image: erlang:28
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install dependencies
+        run: |
+          apt-get update && apt-get install -y cmake build-essential libssl-dev zlib1g-dev libsnappy-dev liblz4-dev libzstd-dev
+          git config --global --add safe.directory '*'
+
+      - name: Cache rebar3
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/rebar3
+          key: rebar3-${{ hashFiles('rebar.lock') }}
+
+      - name: Cache Dialyzer PLT
+        uses: actions/cache@v4
+        with:
+          path: _build/default/*_plt
+          key: dialyzer-plt-${{ env.OTP_VERSION }}-${{ hashFiles('rebar.lock') }}
+          restore-keys: |
+            dialyzer-plt-${{ env.OTP_VERSION }}-
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: build-artifacts
+          path: _build/default
+
+      - name: Run Dialyzer
+        run: rebar3 dialyzer
+
+  release:
+    name: Release (${{ matrix.arch }})
+    needs: [test, xref, dialyzer]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ${{ matrix.runner }}
+    container:
+      image: erlang:28
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm64
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          apt-get install -y cmake build-essential libssl-dev zlib1g-dev libsnappy-dev liblz4-dev libzstd-dev
+
+      - name: Configure git
+        run: git config --global --add safe.directory '*'
+
+      - name: Build release
+        run: rebar3 as prod release
+
+      - name: Get version
+        id: version
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Package release
+        run: |
+          cd _build/prod/rel
+          tar -czf barrel_docdb-${{ steps.version.outputs.version }}-linux-${{ matrix.arch }}.tar.gz barrel_docdb
+
+      - name: Generate checksums
+        run: |
+          cd _build/prod/rel
+          sha256sum barrel_docdb-${{ steps.version.outputs.version }}-linux-${{ matrix.arch }}.tar.gz > barrel_docdb-${{ steps.version.outputs.version }}-linux-${{ matrix.arch }}.tar.gz.sha256
+          md5sum barrel_docdb-${{ steps.version.outputs.version }}-linux-${{ matrix.arch }}.tar.gz > barrel_docdb-${{ steps.version.outputs.version }}-linux-${{ matrix.arch }}.tar.gz.md5
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.arch }}
+          path: |
+            _build/prod/rel/barrel_docdb-*.tar.gz
+            _build/prod/rel/barrel_docdb-*.tar.gz.sha256
+            _build/prod/rel/barrel_docdb-*.tar.gz.md5
+
+  publish-release:
+    name: Publish Release
+    needs: release
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download amd64 artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: release-amd64
+          path: artifacts
+
+      - name: Download arm64 artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: release-arm64
+          path: artifacts
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: artifacts/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

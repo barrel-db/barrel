@@ -1,0 +1,43 @@
+# Rebar3 artifacts
+_build/
+_checkouts/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+*.swp
+*.swo
+*~
+
+# Generated files
+*.beam
+*.plt
+*.dump
+erl_crash.dump
+rebar3.crashdump
+
+# Generated documentation
+doc/
+
+# Coverage data
+*.coverdata
+cover/
+
+# Release
+_rel/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data directories
+data/
+priv/data/
+
+# Test artifacts
+ct_run.*
+logs/
+log/
+*.trace
+site/

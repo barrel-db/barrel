@@ -1,0 +1,35 @@
+{application, barrel_embed,
+ [{description, "Lightweight embedding generation for Erlang"},
+  {vsn, "2.2.1"},
+  {registered, []},
+  {mod, {barrel_embed_app, []}},
+  {applications,
+   [kernel,
+    stdlib,
+    hackney
+   ]},
+  {env,[]},
+  {modules, []},
+  {licenses, ["Apache-2.0"]},
+  {links, [
+    {"GitHub", "https://github.com/barrel-db/barrel_embed"},
+    {"Documentation", "https://docs.barrel-db.eu/embed/"}
+  ]},
+  {files, [
+    "src",
+    "include",
+    "rebar.config",
+    "rebar.lock",
+    "README.md",
+    "LICENSE",
+    "priv/barrel_embed",
+    "priv/pyproject.toml",
+    "priv/requirements.txt",
+    "priv/requirements-minimal.txt",
+    "priv/requirements-full.txt"
+  ]},
+  {exclude_files, [
+    ".*__pycache__.*",
+    ".*\\.pyc$"
+  ]}
+ ]}.

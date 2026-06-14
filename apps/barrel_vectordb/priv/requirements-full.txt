@@ -1,0 +1,14 @@
+# Full requirements including barrel_embed for shared venv
+#
+# Usage:
+#   uv pip install -r priv/requirements-full.txt --python .venv/bin/python
+
+# Include barrel_embed requirements (adjust path as needed)
+-r ../../barrel_embed/priv/requirements.txt
+
+# Reranking models
+transformers>=4.30.0
+torch>=2.0.0
+
+# Performance
+uvloop>=0.17.0; sys_platform != "win32"

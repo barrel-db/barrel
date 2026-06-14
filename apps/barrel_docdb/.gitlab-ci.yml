@@ -1,0 +1,124 @@
+# GitLab CI/CD for Barrel DocDB
+# Builds Erlang tests, Docker images, and deploys MkDocs documentation
+
+stages:
+  - test
+  - build
+  - pages
+
+variables:
+  # Cache rebar3 dependencies
+  REBAR_CACHE_DIR: "$CI_PROJECT_DIR/.cache/rebar3"
+  # Docker image name
+  DOCKER_IMAGE: $CI_REGISTRY_IMAGE
+  DOCKER_TAG: $CI_COMMIT_REF_SLUG
+
+# Erlang tests
+test:
+  stage: test
+  image: erlang:27
+  cache:
+    key: rebar3-deps-v1
+    paths:
+      - .cache/rebar3
+  before_script:
+    # Install build tools for native dependencies (rocksdb)
+    # Clear apt lists first to avoid GPG signature errors with stale Docker cache
+    - rm -rf /var/lib/apt/lists/* && apt-get update && apt-get install -y cmake build-essential libssl-dev zlib1g-dev
+    - rebar3 --version
+  script:
+    - rebar3 compile
+    - rebar3 ct --sname test
+  rules:
+    - if: $CI_COMMIT_BRANCH
+    - if: $CI_MERGE_REQUEST_ID
+
+# Docker build template using buildx
+.docker_build:
+  stage: build
+  image: docker:24
+  before_script:
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+    # Setup buildx
+    - docker buildx create --name multiarch --driver docker-container --use || docker buildx use multiarch
+    - docker buildx inspect --bootstrap
+  rules:
+    # Build on main branch
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    # Build on tags (releases)
+    - if: $CI_COMMIT_TAG
+    # Manual build on other branches
+    - if: $CI_COMMIT_BRANCH
+      when: manual
+      allow_failure: true
+
+# Build for AMD64 (x86_64)
+docker:amd64:
+  extends: .docker_build
+  tags:
+    - amd64
+  script:
+    - docker buildx build --platform linux/amd64
+        --tag $DOCKER_IMAGE:$DOCKER_TAG-amd64
+        --push .
+
+# Build for ARM64 (aarch64)
+docker:arm64:
+  extends: .docker_build
+  tags:
+    - arm64
+  script:
+    - docker buildx build --platform linux/arm64
+        --tag $DOCKER_IMAGE:$DOCKER_TAG-arm64
+        --push .
+
+# Create multi-arch manifest
+docker:manifest:
+  stage: build
+  image: docker:24
+  tags:
+    - docker
+  needs:
+    - docker:amd64
+    - docker:arm64
+  before_script:
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+  script:
+    # Create and push multi-arch manifest
+    - docker buildx imagetools create
+        --tag $DOCKER_IMAGE:$DOCKER_TAG
+        $DOCKER_IMAGE:$DOCKER_TAG-amd64
+        $DOCKER_IMAGE:$DOCKER_TAG-arm64
+    # Tag as latest for main branch
+    - |
+      if [ "$CI_COMMIT_BRANCH" = "$CI_DEFAULT_BRANCH" ]; then
+        docker buildx imagetools create \
+          --tag $DOCKER_IMAGE:latest \
+          $DOCKER_IMAGE:$DOCKER_TAG-amd64 \
+          $DOCKER_IMAGE:$DOCKER_TAG-arm64
+      fi
+  rules:
+    # Build on main branch
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    # Build on tags (releases)
+    - if: $CI_COMMIT_TAG
+    # Manual build on other branches
+    - if: $CI_COMMIT_BRANCH
+      when: manual
+      allow_failure: true
+
+# MkDocs documentation deployment to GitLab Pages
+pages:
+  stage: pages
+  image: python:3.12-slim
+  before_script:
+    - pip install -q mkdocs>=1.6 mkdocs-material>=9.5 pymdown-extensions>=10.0
+  script:
+    - mkdocs build
+    - mv site public
+  artifacts:
+    paths:
+      - public
+  rules:
+    # Deploy on main branch only
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH

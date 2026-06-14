@@ -1,0 +1,44 @@
+# Build artifacts
+_build/
+deps/
+ebin/
+*.beam
+*.plt
+
+# Rebar
+.rebar/
+.rebar3/
+rebar.lock
+
+# Coverage
+*.coverdata
+cover/
+
+# Editor
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Database
+priv/vbarrel_db/
+
+# Crash dumps
+erl_crash.dump
+
+# Generated documentation
+doc/
+site/
+rebar3.crashdump

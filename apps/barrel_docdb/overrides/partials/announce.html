@@ -1,0 +1,64 @@
+<style>
+.barrel-topbar {
+  background: #222929;
+  border-bottom: 1px solid rgba(0, 107, 119, 0.3);
+  padding: 0.5rem 1rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 0.875rem;
+}
+.barrel-topbar a {
+  color: rgba(243, 243, 242, 0.7);
+  text-decoration: none;
+  transition: color 0.2s;
+}
+.barrel-topbar a:hover {
+  color: #F3F3F2;
+}
+.barrel-topbar .barrel-logo {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-weight: 600;
+  color: #F3F3F2;
+}
+.barrel-topbar .barrel-logo img {
+  height: 24px;
+}
+.barrel-topbar nav {
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+}
+.barrel-topbar nav a.active {
+  color: #C65E59;
+}
+.barrel-topbar .barrel-btn {
+  background: #C65E59;
+  color: white !important;
+  padding: 0.35rem 0.75rem;
+  border-radius: 0.375rem;
+  font-weight: 500;
+}
+.barrel-topbar .barrel-btn:hover {
+  background: #a84d49;
+}
+@media (max-width: 768px) {
+  .barrel-topbar nav { display: none; }
+}
+</style>
+<div class="barrel-topbar">
+  <a href="https://barrel-db.eu" class="barrel-logo">
+    <img src="https://barrel-db.eu/logo-symbol-coral.svg" alt="Barrel">
+    <span>Barrel DB</span>
+  </a>
+  <nav>
+    <a href="https://docs.barrel-db.eu/">All Docs</a>
+    <a href="https://docs.barrel-db.eu/vectordb/">Vector</a>
+    <a href="https://docs.barrel-db.eu/docdb/" class="active">Docs</a>
+    <a href="https://docs.barrel-db.eu/embed/">Embed</a>
+    <a href="https://barrel-db.eu/opensource">Open Source</a>
+  </nav>
+  <a href="https://barrel-db.eu/contact" class="barrel-btn">Contact</a>
+</div>

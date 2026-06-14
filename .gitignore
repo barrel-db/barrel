@@ -1,0 +1,35 @@
+# rebar3 / Erlang
+_build/
+.rebar3/
+*.beam
+*.plt
+*.coverdata
+erl_crash.dump
+rebar3.crashdump
+*.crashdump
+
+# Claude Code harness session files
+.claude/
+
+# Compiled NIFs
+priv/*.so
+priv/*.dylib
+**/priv/*.so
+**/priv/*.dylib
+
+# CMake build output
+**/_build/cmake/
+
+# Runtime data
+**/data/
+**/log/
+
+# Python (embed / rerank venvs)
+**/.venv/
+**/venv/
+**/__pycache__/
+*.pyc
+
+# Editors / OS
+.DS_Store
+*~

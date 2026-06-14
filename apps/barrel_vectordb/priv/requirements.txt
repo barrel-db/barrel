@@ -1,0 +1,12 @@
+# barrel_vectordb Python requirements
+# Can be used standalone or extend barrel_embed's requirements
+#
+# To share venv with barrel_embed:
+#   -r ../barrel_embed/priv/requirements.txt
+
+# Reranking dependencies
+transformers>=4.30.0
+torch>=2.0.0
+
+# Optional: better async performance
+uvloop>=0.17.0; sys_platform != "win32"

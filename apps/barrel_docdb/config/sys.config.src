@@ -1,0 +1,23 @@
+[
+    {barrel_docdb, [
+        {data_dir, "${BARREL_DATA_DIR:-data/barrel_docdb}"},
+        {default_store, barrel_store_rocksdb},
+        %% Query pipeline deadline (ms). On expiry queries return a
+        %% structured `query_timeout' error instead of silently
+        %% truncating. Override via BARREL_QUERY_TIMEOUT_MS.
+        {query_timeout_ms, ${BARREL_QUERY_TIMEOUT_MS:-30000}},
+        %% Zone configuration for multi-datacenter deployments
+        {zone, "${BARREL_ZONE:-}"}
+    ]},
+    {kernel, [
+        {logger_level, ${BARREL_LOG_LEVEL:-info}},
+        {logger, [
+            {handler, default, logger_std_h, #{
+                level => ${BARREL_LOG_LEVEL:-info},
+                formatter => {logger_formatter, #{
+                    template => [time, " [", level, "] ", pid, " ", msg, "\n"]
+                }}
+            }}
+        ]}
+    ]}
+].

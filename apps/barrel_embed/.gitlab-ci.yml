@@ -1,0 +1,103 @@
+stages:
+  - test
+  - integration
+  - analyze
+
+variables:
+  MIX_ENV: test
+
+# Erlang tests
+erlang:test:
+  stage: test
+  image: erlang:27
+  before_script:
+    - apt-get update && apt-get install -y cmake
+    - wget https://s3.amazonaws.com/rebar3/rebar3 && chmod +x rebar3
+  script:
+    - ./rebar3 compile
+    - ./rebar3 eunit
+  cache:
+    key: erlang-deps
+    paths:
+      - _build/
+
+# Python tests
+python:test:
+  stage: test
+  image: python:3.11
+  before_script:
+    - pip install uv
+    - uv venv .venv
+    - uv pip install -e "priv[dev]" --python .venv/bin/python
+  script:
+    - source .venv/bin/activate
+    - cd priv && pytest tests/ -v --tb=short
+  cache:
+    key: python-deps-uv
+    paths:
+      - .venv/
+
+# Integration test: Erlang + Python venv
+integration:venv:
+  stage: integration
+  image: erlang:27
+  before_script:
+    - apt-get update && apt-get install -y cmake python3 python3-venv python3-pip curl
+    - wget https://s3.amazonaws.com/rebar3/rebar3 && chmod +x rebar3
+    # Install uv
+    - curl -LsSf https://astral.sh/uv/install.sh | sh
+    - export PATH="$HOME/.local/bin:$PATH"
+    # Setup venv with uv
+    - uv venv .venv
+    - uv pip install -e "priv[sentence-transformers]" --python .venv/bin/python
+  script:
+    - ./rebar3 compile
+    # Test venv integration with Erlang
+    - |
+      ./rebar3 shell --eval '
+        VenvPath = filename:absname(".venv"),
+        io:format("Testing venv at: ~s~n", [VenvPath]),
+        {ok, State} = barrel_embed:init(#{
+          embedder => {local, #{venv => VenvPath, timeout => 60000}}
+        }),
+        io:format("Initialized with state~n"),
+        {ok, Embedding} = barrel_embed:embed(<<"hello world">>, State),
+        io:format("Embedding dimension: ~p~n", [length(Embedding)]),
+        true = length(Embedding) > 0,
+        io:format("SUCCESS: venv integration test passed~n"),
+        init:stop(0)
+      '
+  cache:
+    key: integration-deps
+    paths:
+      - _build/
+      - .venv/
+
+# Dialyzer type checking
+erlang:dialyzer:
+  stage: analyze
+  image: erlang:27
+  before_script:
+    - apt-get update && apt-get install -y cmake
+    - wget https://s3.amazonaws.com/rebar3/rebar3 && chmod +x rebar3
+  script:
+    - ./rebar3 dialyzer
+  cache:
+    key: erlang-plt
+    paths:
+      - _build/
+  allow_failure: true
+
+# Xref cross-reference checks
+erlang:xref:
+  stage: analyze
+  image: erlang:27
+  before_script:
+    - apt-get update && apt-get install -y cmake
+    - wget https://s3.amazonaws.com/rebar3/rebar3 && chmod +x rebar3
+  script:
+    - ./rebar3 xref
+  cache:
+    key: erlang-deps
+    paths:
+      - _build/

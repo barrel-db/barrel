@@ -1,0 +1,9 @@
+_build/
+deps/
+doc/
+*.beam
+*.plt
+erl_crash.dump
+rebar.lock
+.rebar3/
+priv/.venv/

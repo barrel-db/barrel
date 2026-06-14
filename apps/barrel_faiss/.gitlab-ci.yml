@@ -1,0 +1,46 @@
+stages:
+  - build
+  - test
+
+.build_template: &build_template
+  stage: build
+  image: erlang:26
+  before_script:
+    - apt-get update
+    - apt-get install -y cmake libfaiss-dev libomp-dev libopenblas-dev
+  script:
+    - rebar3 compile
+  artifacts:
+    paths:
+      - _build/
+      - priv/
+    expire_in: 1 hour
+
+.test_template: &test_template
+  stage: test
+  image: erlang:26
+  before_script:
+    - apt-get update
+    - apt-get install -y cmake libfaiss-dev libomp-dev libopenblas-dev
+  script:
+    - rebar3 ct
+
+# Linux amd64
+linux:build:amd64:
+  <<: *build_template
+  tags: [amd64]
+
+linux:test:amd64:
+  <<: *test_template
+  tags: [amd64]
+  needs: [linux:build:amd64]
+
+# Linux arm64
+linux:build:arm64:
+  <<: *build_template
+  tags: [arm64]
+
+linux:test:arm64:
+  <<: *test_template
+  tags: [arm64]
+  needs: [linux:build:arm64]

@@ -1,0 +1,29 @@
+{application, barrel_docdb, [
+    {description, "Erlang document database with MVCC, queries, and replication"},
+    {vsn, "0.8.0"},
+    {registered, [barrel_docdb_sup]},
+    {mod, {barrel_docdb_app, []}},
+    {applications, [
+        kernel,
+        stdlib,
+        crypto,
+        public_key,
+        rocksdb,
+        hlc,
+        match_trie,
+        instrument
+    ]},
+    {env, [
+        {data_dir, "data/barrel_docdb"},
+        {default_store, barrel_store_rocksdb},
+        %% Enable async I/O for body reads (experimental, for benchmarking)
+        {body_async_io, false}
+    ]},
+    {modules, []},
+    {licenses, ["Apache-2.0"]},
+    {doc, "https://docs.barrel-db.eu/docdb"},
+    {links, [
+        {"GitHub", "https://github.com/barrel-db/barrel_docdb"},
+        {"Documentation", "https://docs.barrel-db.eu/docdb"}
+    ]}
+]}.

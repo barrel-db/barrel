@@ -1,0 +1,28 @@
+## Node name (use environment variable for Docker)
+-name ${BARREL_NODE_NAME:-barrel@127.0.0.1}
+
+## Cookie for distributed Erlang
+-setcookie ${BARREL_COOKIE:-barrel_secret}
+
+## Enable kernel poll (improves performance on Linux)
++K true
+
+## Async thread pool size
++A 64
+
+## Max ports (file handles)
+-env ERL_MAX_PORTS 65536
+
+## Enable SMP
+-smp auto
+
+## Scheduler settings
++S 4:4
++SDcpu 4:4
+
+## Memory settings
++MBas aobf
++MBlmbcs 512
+
+## Crash dump location
+-env ERL_CRASH_DUMP ${BARREL_DATA_DIR:-data}/erl_crash.dump

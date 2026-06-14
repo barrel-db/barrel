@@ -1,0 +1,20 @@
+name: Trigger Docs Build
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - 'mkdocs.yml'
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger centralized docs build
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.DOCS_TOKEN }}
+          repository: barrel-db/barrel-db.eu
+          event-type: docs-update
+          client-payload: '{"project": "barrel_docdb"}'

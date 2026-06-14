@@ -1,0 +1,4 @@
+# barrel_embed base requirements
+-e .
+sentence-transformers>=2.0.0
+uvloop>=0.17.0; sys_platform != "win32"

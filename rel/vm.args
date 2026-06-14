@@ -1,0 +1,11 @@
+## Node name
+-name barrel@127.0.0.1
+
+## Cookie for distributed Erlang (change for a real deployment)
+-setcookie barrel_secret
+
+## Enable kernel poll
++K true
+
+## Crash dump location
+-env ERL_CRASH_DUMP ./log/erl_crash.dump

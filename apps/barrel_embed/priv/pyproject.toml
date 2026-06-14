@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "barrel_embed"
+version = "1.0.0"
+description = "Async embedding server for Erlang"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = []
+
+[project.optional-dependencies]
+sentence-transformers = ["sentence-transformers>=2.0.0"]
+fastembed = ["fastembed>=0.1.0"]
+splade = ["transformers>=4.0.0", "torch>=2.0.0"]
+colbert = ["transformers>=4.0.0", "torch>=2.0.0"]
+clip = ["transformers>=4.0.0", "torch>=2.0.0", "pillow>=9.0.0"]
+all = [
+    "sentence-transformers>=2.0.0",
+    "fastembed>=0.1.0",
+    "transformers>=4.0.0",
+    "torch>=2.0.0",
+    "pillow>=9.0.0",
+]
+uvloop = ["uvloop>=0.17.0"]
+test = ["pytest>=7.0.0", "pytest-asyncio>=0.21.0"]
+dev = ["pytest>=7.0.0", "pytest-asyncio>=0.21.0", "uvloop>=0.17.0"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+
+[project.scripts]
+barrel-embed = "barrel_embed.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["."]

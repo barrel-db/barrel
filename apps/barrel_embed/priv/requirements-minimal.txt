@@ -1,0 +1,3 @@
+# Minimal requirements (no ML frameworks)
+-e .
+uvloop>=0.17.0; sys_platform != "win32"

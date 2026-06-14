@@ -1,0 +1,141 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  erlang-test:
+    runs-on: ubuntu-latest
+    container:
+      image: erlang:27
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: apt-get update && apt-get install -y cmake python3 python3-dev python3-venv python3-pip curl
+
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Setup Python venv
+        run: |
+          $HOME/.local/bin/uv venv .venv --python python3
+          $HOME/.local/bin/uv pip install -e "priv[sentence-transformers]" --python .venv/bin/python
+
+      - name: Cache rebar3
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/rebar3
+          key: rebar3-${{ hashFiles('rebar.lock') }}
+
+      - name: Compile
+        env:
+          Python3_ROOT_DIR: /usr
+        run: rm -f rebar.lock && rebar3 compile
+
+      - name: Run EUnit tests
+        env:
+          BARREL_EMBED_VENV: ${{ github.workspace }}/.venv
+        run: rebar3 eunit
+
+  integration:
+    runs-on: ubuntu-latest
+    container:
+      image: erlang:27
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          apt-get update && apt-get install -y cmake python3 python3-dev python3-venv python3-pip curl
+
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Setup Python venv
+        run: |
+          $HOME/.local/bin/uv venv .venv --python python3
+          $HOME/.local/bin/uv pip install -e "priv[sentence-transformers]" --python .venv/bin/python
+
+      - name: Run integration test
+        env:
+          Python3_ROOT_DIR: /usr
+        run: |
+          rm -f rebar.lock && rebar3 compile
+          rebar3 shell --eval '
+            VenvPath = filename:absname(".venv"),
+            io:format("Testing venv at: ~s~n", [VenvPath]),
+            {ok, State} = barrel_embed:init(#{
+              embedder => {local, #{venv => VenvPath, timeout => 60000}}
+            }),
+            io:format("Initialized with state~n"),
+            {ok, Embedding} = barrel_embed:embed(<<"hello world">>, State),
+            io:format("Embedding dimension: ~p~n", [length(Embedding)]),
+            true = length(Embedding) > 0,
+            io:format("SUCCESS: venv integration test passed~n"),
+            init:stop(0)
+          '
+
+  dialyzer:
+    runs-on: ubuntu-latest
+    container:
+      image: erlang:27
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: apt-get update && apt-get install -y cmake python3 python3-dev python3-venv python3-pip curl
+
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Setup Python venv
+        run: |
+          $HOME/.local/bin/uv venv .venv --python python3
+          $HOME/.local/bin/uv pip install -e "priv" --python .venv/bin/python
+
+      - name: Cache PLT
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/rebar3
+          key: dialyzer-${{ hashFiles('rebar.lock') }}
+
+      - name: Dialyzer
+        env:
+          Python3_ROOT_DIR: /usr
+        run: rm -f rebar.lock && rebar3 dialyzer
+
+  xref:
+    runs-on: ubuntu-latest
+    container:
+      image: erlang:27
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: apt-get update && apt-get install -y cmake python3 python3-dev python3-venv python3-pip curl
+
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Setup Python venv
+        run: |
+          $HOME/.local/bin/uv venv .venv --python python3
+          $HOME/.local/bin/uv pip install -e "priv" --python .venv/bin/python
+
+      - name: Xref
+        env:
+          Python3_ROOT_DIR: /usr
+        run: rm -f rebar.lock && rebar3 xref

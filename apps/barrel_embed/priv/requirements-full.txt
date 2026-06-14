@@ -1,0 +1,3 @@
+# Full requirements with all providers and uvloop
+-e .[all]
+uvloop>=0.17.0; sys_platform != "win32"

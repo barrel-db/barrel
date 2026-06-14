@@ -1,0 +1,12 @@
+{application, barrel_bench, [
+    {description, "Performance benchmark for barrel_docdb"},
+    {vsn, "0.1.0"},
+    {registered, []},
+    {applications, [
+        kernel,
+        stdlib,
+        barrel_docdb
+    ]},
+    {env, []},
+    {modules, []}
+]}.

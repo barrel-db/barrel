@@ -1,0 +1,16 @@
+_build/
+*.beam
+*.plt
+*.swp
+*~
+.eunit
+.rebar3
+ebin/
+priv/*.so
+rebar.lock
+.idea/
+*.iml
+.DS_Store
+erl_crash.dump
+*.crashdump
+doc/

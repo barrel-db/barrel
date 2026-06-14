@@ -1,0 +1,296 @@
+/* Barrel Embed - Matching barrel-db.eu Theme
+   Colors from barrel-db.eu:
+   - coral: #C65E59 (accent)
+   - coral-dark: #a84d49
+   - teal-light: #75B6B2 (primary)
+   - teal-dark: #006B77
+   - barrel-black: #222929 (background)
+   - barrel-gray: #F3F3F2 (text)
+   Font: Roboto
+*/
+
+:root {
+  /* Primary - Teal Light */
+  --md-primary-fg-color: #006B77;
+  --md-primary-fg-color--light: #75B6B2;
+  --md-primary-fg-color--dark: #004d55;
+
+  /* Accent - Coral */
+  --md-accent-fg-color: #C65E59;
+  --md-accent-fg-color--transparent: rgba(198, 94, 89, 0.1);
+
+  /* Text */
+  --md-default-fg-color: #222929;
+}
+
+/* Dark mode - Barrel Black background (matching barrel-db.eu) */
+[data-md-color-scheme="slate"] {
+  --md-primary-fg-color: #75B6B2;
+  --md-primary-fg-color--light: #8EC5C2;
+  --md-primary-fg-color--dark: #006B77;
+  --md-accent-fg-color: #C65E59;
+
+  /* Barrel black background - same as barrel-db.eu */
+  --md-default-bg-color: #222929;
+  --md-default-bg-color--light: #2d3333;
+  --md-default-bg-color--lighter: #383f3f;
+  --md-default-bg-color--lightest: #444c4c;
+
+  --md-default-fg-color: #F3F3F2;
+  --md-default-fg-color--light: rgba(243, 243, 242, 0.7);
+  --md-default-fg-color--lighter: rgba(243, 243, 242, 0.5);
+}
+
+/* Header - Teal Dark */
+.md-header {
+  background-color: #006B77;
+}
+
+[data-md-color-scheme="slate"] .md-header {
+  background-color: #222929;
+  border-bottom: 2px solid #006B77;
+}
+
+/* Navigation tabs */
+.md-tabs {
+  background-color: #006B77;
+}
+
+[data-md-color-scheme="slate"] .md-tabs {
+  background-color: #2d3333;
+}
+
+/* Cards grid styling */
+.md-typeset .grid.cards > ul > li {
+  border: 1px solid rgba(0, 107, 119, 0.2);
+  border-radius: 8px;
+  padding: 1rem;
+  transition: border-color 0.2s, box-shadow 0.2s, transform 0.2s;
+}
+
+.md-typeset .grid.cards > ul > li:hover {
+  border-color: var(--md-accent-fg-color);
+  box-shadow: 0 4px 16px rgba(198, 94, 89, 0.2);
+  transform: translateY(-2px);
+}
+
+[data-md-color-scheme="slate"] .md-typeset .grid.cards > ul > li {
+  background-color: var(--md-default-bg-color--light);
+  border-color: var(--md-default-bg-color--lightest);
+}
+
+[data-md-color-scheme="slate"] .md-typeset .grid.cards > ul > li:hover {
+  border-color: var(--md-accent-fg-color);
+  box-shadow: 0 4px 16px rgba(198, 94, 89, 0.3);
+}
+
+/* Links - Teal with coral hover */
+.md-typeset a {
+  color: #006B77;
+}
+
+.md-typeset a:hover {
+  color: var(--md-accent-fg-color);
+}
+
+[data-md-color-scheme="slate"] .md-typeset a {
+  color: #75B6B2;
+}
+
+[data-md-color-scheme="slate"] .md-typeset a:hover {
+  color: var(--md-accent-fg-color);
+}
+
+/* Code blocks */
+.md-typeset code {
+  background-color: rgba(0, 107, 119, 0.08);
+  border-radius: 4px;
+}
+
+[data-md-color-scheme="slate"] .md-typeset code {
+  background-color: rgba(117, 182, 178, 0.15);
+}
+
+/* Tables */
+.md-typeset table:not([class]) th {
+  background-color: #006B77;
+  color: #F3F3F2;
+}
+
+[data-md-color-scheme="slate"] .md-typeset table:not([class]) th {
+  background-color: #383f3f;
+}
+
+/* Admonitions */
+.md-typeset .admonition,
+.md-typeset details {
+  border-left-color: #75B6B2;
+}
+
+/* Hero section styling */
+.md-typeset h1 {
+  color: #006B77;
+  font-weight: 700;
+}
+
+[data-md-color-scheme="slate"] .md-typeset h1 {
+  color: #75B6B2;
+}
+
+.md-typeset h2 {
+  color: #006B77;
+  border-bottom: 2px solid #C65E59;
+  padding-bottom: 0.3em;
+}
+
+[data-md-color-scheme="slate"] .md-typeset h2 {
+  color: #F3F3F2;
+}
+
+/* Footer */
+.md-footer {
+  background-color: #006B77;
+}
+
+[data-md-color-scheme="slate"] .md-footer {
+  background-color: #1a1f1f;
+}
+
+/* Sidebar */
+[data-md-color-scheme="slate"] .md-sidebar {
+  background-color: var(--md-default-bg-color);
+}
+
+/* Navigation items */
+.md-nav__link--active {
+  color: var(--md-accent-fg-color) !important;
+  font-weight: 600;
+}
+
+/* Button-like links in cards */
+.md-typeset .grid.cards a[href] {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-weight: 500;
+}
+
+/* Search */
+.md-search__form {
+  background-color: rgba(255, 255, 255, 0.1);
+}
+
+[data-md-color-scheme="slate"] .md-search__form {
+  background-color: rgba(0, 0, 0, 0.2);
+}
+
+/* Feature highlights with definition lists */
+.md-typeset dl dt {
+  font-weight: 600;
+  color: #75B6B2;
+}
+
+/* Strong text */
+.md-typeset strong {
+  color: inherit;
+}
+
+/* Blockquotes */
+.md-typeset blockquote {
+  border-left-color: #75B6B2;
+  background-color: rgba(0, 107, 119, 0.05);
+}
+
+[data-md-color-scheme="slate"] .md-typeset blockquote {
+  background-color: rgba(117, 182, 178, 0.1);
+}
+
+/* ========================================
+   Code Syntax Highlighting - Barrel Theme
+   ======================================== */
+
+/* Code block background */
+.md-typeset pre > code {
+  background-color: #1a1f1f;
+}
+
+[data-md-color-scheme="slate"] .md-typeset pre > code {
+  background-color: #1a1f1f;
+}
+
+/* Pygments / highlight.js token colors */
+.highlight .c,
+.highlight .c1,
+.highlight .cm,
+.highlight .cs { color: #6b7280; font-style: italic; }  /* Comments - gray */
+
+.highlight .k,
+.highlight .kc,
+.highlight .kd,
+.highlight .kn,
+.highlight .kp,
+.highlight .kr,
+.highlight .kt { color: #C65E59; font-weight: 600; }  /* Keywords - coral */
+
+.highlight .s,
+.highlight .s1,
+.highlight .s2,
+.highlight .sb,
+.highlight .sc,
+.highlight .sd,
+.highlight .se,
+.highlight .sh,
+.highlight .si,
+.highlight .sx,
+.highlight .sr { color: #75B6B2; }  /* Strings - teal-light */
+
+.highlight .m,
+.highlight .mb,
+.highlight .mf,
+.highlight .mh,
+.highlight .mi,
+.highlight .mo { color: #E9967A; }  /* Numbers - light coral */
+
+.highlight .n { color: #F3F3F2; }  /* Names - barrel-gray */
+.highlight .na { color: #75B6B2; }  /* Attribute names - teal-light */
+.highlight .nb { color: #E9967A; }  /* Builtins - light coral */
+.highlight .nc { color: #C65E59; font-weight: 600; }  /* Class names - coral */
+.highlight .nf { color: #C65E59; }  /* Function names - coral */
+.highlight .nn { color: #75B6B2; }  /* Namespace - teal-light */
+.highlight .nv { color: #F3F3F2; }  /* Variables - barrel-gray */
+
+.highlight .o,
+.highlight .ow { color: #a84d49; }  /* Operators - coral-dark */
+
+.highlight .p { color: #F3F3F2; }  /* Punctuation - barrel-gray */
+
+.highlight .l { color: #E9967A; }  /* Literals - light coral */
+.highlight .ld { color: #75B6B2; }  /* Literal date - teal */
+
+.highlight .err { color: #ff6b6b; background-color: transparent; }  /* Errors */
+
+/* Special tokens */
+.highlight .gh { color: #75B6B2; font-weight: bold; }  /* Generic heading */
+.highlight .gu { color: #006B77; font-weight: bold; }  /* Generic subheading */
+.highlight .gd { color: #ff6b6b; }  /* Generic deleted */
+.highlight .gi { color: #69db7c; }  /* Generic inserted */
+
+/* Atom/module for Erlang */
+.highlight .ss { color: #E9967A; }  /* Symbols/atoms */
+
+/* Line numbers */
+.highlight .linenos { color: #6b7280; }
+
+/* Selected/highlighted line */
+.highlight .hll {
+  background-color: rgba(198, 94, 89, 0.15);
+}
+
+/* Copy button */
+.md-clipboard {
+  color: #75B6B2;
+}
+
+.md-clipboard:hover {
+  color: #C65E59;
+}

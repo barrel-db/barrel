@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        otp: ['26', '27']
+
+    container:
+      image: erlang:${{ matrix.otp }}-slim
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          apt-get update
+          apt-get install -y cmake build-essential libfaiss-dev libomp-dev libopenblas-dev git curl
+
+      - name: Install rebar3
+        run: |
+          curl -o /usr/local/bin/rebar3 https://s3.amazonaws.com/rebar3/rebar3
+          chmod +x /usr/local/bin/rebar3
+
+      - name: Compile
+        run: rebar3 compile
+
+      - name: Run xref
+        run: rebar3 xref
+
+      - name: Run dialyzer
+        run: rebar3 dialyzer
+
+      - name: Run eunit
+        run: rebar3 eunit
+
+      - name: Run common tests
+        run: rebar3 ct
