@@ -67,7 +67,11 @@
     config :: map(),
     %% BM25 support
     bm25_index :: term() | undefined,     %% BM25 index state
-    bm25_backend :: memory | disk | none  %% BM25 backend type
+    bm25_backend :: memory | disk | none, %% BM25 backend type
+    %% Document backend for text + metadata. `undefined' = this store's own
+    %% RocksDB column families (default). `{Module, Ctx}' = an external
+    %% barrel_vectordb_docstore (vectors always stay local).
+    docstore :: undefined | {module(), term()}
 }).
 
 %%====================================================================
@@ -222,6 +226,10 @@ init({Name, Config}) ->
     DbPath = maps:get(db_path, Config, "priv/barrel_vectordb_data"),
     Dimension = maps:get(dimension, Config, ?DEFAULT_DIMENSION),
 
+    %% Document backend: undefined (own RocksDB CFs) by default, or an external
+    %% barrel_vectordb_docstore. Raises on misconfiguration so the start fails.
+    Docstore = init_docstore(Name, Config),
+
     %% Select index backend (default: hnsw)
     Backend = maps:get(backend, Config, hnsw),
     IndexModule = barrel_vectordb_index:backend_module(Backend),
@@ -265,7 +273,8 @@ init({Name, Config}) ->
                                         embed_state = EmbedState,
                                         config = Config,
                                         bm25_index = BM25Index,
-                                        bm25_backend = BM25Backend
+                                        bm25_backend = BM25Backend,
+                                        docstore = Docstore
                                     },
                                     {ok, State};
                                 {error, BM25Error} ->
@@ -475,7 +484,7 @@ process_single_op({call, From, _Unknown}, State) ->
 process_writes_atomic([], State) ->
     {[], State};
 process_writes_atomic(Writes, #state{db = Db, cf_vectors = CfV, cf_metadata = CfM,
-                                      cf_text = CfT,
+                                      cf_text = CfT, docstore = Docstore,
                                       index = Index, index_module = Mod, dimension = Dim} = State) ->
     {ok, Batch} = rocksdb:batch(),
 
@@ -486,32 +495,43 @@ process_writes_atomic(Writes, #state{db = Db, cf_vectors = CfV, cf_metadata = Cf
             %% Check if module supports batch insert (e.g., DiskANN)
             SupportsBatchInsert = erlang:function_exported(Mod, insert_batch, 3),
 
-            %% Apply writes to RocksDB batch and collect vectors for index
-            {VectorsForIndex, Replies0} = lists:foldl(
-                fun({From, WriteOp, _PreparedData}, {AccVectors, AccReplies}) ->
-                    case apply_write_to_rocksdb_batch(WriteOp, Batch, CfV, CfM, CfT, Dim) of
-                        {ok, {Id, Vector}} ->
-                            {[{Id, Vector} | AccVectors], [{From, ok} | AccReplies]};
-                        {ok, VectorList} when is_list(VectorList) ->
+            %% Apply writes to RocksDB batch and collect vectors for index.
+            %% DocPairs holds {Id, Text, Metadata} only for an external docstore
+            %% (empty for the default, which writes text/metadata into the batch).
+            {VectorsForIndex, DocPairs, Replies0} = lists:foldl(
+                fun({From, WriteOp, _PreparedData}, {AccVectors, AccDocs, AccReplies}) ->
+                    case apply_write_to_rocksdb_batch(WriteOp, Batch, CfV, CfM, CfT, Dim, Docstore) of
+                        {ok, {Id, Vector}, Docs} ->
+                            {[{Id, Vector} | AccVectors], Docs ++ AccDocs, [{From, ok} | AccReplies]};
+                        {ok, VectorList, Docs} when is_list(VectorList) ->
                             %% Batch insert - return stats
                             Count = length(VectorList),
-                            {VectorList ++ AccVectors, [{From, {ok, #{inserted => Count}}} | AccReplies]};
+                            {VectorList ++ AccVectors, Docs ++ AccDocs,
+                             [{From, {ok, #{inserted => Count}}} | AccReplies]};
                         {error, Reason} ->
-                            {AccVectors, [{From, {error, Reason}} | AccReplies]}
+                            {AccVectors, AccDocs, [{From, {error, Reason}} | AccReplies]}
                     end
                 end,
-                {[], []},
+                {[], [], []},
                 PreparedWrites
             ),
 
             %% Insert into index (batch or individual)
             case insert_vectors_to_index(lists:reverse(VectorsForIndex), Index, Mod, SupportsBatchInsert) of
                 {ok, NewIndex} ->
-                    %% Commit the RocksDB batch atomically
+                    %% Commit the RocksDB batch atomically, then (for an external
+                    %% docstore only) write text/metadata. Vector-first, doc-second.
                     case rocksdb:write_batch(Db, Batch, []) of
                         ok ->
-                            Replies = [{reply, From, Reply} || {From, Reply} <- Replies0],
-                            {Replies, State#state{index = NewIndex}};
+                            case docstore_multi_put(Docstore, lists:reverse(DocPairs)) of
+                                ok ->
+                                    Replies = [{reply, From, Reply} || {From, Reply} <- Replies0],
+                                    {Replies, State#state{index = NewIndex}};
+                                {error, DsReason} ->
+                                    ErrorReplies = [{reply, From, {error, {docstore_error, DsReason}}}
+                                                   || {From, _} <- Replies0],
+                                    {ErrorReplies, State#state{index = NewIndex}}
+                            end;
                         {error, Reason} ->
                             ErrorReplies = [{reply, From, {error, {db_error, Reason}}}
                                            || {From, _} <- Replies0],
@@ -537,31 +557,29 @@ process_writes_atomic(Writes, #state{db = Db, cf_vectors = CfV, cf_metadata = Cf
             end
     end.
 
-%% Apply write to RocksDB batch only (no index update yet)
-apply_write_to_rocksdb_batch({add_vector, Id, Text, Metadata, Vector}, Batch, CfV, CfM, CfT, Dim) ->
+%% Apply write to RocksDB batch only (no index update yet). Returns the vector(s)
+%% for the index plus the {Id, Text, Metadata} pairs to write to an external
+%% docstore (empty for the default, which writes them into the batch here).
+apply_write_to_rocksdb_batch({add_vector, Id, Text, Metadata, Vector}, Batch, CfV, CfM, CfT, Dim, Docstore) ->
     case length(Vector) of
         Dim ->
             VectorBin = encode_vector(Vector),
-            MetadataBin = term_to_binary(Metadata),
             ok = rocksdb:batch_put(Batch, CfV, Id, VectorBin),
-            ok = rocksdb:batch_put(Batch, CfM, Id, MetadataBin),
-            ok = rocksdb:batch_put(Batch, CfT, Id, Text),
-            {ok, {Id, Vector}};
+            DocPairs = put_docdata_to_batch(Docstore, Batch, CfM, CfT, Id, Text, Metadata),
+            {ok, {Id, Vector}, DocPairs};
         Other ->
             {error, {dimension_mismatch, Dim, Other}}
     end;
-apply_write_to_rocksdb_batch({add_vector_batch, Docs}, Batch, CfV, CfM, CfT, Dim) ->
+apply_write_to_rocksdb_batch({add_vector_batch, Docs}, Batch, CfV, CfM, CfT, Dim, Docstore) ->
     %% Process batch - collect all vectors
     Results = lists:map(
         fun({Id, Text, Metadata, Vector}) ->
             case length(Vector) of
                 Dim ->
                     VectorBin = encode_vector(Vector),
-                    MetadataBin = term_to_binary(Metadata),
                     ok = rocksdb:batch_put(Batch, CfV, Id, VectorBin),
-                    ok = rocksdb:batch_put(Batch, CfM, Id, MetadataBin),
-                    ok = rocksdb:batch_put(Batch, CfT, Id, Text),
-                    {ok, {Id, Vector}};
+                    DocPairs = put_docdata_to_batch(Docstore, Batch, CfM, CfT, Id, Text, Metadata),
+                    {ok, {Id, Vector}, DocPairs};
                 Other ->
                     {error, {dimension_mismatch, Dim, Other}}
             end
@@ -571,11 +589,126 @@ apply_write_to_rocksdb_batch({add_vector_batch, Docs}, Batch, CfV, CfM, CfT, Dim
     %% Check for any errors
     case [E || {error, _} = E <- Results] of
         [] ->
-            Vectors = [{Id, Vec} || {ok, {Id, Vec}} <- Results],
-            {ok, Vectors};
+            Vectors = [{Id, Vec} || {ok, {Id, Vec}, _} <- Results],
+            DocPairs = lists:append([DP || {ok, _, DP} <- Results]),
+            {ok, Vectors, DocPairs};
         [FirstError | _] ->
             FirstError
     end.
+
+%% @private For the default (undefined) docstore, write metadata + text into the
+%% same RocksDB batch as the vector (atomic) and return no external pairs. For an
+%% external docstore, skip the column families and return the pair to write after
+%% the batch commits.
+put_docdata_to_batch(undefined, Batch, CfM, CfT, Id, Text, Metadata) ->
+    MetadataBin = term_to_binary(Metadata),
+    ok = rocksdb:batch_put(Batch, CfM, Id, MetadataBin),
+    ok = rocksdb:batch_put(Batch, CfT, Id, Text),
+    [];
+put_docdata_to_batch({_Mod, _Ctx}, _Batch, _CfM, _CfT, Id, Text, Metadata) ->
+    [{Id, Text, Metadata}].
+
+%%====================================================================
+%% Document backend (text + metadata) helpers
+%%====================================================================
+
+%% @private Initialise the document backend from store config. `undefined' keeps
+%% text/metadata in this store's RocksDB CFs; otherwise start the configured
+%% barrel_vectordb_docstore module.
+init_docstore(Name, Config) ->
+    case maps:get(docstore, Config, undefined) of
+        undefined ->
+            undefined;
+        {Module, ModConfig} when is_atom(Module), is_map(ModConfig) ->
+            start_docstore(Module, Name, ModConfig);
+        Module when is_atom(Module) ->
+            start_docstore(Module, Name, #{})
+    end.
+
+start_docstore(Module, Name, ModConfig) ->
+    case Module:init(Name, ModConfig) of
+        {ok, Ctx} -> {Module, Ctx};
+        {error, Reason} -> error({docstore_init_failed, Module, Reason})
+    end.
+
+%% @private Write {Id, Text, Metadata} pairs to an external docstore (no-op for
+%% the default, which already wrote them into the RocksDB batch).
+docstore_multi_put(undefined, _Pairs) ->
+    ok;
+docstore_multi_put({Module, Ctx}, Pairs) ->
+    Module:multi_put(Ctx, Pairs).
+
+%% @private Fetch one document's metadata + text. Returns {ok, Metadata, Text}.
+docstore_get(undefined, Db, CfM, CfT, Id) ->
+    case {rocksdb:get(Db, CfM, Id, []), rocksdb:get(Db, CfT, Id, [])} of
+        {{ok, MetadataBin}, {ok, Text}} ->
+            {ok, binary_to_term(MetadataBin), Text};
+        _ ->
+            not_found
+    end;
+docstore_get({Module, Ctx}, _Db, _CfM, _CfT, Id) ->
+    case Module:get(Ctx, Id) of
+        {ok, Text, Metadata} -> {ok, Metadata, Text};
+        not_found -> not_found;
+        {error, _} = Err -> Err
+    end.
+
+%% @private Add metadata + text deletes to the batch for the default docstore.
+delete_docdata_from_batch(undefined, Batch, CfM, CfT, Id) ->
+    ok = rocksdb:batch_delete(Batch, CfM, Id),
+    ok = rocksdb:batch_delete(Batch, CfT, Id),
+    ok;
+delete_docdata_from_batch({_Module, _Ctx}, _Batch, _CfM, _CfT, _Id) ->
+    ok.
+
+docstore_delete(undefined, _Id) ->
+    ok;
+docstore_delete({Module, Ctx}, Id) ->
+    Module:delete(Ctx, Id).
+
+%% @private Batch-fetch metadata + text for peek, returning two lists in the
+%% rocksdb:multi_get shape so combine_peek_results stays backend-agnostic.
+docstore_multi_fetch(undefined, Db, CfM, CfT, Keys) ->
+    {rocksdb:multi_get(Db, CfM, Keys, []), rocksdb:multi_get(Db, CfT, Keys, [])};
+docstore_multi_fetch({Module, Ctx}, _Db, _CfM, _CfT, Keys) ->
+    Results = Module:multi_get(Ctx, Keys),
+    {[meta_result(R) || R <- Results], [text_result(R) || R <- Results]}.
+
+%% @private Batch-fetch for search, honouring the need-meta / include-text flags.
+docstore_search_fetch(undefined, Db, CfM, CfT, Ids, NeedMeta, IncludeText) ->
+    Metas = case NeedMeta of
+        true -> rocksdb:multi_get(Db, CfM, Ids, []);
+        false -> [not_needed || _ <- Ids]
+    end,
+    Texts = case IncludeText of
+        true -> rocksdb:multi_get(Db, CfT, Ids, []);
+        false -> [not_needed || _ <- Ids]
+    end,
+    {Metas, Texts};
+docstore_search_fetch({Module, Ctx}, _Db, _CfM, _CfT, Ids, NeedMeta, IncludeText) ->
+    Results = Module:multi_get(Ctx, Ids),
+    Metas = case NeedMeta of
+        true -> [meta_result(R) || R <- Results];
+        false -> [not_needed || _ <- Ids]
+    end,
+    Texts = case IncludeText of
+        true -> [text_result(R) || R <- Results];
+        false -> [not_needed || _ <- Ids]
+    end,
+    {Metas, Texts}.
+
+%% @private Re-encode external docstore results into the CF result shape so the
+%% combine_*_results functions (which binary_to_term the metadata) are unchanged.
+meta_result({ok, _Text, Metadata}) -> {ok, term_to_binary(Metadata)};
+meta_result(_) -> not_found.
+
+text_result({ok, Text, _Metadata}) -> {ok, Text};
+text_result(_) -> not_found.
+
+docstore_terminate(undefined) ->
+    ok;
+docstore_terminate({Module, Ctx}) ->
+    Module:terminate(Ctx).
 
 %% Insert vectors to index - use batch insert if available
 insert_vectors_to_index([], Index, _Mod, _SupportsBatch) ->
@@ -633,12 +766,14 @@ prepare_batch_embeddings(Docs, State) ->
             {error, Reason}
     end.
 
-terminate(_Reason, #state{db = Db, index = Index, index_module = Mod, cf_hnsw = CfHnsw}) ->
+terminate(_Reason, #state{db = Db, index = Index, index_module = Mod, cf_hnsw = CfHnsw,
+                          docstore = Docstore}) ->
     %% Persist index metadata before closing
     _ = persist_index_meta(Db, CfHnsw, Index, Mod),
     %% Close index if backend supports it (e.g., FAISS releases NIF resources)
     _ = maybe_close_index(Mod, Index),
     _ = rocksdb:close(Db),
+    _ = docstore_terminate(Docstore),
     ok.
 
 %% Close index if the backend module supports close/1
@@ -784,26 +919,30 @@ do_embed_batch(Texts, #state{embed_state = EmbedState}) ->
 do_add(Id, Text, Metadata, Vector, #state{db = Db, cf_vectors = CfV,
                                           cf_metadata = CfM, cf_text = CfT,
                                           index = Index, index_module = Mod,
-                                          bm25_index = BM25Index} = State) ->
+                                          bm25_index = BM25Index,
+                                          docstore = Docstore} = State) ->
     VectorBin = encode_vector(Vector),
-    MetadataBin = term_to_binary(Metadata),
 
     {ok, Batch} = rocksdb:batch(),
     ok = rocksdb:batch_put(Batch, CfV, Id, VectorBin),
-    ok = rocksdb:batch_put(Batch, CfM, Id, MetadataBin),
-    ok = rocksdb:batch_put(Batch, CfT, Id, Text),
+    DocPairs = put_docdata_to_batch(Docstore, Batch, CfM, CfT, Id, Text, Metadata),
 
     %% Index updated in-memory only (rebuilt from vectors on startup)
     case Mod:insert(Index, Id, Vector) of
         {ok, NewIndex} ->
             case rocksdb:write_batch(Db, Batch, []) of
                 ok ->
-                    %% Also add to BM25 index if enabled
-                    case bm25_add(BM25Index, Id, Text) of
-                        {ok, NewBM25Index} ->
-                            {ok, State#state{index = NewIndex, bm25_index = NewBM25Index}};
-                        {error, Reason} ->
-                            {error, {bm25_error, Reason}}
+                    case docstore_multi_put(Docstore, DocPairs) of
+                        ok ->
+                            %% Also add to BM25 index if enabled
+                            case bm25_add(BM25Index, Id, Text) of
+                                {ok, NewBM25Index} ->
+                                    {ok, State#state{index = NewIndex, bm25_index = NewBM25Index}};
+                                {error, Reason} ->
+                                    {error, {bm25_error, Reason}}
+                            end;
+                        {error, DsReason} ->
+                            {error, {docstore_error, DsReason}}
                     end;
                 {error, Reason} ->
                     {error, {db_error, Reason}}
@@ -813,19 +952,22 @@ do_add(Id, Text, Metadata, Vector, #state{db = Db, cf_vectors = CfV,
     end.
 
 %% Get a document
-do_get(Id, #state{db = Db, cf_vectors = CfV, cf_metadata = CfM, cf_text = CfT}) ->
+do_get(Id, #state{db = Db, cf_vectors = CfV, cf_metadata = CfM, cf_text = CfT,
+                  docstore = Docstore}) ->
     case rocksdb:get(Db, CfV, Id, []) of
         {ok, VectorBin} ->
-            case {rocksdb:get(Db, CfM, Id, []), rocksdb:get(Db, CfT, Id, [])} of
-                {{ok, MetadataBin}, {ok, Text}} ->
+            case docstore_get(Docstore, Db, CfM, CfT, Id) of
+                {ok, Metadata, Text} ->
                     {ok, #{
                         key => Id,
                         vector => decode_vector(VectorBin),
-                        metadata => binary_to_term(MetadataBin),
+                        metadata => Metadata,
                         text => Text
                     }};
-                _ ->
-                    {error, incomplete_data}
+                not_found ->
+                    {error, incomplete_data};
+                {error, Reason} ->
+                    {error, Reason}
             end;
         not_found ->
             not_found;
@@ -836,21 +978,25 @@ do_get(Id, #state{db = Db, cf_vectors = CfV, cf_metadata = CfM, cf_text = CfT}) 
 %% Delete a document
 do_delete(Id, #state{db = Db, cf_vectors = CfV, cf_metadata = CfM,
                      cf_text = CfT, cf_hnsw = CfH, index = Index, index_module = Mod,
-                     bm25_index = BM25Index} = State) ->
+                     bm25_index = BM25Index, docstore = Docstore} = State) ->
     {ok, Batch} = rocksdb:batch(),
     ok = rocksdb:batch_delete(Batch, CfV, Id),
-    ok = rocksdb:batch_delete(Batch, CfM, Id),
-    ok = rocksdb:batch_delete(Batch, CfT, Id),
+    ok = delete_docdata_from_batch(Docstore, Batch, CfM, CfT, Id),
     ok = rocksdb:batch_delete(Batch, CfH, Id),
 
     case rocksdb:write_batch(Db, Batch, []) of
         ok ->
-            case Mod:delete(Index, Id) of
-                {ok, NewIndex} ->
-                    %% Also remove from BM25 index if enabled
-                    {ok, NewBM25Index} = bm25_remove(BM25Index, Id),
-                    {ok, State#state{index = NewIndex, bm25_index = NewBM25Index}};
-                {error, Reason} -> {error, Reason}
+            case docstore_delete(Docstore, Id) of
+                ok ->
+                    case Mod:delete(Index, Id) of
+                        {ok, NewIndex} ->
+                            %% Also remove from BM25 index if enabled
+                            {ok, NewBM25Index} = bm25_remove(BM25Index, Id),
+                            {ok, State#state{index = NewIndex, bm25_index = NewBM25Index}};
+                        {error, Reason} -> {error, Reason}
+                    end;
+                {error, DsReason} ->
+                    {error, {docstore_error, DsReason}}
             end;
         {error, Reason} ->
             {error, {db_error, Reason}}
@@ -858,7 +1004,8 @@ do_delete(Id, #state{db = Db, cf_vectors = CfV, cf_metadata = CfM,
 
 %% Peek at documents (sample without search)
 %% Optimized: collect keys from iterator, then batch fetch metadata/text
-do_peek(Limit, #state{db = Db, cf_vectors = CfV, cf_metadata = CfM, cf_text = CfT}) ->
+do_peek(Limit, #state{db = Db, cf_vectors = CfV, cf_metadata = CfM, cf_text = CfT,
+                      docstore = Docstore}) ->
     case rocksdb:iterator(Db, CfV, []) of
         {ok, Iter} ->
             try
@@ -868,10 +1015,10 @@ do_peek(Limit, #state{db = Db, cf_vectors = CfV, cf_metadata = CfM, cf_text = Cf
                     [] ->
                         {ok, []};
                     _ ->
-                        %% Phase 2: Batch fetch metadata and text
+                        %% Phase 2: Batch fetch metadata and text (from CFs or docstore)
                         Keys = [K || {K, _} <- KeyVectors],
-                        MetaResults = rocksdb:multi_get(Db, CfM, Keys, []),
-                        TextResults = rocksdb:multi_get(Db, CfT, Keys, []),
+                        {MetaResults, TextResults} =
+                            docstore_multi_fetch(Docstore, Db, CfM, CfT, Keys),
                         %% Phase 3: Combine results
                         Docs = combine_peek_results(KeyVectors, MetaResults, TextResults, []),
                         {ok, Docs}
@@ -916,7 +1063,8 @@ combine_peek_results([{Key, VectorBin} | KVs], [MetaResult | Ms], [TextResult | 
 %%   - include_text: include text in results (default true)
 %%   - include_metadata: include metadata in results (default true)
 do_search(QueryVector, Opts, #state{db = Db, index = Index, index_module = Mod,
-                                     cf_metadata = CfM, cf_text = CfT}) ->
+                                     cf_metadata = CfM, cf_text = CfT,
+                                     docstore = Docstore}) ->
     K = maps:get(k, Opts, 5),
     IndexResults = Mod:search(Index, QueryVector, K, Opts),
 
@@ -935,14 +1083,8 @@ do_search(QueryVector, Opts, #state{db = Db, index = Index, index_module = Mod,
             %% Only fetch what's needed (skip lookups if not needed and no filter)
             NeedMeta = IncludeMeta orelse Filter =/= fun(_) -> true end,
 
-            MetaResults = case NeedMeta of
-                true -> rocksdb:multi_get(Db, CfM, Ids, []);
-                false -> [not_needed || _ <- Ids]
-            end,
-            TextResults = case IncludeText of
-                true -> rocksdb:multi_get(Db, CfT, Ids, []);
-                false -> [not_needed || _ <- Ids]
-            end,
+            {MetaResults, TextResults} =
+                docstore_search_fetch(Docstore, Db, CfM, CfT, Ids, NeedMeta, IncludeText),
 
             %% Combine results
             Results = combine_search_results(Ids, Distances, MetaResults, TextResults,
