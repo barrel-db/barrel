@@ -17,6 +17,9 @@ priv/*.dylib
 **/priv/*.so
 **/priv/*.dylib
 
+# Stray umbrella-root priv (e.g. default vectordb store path during dev/smoke)
+/priv/
+
 # CMake build output
 **/_build/cmake/
 

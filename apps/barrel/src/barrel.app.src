@@ -1,0 +1,16 @@
+{application, barrel, [
+    {description, "Barrel: the embeddable edge-AI database composing the document and vector layers"},
+    {vsn, "0.1.0"},
+    {registered, [barrel_sup]},
+    {mod, {barrel_app, []}},
+    {applications, [
+        kernel,
+        stdlib,
+        barrel_docdb,
+        barrel_vectordb
+    ]},
+    {env, []},
+    {modules, []},
+    {licenses, ["Apache-2.0"]},
+    {links, [{"GitHub", "https://github.com/barrel-db/barrel"}]}
+]}.
