@@ -23,16 +23,26 @@ a clear responsibility and its own public API.
 - **barrel_faiss**: Erlang NIF bindings for FAISS. Optional backend for
   `barrel_vectordb`. Needs the FAISS C++ library, so it is excluded from the
   default build.
+- **barrel**: the embeddable facade. Composes `barrel_docdb` and
+  `barrel_vectordb` so a document, its attachments (blobs), and its vector share
+  one id. Pulls no transports. The hex "edge" package.
+- **barrel_server**: the network server. Exposes `barrel` over HTTP/1.1 and
+  HTTP/2 (REST/JSON) using `livery`. Opt-in behind the `server` profile; not part
+  of the default embeddable build.
 
 ## Intended split
 
-The longer-term shape of the stack separates four concerns:
+The longer-term shape of the stack separates these concerns:
 
 - **docdb** (exists): the source of truth for document metadata and the
-  catalog. MVCC, changes, and replication primitives.
+  catalog. MVCC, changes, replication primitives, and attachment (blob) storage.
 - **vectordb** (exists): vector segments and local vector/text/hybrid search.
-- **object** (future, `barrel_object`): object storage abstraction. Local disk,
-  S3/MinIO, and remote nodes. Owns object bytes.
+- **facade** (exists, `barrel`): composes docdb and vectordb under one id space.
+- **server** (exists, `barrel_server`): transports over the facade.
+- **object storage**: blobs are docdb attachments with a pluggable backend per
+  database (`barrel_att_backend`: RocksDB BlobDB today; local filesystem and S3
+  planned as additional backends). There is no separate object-store app; a
+  document owns its blob, matching how vectors and metadata attach to the same id.
 - **fabric** (future, `barrel_fabric`): dataset agents, durability, placement,
   replication orchestration, and query routing across nodes.
 
@@ -43,9 +53,11 @@ A separate `barrel_agents` application is expected to build on the fabric later.
 These rules keep the umbrella maintainable as it grows:
 
 - Clear OTP application boundaries. Each app owns its modules and public API.
-- No circular dependencies between apps. The current direction is
+- No circular dependencies between apps. The direction is
+  `barrel_server` -> `barrel` -> {`barrel_docdb`, `barrel_vectordb`}, and
   `barrel_vectordb` -> `barrel_embed` (and optionally `barrel_faiss`,
-  `barrel_rerank`); the other apps are leaves.
+  `barrel_rerank`). `barrel_docdb` and `barrel_vectordb` are leaves;
+  `barrel_docdb` -> `barrel_vectordb` is forbidden.
 - Prefer per-app modules over shared global modules. Avoid a common "junk
   drawer" application.
 - Local use needs no external services. S3, remote replication, and the fabric
@@ -55,8 +67,9 @@ These rules keep the umbrella maintainable as it grows:
 
 ## Scope and rationale
 
-This umbrella holds the Barrel data-stack libraries only: `barrel_docdb`,
-`barrel_vectordb`, `barrel_embed`, `barrel_rerank`, and `barrel_faiss`. Products
+This umbrella holds the Barrel data-stack libraries (`barrel_docdb`,
+`barrel_vectordb`, `barrel_embed`, `barrel_rerank`, `barrel_faiss`), the
+embeddable facade (`barrel`), and the network server (`barrel_server`). Products
 and clients that build on top of the stack stay in their own repositories.
 
 ### What the umbrella buys you
@@ -69,10 +82,11 @@ and clients that build on top of the stack stay in their own repositories.
   its adapters is one commit and one CI run, not tag-and-chase across repos.
 - One build, test, and release surface: shared profiles (the FAISS opt-in), one
   PLT, one `rel/`.
-- A staging ground for the fabric: `barrel_object` and `barrel_fabric` are meant
-  to span docdb and vectordb, and a layer that unifies two apps needs a repo
-  that holds both. `barrel_docdb` shares no code with `barrel_vectordb` today, so
-  its place here is forward-looking, justified by that fabric work.
+- A home for the layers that span the stack: `barrel` (the facade) already
+  unifies docdb and vectordb under one id, and `barrel_fabric` (future) will span
+  them across nodes. A layer that unifies two apps needs a repo that holds both.
+  `barrel_docdb` shares no code with `barrel_vectordb`, so its place here is
+  justified by the facade and the coming fabric work.
 
 ### Out of scope (kept separate on purpose)
 
