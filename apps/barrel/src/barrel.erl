@@ -58,7 +58,9 @@
     changes/2,
     changes/3,
     subscribe/2,
-    subscribe/3
+    subscribe/3,
+    hlc_encode/1,
+    hlc_decode/1
 ]).
 
 %% Vectors (barrel_vectordb)
@@ -262,6 +264,18 @@ subscribe(#{docdb := DbBin}, Since) ->
 -spec subscribe(db(), term(), map()) -> {ok, pid()} | {error, term()}.
 subscribe(#{docdb := DbBin}, Since, Opts) ->
     barrel_docdb:subscribe_changes(DbBin, Since, Opts).
+
+%% @doc Encode an HLC timestamp (the cursor returned by {@link changes/2}) as a
+%% JSON/URL-safe string, for transports that serialise the changes feed.
+-spec hlc_encode(term()) -> binary().
+hlc_encode(Hlc) ->
+    base64:encode(barrel_hlc:encode(Hlc)).
+
+%% @doc Decode a cursor produced by {@link hlc_encode/1} back to an HLC
+%% timestamp usable as the `Since' argument of {@link changes/2}.
+-spec hlc_decode(binary()) -> term().
+hlc_decode(Cursor) ->
+    barrel_hlc:decode(base64:decode(Cursor)).
 
 %%====================================================================
 %% Vectors (barrel_vectordb)
