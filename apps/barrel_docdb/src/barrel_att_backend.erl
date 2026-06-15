@@ -6,7 +6,7 @@
 %%% `barrel_att_store_blob' is the default backend (a RocksDB BlobDB instance).
 %%% `barrel_att_store' is a thin dispatcher that selects a backend per database
 %%% from `att_opts.backend' and routes calls to it, so additional backends (for
-%%% example an object store via barrel_objectdb / S3) can be added without
+%%% example a local filesystem or an S3 object store) can be added without
 %%% touching the document layer.
 %%%
 %%% `AttRef' is the opaque handle returned by {@link open/2}; the dispatcher tags

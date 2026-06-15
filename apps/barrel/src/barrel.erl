@@ -1,11 +1,12 @@
 %%%-------------------------------------------------------------------
 %%% @doc Barrel facade: the embeddable edge database.
 %%%
-%%% Composes the document layer (`barrel_docdb'), the vector layer
-%%% (`barrel_vectordb'), and object storage (`barrel_objectdb', via the docdb
-%%% attachment backend) behind one API. A barrel database is a docdb database
-%%% plus a vectordb store that share a name and a single id space: a document and
-%%% its vector are addressed by the same id.
+%%% Composes the document layer (`barrel_docdb') and the vector layer
+%%% (`barrel_vectordb') behind one API. A barrel database is a docdb database
+%%% plus a vectordb store that share a name and a single id space: a document,
+%%% its attachments (blobs), and its vector are all addressed by the same id.
+%%% Blobs are docdb attachments; their storage backend is pluggable per database
+%%% via the docdb `barrel_att_backend' seam.
 %%%
 %%% {@link open/2} returns a handle used by the rest of this module. Each
 %%% underlying application stays usable on its own; this facade adds no storage
@@ -26,14 +27,19 @@
 -export([
     put_doc/2,
     put_doc/3,
+    put_docs/2,
+    put_docs/3,
     get_doc/2,
     get_doc/3,
+    get_docs/2,
+    get_docs/3,
     delete_doc/2,
+    delete_docs/2,
     find/2,
     find/3
 ]).
 
-%% Attachments / blobs (barrel_docdb, optionally backed by barrel_objectdb)
+%% Attachments / blobs (barrel_docdb; backend pluggable per database)
 -export([
     put_attachment/4,
     get_attachment/3,
@@ -67,6 +73,7 @@
 -export([
     vector_add/4,
     vector_add/5,
+    vector_add_batch/2,
     vector_get/2,
     vector_delete/2,
     search/3,
@@ -147,6 +154,17 @@ put_doc(#{docdb := DbBin}, Doc) ->
 put_doc(#{docdb := DbBin}, Doc, Opts) ->
     barrel_docdb:put_doc(DbBin, Doc, Opts).
 
+%% @doc Create or update multiple documents in one batch.
+%% Returns a result per input document, in order.
+-spec put_docs(db(), [map()]) -> [{ok, map()} | {error, term()}].
+put_docs(#{docdb := DbBin}, Docs) ->
+    barrel_docdb:put_docs(DbBin, Docs).
+
+%% @doc Create or update multiple documents in one batch, with options.
+-spec put_docs(db(), [map()], map()) -> [{ok, map()} | {error, term()}].
+put_docs(#{docdb := DbBin}, Docs, Opts) ->
+    barrel_docdb:put_docs(DbBin, Docs, Opts).
+
 %% @doc Get a document by id.
 -spec get_doc(db(), binary()) -> {ok, map()} | {error, term()}.
 get_doc(#{docdb := DbBin}, DocId) ->
@@ -157,10 +175,27 @@ get_doc(#{docdb := DbBin}, DocId) ->
 get_doc(#{docdb := DbBin}, DocId, Opts) ->
     barrel_docdb:get_doc(DbBin, DocId, Opts).
 
+%% @doc Get multiple documents by id in one batch.
+%% Returns a result per input id, in order.
+-spec get_docs(db(), [binary()]) -> [{ok, map()} | {error, term()}].
+get_docs(#{docdb := DbBin}, DocIds) ->
+    barrel_docdb:get_docs(DbBin, DocIds).
+
+%% @doc Get multiple documents by id in one batch, with options.
+-spec get_docs(db(), [binary()], map()) -> [{ok, map()} | {error, term()}].
+get_docs(#{docdb := DbBin}, DocIds, Opts) ->
+    barrel_docdb:get_docs(DbBin, DocIds, Opts).
+
 %% @doc Delete a document by id.
 -spec delete_doc(db(), binary()) -> {ok, map()} | {error, term()}.
 delete_doc(#{docdb := DbBin}, DocId) ->
     barrel_docdb:delete_doc(DbBin, DocId).
+
+%% @doc Delete multiple documents by id. docdb has no bulk delete, so this maps
+%% over {@link delete_doc/2} and returns a result per id, in order.
+-spec delete_docs(db(), [binary()]) -> [{ok, map()} | {error, term()}].
+delete_docs(#{docdb := DbBin}, DocIds) ->
+    [barrel_docdb:delete_doc(DbBin, DocId) || DocId <- DocIds].
 
 %% @doc Run a declarative query.
 -spec find(db(), map()) -> {ok, [map()], map()} | {error, term()}.
@@ -291,6 +326,20 @@ vector_add(#{vstore := Store}, Id, Text, Metadata) ->
 vector_add(#{vstore := Store}, Id, Text, Metadata, Vector) ->
     barrel_vectordb:add(Store, Id, Text, Metadata, Vector).
 
+%% @doc Add many documents to the vector store in one atomic batch.
+%%
+%% Each element is either `{Id, Text, Metadata}' (text embedded by the store) or
+%% `{Id, Text, Metadata, Vector}' (explicit vector). All elements must be the
+%% same shape; a mixed batch returns `{error, mixed_batch}'.
+-spec vector_add_batch(db(), [tuple()]) ->
+    {ok, map()} | {error, term()}.
+vector_add_batch(#{vstore := Store}, Docs) ->
+    case batch_kind(Docs) of
+        explicit -> barrel_vectordb:add_vector_batch(Store, Docs);
+        auto -> barrel_vectordb:add_batch(Store, Docs);
+        mixed -> {error, mixed_batch}
+    end.
+
 %% @doc Get a stored vector entry by id.
 -spec vector_get(db(), binary()) -> term().
 vector_get(#{vstore := Store}, Id) ->
@@ -329,6 +378,19 @@ vector_stats(#{vstore := Store}) ->
 %%====================================================================
 %% Internal
 %%====================================================================
+
+%% @private Classify a vector batch: all 4-tuples (explicit vectors), all
+%% 3-tuples (auto-embed), or mixed. An empty list embeds (a no-op batch).
+-spec batch_kind([tuple()]) -> explicit | auto | mixed.
+batch_kind([]) ->
+    auto;
+batch_kind(Docs) ->
+    Sizes = lists:usort([tuple_size(D) || D <- Docs, is_tuple(D)]),
+    case Sizes of
+        [4] -> explicit;
+        [3] -> auto;
+        _ -> mixed
+    end.
 
 %% @private Open the docdb database, creating it if it does not exist.
 -spec ensure_docdb(binary(), map()) -> {ok, pid()} | {error, term()}.

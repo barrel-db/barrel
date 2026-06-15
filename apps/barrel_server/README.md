@@ -38,6 +38,8 @@ DELETE /db/:db                     close a database
 PUT    /db/:db/doc/:id             body = JSON document
 GET    /db/:db/doc/:id             fetch a document
 DELETE /db/:db/doc/:id             delete a document
+POST   /db/:db/_bulk_docs          {"docs":[...]} -> {"results":[...]}
+POST   /db/:db/_bulk_get           {"ids":[...]}  -> {"results":[...]}
 POST   /db/:db/find                body = query, returns rows
 GET    /db/:db/changes            changes feed (JSON, or SSE via Accept)
 

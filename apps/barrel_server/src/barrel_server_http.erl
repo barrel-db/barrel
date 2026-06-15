@@ -22,6 +22,8 @@
     put_doc/1,
     get_doc/1,
     delete_doc/1,
+    bulk_docs/1,
+    bulk_get/1,
     find/1,
     changes/1,
     put_att/1,
@@ -62,6 +64,8 @@ routes() ->
         {<<"PUT">>,    <<"/db/:db/doc/:id">>,            {?MODULE, put_doc}},
         {<<"GET">>,    <<"/db/:db/doc/:id">>,            {?MODULE, get_doc}},
         {<<"DELETE">>, <<"/db/:db/doc/:id">>,            {?MODULE, delete_doc}},
+        {<<"POST">>,   <<"/db/:db/_bulk_docs">>,         {?MODULE, bulk_docs}},
+        {<<"POST">>,   <<"/db/:db/_bulk_get">>,          {?MODULE, bulk_get}},
         {<<"POST">>,   <<"/db/:db/find">>,               {?MODULE, find}},
         {<<"GET">>,    <<"/db/:db/changes">>,            {?MODULE, changes}},
 
@@ -141,6 +145,24 @@ delete_doc(Req) ->
             {ok, Res} -> json_resp(200, jsonable(Res));
             Err -> error_resp(Err)
         end
+    end).
+
+bulk_docs(Req) ->
+    with_db(Req, fun(Db) ->
+        with_json(Req, fun(Body) ->
+            Docs = maps:get(<<"docs">>, Body, []),
+            Results = barrel:put_docs(Db, Docs),
+            json_resp(201, #{results => [batch_result(R) || R <- Results]})
+        end)
+    end).
+
+bulk_get(Req) ->
+    with_db(Req, fun(Db) ->
+        with_json(Req, fun(Body) ->
+            Ids = maps:get(<<"ids">>, Body, []),
+            Results = barrel:get_docs(Db, Ids),
+            json_resp(200, #{results => [batch_result(R) || R <- Results]})
+        end)
     end).
 
 find(Req) ->
@@ -303,6 +325,14 @@ read_body(Req) ->
                 {error, Reason, _R2} -> {error, Reason}
             end
     end.
+
+%% @private Render one batch element ({ok, Map} | {error, Reason}) as JSON.
+batch_result({ok, Map}) when is_map(Map) -> jsonable(Map);
+batch_result({ok, Other}) -> #{ok => true, result => Other};
+batch_result({error, Reason}) -> #{error => err_bin(Reason)}.
+
+err_bin(Atom) when is_atom(Atom) -> atom_to_binary(Atom, utf8);
+err_bin(Other) -> iolist_to_binary(io_lib:format("~p", [Other])).
 
 search_opts(Body) ->
     K = maps:get(<<"k">>, Body, 10),

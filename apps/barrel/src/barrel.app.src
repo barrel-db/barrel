@@ -7,8 +7,7 @@
         kernel,
         stdlib,
         barrel_docdb,
-        barrel_vectordb,
-        barrel_objectdb
+        barrel_vectordb
     ]},
     {env, []},
     {modules, []},
