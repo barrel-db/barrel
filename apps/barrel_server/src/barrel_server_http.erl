@@ -338,9 +338,18 @@ search_opts(Body) ->
     K = maps:get(<<"k">>, Body, 10),
     #{k => K}.
 
-search_reply({ok, Hits}) -> json_resp(200, #{hits => Hits});
-search_reply(Hits) when is_list(Hits) -> json_resp(200, #{hits => Hits});
-search_reply(Err) -> error_resp(Err).
+search_reply({ok, Hits}) when is_list(Hits) ->
+    json_resp(200, #{hits => [hit(H) || H <- Hits]});
+search_reply(Hits) when is_list(Hits) ->
+    json_resp(200, #{hits => [hit(H) || H <- Hits]});
+search_reply(Err) ->
+    error_resp(Err).
+
+%% @private Normalise a search hit to a JSON-safe map. Vector hits are already
+%% maps; BM25 hits are {Id, Score} tuples.
+hit({Id, Score}) -> #{key => Id, score => Score};
+hit(Map) when is_map(Map) -> jsonable(Map);
+hit(Other) -> Other.
 
 att_content_type(Db, Id, Name) ->
     case barrel:attachment_info(Db, Id, Name) of

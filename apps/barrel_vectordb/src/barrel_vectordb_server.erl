@@ -498,21 +498,26 @@ process_writes_atomic(Writes, #state{db = Db, cf_vectors = CfV, cf_metadata = Cf
             %% Apply writes to RocksDB batch and collect vectors for index.
             %% DocPairs holds {Id, Text, Metadata} only for an external docstore
             %% (empty for the default, which writes text/metadata into the batch).
-            {VectorsForIndex, DocPairs, Replies0} = lists:foldl(
-                fun({From, WriteOp, _PreparedData}, {AccVectors, AccDocs, AccReplies}) ->
+            %% Bm25Pairs holds {Id, Text} for successfully applied writes, used to
+            %% update the BM25 index after the batch commits (the atomic write path
+            %% indexes BM25 here; do_add only covers update/upsert).
+            {VectorsForIndex, DocPairs, Bm25Pairs, Replies0} = lists:foldl(
+                fun({From, WriteOp, _PreparedData}, {AccVectors, AccDocs, AccBm25, AccReplies}) ->
                     case apply_write_to_rocksdb_batch(WriteOp, Batch, CfV, CfM, CfT, Dim, Docstore) of
                         {ok, {Id, Vector}, Docs} ->
-                            {[{Id, Vector} | AccVectors], Docs ++ AccDocs, [{From, ok} | AccReplies]};
+                            {[{Id, Vector} | AccVectors], Docs ++ AccDocs,
+                             bm25_pairs_of(WriteOp) ++ AccBm25, [{From, ok} | AccReplies]};
                         {ok, VectorList, Docs} when is_list(VectorList) ->
                             %% Batch insert - return stats
                             Count = length(VectorList),
                             {VectorList ++ AccVectors, Docs ++ AccDocs,
+                             bm25_pairs_of(WriteOp) ++ AccBm25,
                              [{From, {ok, #{inserted => Count}}} | AccReplies]};
                         {error, Reason} ->
-                            {AccVectors, AccDocs, [{From, {error, Reason}} | AccReplies]}
+                            {AccVectors, AccDocs, AccBm25, [{From, {error, Reason}} | AccReplies]}
                     end
                 end,
-                {[], [], []},
+                {[], [], [], []},
                 PreparedWrites
             ),
 
@@ -523,14 +528,19 @@ process_writes_atomic(Writes, #state{db = Db, cf_vectors = CfV, cf_metadata = Cf
                     %% docstore only) write text/metadata. Vector-first, doc-second.
                     case rocksdb:write_batch(Db, Batch, []) of
                         ok ->
+                            %% BM25 indexes text and is independent of the docstore,
+                            %% so update it once the rocksdb write succeeds.
+                            {ok, NewBM25} = bm25_add_all(State#state.bm25_index,
+                                                         lists:reverse(Bm25Pairs)),
+                            StateOk = State#state{index = NewIndex, bm25_index = NewBM25},
                             case docstore_multi_put(Docstore, lists:reverse(DocPairs)) of
                                 ok ->
                                     Replies = [{reply, From, Reply} || {From, Reply} <- Replies0],
-                                    {Replies, State#state{index = NewIndex}};
+                                    {Replies, StateOk};
                                 {error, DsReason} ->
                                     ErrorReplies = [{reply, From, {error, {docstore_error, DsReason}}}
                                                    || {From, _} <- Replies0],
-                                    {ErrorReplies, State#state{index = NewIndex}}
+                                    {ErrorReplies, StateOk}
                             end;
                         {error, Reason} ->
                             ErrorReplies = [{reply, From, {error, {db_error, Reason}}}
@@ -1176,6 +1186,26 @@ init_bm25(DbPath, disk, Config) ->
     end.
 
 %% Add document to BM25 index
+%% Extract the {Id, Text} pairs a write contributes to the BM25 index. Writes
+%% reaching the atomic path are always add_vector / add_vector_batch (auto-embed
+%% adds are rewritten to these in prepare_writes).
+bm25_pairs_of({add_vector, Id, Text, _Metadata, _Vector}) ->
+    [{Id, Text}];
+bm25_pairs_of({add_vector_batch, Docs}) ->
+    [{Id, Text} || {Id, Text, _Metadata, _Vector} <- Docs];
+bm25_pairs_of(_) ->
+    [].
+
+%% Fold bm25_add over a list of {Id, Text} pairs, threading the index. A no-op
+%% (returns the unchanged index) when BM25 is disabled.
+bm25_add_all(Index, []) ->
+    {ok, Index};
+bm25_add_all(Index, [{Id, Text} | Rest]) ->
+    case bm25_add(Index, Id, Text) of
+        {ok, NewIndex} -> bm25_add_all(NewIndex, Rest);
+        {error, _} = Err -> Err
+    end.
+
 bm25_add(undefined, _Id, _Text) ->
     {ok, undefined};
 bm25_add(Index, Id, Text) when is_map(Index) ->

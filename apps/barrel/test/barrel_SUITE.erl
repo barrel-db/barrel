@@ -140,10 +140,10 @@ t_vectors(Config) ->
     ?assertMatch({ok, _}, barrel:vector_get(Db, <<"a">>)),
     {ok, Hits} = barrel:search_vector(Db, V, #{k => 5}),
     ?assert(lists:any(fun(H) -> maps:get(key, H, undefined) =:= <<"a">> end, Hits)),
-    %% BM25 keyword search delegates and returns a hit list (enabled via
-    %% bm25_backend => memory). Ranking/recall is covered by vectordb's own
-    %% suite; here we pin the facade contract.
-    ?assertMatch({ok, L} when is_list(L), barrel:search_bm25(Db, <<"hello">>, #{k => 5})),
+    %% BM25 keyword search (enabled via bm25_backend => memory) finds the doc
+    %% indexed on the explicit-vector add path. Hits are {Id, Score} tuples.
+    {ok, BHits} = barrel:search_bm25(Db, <<"hello">>, #{k => 5}),
+    ?assert(lists:keymember(<<"a">>, 1, BHits)),
     %% Hybrid must vectorise the text query, so it needs an embedder; without a
     %% model configured it reports embedder_not_configured. The happy path is
     %% covered where a model is available.
