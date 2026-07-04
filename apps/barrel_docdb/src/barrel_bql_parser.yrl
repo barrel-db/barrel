@@ -1,14 +1,17 @@
-%% BQL grammar. Layered and precedence-declaration-free; any new conflict
-%% must be resolved by refactoring, not by raising Expect.
+%% BQL grammar. Layered expression grammar (or > and > not > predicate),
+%% precedence-declaration-free; any new conflict must be resolved by
+%% refactoring, not by raising Expect.
 %%
-%% Step-3 shape: SELECT list, FROM collection with optional alias,
-%% ORDER BY, LIMIT, OFFSET, trailing SUBSCRIBE, and path expressions
-%% (dotted keys, [N] indexes, [*] wildcard; any keyword is legal after
-%% a dot). WHERE, UNNEST and table functions land in step 4.
+%% Bare boolean paths are not predicates (write d.active = true): that
+%% restriction is what keeps BETWEEN/NOT LALR(1)-clean, since an operand
+%% can never derive 'and'. Negative numbers are built here from '-'.
+%% <> is normalized to != in the actions.
 
 Nonterminals
     statement select_stmt select_list proj_list projection
-    from_clause source opt_alias
+    from_clause source opt_alias fn_args fn_arg
+    opt_where expr and_expr not_expr predicate operand
+    literal literal_list
     path_expr path_rest path_key
     opt_order order_list order_item opt_dir
     opt_limit opt_offset opt_subscribe.
@@ -17,8 +20,9 @@ Terminals
     select from where order by limit offset as unnest asc desc
     'and' 'or' 'not' in like between is null missing true false
     subscribe contains
-    ident integer
-    '*' ',' '.' '[' ']'.
+    ident string integer float param
+    '=' '!=' '<>' '<' '<=' '>' '>=' '=>'
+    '(' ')' '*' ',' '.' '[' ']' '-'.
 
 Rootsymbol statement.
 
@@ -26,16 +30,16 @@ Expect 0.
 
 statement -> select_stmt : '$1'.
 
-select_stmt -> select select_list from_clause opt_order opt_limit
-               opt_offset opt_subscribe :
+select_stmt -> select select_list from_clause opt_where opt_order
+               opt_limit opt_offset opt_subscribe :
     #{type => select,
       select => '$2',
       from => '$3',
-      where => undefined,
-      order_by => '$4',
-      limit => '$5',
-      offset => '$6',
-      subscribe => '$7'}.
+      where => '$4',
+      order_by => '$5',
+      limit => '$6',
+      offset => '$7',
+      subscribe => '$8'}.
 
 %%--------------------------------------------------------------------
 %% SELECT list
@@ -53,17 +57,91 @@ projection -> path_expr as ident :
     #{expr => '$1', as => ident_name('$3'), loc => path_loc('$1')}.
 
 %%--------------------------------------------------------------------
-%% FROM
+%% FROM: collection or table function, optional alias, optional UNNEST
 %%--------------------------------------------------------------------
 
 from_clause -> from source opt_alias :
     #{source => '$2', alias => '$3', unnest => undefined}.
+from_clause -> from source opt_alias ',' unnest '(' path_expr ')' as ident :
+    #{source => '$2', alias => '$3',
+      unnest => #{path => '$7', alias => ident_name('$10'),
+                  loc => token_loc('$5')}}.
 
 source -> ident : {collection, token_loc('$1'), ident_name('$1')}.
+source -> ident '(' fn_args ')' :
+    {table_fn, token_loc('$1'), ident_name('$1'), lists:reverse('$3')}.
 
 opt_alias -> '$empty' : undefined.
 opt_alias -> as ident : ident_name('$2').
 opt_alias -> ident : ident_name('$1').
+
+fn_args -> fn_arg : ['$1'].
+fn_args -> fn_args ',' fn_arg : ['$3' | '$1'].
+
+fn_arg -> literal : {pos, '$1'}.
+fn_arg -> param : {pos, '$1'}.
+fn_arg -> ident '=>' literal : {named, ident_name('$1'), '$3'}.
+fn_arg -> ident '=>' param : {named, ident_name('$1'), '$3'}.
+
+%%--------------------------------------------------------------------
+%% WHERE expression layer
+%%--------------------------------------------------------------------
+
+opt_where -> '$empty' : undefined.
+opt_where -> where expr : '$2'.
+
+expr -> expr 'or' and_expr : {'or', token_loc('$2'), '$1', '$3'}.
+expr -> and_expr : '$1'.
+
+and_expr -> and_expr 'and' not_expr : {'and', token_loc('$2'), '$1', '$3'}.
+and_expr -> not_expr : '$1'.
+
+not_expr -> 'not' not_expr : {'not', token_loc('$1'), '$2'}.
+not_expr -> predicate : '$1'.
+
+predicate -> '(' expr ')' : '$2'.
+predicate -> operand '=' operand : {cmp, token_loc('$2'), '=', '$1', '$3'}.
+predicate -> operand '!=' operand : {cmp, token_loc('$2'), '!=', '$1', '$3'}.
+predicate -> operand '<>' operand : {cmp, token_loc('$2'), '!=', '$1', '$3'}.
+predicate -> operand '<' operand : {cmp, token_loc('$2'), '<', '$1', '$3'}.
+predicate -> operand '<=' operand : {cmp, token_loc('$2'), '<=', '$1', '$3'}.
+predicate -> operand '>' operand : {cmp, token_loc('$2'), '>', '$1', '$3'}.
+predicate -> operand '>=' operand : {cmp, token_loc('$2'), '>=', '$1', '$3'}.
+predicate -> operand is null : {is_null, token_loc('$2'), '$1', false}.
+predicate -> operand is 'not' null : {is_null, token_loc('$2'), '$1', true}.
+predicate -> operand is missing : {is_missing, token_loc('$2'), '$1', false}.
+predicate -> operand is 'not' missing :
+    {is_missing, token_loc('$2'), '$1', true}.
+predicate -> operand in '(' literal_list ')' :
+    {in, token_loc('$2'), '$1', lists:reverse('$4'), false}.
+predicate -> operand 'not' in '(' literal_list ')' :
+    {in, token_loc('$3'), '$1', lists:reverse('$5'), true}.
+predicate -> operand like string :
+    {like, token_loc('$2'), '$1', string_value('$3'), false}.
+predicate -> operand 'not' like string :
+    {like, token_loc('$3'), '$1', string_value('$4'), true}.
+predicate -> operand between operand 'and' operand :
+    {between, token_loc('$2'), '$1', '$3', '$5', false}.
+predicate -> operand 'not' between operand 'and' operand :
+    {between, token_loc('$3'), '$1', '$4', '$6', true}.
+predicate -> contains '(' path_expr ',' literal ')' :
+    {contains, token_loc('$1'), '$3', '$5'}.
+
+operand -> path_expr : '$1'.
+operand -> literal : '$1'.
+operand -> param : '$1'.
+
+literal -> string : {lit, token_loc('$1'), string_value('$1')}.
+literal -> integer : {lit, token_loc('$1'), int_value('$1')}.
+literal -> float : {lit, token_loc('$1'), float_value('$1')}.
+literal -> '-' integer : {lit, token_loc('$1'), -int_value('$2')}.
+literal -> '-' float : {lit, token_loc('$1'), -float_value('$2')}.
+literal -> true : {lit, token_loc('$1'), true}.
+literal -> false : {lit, token_loc('$1'), false}.
+literal -> null : {lit, token_loc('$1'), null}.
+
+literal_list -> literal : ['$1'].
+literal_list -> literal_list ',' literal : ['$3' | '$1'].
 
 %%--------------------------------------------------------------------
 %% Paths: a.b, a[0], a[*], and any keyword after a dot
@@ -135,6 +213,10 @@ Erlang code.
 ident_name({ident, _Loc, Name}) -> Name.
 
 int_value({integer, _Loc, N}) -> N.
+
+float_value({float, _Loc, F}) -> F.
+
+string_value({string, _Loc, S}) -> S.
 
 token_loc(Token) -> element(2, Token).
 
