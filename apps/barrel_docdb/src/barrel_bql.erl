@@ -14,10 +14,6 @@
 %% '''
 -module(barrel_bql).
 
-%% barrel_bql_lexer is excluded from dialyzer (leexinc.hrl dead
-%% patterns), which makes calls into it "unknown" here.
--dialyzer(no_unknown).
-
 -export([
     parse/1,
     compile/1,
