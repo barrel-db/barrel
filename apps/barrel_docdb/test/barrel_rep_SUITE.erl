@@ -17,8 +17,7 @@
 all() ->
     [
         {group, local_docs},
-        {group, revsdiff},
-        {group, put_rev},
+        {group, vv_protocol},
         {group, replication},
         {group, filtered_replication},
         {group, hlc_replication},
@@ -32,15 +31,13 @@ groups() ->
             local_doc_crud,
             local_doc_not_replicated
         ]},
-        {revsdiff, [sequence], [
-            revsdiff_missing_all,
-            revsdiff_missing_some,
-            revsdiff_missing_none,
-            revsdiff_batch
-        ]},
-        {put_rev, [sequence], [
-            put_rev_new_doc,
-            put_rev_with_history
+        {vv_protocol, [sequence], [
+            diff_versions_missing_and_have,
+            put_version_new_doc,
+            put_version_idempotent,
+            put_version_conflict_remote_wins,
+            put_version_conflict_local_wins,
+            get_doc_for_replication_meta
         ]},
         {replication, [sequence], [
             replicate_single_doc,
@@ -70,11 +67,9 @@ groups() ->
         ]}
     ].
 
-init_per_suite(_Config) ->
-    %% Rev-tree replication primitives were removed with the version
-    %% vector pivot; the VV protocol (put_version + diff_versions) and a
-    %% rewritten suite land with the transport rework (phase 3 step 3).
-    {skip, revtree_removed}.
+init_per_suite(Config) ->
+    {ok, _} = application:ensure_all_started(barrel_docdb),
+    Config.
 
 end_per_suite(_Config) ->
     ok = application:stop(barrel_docdb),
@@ -207,120 +202,133 @@ local_doc_not_replicated(_Config) ->
     ok.
 
 %%====================================================================
-%% Revsdiff Tests
+%% VV Protocol Tests (diff_versions + put_version)
 %%====================================================================
 
-revsdiff_missing_all(_Config) ->
-    Db = <<"test_db">>,
-    DocId = <<"nonexistent_doc">>,
-    RevIds = [<<"1-abc123">>, <<"2-def456">>],
+%% A version authored by a fake remote peer, with the version vector
+%% such a peer would ship for a fresh write.
+remote_version(Author) ->
+    V = barrel_version:new(barrel_hlc:new_hlc(), Author),
+    VV = barrel_vv:bump(barrel_vv:new(), V),
+    {barrel_version:to_token(V), barrel_vv:encode(VV)}.
 
-    %% Document doesn't exist - all revisions are missing
-    {ok, Missing, Ancestors} = barrel_docdb:revsdiff(Db, DocId, RevIds),
-    ?assertEqual(RevIds, Missing),
-    ?assertEqual([], Ancestors),
+diff_versions_missing_and_have(_Config) ->
+    Db = <<"test_db">>,
+
+    {ok, #{<<"id">> := DocId, <<"rev">> := Rev}} =
+        barrel_docdb:put_doc(Db, #{<<"id">> => <<"diff_doc">>, <<"value">> => 1}),
+
+    %% Batch: covered version, unknown doc, and a foreign version of an
+    %% existing doc
+    {RemoteTok, _} = remote_version(<<"peer_a">>),
+    {ok, Diff} = barrel_docdb:diff_versions(Db, #{
+        DocId => Rev,
+        <<"unknown_doc">> => RemoteTok
+    }),
+    ?assertEqual(have, maps:get(DocId, Diff)),
+    ?assertEqual(missing, maps:get(<<"unknown_doc">>, Diff)),
+
+    {ForeignTok, _} = remote_version(<<"peer_b">>),
+    {ok, Diff2} = barrel_docdb:diff_versions(Db, #{DocId => ForeignTok}),
+    ?assertEqual(missing, maps:get(DocId, Diff2)),
 
     ok.
 
-revsdiff_missing_some(_Config) ->
+put_version_new_doc(_Config) ->
     Db = <<"test_db">>,
+    DocId = <<"pv_new">>,
+    {Tok, VVBin} = remote_version(<<"peer_a">>),
 
-    %% Create a document
-    {ok, #{<<"id">> := DocId, <<"rev">> := Rev1}} =
-        barrel_docdb:put_doc(Db, #{<<"id">> => <<"revsdiff_doc">>, <<"value">> => 1}),
+    {ok, DocId, Tok} = barrel_docdb:put_version(
+        Db, #{<<"id">> => DocId, <<"value">> => <<"remote">>}, Tok, VVBin, false),
 
-    %% Update it
-    {ok, #{<<"rev">> := Rev2}} =
-        barrel_docdb:put_doc(Db, #{<<"id">> => DocId, <<"_rev">> => Rev1, <<"value">> => 2}),
+    %% The remote version is preserved as the doc's rev
+    {ok, Doc} = barrel_docdb:get_doc(Db, DocId),
+    ?assertEqual(<<"remote">>, maps:get(<<"value">>, Doc)),
+    ?assertEqual(Tok, maps:get(<<"_rev">>, Doc)),
 
-    %% Check revsdiff - Rev2 exists, fake rev doesn't
-    FakeRev = <<"3-fake123">>,
-    {ok, Missing, _Ancestors} = barrel_docdb:revsdiff(Db, DocId, [Rev2, FakeRev]),
-    ?assertEqual([FakeRev], Missing),
+    %% And the diff now answers have
+    {ok, Diff} = barrel_docdb:diff_versions(Db, #{DocId => Tok}),
+    ?assertEqual(have, maps:get(DocId, Diff)),
 
     ok.
 
-revsdiff_missing_none(_Config) ->
+put_version_idempotent(_Config) ->
     Db = <<"test_db">>,
+    DocId = <<"pv_idem">>,
+    {Tok, VVBin} = remote_version(<<"peer_a">>),
+    Doc = #{<<"id">> => DocId, <<"value">> => <<"once">>},
 
-    %% Create a document
-    {ok, #{<<"id">> := DocId, <<"rev">> := Rev1}} =
-        barrel_docdb:put_doc(Db, #{<<"id">> => <<"revsdiff_doc2">>, <<"value">> => 1}),
+    {ok, DocId, Tok} = barrel_docdb:put_version(Db, Doc, Tok, VVBin, false),
+    %% Redelivery is a no-op returning the same winner
+    {ok, DocId, Tok} = barrel_docdb:put_version(Db, Doc, Tok, VVBin, false),
 
-    %% Check revsdiff - existing rev is not missing
-    {ok, Missing, _} = barrel_docdb:revsdiff(Db, DocId, [Rev1]),
-    ?assertEqual([], Missing),
+    {ok, Stored} = barrel_docdb:get_doc(Db, DocId),
+    ?assertEqual(Tok, maps:get(<<"_rev">>, Stored)),
+    {ok, Conflicts} = barrel_docdb:get_conflicts(Db, DocId),
+    ?assertEqual([], Conflicts),
 
     ok.
 
-revsdiff_batch(_Config) ->
+put_version_conflict_remote_wins(_Config) ->
     Db = <<"test_db">>,
+    DocId = <<"pv_remote_wins">>,
 
-    %% Create two documents
-    {ok, #{<<"id">> := DocId1, <<"rev">> := Rev1}} =
-        barrel_docdb:put_doc(Db, #{<<"id">> => <<"batch_doc1">>, <<"value">> => 1}),
-    {ok, #{<<"id">> := DocId2, <<"rev">> := Rev2}} =
-        barrel_docdb:put_doc(Db, #{<<"id">> => <<"batch_doc2">>, <<"value">> => 2}),
+    %% Local write first, then a concurrent remote version with a later
+    %% HLC: LWW picks the remote, the local winner becomes a conflict
+    %% sibling
+    {ok, #{<<"rev">> := LocalRev}} =
+        barrel_docdb:put_doc(Db, #{<<"id">> => DocId, <<"v">> => <<"local">>}),
+    {Tok, VVBin} = remote_version(<<"peer_a">>),
 
-    %% Test batch revsdiff with multiple documents
-    RevsMap = #{
-        DocId1 => [Rev1, <<"2-fake123">>],  % Rev1 exists, fake doesn't
-        DocId2 => [Rev2],                    % Rev2 exists
-        <<"nonexistent">> => [<<"1-abc">>]   % Doc doesn't exist
-    },
+    {ok, DocId, Tok} = barrel_docdb:put_version(
+        Db, #{<<"id">> => DocId, <<"v">> => <<"remote">>}, Tok, VVBin, false),
 
-    {ok, Results} = barrel_docdb:revsdiff_batch(Db, RevsMap),
-
-    %% Check DocId1 result - only fake rev should be missing
-    #{DocId1 := Result1} = Results,
-    ?assertEqual([<<"2-fake123">>], maps:get(missing, Result1)),
-
-    %% Check DocId2 result - nothing missing
-    #{DocId2 := Result2} = Results,
-    ?assertEqual([], maps:get(missing, Result2)),
-
-    %% Check nonexistent doc - all revs missing
-    #{<<"nonexistent">> := Result3} = Results,
-    ?assertEqual([<<"1-abc">>], maps:get(missing, Result3)),
-    ?assertEqual([], maps:get(possible_ancestors, Result3)),
+    {ok, Doc} = barrel_docdb:get_doc(Db, DocId),
+    ?assertEqual(<<"remote">>, maps:get(<<"v">>, Doc)),
+    {ok, Conflicts} = barrel_docdb:get_conflicts(Db, DocId),
+    ?assertEqual([LocalRev], Conflicts),
 
     ok.
 
-%%====================================================================
-%% Put Rev Tests
-%%====================================================================
-
-put_rev_new_doc(_Config) ->
+put_version_conflict_local_wins(_Config) ->
     Db = <<"test_db">>,
-    Doc = #{<<"id">> => <<"replicated_doc_1">>, <<"value">> => <<"from_source">>},
-    History = [<<"1-abc123def456">>],
+    DocId = <<"pv_local_wins">>,
 
-    %% Put document with explicit revision
-    {ok, DocId, Rev} = barrel_docdb:put_rev(Db, Doc, History, false),
-    ?assertEqual(<<"replicated_doc_1">>, DocId),
-    ?assertEqual(<<"1-abc123def456">>, Rev),
+    %% Remote version issued BEFORE the local write: concurrent but
+    %% older, so the local winner stays and the remote becomes a
+    %% conflict sibling
+    {Tok, VVBin} = remote_version(<<"peer_a">>),
+    {ok, #{<<"rev">> := LocalRev}} =
+        barrel_docdb:put_doc(Db, #{<<"id">> => DocId, <<"v">> => <<"local">>}),
 
-    %% Verify document exists
-    {ok, Retrieved} = barrel_docdb:get_doc(Db, DocId),
-    ?assertEqual(<<"from_source">>, maps:get(<<"value">>, Retrieved)),
-    ?assertEqual(<<"1-abc123def456">>, maps:get(<<"_rev">>, Retrieved)),
+    {ok, DocId, LocalRev} = barrel_docdb:put_version(
+        Db, #{<<"id">> => DocId, <<"v">> => <<"remote">>}, Tok, VVBin, false),
+
+    {ok, Doc} = barrel_docdb:get_doc(Db, DocId),
+    ?assertEqual(<<"local">>, maps:get(<<"v">>, Doc)),
+    {ok, Conflicts} = barrel_docdb:get_conflicts(Db, DocId),
+    ?assertEqual([Tok], Conflicts),
 
     ok.
 
-put_rev_with_history(_Config) ->
+get_doc_for_replication_meta(_Config) ->
     Db = <<"test_db">>,
-    Doc = #{<<"id">> => <<"replicated_doc_2">>, <<"value">> => <<"updated">>},
-    History = [<<"2-newrev123">>, <<"1-parentrev456">>],
 
-    %% Put document with revision history
-    {ok, DocId, Rev} = barrel_docdb:put_rev(Db, Doc, History, false),
-    ?assertEqual(<<"replicated_doc_2">>, DocId),
-    ?assertEqual(<<"2-newrev123">>, Rev),
+    {ok, #{<<"id">> := DocId, <<"rev">> := Rev}} =
+        barrel_docdb:put_doc(Db, #{<<"id">> => <<"repdoc">>, <<"value">> => 42}),
 
-    %% Verify document exists with correct revision
-    {ok, Retrieved} = barrel_docdb:get_doc(Db, DocId),
-    ?assertEqual(<<"updated">>, maps:get(<<"value">>, Retrieved)),
-    ?assertEqual(<<"2-newrev123">>, maps:get(<<"_rev">>, Retrieved)),
+    {ok, #{doc := Doc, version := Rev, vv := VVBin, deleted := false}} =
+        barrel_docdb:get_doc_for_replication(Db, DocId),
+    ?assertEqual(42, maps:get(<<"value">>, Doc)),
+    ?assertNot(maps:is_key(<<"_rev">>, Doc)),
+    %% The shipped vector covers the shipped version
+    ?assert(barrel_vv:contains(barrel_vv:decode(VVBin),
+                               barrel_version:from_token(Rev))),
+
+    %% Tombstones stay readable for replication
+    {ok, _} = barrel_docdb:delete_doc(Db, DocId, #{rev => Rev}),
+    {ok, #{deleted := true}} = barrel_docdb:get_doc_for_replication(Db, DocId),
 
     ok.
 

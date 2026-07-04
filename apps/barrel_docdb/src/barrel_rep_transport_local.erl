@@ -14,8 +14,8 @@
 %% barrel_rep_transport callbacks
 -export([
     get_doc/3,
-    put_rev/4,
-    revsdiff/3,
+    put_version/5,
+    diff_versions/2,
     get_changes/3,
     get_local_doc/2,
     put_local_doc/3,
@@ -28,46 +28,29 @@
 %% barrel_rep_transport callbacks
 %%====================================================================
 
-%% @doc Get a document with options
+%% @doc Get a document for replication (tombstones included) with its
+%% version protocol metadata.
 -spec get_doc(db_name(), docid(), map()) ->
     {ok, map(), map()} | {error, not_found} | {error, term()}.
-get_doc(DbName, DocId, Opts) ->
-    IncludeHistory = maps:get(history, Opts, false),
-    GetOpts = case maps:get(rev, Opts, undefined) of
-        undefined -> #{};
-        RequestedRev -> #{rev => RequestedRev}
-    end,
-    case barrel_docdb:get_doc(DbName, DocId, GetOpts) of
-        {ok, Doc} ->
-            Rev = maps:get(<<"_rev">>, Doc),
-            Meta = #{
-                <<"rev">> => Rev,
-                <<"deleted">> => maps:get(<<"_deleted">>, Doc, false)
-            },
-            Meta2 = case IncludeHistory of
-                true ->
-                    %% Build revisions from rev
-                    Revisions = build_revisions(Rev),
-                    Meta#{<<"revisions">> => Revisions};
-                false ->
-                    Meta
-            end,
-            {ok, Doc, Meta2};
+get_doc(DbName, DocId, _Opts) ->
+    case barrel_docdb:get_doc_for_replication(DbName, DocId) of
+        {ok, #{doc := Doc, version := Token, vv := VVBin, deleted := Deleted}} ->
+            {ok, Doc, #{version => Token, vv => VVBin, deleted => Deleted}};
         {error, _} = Error ->
             Error
     end.
 
-%% @doc Put a document with explicit revision history
--spec put_rev(db_name(), map(), [revid()], boolean()) ->
-    {ok, docid(), revid()} | {error, term()}.
-put_rev(DbName, Doc, History, Deleted) ->
-    barrel_docdb:put_rev(DbName, Doc, History, Deleted).
+%% @doc Apply a replicated version.
+-spec put_version(db_name(), map(), binary(), binary(), boolean()) ->
+    {ok, docid(), binary()} | {error, term()}.
+put_version(DbName, Doc, VersionToken, VVBin, Deleted) ->
+    barrel_docdb:put_version(DbName, Doc, VersionToken, VVBin, Deleted).
 
-%% @doc Get revision differences
--spec revsdiff(db_name(), docid(), [revid()]) ->
-    {ok, [revid()], [revid()]} | {error, term()}.
-revsdiff(DbName, DocId, RevIds) ->
-    barrel_docdb:revsdiff(DbName, DocId, RevIds).
+%% @doc Which offered versions is this database missing?
+-spec diff_versions(db_name(), #{docid() => binary()}) ->
+    {ok, #{docid() => missing | have}} | {error, term()}.
+diff_versions(DbName, TokenMap) ->
+    barrel_docdb:diff_versions(DbName, TokenMap).
 
 %% @doc Get changes since a sequence
 -spec get_changes(db_name(), seq() | first, map()) ->
@@ -103,16 +86,3 @@ db_info(DbName) ->
     {ok, barrel_hlc:timestamp()} | {error, term()}.
 sync_hlc(_DbName, RemoteHlc) ->
     barrel_docdb:sync_hlc(RemoteHlc).
-
-%%====================================================================
-%% Internal functions
-%%====================================================================
-
-%% @doc Build revisions structure from a single revision
-%% In a full implementation, this would query the revision tree
-build_revisions(Rev) ->
-    {Gen, Hash} = barrel_doc:parse_revision(Rev),
-    #{
-        <<"start">> => Gen,
-        <<"ids">> => [Hash]
-    }.

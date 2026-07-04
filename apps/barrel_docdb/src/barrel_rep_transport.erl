@@ -1,42 +1,27 @@
 %%%-------------------------------------------------------------------
-%%% @author Benoit Chesneau
-%%% @copyright (C) 2024, Benoit Chesneau
 %%% @doc barrel_rep_transport - Transport behaviour for replication
 %%%
-%%% This behaviour defines the interface for replication transports.
-%%% Transports abstract the communication with databases, allowing
-%%% replication to work between local databases or remote ones.
+%%% This behaviour defines the interface for the version-vector
+%%% replication protocol. Transports abstract the communication with
+%%% databases, allowing replication to work between local databases or
+%%% remote ones.
 %%%
-%%% == Implementing a Transport ==
+%%% The protocol per batch of changes:
+%%% <ol>
+%%% <li>`get_changes/3' on the source (each change carries the doc's
+%%%     current version token as `rev').</li>
+%%% <li>`diff_versions/2' on the target with `#{DocId => Token}': the
+%%%     target answers `have' when its version vector already covers the
+%%%     offered version, `missing' otherwise.</li>
+%%% <li>For each missing doc: `get_doc/3' on the source returns the
+%%%     current body plus `#{version, vv, deleted}', then
+%%%     `put_version/5' applies it on the target, which fast-forwards,
+%%%     ignores (already covered), or records a conflict sibling with a
+%%%     deterministic last-write-wins winner.</li>
+%%% </ol>
 %%%
-%%% To implement a custom transport, create a module that exports all
-%%% the callback functions defined in this behaviour:
-%%%
-%%% ```
-%%% -module(my_transport).
-%%% -behaviour(barrel_rep_transport).
-%%% -export([get_doc/3, put_rev/4, revsdiff/3, get_changes/3,
-%%%          get_local_doc/2, put_local_doc/3, delete_local_doc/2,
-%%%          db_info/1]).
-%%%
-%%% get_doc(Endpoint, DocId, Opts) ->
-%%%     %% Fetch document from remote
-%%%     ...
-%%% '''
-%%%
-%%% == Callback Functions ==
-%%%
-%%% <ul>
-%%%   <li>`get_doc/3' - Retrieve a document with options</li>
-%%%   <li>`put_rev/4' - Store a document with explicit revision history</li>
-%%%   <li>`revsdiff/3' - Find missing revisions</li>
-%%%   <li>`get_changes/3' - Get changes since a sequence</li>
-%%%   <li>`get_local_doc/2' - Get a local (non-replicated) document</li>
-%%%   <li>`put_local_doc/3' - Store a local document</li>
-%%%   <li>`delete_local_doc/2' - Delete a local document</li>
-%%%   <li>`db_info/1' - Get database information</li>
-%%% </ul>
-%%%
+%%% Local documents carry replication checkpoints and are not
+%%% replicated themselves.
 %%% @end
 %%%-------------------------------------------------------------------
 -module(barrel_rep_transport).
@@ -47,19 +32,19 @@
 %% Behaviour callbacks
 %%====================================================================
 
-%% Get a document with options
-%% Options may include: rev, history
+%% Get a document for replication. Meta carries the version protocol
+%% fields: #{version := Token, vv := EncodedVV, deleted := boolean()}.
 -callback get_doc(Endpoint :: term(), DocId :: docid(), Opts :: map()) ->
     {ok, Doc :: map(), Meta :: map()} | {error, not_found} | {error, term()}.
 
-%% Put a document with explicit revision history (replication)
--callback put_rev(Endpoint :: term(), Doc :: map(), History :: [revid()], Deleted :: boolean()) ->
-    {ok, DocId :: docid(), RevId :: revid()} | {error, term()}.
+%% Apply a replicated version (token + encoded VV preserved from source)
+-callback put_version(Endpoint :: term(), Doc :: map(), VersionToken :: binary(),
+                      VVBin :: binary(), Deleted :: boolean()) ->
+    {ok, DocId :: docid(), WinnerToken :: binary()} | {error, term()}.
 
-%% Get revision differences
-%% Returns {ok, MissingRevs, PossibleAncestors}
--callback revsdiff(Endpoint :: term(), DocId :: docid(), RevIds :: [revid()]) ->
-    {ok, Missing :: [revid()], Ancestors :: [revid()]} | {error, term()}.
+%% Which offered versions is the endpoint missing?
+-callback diff_versions(Endpoint :: term(), TokenMap :: #{docid() => binary()}) ->
+    {ok, #{docid() => missing | have}} | {error, term()}.
 
 %% Get changes since a sequence
 -callback get_changes(Endpoint :: term(), Since :: seq() | first, Opts :: map()) ->

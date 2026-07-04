@@ -132,11 +132,11 @@
     set_doc_embedding/4
 ]).
 
-%% Replication primitives
+%% Replication primitives (version-vector protocol)
 -export([
-    put_rev/4,
-    revsdiff/3,
-    revsdiff_batch/2
+    put_version/5,
+    diff_versions/2,
+    get_doc_for_replication/2
 ]).
 
 %% Local documents (for checkpoints, not replicated)
@@ -492,7 +492,7 @@ wait_for_sync_replication(DocId, Rev, Targets, Retries, Delay) ->
         fun(Target) ->
             Transport = get_transport_for_target(Target),
             case Transport:get_doc(Target, DocId, #{}) of
-                {ok, _Doc, #{<<"rev">> := TargetRev}} when TargetRev =:= Rev -> ok;
+                {ok, _Doc, #{version := TargetRev}} when TargetRev =:= Rev -> ok;
                 {ok, _, _} -> revision_mismatch;
                 {error, not_found} -> not_found;
                 {error, _} -> error
@@ -1399,90 +1399,51 @@ set_doc_embedding(Db, DocId, ExpectedRev, Vector) ->
 %% Replication Primitives
 %%====================================================================
 
-%% @doc Put a document with explicit revision history.
+%% @doc Apply a replicated version (the version-vector protocol write).
 %%
-%% This function is used by replication to store documents with their
-%% full revision history. Unlike `put_doc/2', this allows specifying
-%% the exact revision chain.
-%%
-%% == Example ==
-%% ```
-%% Doc = #{<<"id">> => <<"doc1">>, <<"value">> => <<"replicated">>},
-%% History = [<<"2-abc123">>, <<"1-def456">>],
-%% {ok, DocId, Rev} = barrel_docdb:put_rev(<<"mydb">>, Doc, History, false).
-%% '''
+%% The version token and vector come from the source database and are
+%% preserved; only the change-sequence HLC is issued locally. Outcomes:
+%% already-covered versions are idempotent no-ops, dominating versions
+%% fast-forward the document, concurrent versions create a conflict
+%% sibling with a deterministic last-write-wins winner.
 %%
 %% @param Db Database name or pid
 %% @param Doc Document map (must include `<<"id">>')
-%% @param History List of revision IDs, newest first
-%% @param Deleted Whether this is a deletion tombstone
-%% @returns `{ok, DocId, RevId}'
-%% @see barrel_rep
--spec put_rev(binary() | pid(), map(), [binary()], boolean()) ->
+%% @param VersionToken The source's version token for this write
+%% @param VVBin The source doc's encoded version vector
+%% @param Deleted Whether this version is a tombstone
+%% @returns `{ok, DocId, WinnerToken}'
+-spec put_version(binary() | pid(), map(), binary(), binary(), boolean()) ->
     {ok, binary(), binary()} | {error, term()}.
-put_rev(Db, Doc, History, Deleted) ->
+put_version(Db, Doc, VersionToken, VVBin, Deleted) ->
     with_db(Db, fun(Pid) ->
-        barrel_db_server:put_rev(Pid, Doc, History, Deleted)
+        barrel_db_server:put_version(Pid, Doc, VersionToken, VVBin, Deleted)
     end).
 
-%% @doc Find missing revisions for replication.
-%%
-%% Compares a list of revision IDs against those stored locally and
-%% returns which revisions are missing. Used by replication to determine
-%% what needs to be transferred.
-%%
-%% == Example ==
-%% ```
-%% {ok, Missing, Ancestors} = barrel_docdb:revsdiff(<<"mydb">>,
-%%     <<"doc1">>,
-%%     [<<"3-abc">>, <<"2-def">>, <<"1-ghi">>]
-%% ),
-%% %% Missing = revisions we don't have
-%% %% Ancestors = our revisions that could be ancestors
-%% '''
-%%
-%% @param Db Database name or pid
-%% @param DocId Document ID
-%% @param RevIds List of revision IDs to check
-%% @returns `{ok, MissingRevs, PossibleAncestors}'
-%% @see barrel_rep
--spec revsdiff(binary() | pid(), binary(), [binary()]) ->
-    {ok, [binary()], [binary()]} | {error, term()}.
-revsdiff(Db, DocId, RevIds) ->
+%% @doc The replication diff: which offered versions does this database
+%% not cover? Takes `#{DocId => VersionToken}', answers
+%% `#{DocId => missing | have}' (`have' = the doc's version vector
+%% contains the offered version).
+-spec diff_versions(binary() | pid(), #{binary() => binary()}) ->
+    {ok, #{binary() => missing | have}} | {error, term()}.
+diff_versions(Db, TokenMap) ->
     with_db(Db, fun(Pid) ->
-        barrel_db_server:revsdiff(Pid, DocId, RevIds)
+        barrel_db_server:diff_versions(Pid, TokenMap)
     end).
 
-%% @doc Compare revisions for multiple documents (batch).
-%%
-%% Takes a map of `DocId => [RevIds]' and returns a map of
-%% `DocId => #{missing => [...], possible_ancestors => [...]}'.
-%%
-%% This is useful for replication when checking multiple documents at once.
-%%
-%% == Example ==
-%% ```
-%% RevsMap = #{
-%%     <<"doc1">> => [<<"1-abc123">>],
-%%     <<"doc2">> => [<<"1-def456">>, <<"2-ghi789">>]
-%% },
-%% {ok, Results} = barrel_docdb:revsdiff_batch(<<"mydb">>, RevsMap),
-%% %% Results = #{
-%% %%     <<"doc1">> => #{missing => [<<"1-abc123">>], possible_ancestors => []},
-%% %%     <<"doc2">> => #{missing => [], possible_ancestors => [<<"1-def456">>]}
-%% %% }
-%% '''
-%%
-%% @param Db Database name or pid
-%% @param RevsMap Map of DocId => [RevIds] to check
-%% @returns `{ok, ResultMap}' where ResultMap is DocId => #{missing => [...], possible_ancestors => [...]}
-%% @see revsdiff/3
--spec revsdiff_batch(binary() | pid(), #{binary() => [binary()]}) ->
-    {ok, #{binary() => #{missing => [binary()], possible_ancestors => [binary()]}}}.
-revsdiff_batch(Db, RevsMap) when is_map(RevsMap) ->
-    with_db(Db, fun(Pid) ->
-        barrel_db_server:revsdiff_batch(Pid, RevsMap)
-    end).
+%% @doc Read a document for replication: current body (tombstones
+%% included) plus its version token, encoded version vector, and deleted
+%% flag. Caller-side read; the database must be addressed by name.
+-spec get_doc_for_replication(binary(), binary()) ->
+    {ok, #{doc := map(), version := binary(), vv := binary(),
+           deleted := boolean()}} | {error, term()}.
+get_doc_for_replication(Db, DocId) ->
+    case reader_store(Db) of
+        {ok, StoreRef} ->
+            barrel_docdb_reader:get_replication_doc(StoreRef, Db, DocId);
+        undefined ->
+            {error, not_found}
+    end.
 
 %%====================================================================
 %% Local Documents

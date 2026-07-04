@@ -1,8 +1,12 @@
 %%%-------------------------------------------------------------------
 %%% @doc barrel_rep_alg - Replication algorithm
 %%%
-%%% Implements the core replication algorithm for synchronizing
-%%% documents between source and target databases.
+%%% Implements the core version-vector replication algorithm: one
+%%% `diff_versions' round-trip per batch of changes, then a
+%%% `get_doc' + `put_version' per missing document. Conflict handling
+%%% lives entirely in the target's `put_version' (fast-forward, ignore,
+%%% or record a conflict sibling), so the algorithm itself needs no
+%%% ancestor negotiation.
 %%% @end
 %%%-------------------------------------------------------------------
 -module(barrel_rep_alg).
@@ -19,9 +23,11 @@
 %% API
 %%====================================================================
 
-%% @doc Replicate a list of changes from source to target
+%% @doc Replicate a list of changes from source to target.
 -spec replicate(term(), term(), module(), module(), [map()]) ->
-    {ok, map()}.
+    {ok, map()} | {error, term()}.
+replicate(_Source, _Target, _SourceTransport, _TargetTransport, []) ->
+    {ok, new_stats()};
 replicate(Source, Target, SourceTransport, TargetTransport, Changes) ->
     ExtraAttrs = #{
         <<"replication.changes_count">> => length(Changes),
@@ -29,22 +35,32 @@ replicate(Source, Target, SourceTransport, TargetTransport, Changes) ->
         <<"replication.target_transport">> => atom_to_binary(TargetTransport, utf8)
     },
     barrel_trace:with_db_span(replication, undefined, ExtraAttrs, fun() ->
-        Stats = new_stats(),
-        {ok, Stats2} = lists:foldl(
-            fun(Change, {ok, Acc}) ->
-                %% Sync HLC from change to target (for distributed ordering)
-                _ = maybe_sync_hlc(Target, TargetTransport, Change),
-                sync_change(Source, Target, SourceTransport, TargetTransport, Change, Acc)
-            end,
-            {ok, Stats},
-            Changes
-        ),
-        {ok, Stats2}
+        %% Advance the target clock past the newest source change so its
+        %% change sequence stays strictly increasing across the sync
+        _ = maybe_sync_hlc(Target, TargetTransport, lists:last(Changes)),
+        %% One diff round-trip for the whole batch
+        TokenMap = maps:from_list(
+            [{get_value(id, Change), get_value(rev, Change)}
+             || Change <- Changes]),
+        case TargetTransport:diff_versions(Target, TokenMap) of
+            {ok, DiffMap} ->
+                Missing = [DocId || {DocId, missing} <- maps:to_list(DiffMap)],
+                Stats = lists:foldl(
+                    fun(DocId, Acc) ->
+                        sync_doc(Source, Target, SourceTransport,
+                                 TargetTransport, DocId, Acc)
+                    end,
+                    new_stats(),
+                    Missing),
+                {ok, Stats};
+            {error, _} = Error ->
+                Error
+        end
     end).
 
 %% @doc Replicate changes in batches with checkpoint callback
 -spec replicate_batch(term(), term(), module(), module(), map()) ->
-    {ok, map()}.
+    {ok, map()} | {error, term()}.
 replicate_batch(Source, Target, SourceTransport, TargetTransport, Opts) ->
     Since = maps:get(since, Opts, first),
     Limit = maps:get(batch_size, Opts, 100),
@@ -66,102 +82,46 @@ replicate_loop(Source, Target, SourceTransport, TargetTransport, Since, Limit, C
             {ok, Stats};
         {ok, Changes, LastSeq} ->
             %% Process this batch
-            {ok, Stats2} = replicate(Source, Target, SourceTransport, TargetTransport, Changes),
-            MergedStats = merge_stats(Stats, Stats2),
-
-            %% Call checkpoint function
-            ok = CheckpointFun(LastSeq),
-
-            %% Continue with next batch
-            replicate_loop(Source, Target, SourceTransport, TargetTransport, LastSeq, Limit, CheckpointFun, MergedStats);
+            case replicate(Source, Target, SourceTransport, TargetTransport, Changes) of
+                {ok, Stats2} ->
+                    MergedStats = merge_stats(Stats, Stats2),
+                    %% Call checkpoint function
+                    ok = CheckpointFun(LastSeq),
+                    %% Continue with next batch
+                    replicate_loop(Source, Target, SourceTransport, TargetTransport,
+                                   LastSeq, Limit, CheckpointFun, MergedStats);
+                {error, _} = Error ->
+                    Error
+            end;
         {error, Reason} ->
             {error, Reason}
     end.
 
-%% @doc Sync a single change
-sync_change(Source, Target, SourceTransport, TargetTransport, Change, Stats) ->
-    DocId = get_value(id, Change),
-    ChangeRevs = get_value(changes, Change, []),
-
-    %% Extract revision IDs from changes
-    RevIds = [get_value(rev, R) || R <- ChangeRevs],
-
-    %% Find which revisions target is missing
-    case TargetTransport:revsdiff(Target, DocId, RevIds) of
-        {ok, [], _Ancestors} ->
-            %% Target has all revisions
-            {ok, Stats};
-        {ok, MissingRevisions, _Ancestors} ->
-            %% Sync each missing revision
-            Stats2 = lists:foldl(
-                fun(Revision, Acc) ->
-                    sync_revision(Source, Target, SourceTransport, TargetTransport, DocId, Revision, Acc)
-                end,
-                Stats,
-                MissingRevisions
-            ),
-            {ok, Stats2};
-        {error, _} = Error ->
-            logger:warning("revsdiff failed for ~s: ~p", [DocId, Error]),
-            {ok, inc_stat(doc_read_failures, Stats, 1)}
-    end.
-
-%% @doc Sync a single revision
-sync_revision(Source, Target, SourceTransport, TargetTransport, DocId, Revision, Stats) ->
-    case read_doc_with_history(Source, SourceTransport, DocId, Revision, Stats) of
-        {undefined, undefined, Stats2} ->
-            Stats2;
-        {Doc, Meta, Stats2} ->
-            History = parse_revisions(Meta),
-            Deleted = maps:get(<<"deleted">>, Meta, false),
-            write_doc(Target, TargetTransport, Doc, History, Deleted, Stats2)
-    end.
-
-%% @doc Read document with revision history from source
-read_doc_with_history(Source, SourceTransport, DocId, Rev, Stats) ->
-    StartTime = erlang:monotonic_time(microsecond),
-    case SourceTransport:get_doc(Source, DocId, #{rev => Rev, history => true}) of
-        {ok, Doc, Meta} ->
-            Time = erlang:monotonic_time(microsecond) - StartTime,
-            Stats2 = inc_stat(docs_read, Stats, 1),
-            Stats3 = update_time_stat(doc_read_time_us, Time, Stats2),
-            {Doc, Meta, Stats3};
-        {error, _} ->
-            Stats2 = inc_stat(doc_read_failures, Stats, 1),
-            {undefined, undefined, Stats2}
-    end.
-
-%% @doc Write document with history to target
-write_doc(_Target, _TargetTransport, undefined, _History, _Deleted, Stats) ->
-    Stats;
-write_doc(Target, TargetTransport, Doc, History, Deleted, Stats) ->
-    StartTime = erlang:monotonic_time(microsecond),
-    case TargetTransport:put_rev(Target, Doc, History, Deleted) of
-        {ok, _DocId, _Rev} ->
-            Time = erlang:monotonic_time(microsecond) - StartTime,
-            Stats2 = inc_stat(docs_written, Stats, 1),
-            update_time_stat(doc_write_time_us, Time, Stats2);
+%% @doc Ship one missing document: read it with its version metadata
+%% from the source, apply it on the target.
+sync_doc(Source, Target, SourceTransport, TargetTransport, DocId, Stats) ->
+    ReadStart = erlang:monotonic_time(microsecond),
+    case SourceTransport:get_doc(Source, DocId, #{}) of
+        {ok, Doc, #{version := Token, vv := VVBin, deleted := Deleted}} ->
+            ReadTime = erlang:monotonic_time(microsecond) - ReadStart,
+            Stats2 = update_time_stat(doc_read_time_us, ReadTime,
+                                      inc_stat(docs_read, Stats, 1)),
+            WriteStart = erlang:monotonic_time(microsecond),
+            case TargetTransport:put_version(Target, Doc, Token, VVBin, Deleted) of
+                {ok, _DocId, _WinnerToken} ->
+                    WriteTime = erlang:monotonic_time(microsecond) - WriteStart,
+                    update_time_stat(doc_write_time_us, WriteTime,
+                                     inc_stat(docs_written, Stats2, 1));
+                {error, Reason} ->
+                    logger:error("replicate write error for ~p: ~p",
+                                 [DocId, Reason]),
+                    inc_stat(doc_write_failures, Stats2, 1)
+            end;
         {error, Reason} ->
-            DocId = maps:get(<<"id">>, Doc, undefined),
-            logger:error("replicate write error for ~p: ~p", [DocId, Reason]),
-            inc_stat(doc_write_failures, Stats, 1)
+            %% The doc may have been purged between changes and read
+            logger:warning("replicate read error for ~p: ~p", [DocId, Reason]),
+            inc_stat(doc_read_failures, Stats, 1)
     end.
-
-%% @doc Parse revisions from metadata
-parse_revisions(#{<<"revisions">> := Revisions}) ->
-    Start = maps:get(<<"start">>, Revisions),
-    Ids = maps:get(<<"ids">>, Revisions),
-    lists:zipwith(
-        fun(Gen, Hash) ->
-            iolist_to_binary([integer_to_binary(Gen), "-", Hash])
-        end,
-        lists:seq(Start, Start - length(Ids) + 1, -1),
-        Ids
-    );
-parse_revisions(#{<<"rev">> := Rev}) ->
-    [Rev];
-parse_revisions(_) ->
-    [].
 
 %%====================================================================
 %% Stats management

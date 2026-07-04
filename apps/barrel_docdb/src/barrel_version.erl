@@ -15,7 +15,7 @@
 %%%-------------------------------------------------------------------
 -module(barrel_version).
 
--export([new/0, new/1]).
+-export([new/0, new/1, new/2]).
 -export([encode/1, decode/1]).
 -export([to_token/1, from_token/1]).
 -export([compare/2, max/2]).
@@ -47,6 +47,14 @@ new() ->
 -spec new(barrel_hlc:timestamp()) -> version().
 new(Hlc) ->
     {Hlc, node_id()}.
+
+%% @doc A version at a given HLC authored by an explicit identity.
+%% Databases author their writes with their own source id (per-replica,
+%% not per-node): two databases on one node must still detect each
+%% other's divergent writes as concurrent.
+-spec new(barrel_hlc:timestamp(), binary()) -> version().
+new(Hlc, Author) when is_binary(Author) ->
+    {Hlc, Author}.
 
 %%====================================================================
 %% Codec

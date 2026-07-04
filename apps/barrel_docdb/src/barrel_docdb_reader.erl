@@ -20,6 +20,7 @@
 -include("barrel_docdb.hrl").
 
 -export([get_doc/4, get_docs/4]).
+-export([get_replication_doc/3]).
 
 %% @doc Get a document by id, reading entity and body under one snapshot.
 %%
@@ -46,6 +47,36 @@ get_docs(StoreRef, DbName, DocIds, Opts) ->
         {error, _} = Err -> [Err || _ <- DocIds];
         Results -> Results
     end.
+
+%% @doc Read a document for the replication protocol: body (tombstones
+%% included), version token, encoded version vector, and deleted flag,
+%% all under one snapshot.
+-spec get_replication_doc(barrel_store_rocksdb:db_ref(), db_name(), docid()) ->
+    {ok, #{doc := map(), version := binary(), vv := binary(),
+           deleted := boolean()}} | {error, term()}.
+get_replication_doc(StoreRef, DbName, DocId) ->
+    with_snapshot(StoreRef, fun(Snapshot) ->
+        DocEntityKey = barrel_store_keys:doc_entity(DbName, DocId),
+        case barrel_store_rocksdb:get_entity_with_snapshot(StoreRef, DocEntityKey, Snapshot) of
+            {ok, Columns} ->
+                Token = barrel_version:to_token(
+                    barrel_version:decode(
+                        proplists:get_value(?COL_VERSION, Columns))),
+                VVBin = proplists:get_value(?COL_VV, Columns, <<>>),
+                Deleted = bin_to_deleted(
+                    proplists:get_value(?COL_DELETED, Columns, <<"false">>)),
+                BodyKey = barrel_store_keys:doc_body(DbName, DocId),
+                Body = case barrel_store_rocksdb:body_get_with_snapshot(
+                                StoreRef, BodyKey, Snapshot) of
+                    {ok, CborBin} -> barrel_docdb_codec_cbor:decode_any(CborBin);
+                    not_found -> #{}
+                end,
+                {ok, #{doc => Body#{<<"id">> => DocId},
+                       version => Token, vv => VVBin, deleted => Deleted}};
+            not_found ->
+                {error, not_found}
+        end
+    end).
 
 %%====================================================================
 %% Internal

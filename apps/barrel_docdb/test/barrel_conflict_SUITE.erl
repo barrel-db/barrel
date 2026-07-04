@@ -25,7 +25,7 @@ groups() ->
     [
         {conflict_detection, [sequence], [
             no_conflict_single_rev,
-            detect_conflict_after_put_rev,
+            detect_conflict_via_replication,
             get_doc_with_conflicts_option,
             get_conflicts_api
         ]},
@@ -103,39 +103,135 @@ no_conflict_single_rev(_Config) ->
 
     ok.
 
-detect_conflict_after_put_rev(_Config) ->
-    %% Conflicts can only be created through replication; the VV
-    %% protocol and a rewritten test land with phase 3 step 3.
-    {skip, revtree_removed}.
+%% A version authored by a fake remote peer, with the version vector
+%% such a peer would ship for a fresh write.
+remote_version(Author) ->
+    V = barrel_version:new(barrel_hlc:new_hlc(), Author),
+    VV = barrel_vv:bump(barrel_vv:new(), V),
+    {barrel_version:to_token(V), barrel_vv:encode(VV)}.
+
+%% Create a doc with one conflict sibling: the remote version is issued
+%% before the local write, so it is concurrent but loses LWW and lands
+%% as a live conflict. Returns {LocalRev, RemoteTok}.
+make_conflict(Db, DocId) ->
+    {RemoteTok, RemoteVV} = remote_version(<<"peer_a">>),
+    {ok, #{<<"rev">> := LocalRev}} =
+        barrel_docdb:put_doc(Db, #{<<"id">> => DocId, <<"v">> => <<"local">>}),
+    {ok, DocId, LocalRev} = barrel_docdb:put_version(
+        Db, #{<<"id">> => DocId, <<"v">> => <<"remote">>},
+        RemoteTok, RemoteVV, false),
+    {LocalRev, RemoteTok}.
+
+detect_conflict_via_replication(_Config) ->
+    DbName = <<"conflict_test_db">>,
+    DocId = <<"doc_detect_conflict">>,
+
+    {LocalRev, RemoteTok} = make_conflict(DbName, DocId),
+
+    %% The local winner stays current, the remote is a conflict sibling
+    {ok, Doc} = barrel_docdb:get_doc(DbName, DocId),
+    ?assertEqual(LocalRev, maps:get(<<"_rev">>, Doc)),
+    ?assertEqual(<<"local">>, maps:get(<<"v">>, Doc)),
+    {ok, Conflicts} = barrel_docdb:get_conflicts(DbName, DocId),
+    ?assertEqual([RemoteTok], Conflicts),
+
+    ok.
 
 get_doc_with_conflicts_option(_Config) ->
-    %% Needs replication-created conflicts; rewritten with the VV
-    %% protocol in phase 3 step 3.
-    {skip, revtree_removed}.
+    DbName = <<"conflict_test_db">>,
+    DocId = <<"doc_conflicts_option">>,
+
+    {_LocalRev, RemoteTok} = make_conflict(DbName, DocId),
+
+    {ok, Doc} = barrel_docdb:get_doc(DbName, DocId, #{conflicts => true}),
+    ?assertEqual([RemoteTok], maps:get(<<"_conflicts">>, Doc)),
+
+    %% Without the option the doc carries no _conflicts field
+    {ok, Doc2} = barrel_docdb:get_doc(DbName, DocId),
+    ?assertNot(maps:is_key(<<"_conflicts">>, Doc2)),
+
+    ok.
 
 get_conflicts_api(_Config) ->
-    %% Needs replication-created conflicts; rewritten with the VV
-    %% protocol in phase 3 step 3.
-    {skip, revtree_removed}.
+    DbName = <<"conflict_test_db">>,
+    DocId = <<"doc_conflicts_api">>,
+
+    %% Two concurrent remote versions from distinct peers, both losing
+    {TokA, VVA} = remote_version(<<"peer_a">>),
+    {TokB, VVB} = remote_version(<<"peer_b">>),
+    {ok, #{<<"rev">> := LocalRev}} =
+        barrel_docdb:put_doc(DbName, #{<<"id">> => DocId, <<"v">> => <<"local">>}),
+    {ok, DocId, LocalRev} = barrel_docdb:put_version(
+        DbName, #{<<"id">> => DocId, <<"v">> => <<"a">>}, TokA, VVA, false),
+    {ok, DocId, LocalRev} = barrel_docdb:put_version(
+        DbName, #{<<"id">> => DocId, <<"v">> => <<"b">>}, TokB, VVB, false),
+
+    {ok, Conflicts} = barrel_docdb:get_conflicts(DbName, DocId),
+    ?assertEqual(lists:sort([TokA, TokB]), lists:sort(Conflicts)),
+
+    ok.
 
 %%====================================================================
 %% Conflict Resolution Tests
 %%====================================================================
 
 resolve_conflict_choose_winner(_Config) ->
-    %% Needs replication-created conflicts; rewritten with the VV
-    %% protocol in phase 3 step 3.
-    {skip, revtree_removed}.
+    DbName = <<"conflict_test_db">>,
+    DocId = <<"doc_choose_winner">>,
+
+    {LocalRev, _RemoteTok} = make_conflict(DbName, DocId),
+
+    %% Keep the current winner: still a resolving write (new rev),
+    %% conflicts cleared
+    {ok, #{rev := NewRev, conflicts_resolved := 1}} =
+        barrel_docdb:resolve_conflict(DbName, DocId, LocalRev,
+                                      {choose, LocalRev}),
+    ?assertNotEqual(LocalRev, NewRev),
+
+    {ok, Doc} = barrel_docdb:get_doc(DbName, DocId),
+    ?assertEqual(<<"local">>, maps:get(<<"v">>, Doc)),
+    ?assertEqual(NewRev, maps:get(<<"_rev">>, Doc)),
+    {ok, Conflicts} = barrel_docdb:get_conflicts(DbName, DocId),
+    ?assertEqual([], Conflicts),
+
+    ok.
 
 resolve_conflict_choose_loser(_Config) ->
-    %% Needs replication-created conflicts; rewritten with the VV
-    %% protocol in phase 3 step 3.
-    {skip, revtree_removed}.
+    DbName = <<"conflict_test_db">>,
+    DocId = <<"doc_choose_loser">>,
+
+    {LocalRev, RemoteTok} = make_conflict(DbName, DocId),
+
+    %% Choose the conflict sibling: its archived body becomes current
+    {ok, #{rev := NewRev, conflicts_resolved := 1}} =
+        barrel_docdb:resolve_conflict(DbName, DocId, LocalRev,
+                                      {choose, RemoteTok}),
+
+    {ok, Doc} = barrel_docdb:get_doc(DbName, DocId),
+    ?assertEqual(<<"remote">>, maps:get(<<"v">>, Doc)),
+    ?assertEqual(NewRev, maps:get(<<"_rev">>, Doc)),
+    {ok, Conflicts} = barrel_docdb:get_conflicts(DbName, DocId),
+    ?assertEqual([], Conflicts),
+
+    ok.
 
 resolve_conflict_merge(_Config) ->
-    %% Needs replication-created conflicts; rewritten with the VV
-    %% protocol in phase 3 step 3.
-    {skip, revtree_removed}.
+    DbName = <<"conflict_test_db">>,
+    DocId = <<"doc_merge">>,
+
+    {LocalRev, _RemoteTok} = make_conflict(DbName, DocId),
+
+    {ok, #{rev := NewRev, conflicts_resolved := 1}} =
+        barrel_docdb:resolve_conflict(DbName, DocId, LocalRev,
+                                      {merge, #{<<"v">> => <<"merged">>}}),
+
+    {ok, Doc} = barrel_docdb:get_doc(DbName, DocId),
+    ?assertEqual(<<"merged">>, maps:get(<<"v">>, Doc)),
+    ?assertEqual(NewRev, maps:get(<<"_rev">>, Doc)),
+    {ok, Conflicts} = barrel_docdb:get_conflicts(DbName, DocId),
+    ?assertEqual([], Conflicts),
+
+    ok.
 
 resolve_conflict_no_conflicts_error(_Config) ->
     DbName = <<"conflict_test_db">>,
@@ -151,9 +247,27 @@ resolve_conflict_no_conflicts_error(_Config) ->
     ok.
 
 resolve_conflict_invalid_rev_error(_Config) ->
-    %% Needs replication-created conflicts; rewritten with the VV
-    %% protocol in phase 3 step 3.
-    {skip, revtree_removed}.
+    DbName = <<"conflict_test_db">>,
+    DocId = <<"doc_invalid_rev">>,
+
+    {LocalRev, RemoteTok} = make_conflict(DbName, DocId),
+
+    %% Base rev must be the current winner
+    {error, {conflict, LocalRev}} =
+        barrel_docdb:resolve_conflict(DbName, DocId, RemoteTok,
+                                      {choose, RemoteTok}),
+
+    %% Choosing a version that is not a sibling fails
+    {FakeTok, _} = remote_version(<<"peer_z">>),
+    {error, {unknown_version, FakeTok}} =
+        barrel_docdb:resolve_conflict(DbName, DocId, LocalRev,
+                                      {choose, FakeTok}),
+
+    %% The conflict is untouched
+    {ok, Conflicts} = barrel_docdb:get_conflicts(DbName, DocId),
+    ?assertEqual([RemoteTok], Conflicts),
+
+    ok.
 
 %%====================================================================
 %% MVCC strict _rev tests
