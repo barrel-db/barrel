@@ -120,6 +120,13 @@
     subscribe_changes/3
 ]).
 
+%% Tagged outbox (durable work queue written with the doc batch)
+-export([
+    outbox_fold/4,
+    outbox_fold/5,
+    outbox_ack/3
+]).
+
 %% Replication primitives
 -export([
     put_rev/4,
@@ -1327,6 +1334,48 @@ subscribe_changes(Db, Since, Opts) ->
                 barrel_changes_stream:start_link(StoreRef, DbName, StreamOpts)
             end)
     end.
+
+%%====================================================================
+%% Tagged Outbox
+%%====================================================================
+
+%% @doc Fold over pending outbox entries for a tag, in HLC order.
+%%
+%% Entries are written atomically with the document batch when a write
+%% carries the `outbox => [Tag]' option (see {@link put_doc/3}). The fold
+%% runs in the caller's process against the store; the database must be
+%% addressed by name and open. `Fun(Entry, Acc)' receives
+%% `#{hlc, id, rev, deleted}' and returns `{ok, Acc}' or `{stop, Acc}'.
+%%
+%% @see outbox_ack/3
+-spec outbox_fold(binary(), binary(), fun((barrel_outbox:entry(), term()) ->
+    {ok, term()} | {stop, term()}), term()) -> term() | {error, term()}.
+outbox_fold(Db, Tag, Fun, Acc) ->
+    outbox_fold(Db, Tag, Fun, Acc, #{}).
+
+%% @doc Fold over pending outbox entries with options (`limit').
+-spec outbox_fold(binary(), binary(), fun((barrel_outbox:entry(), term()) ->
+    {ok, term()} | {stop, term()}), term(), map()) -> term() | {error, term()}.
+outbox_fold(Db, Tag, Fun, Acc, Opts) ->
+    case reader_store(Db) of
+        {ok, StoreRef} ->
+            barrel_outbox:fold(StoreRef, Db, Tag, Fun, Acc, Opts);
+        undefined ->
+            {error, not_found}
+    end.
+
+%% @doc Acknowledge processed outbox entries by their exact HLC keys.
+%%
+%% Ack-by-exact-key is race-free: if a document was rewritten while its
+%% entry was being processed, the new entry lives at a different HLC key
+%% and re-drives the consumer; deleting the processed key never loses
+%% work.
+-spec outbox_ack(binary() | pid(), binary(), [barrel_hlc:timestamp()]) ->
+    ok | {error, term()}.
+outbox_ack(Db, Tag, Hlcs) ->
+    with_db(Db, fun(Pid) ->
+        barrel_db_server:outbox_ack(Pid, Tag, Hlcs)
+    end).
 
 %%====================================================================
 %% Replication Primitives

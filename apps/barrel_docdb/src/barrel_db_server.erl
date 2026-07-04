@@ -31,6 +31,9 @@
     get_conflicts/2
 ]).
 
+%% Tagged outbox API (acks are writes, so they go through the server)
+-export([outbox_ack/3]).
+
 %% Replication API
 -export([
     put_rev/4,
@@ -150,6 +153,14 @@ get_conflicts(Pid, DocId) ->
     {ok, map()} | {error, term()}.
 resolve_conflict(Pid, DocId, BaseRev, Resolution) ->
     gen_server:call(Pid, {resolve_conflict, DocId, BaseRev, Resolution}).
+
+%% @doc Acknowledge processed outbox entries by their exact HLC keys.
+%% Deleting a key that was already replaced by a newer write is a no-op,
+%% so acks never lose work (see barrel_outbox).
+-spec outbox_ack(pid(), barrel_outbox:tag(), [barrel_hlc:timestamp()]) ->
+    ok | {error, term()}.
+outbox_ack(Pid, Tag, Hlcs) ->
+    gen_server:call(Pid, {outbox_ack, Tag, Hlcs}).
 
 %%====================================================================
 %% Replication API functions
@@ -323,6 +334,16 @@ handle_call({fold_docs, Fun, Acc}, _From,
 handle_call({fold_docs, Fun, Acc, Opts}, _From,
             #state{name = DbName, store_ref = StoreRef} = State) ->
     Result = do_fold_docs(StoreRef, DbName, Fun, Acc, Opts),
+    {reply, Result, State};
+
+%% Tagged outbox operations
+handle_call({outbox_ack, Tag, Hlcs}, _From,
+            #state{name = DbName, store_ref = StoreRef} = State) ->
+    Result = case [{delete, barrel_store_keys:outbox_key(DbName, Tag, Hlc)}
+                   || Hlc <- Hlcs] of
+        [] -> ok;
+        Ops -> barrel_store_rocksdb:write_batch(StoreRef, Ops, #{})
+    end,
     {reply, Result, State};
 
 %% Conflict operations
@@ -645,10 +666,15 @@ do_put_doc_apply(StoreRef, DbName, DocId, Revs, NewRev, Deleted, DocBody,
             [{body_put, OldBodyKey, OldCbor}]
     end,
 
+    %% Tagged outbox entries (generic durable work queue; see barrel_outbox)
+    OutboxOps = barrel_outbox:write_ops(DbName, maps:get(outbox, Opts, []),
+                                        NextHlc, OldHlc, DocId, NewRev, Deleted),
+
     %% Write new body to current location (no revision in key)
     BodyKey = barrel_store_keys:doc_body(DbName, DocId),
     BodyOp = {body_put, BodyKey, CborBody},
-    AllOps = DocOps ++ HlcDeleteOps ++ PathIndexOps ++ ChangeOps ++ PathHlcOps ++ ArchiveOps ++ [BodyOp],
+    AllOps = DocOps ++ HlcDeleteOps ++ PathIndexOps ++ ChangeOps ++ PathHlcOps
+        ++ ArchiveOps ++ OutboxOps ++ [BodyOp],
     Sync = maps:get(sync, Opts, false),
     WriteOpts = #{sync => Sync},
     ok = barrel_store_rocksdb:write_batch(StoreRef, AllOps, WriteOpts),
@@ -672,7 +698,7 @@ do_put_docs(StoreRef, DbName, Docs, Opts) ->
     %% Process each document to build operations and metadata
     {AllOps, Notifications} = lists:foldl(
         fun(Doc, {OpsAcc, NotifyAcc}) ->
-            case prepare_doc_ops(StoreRef, DbName, Doc) of
+            case prepare_doc_ops(StoreRef, DbName, Doc, Opts) of
                 {ok, Ops, NotifyInfo} ->
                     {OpsAcc ++ Ops, [NotifyInfo | NotifyAcc]};
                 {error, _Reason} = Err ->
@@ -706,8 +732,9 @@ do_put_docs(StoreRef, DbName, Docs, Opts) ->
 
 %% @doc Prepare document operations without writing (using wide column entity)
 %% Accepts: Erlang map, indexed CBOR binary, or plain CBOR binary
+%% Batch-level Opts carry the outbox tags applied to every doc in the batch.
 %% Returns {ok, Ops, NotifyInfo} or {error, Reason}
-prepare_doc_ops(StoreRef, DbName, Doc) ->
+prepare_doc_ops(StoreRef, DbName, Doc, Opts) ->
     try
         %% Normalize input: map, indexed binary, or plain CBOR -> map for processing
         DocMap = barrel_doc:to_map(Doc),
@@ -837,10 +864,15 @@ prepare_doc_ops(StoreRef, DbName, Doc) ->
                 [{body_put, OldBodyKey, OldCborBody}]
         end,
 
+        %% Tagged outbox entries (batch-level tags apply to every doc)
+        OutboxOps = barrel_outbox:write_ops(DbName, maps:get(outbox, Opts, []),
+                                            NextHlc, OldHlc, DocId, NewRev, Deleted),
+
         %% Write new body to current location (no revision in key)
         BodyKey = barrel_store_keys:doc_body(DbName, DocId),
         BodyOp = {body_put, BodyKey, CborBody},
-        AllOps = DocOps ++ HlcDeleteOps ++ PathIndexOps ++ ChangeOps ++ PathHlcOps ++ ArchiveOps ++ [BodyOp],
+        AllOps = DocOps ++ HlcDeleteOps ++ PathIndexOps ++ ChangeOps ++ PathHlcOps
+            ++ ArchiveOps ++ OutboxOps ++ [BodyOp],
         NotifyInfo = {DocId, NewRev, NextHlc, Deleted, DocBody},
         {ok, AllOps, NotifyInfo}
     catch
@@ -931,8 +963,13 @@ do_delete_doc(StoreRef, DbName, DocId, Opts) ->
             PathHlcOps = barrel_changes:update_path_index_ops(DbName, NextHlc, NewDocInfo,
                                                                OldHlc, OldDocBody),
 
+            %% Tagged outbox entries (deletes replace the pending entry too)
+            OutboxOps = barrel_outbox:write_ops(DbName, maps:get(outbox, Opts, []),
+                                                NextHlc, OldHlc, DocId, NewRev, true),
+
             %% Write batch atomically
-            AllOps = DocOps ++ HlcDeleteOps ++ PathIndexOps ++ ChangeOps ++ PathHlcOps,
+            AllOps = DocOps ++ HlcDeleteOps ++ PathIndexOps ++ ChangeOps ++ PathHlcOps
+                ++ OutboxOps,
             WriteOpts = #{sync => maps:get(sync, Opts, false)},
             ok = barrel_store_rocksdb:write_batch(StoreRef, AllOps, WriteOpts),
 

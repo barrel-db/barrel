@@ -81,6 +81,9 @@
 %% Attachment keys
 -export([att_data/3, att_data_prefix/2]).
 
+%% Tagged outbox keys (durable work queue written with the doc batch)
+-export([outbox_key/3, outbox_prefix/2, outbox_end/2, decode_outbox_key/2]).
+
 
 %% HLC encoding/decoding
 -export([encode_hlc/1, decode_hlc/1, decode_hlc_key/2]).
@@ -114,6 +117,7 @@
 -define(PREFIX_VALUE_INDEX, 16#16).   %% Value-first index: [value_prefix, path, DocId] → marker (for iteration)
 -define(PREFIX_CHANGE_BUCKET, 16#17). %% Change bucket: DbName + BucketTs → {min_hlc, max_hlc, count}
 -define(PREFIX_DOC_ENTITY, 16#18).    %% Wide-column doc entity: DbName + DocId → entity with columns
+-define(PREFIX_OUTBOX, 16#1A).        %% Tagged outbox: DbName + tag (null-terminated) + HLC → entry
 -define(PREFIX_CHANGES, 16#1B).       %% Prefix changes posting: prefix + bucket → [HLC:12, change, ...]
 
 %% Value prefix max length for value-first index (128 bytes)
@@ -264,6 +268,40 @@ path_hlc_wildcard_end(DbName, TopicPrefix) ->
 -spec encode_topic(binary()) -> binary().
 encode_topic(Topic) when is_binary(Topic) ->
     <<Topic/binary, 0>>.
+
+%%====================================================================
+%% Tagged Outbox Keys (durable work queue)
+%%====================================================================
+
+%% @doc Outbox key for a tagged entry.
+%% Key format: prefix | db_name | tag (null-terminated) | hlc
+%% The tag is an opaque binary chosen by the producer (e.g. <<"embed">>);
+%% the HLC gives time-ordered scans per tag and exact-key acks.
+-spec outbox_key(db_name(), binary(), barrel_hlc:timestamp()) -> binary().
+outbox_key(DbName, Tag, Hlc) ->
+    <<?PREFIX_OUTBOX, (encode_name(DbName))/binary,
+      (encode_topic(Tag))/binary, (encode_hlc(Hlc))/binary>>.
+
+%% @doc Start key for scanning all outbox entries under a tag.
+-spec outbox_prefix(db_name(), binary()) -> binary().
+outbox_prefix(DbName, Tag) ->
+    <<?PREFIX_OUTBOX, (encode_name(DbName))/binary, (encode_topic(Tag))/binary>>.
+
+%% @doc End marker for an outbox tag range scan.
+-spec outbox_end(db_name(), binary()) -> binary().
+outbox_end(DbName, Tag) ->
+    <<?PREFIX_OUTBOX, (encode_name(DbName))/binary, (encode_topic(Tag))/binary,
+      16#FF, 16#FF, 16#FF, 16#FF, 16#FF, 16#FF, 16#FF, 16#FF,
+      16#FF, 16#FF, 16#FF, 16#FF>>.
+
+%% @doc Decode an outbox key to extract tag and HLC.
+-spec decode_outbox_key(db_name(), binary()) -> {binary(), barrel_hlc:timestamp()}.
+decode_outbox_key(DbName, Key) ->
+    NameLen = byte_size(DbName),
+    PrefixLen = 1 + 2 + NameLen, %% PREFIX + 16-bit length + name
+    <<_:PrefixLen/binary, Rest/binary>> = Key,
+    {Tag, HlcBin} = split_on_null(Rest),
+    {Tag, decode_hlc(HlcBin)}.
 
 %% @doc Decode path_hlc key to extract topic and HLC.
 %% Returns {Topic, Hlc} tuple.
