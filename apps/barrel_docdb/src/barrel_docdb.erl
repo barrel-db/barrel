@@ -595,9 +595,16 @@ get_doc(Db, DocId) ->
 get_doc(Db, DocId, Opts) ->
     DbName = db_name(Db),
     Start = erlang:monotonic_time(millisecond),
-    Result = with_db(Db, fun(Pid) ->
-        barrel_db_server:get_doc(Pid, DocId, Opts)
-    end),
+    %% Point reads run in the caller's process against a snapshot when the
+    %% store ref is available; they must not serialize behind the writer.
+    Result = case reader_store(Db) of
+        {ok, StoreRef} ->
+            barrel_docdb_reader:get_doc(StoreRef, Db, DocId, Opts);
+        undefined ->
+            with_db(Db, fun(Pid) ->
+                barrel_db_server:get_doc(Pid, DocId, Opts)
+            end)
+    end,
     Duration = erlang:monotonic_time(millisecond) - Start,
     barrel_metrics:inc_doc_ops(DbName, get),
     barrel_metrics:observe_doc_latency(DbName, get, Duration),
@@ -638,9 +645,14 @@ get_docs(Db, DocIds, Opts) ->
     DbName = db_name(Db),
     ExtraAttrs = #{<<"db.batch_size">> => length(DocIds)},
     barrel_trace:with_db_span(get_batch, DbName, ExtraAttrs, fun() ->
-        with_db(Db, fun(Pid) ->
-            barrel_db_server:get_docs(Pid, DocIds, Opts)
-        end)
+        case reader_store(Db) of
+            {ok, StoreRef} ->
+                barrel_docdb_reader:get_docs(StoreRef, Db, DocIds, Opts);
+            undefined ->
+                with_db(Db, fun(Pid) ->
+                    barrel_db_server:get_docs(Pid, DocIds, Opts)
+                end)
+        end
     end).
 
 %% @doc Delete a document.
@@ -1132,32 +1144,20 @@ find(Db, QuerySpec) ->
 find(Db, QuerySpec, Opts) ->
     MetricsDbName = db_name(Db),
     Start = erlang:monotonic_time(millisecond),
-    Result = with_db(Db, fun(Pid) ->
-        {ok, StoreRef} = barrel_db_server:get_store_ref(Pid),
-        {ok, Info} = barrel_db_server:info(Pid),
-        DbName = maps:get(name, Info),
-        %% Default include_docs to true for find API
-        DefaultOpts = #{include_docs => true},
-        MergedSpec = maps:merge(maps:merge(DefaultOpts, QuerySpec), Opts),
-        case barrel_query:compile(MergedSpec) of
-            {ok, Plan} ->
-                %% Use chunked execution with configurable chunk_size
-                %% If query has a limit, use min(limit, chunk_size) to respect it
-                DefaultChunkSize = maps:get(chunk_size, Opts, 1000),
-                EffectiveChunkSize = case maps:get(limit, MergedSpec, undefined) of
-                    undefined -> DefaultChunkSize;
-                    Limit when Limit < DefaultChunkSize -> Limit;
-                    _ -> DefaultChunkSize
-                end,
-                ChunkOpts = case maps:get(continuation, Opts, undefined) of
-                    undefined -> #{chunk_size => EffectiveChunkSize};
-                    Token -> #{chunk_size => EffectiveChunkSize, continuation => Token}
-                end,
-                barrel_query:execute(StoreRef, DbName, Plan, ChunkOpts);
-            {error, _} = Error ->
-                Error
-        end
-    end),
+    %% Queries already execute in the caller; resolve the store ref from
+    %% persistent_term when given a name so we skip two writer round-trips
+    %% (get_store_ref + info).
+    Result = case reader_store(Db) of
+        {ok, FastStoreRef} ->
+            do_find(FastStoreRef, Db, QuerySpec, Opts);
+        undefined ->
+            with_db(Db, fun(Pid) ->
+                {ok, StoreRef} = barrel_db_server:get_store_ref(Pid),
+                {ok, Info} = barrel_db_server:info(Pid),
+                DbName = maps:get(name, Info),
+                do_find(StoreRef, DbName, QuerySpec, Opts)
+            end)
+    end,
     %% Record query metrics
     Duration = erlang:monotonic_time(millisecond) - Start,
     barrel_metrics:inc_query_ops(MetricsDbName),
@@ -1169,6 +1169,32 @@ find(Db, QuerySpec, Opts) ->
             ok
     end,
     Result.
+
+%% @private Compile and execute a query against a resolved store ref.
+-spec do_find(barrel_store_rocksdb:db_ref(), binary(), map(), map()) ->
+    {ok, [map()], map()} | {error, term()}.
+do_find(StoreRef, DbName, QuerySpec, Opts) ->
+    %% Default include_docs to true for find API
+    DefaultOpts = #{include_docs => true},
+    MergedSpec = maps:merge(maps:merge(DefaultOpts, QuerySpec), Opts),
+    case barrel_query:compile(MergedSpec) of
+        {ok, Plan} ->
+            %% Use chunked execution with configurable chunk_size
+            %% If query has a limit, use min(limit, chunk_size) to respect it
+            DefaultChunkSize = maps:get(chunk_size, Opts, 1000),
+            EffectiveChunkSize = case maps:get(limit, MergedSpec, undefined) of
+                undefined -> DefaultChunkSize;
+                Limit when Limit < DefaultChunkSize -> Limit;
+                _ -> DefaultChunkSize
+            end,
+            ChunkOpts = case maps:get(continuation, Opts, undefined) of
+                undefined -> #{chunk_size => EffectiveChunkSize};
+                Token -> #{chunk_size => EffectiveChunkSize, continuation => Token}
+            end,
+            barrel_query:execute(StoreRef, DbName, Plan, ChunkOpts);
+        {error, _} = Error ->
+            Error
+    end.
 
 %% @doc Explain a query execution plan.
 %%
@@ -1247,12 +1273,17 @@ get_changes(Db, Since) ->
 get_changes(Db, Since, Opts) ->
     DbName = db_name(Db),
     barrel_trace:with_db_span(changes, DbName, fun() ->
-        with_db(Db, fun(Pid) ->
-            {ok, StoreRef} = barrel_db_server:get_store_ref(Pid),
-            {ok, Info} = barrel_db_server:info(Pid),
-            DbNameInner = maps:get(name, Info),
-            barrel_changes:get_changes(StoreRef, DbNameInner, Since, Opts)
-        end)
+        case reader_store(Db) of
+            {ok, StoreRef} ->
+                barrel_changes:get_changes(StoreRef, Db, Since, Opts);
+            undefined ->
+                with_db(Db, fun(Pid) ->
+                    {ok, StoreRef} = barrel_db_server:get_store_ref(Pid),
+                    {ok, Info} = barrel_db_server:info(Pid),
+                    DbNameInner = maps:get(name, Info),
+                    barrel_changes:get_changes(StoreRef, DbNameInner, Since, Opts)
+                end)
+        end
     end).
 
 %% @doc Subscribe to a changes stream.
@@ -1284,13 +1315,18 @@ subscribe_changes(Db, Since) ->
 -spec subscribe_changes(binary() | pid(), barrel_hlc:timestamp() | first, map()) ->
     {ok, pid()} | {error, term()}.
 subscribe_changes(Db, Since, Opts) ->
-    with_db(Db, fun(Pid) ->
-        {ok, StoreRef} = barrel_db_server:get_store_ref(Pid),
-        {ok, Info} = barrel_db_server:info(Pid),
-        DbName = maps:get(name, Info),
-        StreamOpts = Opts#{since => Since},
-        barrel_changes_stream:start_link(StoreRef, DbName, StreamOpts)
-    end).
+    case reader_store(Db) of
+        {ok, StoreRef} ->
+            barrel_changes_stream:start_link(StoreRef, Db, Opts#{since => Since});
+        undefined ->
+            with_db(Db, fun(Pid) ->
+                {ok, StoreRef} = barrel_db_server:get_store_ref(Pid),
+                {ok, Info} = barrel_db_server:info(Pid),
+                DbName = maps:get(name, Info),
+                StreamOpts = Opts#{since => Since},
+                barrel_changes_stream:start_link(StoreRef, DbName, StreamOpts)
+            end)
+    end.
 
 %%====================================================================
 %% Replication Primitives
@@ -1795,3 +1831,20 @@ with_db(Name, Fun) when is_binary(Name) ->
         {error, _} = Error ->
             Error
     end.
+
+%% @private Resolve the store ref for caller-side reads when Db is a name.
+%%
+%% Reads go straight to RocksDB via the `{barrel_store, Name}' registry
+%% published by barrel_db_server (same pattern as barrel_doc_body_store),
+%% skipping the writer process. Returns `undefined' for pids or when the
+%% database is not open; callers then fall back to the server path, which
+%% yields the usual `{error, not_found}'.
+-spec reader_store(binary() | pid()) ->
+    {ok, barrel_store_rocksdb:db_ref()} | undefined.
+reader_store(Name) when is_binary(Name) ->
+    case persistent_term:get({barrel_store, Name}, undefined) of
+        undefined -> undefined;
+        StoreRef -> {ok, StoreRef}
+    end;
+reader_store(_Pid) ->
+    undefined.

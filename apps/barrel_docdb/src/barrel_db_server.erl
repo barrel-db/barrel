@@ -11,6 +11,8 @@
 
 -behaviour(gen_server).
 
+-include("barrel_docdb.hrl").
+
 %% API
 -export([start_link/2]).
 -export([info/1, stop/1]).
@@ -416,15 +418,18 @@ terminate(_Reason, #state{name = Name, store_ref = StoreRef, att_ref = AttRef,
           undefined -> ok;
           _ -> barrel_att_store:close(AttRef)
       end,
+    %% Unregister BEFORE closing the store so caller-side readers
+    %% (barrel_docdb_reader, barrel_doc_body_store) stop picking up a ref
+    %% that is about to be closed. In-flight readers that already hold the
+    %% ref are handled by the reader's badarg guard.
+    persistent_term:erase({barrel_db, Name}),
+    persistent_term:erase({barrel_store, Name}),
     %% Close document store (includes body CF)
-    _ = 
+    _ =
       case StoreRef of
           undefined -> ok;
           _ -> barrel_store_rocksdb:close(StoreRef)
       end,
-    %% Unregister
-    persistent_term:erase({barrel_db, Name}),
-    persistent_term:erase({barrel_store, Name}),
     logger:info("Database ~s stopped", [Name]),
     ok.
 
@@ -461,17 +466,8 @@ do_check_compaction(StoreRef, Threshold, State) ->
 %% Document Operations
 %%====================================================================
 
-%% Wide column names for document entity
--define(COL_REV, <<"rev">>).
--define(COL_DELETED, <<"del">>).
--define(COL_HLC, <<"hlc">>).
--define(COL_REVTREE, <<"revtree">>).
-%% Reserved entity columns (default 0, preserved across writes).
-%% The built-in tiering engine was removed; these are kept as on-disk
-%% format-stable seams for an external tiering layer to use.
--define(COL_CREATED_AT, <<"created_at">>).
--define(COL_EXPIRES_AT, <<"expires_at">>).
--define(COL_TIER, <<"tier">>).
+%% Wide column names for the document entity are shared with the caller-side
+%% reader; they live in barrel_docdb.hrl (?COL_REV, ?COL_DELETED, ...).
 
 %% @doc Put a document (create or update)
 %% Accepts: Erlang map, indexed CBOR binary, or plain CBOR binary
@@ -852,110 +848,16 @@ prepare_doc_ops(StoreRef, DbName, Doc) ->
             {error, Reason}
     end.
 
-%% @doc Get a document by ID (using wide column entity)
+%% @doc Get a document by ID. The read implementation lives in
+%% barrel_docdb_reader so callers can run it outside this process; the
+%% server delegates to keep a single code path.
 do_get_doc(StoreRef, DbName, DocId, Opts) ->
-    DocEntityKey = barrel_store_keys:doc_entity(DbName, DocId),
-    case barrel_store_rocksdb:get_entity(StoreRef, DocEntityKey) of
-        {ok, Columns} ->
-            %% Get the deterministic winner from revtree (not just stored rev)
-            RevTreeBin = proplists:get_value(?COL_REVTREE, Columns),
-            Rev = case RevTreeBin of
-                undefined ->
-                    proplists:get_value(?COL_REV, Columns);
-                <<>> ->
-                    proplists:get_value(?COL_REV, Columns);
-                _ ->
-                    #{winner := Winner} = barrel_revtree_bin:decode_winner_leaves(RevTreeBin),
-                    case Winner of
-                        undefined -> proplists:get_value(?COL_REV, Columns);
-                        _ -> Winner
-                    end
-            end,
-            Deleted = bin_to_deleted(proplists:get_value(?COL_DELETED, Columns, <<"false">>)),
-            IncludeDeleted = maps:get(include_deleted, Opts, false),
+    barrel_docdb_reader:get_doc(StoreRef, DbName, DocId, Opts).
 
-            case {Deleted, IncludeDeleted} of
-                {true, false} ->
-                    {error, not_found};
-                _ ->
-                    %% Get document body from body CF (current body, no rev in key)
-                    BodyKey = barrel_store_keys:doc_body(DbName, DocId),
-                    case barrel_store_rocksdb:body_get(StoreRef, BodyKey) of
-                        {ok, CborBin} ->
-                            %% Check if raw body requested (for zero-copy CBOR responses)
-                            case maps:get(raw_body, Opts, false) of
-                                true ->
-                                    %% Return raw CBOR body with metadata for zero-copy
-                                    Meta = #{
-                                        id => DocId,
-                                        rev => Rev,
-                                        deleted => Deleted
-                                    },
-                                    Meta2 = maybe_add_conflicts_to_meta(Meta, Columns, Opts),
-                                    {ok, CborBin, Meta2};
-                                false ->
-                                    %% Decode CBOR to get document body
-                                    DocBody = barrel_docdb_codec_cbor:decode_any(CborBin),
-                                    %% Add metadata
-                                    Result = DocBody#{
-                                        <<"id">> => DocId,
-                                        <<"_rev">> => Rev
-                                    },
-                                    Result2 = case Deleted of
-                                        true -> Result#{<<"_deleted">> => true};
-                                        false -> Result
-                                    end,
-                                    %% Add conflicts if requested
-                                    Result3 = maybe_add_conflicts(Result2, Columns, Opts),
-                                    {ok, Result3}
-                            end;
-                        not_found ->
-                            {error, not_found}
-                    end
-            end;
-        not_found ->
-            {error, not_found}
-    end.
-
-%% @doc Get multiple documents by ID (batch read - parallel entity + body fetch)
+%% @doc Get multiple documents by ID (batch read). Delegates to the
+%% caller-side reader, same as do_get_doc/4.
 do_get_docs(StoreRef, DbName, DocIds, Opts) ->
-    IncludeDeleted = maps:get(include_deleted, Opts, false),
-
-    %% Build keys for both entity and body (no rev needed for body)
-    DocEntityKeys = [barrel_store_keys:doc_entity(DbName, DocId) || DocId <- DocIds],
-    BodyKeys = [barrel_store_keys:doc_body(DbName, DocId) || DocId <- DocIds],
-
-    %% Batch fetch entities and bodies in parallel (same batch)
-    DocEntityResults = barrel_store_rocksdb:multi_get_entity(StoreRef, DocEntityKeys),
-    DocBodyResults = barrel_store_rocksdb:body_multi_get(StoreRef, BodyKeys),
-
-    %% Combine results
-    DocBodyMap = lists:foldl(
-        fun({DocId, EntityResult, BodyResult}, Map) ->
-            case {EntityResult, BodyResult} of
-                {{ok, Columns}, {ok, CborBin}} ->
-                    Rev = proplists:get_value(?COL_REV, Columns),
-                    Deleted = bin_to_deleted(proplists:get_value(?COL_DELETED, Columns, <<"false">>)),
-                    case {Deleted, IncludeDeleted} of
-                        {true, false} ->
-                            Map;  %% Skip deleted
-                        _ ->
-                            DocBody = barrel_docdb_codec_cbor:decode_any(CborBin),
-                            Result = DocBody#{<<"id">> => DocId, <<"_rev">> => Rev},
-                            Result2 = case Deleted of
-                                true -> Result#{<<"_deleted">> => true};
-                                false -> Result
-                            end,
-                            Map#{DocId => {ok, Result2}}
-                    end;
-                _ -> Map
-            end
-        end,
-        #{},
-        lists:zip3(DocIds, DocEntityResults, DocBodyResults)
-    ),
-    %% Return results in original order
-    [maps:get(DocId, DocBodyMap, {error, not_found}) || DocId <- DocIds].
+    barrel_docdb_reader:get_docs(StoreRef, DbName, DocIds, Opts).
 
 %% @doc Delete a document (using wide column entity)
 %% Options:
@@ -1423,44 +1325,8 @@ decode_revtree(Bin) ->
     RT = barrel_revtree_bin:decode(Bin),
     barrel_revtree_bin:to_map(RT).
 
-%% @doc Add conflicts to document if requested and conflicts exist
-maybe_add_conflicts(Doc, Columns, Opts) ->
-    case maps:get(conflicts, Opts, false) of
-        true ->
-            RevTreeBin = proplists:get_value(?COL_REVTREE, Columns),
-            case RevTreeBin of
-                undefined -> Doc;
-                <<>> -> Doc;
-                _ ->
-                    %% Use fast path to get conflicts directly from binary
-                    #{conflicts := Conflicts} = barrel_revtree_bin:decode_winner_leaves(RevTreeBin),
-                    case Conflicts of
-                        [] -> Doc;
-                        _ -> Doc#{<<"_conflicts">> => Conflicts}
-                    end
-            end;
-        false ->
-            Doc
-    end.
-
-%% @doc Add conflicts to metadata map (for raw_body responses)
-maybe_add_conflicts_to_meta(Meta, Columns, Opts) ->
-    case maps:get(conflicts, Opts, false) of
-        true ->
-            RevTreeBin = proplists:get_value(?COL_REVTREE, Columns),
-            case RevTreeBin of
-                undefined -> Meta;
-                <<>> -> Meta;
-                _ ->
-                    #{conflicts := Conflicts} = barrel_revtree_bin:decode_winner_leaves(RevTreeBin),
-                    case Conflicts of
-                        [] -> Meta;
-                        _ -> Meta#{conflicts => Conflicts}
-                    end
-            end;
-        false ->
-            Meta
-    end.
+%% Conflict decoration for reads (maybe_add_conflicts*) moved to
+%% barrel_docdb_reader with the read paths.
 
 %%====================================================================
 %% Conflict Operations

@@ -20,6 +20,8 @@
 %% Additional utilities
 -export([snapshot/1, release_snapshot/1, safe_release_snapshot/1]).
 -export([get_with_snapshot/3, multi_get_with_snapshot/3]).
+-export([get_entity_with_snapshot/3, multi_get_entity_with_snapshot/3]).
+-export([body_get_with_snapshot/3]).
 -export([fold_range_posting_with_snapshot/6]).
 
 %% Posting list operations (using erlang_merge_operator)
@@ -793,6 +795,12 @@ body_put(#{ref := Ref, body_cf := BodyCF}, Key, Value, Opts) ->
 body_get(#{ref := Ref, body_cf := BodyCF}, Key) ->
     rocksdb:get(Ref, BodyCF, Key, []).
 
+%% @doc Get a value from the body column family with a snapshot.
+-spec body_get_with_snapshot(db_ref(), binary(), snapshot()) ->
+    {ok, binary()} | not_found | {error, term()}.
+body_get_with_snapshot(#{ref := Ref, body_cf := BodyCF}, Key, Snapshot) ->
+    rocksdb:get(Ref, BodyCF, Key, [{snapshot, Snapshot}]).
+
 %% @doc Get multiple values from the body column family (batch read)
 %% Uses short_range profile by default.
 -spec body_multi_get(db_ref(), [binary()]) -> [{ok, binary()} | not_found | {error, term()}].
@@ -1028,6 +1036,27 @@ get_entity(#{ref := Ref}, Key) ->
 -spec multi_get_entity(db_ref(), [binary()]) -> [{ok, [{binary(), binary()}]} | not_found | {error, term()}].
 multi_get_entity(#{ref := Ref}, Keys) ->
     Results = rocksdb:multi_get(Ref, Keys, []),
+    [case R of
+        {ok, Bin} -> {ok, decode_entity(Bin)};
+        not_found -> not_found;
+        {error, _} = Err -> Err
+    end || R <- Results].
+
+%% @doc Get a wide-column entity with a snapshot for consistent reads.
+-spec get_entity_with_snapshot(db_ref(), binary(), snapshot()) ->
+    {ok, [{binary(), binary()}]} | not_found | {error, term()}.
+get_entity_with_snapshot(#{ref := Ref}, Key, Snapshot) ->
+    case rocksdb:get(Ref, Key, [{snapshot, Snapshot}]) of
+        {ok, Bin} -> {ok, decode_entity(Bin)};
+        not_found -> not_found;
+        {error, _} = Err -> Err
+    end.
+
+%% @doc Get multiple wide-column entities with a snapshot for consistent reads.
+-spec multi_get_entity_with_snapshot(db_ref(), [binary()], snapshot()) ->
+    [{ok, [{binary(), binary()}]} | not_found | {error, term()}].
+multi_get_entity_with_snapshot(#{ref := Ref}, Keys, Snapshot) ->
+    Results = rocksdb:multi_get(Ref, Keys, [{snapshot, Snapshot}]),
     [case R of
         {ok, Bin} -> {ok, decode_entity(Bin)};
         not_found -> not_found;

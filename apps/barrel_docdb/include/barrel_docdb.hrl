@@ -127,4 +127,18 @@
 -define(DEFAULT_DATA_DIR, "data/barrel_docdb").
 -define(DEFAULT_STORE_MODULE, barrel_store_rocksdb).
 
+%% Wide column names for the document entity (PREFIX_DOC_ENTITY).
+%% On-disk format constants shared by the writer (barrel_db_server) and the
+%% caller-side reader (barrel_docdb_reader); keep them in sync.
+-define(COL_REV, <<"rev">>).
+-define(COL_DELETED, <<"del">>).
+-define(COL_HLC, <<"hlc">>).
+-define(COL_REVTREE, <<"revtree">>).
+%% Reserved entity columns (default 0, preserved across writes). The built-in
+%% tiering engine was removed; these are kept as on-disk format-stable seams
+%% for an external tiering layer to use.
+-define(COL_CREATED_AT, <<"created_at">>).
+-define(COL_EXPIRES_AT, <<"expires_at">>).
+-define(COL_TIER, <<"tier">>).
+
 -endif. %% BARREL_DOCDB_HRL
