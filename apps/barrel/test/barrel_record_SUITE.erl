@@ -34,7 +34,9 @@
          sync_delete_immediate/1,
          sync_batch_put/1,
          explicit_vector_skips_embedder/1,
-         explicit_vector_dimension_check/1]).
+         explicit_vector_dimension_check/1,
+         search_end_to_end/1,
+         vector_add_guards/1]).
 
 all() ->
     [adapter_get,
@@ -60,7 +62,9 @@ all() ->
      sync_delete_immediate,
      sync_batch_put,
      explicit_vector_skips_embedder,
-     explicit_vector_dimension_check].
+     explicit_vector_dimension_check,
+     search_end_to_end,
+     vector_add_guards].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(barrel),
@@ -108,7 +112,9 @@ meck_cases() ->
      sync_delete_immediate,
      sync_batch_put,
      explicit_vector_skips_embedder,
-     explicit_vector_dimension_check].
+     explicit_vector_dimension_check,
+     search_end_to_end,
+     vector_add_guards].
 
 %% Deterministic 3-dim embedder; texts containing "poison" fail.
 mock_embed() ->
@@ -459,6 +465,59 @@ explicit_vector_dimension_check(Config) ->
                                 #{vector => [0.1, 0.2]})),
     ?assertEqual({error, not_found}, barrel:get_doc(Db, <<"a">>)),
     ok = barrel:close(Db).
+
+%%====================================================================
+%% Test cases: search surface + guards
+%%====================================================================
+
+search_end_to_end(Config) ->
+    Dir = ?config(dir, Config),
+    {ok, Db} = barrel:open(search_e2e_db, #{
+        embedding => #{fields => [<<"title">>], mode => sync,
+                       metadata_fields => [<<"kind">>]},
+        docdb => #{data_dir => Dir},
+        vectordb => #{dimension => 3, db_path => Dir ++ "/search_e2e_vec"}}),
+    {ok, _} = barrel:put_doc(Db, #{<<"id">> => <<"a">>,
+                                   <<"title">> => <<"quick brown fox">>,
+                                   <<"kind">> => <<"animal">>,
+                                   <<"noise">> => 42}),
+    %% barrel:search embeds the query through the facade and hydrates
+    %% text/metadata from the document via the adapter
+    {ok, [Top | _]} = barrel:search(Db, <<"quick brown fox">>, #{k => 1}),
+    ?assertEqual(<<"a">>, maps:get(key, Top)),
+    ?assertEqual(<<"quick brown fox">>, maps:get(text, Top)),
+    ?assertEqual(#{<<"kind">> => <<"animal">>}, maps:get(metadata, Top)),
+    %% Hybrid works on the embedder-less record store (facade embeds the
+    %% query, BM25 leg matches terms)
+    {ok, [HTop | _]} = barrel:search_hybrid(Db, <<"quick fox">>, #{k => 1}),
+    ?assertEqual(<<"a">>, maps:get(key, HTop)),
+    ?assertEqual(<<"quick brown fox">>, maps:get(text, HTop)),
+    ?assertEqual(#{<<"kind">> => <<"animal">>}, maps:get(metadata, HTop)),
+    ok = barrel:close(Db).
+
+vector_add_guards(Config) ->
+    {ok, Db} = open_record(guards_db, Config, #{fields => [<<"title">>]}),
+    ?assertEqual({error, record_mode},
+                 barrel:vector_add(Db, <<"x">>, <<"t">>, #{})),
+    ?assertEqual({error, record_mode},
+                 barrel:vector_add(Db, <<"x">>, <<"t">>, #{}, [0.1, 0.2, 0.3])),
+    ?assertEqual({error, record_mode},
+                 barrel:vector_add_batch(Db, [{<<"x">>, <<"t">>, #{}}])),
+    %% info reports the embedding config
+    {ok, Info} = barrel:info(Db),
+    ?assertMatch(#{fields := [[<<"title">>]]}, maps:get(embedding, Info)),
+    ?assertEqual(3, maps:get(dimensions, Info)),
+    ok = barrel:close(Db),
+    %% Plain databases keep the direct vector path
+    Dir = ?config(dir, Config),
+    {ok, Plain} = barrel:open(guards_plain_db, #{
+        docdb => #{data_dir => Dir},
+        vectordb => #{dimension => 3, db_path => Dir ++ "/guards_plain_vec",
+                      bm25_backend => memory}}),
+    ok = barrel:vector_add(Plain, <<"x">>, <<"t">>, #{}, [0.1, 0.2, 0.3]),
+    {ok, PlainInfo} = barrel:info(Plain),
+    ?assertEqual(false, maps:is_key(embedding, PlainInfo)),
+    ok = barrel:close(Plain).
 
 %%====================================================================
 %% Helpers

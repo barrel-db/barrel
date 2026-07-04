@@ -224,8 +224,18 @@ close(#{name := Name, docdb := DbBin, vstore := Store} = Db) ->
 
 %% @doc Database metadata.
 -spec info(db()) -> {ok, map()} | {error, term()}.
-info(#{docdb := DbBin}) ->
-    barrel_docdb:db_info(DbBin).
+info(#{docdb := DbBin} = Db) ->
+    case barrel_docdb:db_info(DbBin) of
+        {ok, Info} ->
+            case Db of
+                #{embedding := Policy, dimensions := Dim} ->
+                    {ok, Info#{embedding => Policy, dimensions => Dim}};
+                _ ->
+                    {ok, Info}
+            end;
+        {error, _} = Err ->
+            Err
+    end.
 
 %%====================================================================
 %% Documents (barrel_docdb)
@@ -448,11 +458,17 @@ hlc_decode(Cursor) ->
 
 %% @doc Add a document to the vector store (text embedded by the store).
 -spec vector_add(db(), binary(), binary(), map()) -> term().
+vector_add(#{embedding := _}, _Id, _Text, _Metadata) ->
+    %% Record mode: the document is the only write path (use put_doc;
+    %% explicit vectors via the `vector' put option).
+    {error, record_mode};
 vector_add(#{vstore := Store}, Id, Text, Metadata) ->
     barrel_vectordb:add(Store, Id, Text, Metadata).
 
 %% @doc Add a document to the vector store with an explicit vector.
 -spec vector_add(db(), binary(), binary(), map(), [float()]) -> term().
+vector_add(#{embedding := _}, _Id, _Text, _Metadata, _Vector) ->
+    {error, record_mode};
 vector_add(#{vstore := Store}, Id, Text, Metadata, Vector) ->
     barrel_vectordb:add(Store, Id, Text, Metadata, Vector).
 
@@ -463,6 +479,8 @@ vector_add(#{vstore := Store}, Id, Text, Metadata, Vector) ->
 %% same shape; a mixed batch returns `{error, mixed_batch}'.
 -spec vector_add_batch(db(), [tuple()]) ->
     {ok, map()} | {error, term()}.
+vector_add_batch(#{embedding := _}, _Docs) ->
+    {error, record_mode};
 vector_add_batch(#{vstore := Store}, Docs) ->
     case batch_kind(Docs) of
         explicit -> barrel_vectordb:add_vector_batch(Store, Docs);
@@ -482,6 +500,12 @@ vector_delete(#{vstore := Store}, Id) ->
 
 %% @doc Semantic search over the vector store.
 -spec search(db(), binary(), map()) -> term().
+search(#{embedding := _, embed := Embed, vstore := Store}, Query, Opts) ->
+    %% Record mode: the facade owns embedding (the store has none)
+    case embed_one(Query, Embed) of
+        {ok, Vector} -> barrel_vectordb:search_vector(Store, Vector, Opts);
+        {error, Reason} -> {error, {embed_failed, Reason}}
+    end;
 search(#{vstore := Store}, Query, Opts) ->
     barrel_vectordb:search(Store, Query, Opts).
 
@@ -496,7 +520,17 @@ search_bm25(#{vstore := Store}, Query, Opts) ->
     barrel_vectordb:search_bm25(Store, Query, Opts).
 
 %% @doc Hybrid (vector + BM25) search.
+%% On record-mode databases the facade embeds the query itself and
+%% passes it as `query_vector' (the store has no embedder).
 -spec search_hybrid(db(), binary(), map()) -> term().
+search_hybrid(#{embedding := _, embed := Embed, vstore := Store}, Query, Opts) ->
+    case embed_one(Query, Embed) of
+        {ok, Vector} ->
+            barrel_vectordb:search_hybrid(Store, Query,
+                                          Opts#{query_vector => Vector});
+        {error, Reason} ->
+            {error, {embed_failed, Reason}}
+    end;
 search_hybrid(#{vstore := Store}, Query, Opts) ->
     barrel_vectordb:search_hybrid(Store, Query, Opts).
 

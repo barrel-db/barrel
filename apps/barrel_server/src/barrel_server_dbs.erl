@@ -60,7 +60,11 @@ handle_call({ensure, Name}, _From, State) ->
                 {ok, Db} ->
                     {reply, {ok, Db}, State};
                 error ->
-                    case barrel:open(binary_to_atom(Name, utf8)) of
+                    %% Default open options from the barrel_server app env
+                    %% (e.g. a server-wide embedding policy or vectordb
+                    %% config for record-mode databases).
+                    OpenOpts = application:get_env(barrel_server, open_opts, #{}),
+                    case barrel:open(binary_to_atom(Name, utf8), OpenOpts) of
                         {ok, Db} ->
                             Dbs = maps:put(Name, Db, State#state.dbs),
                             {reply, {ok, Db}, State#state{dbs = Dbs}};
