@@ -25,6 +25,7 @@
     bulk_docs/1,
     bulk_get/1,
     find/1,
+    query/1,
     changes/1,
     put_att/1,
     get_att/1,
@@ -67,6 +68,9 @@ routes() ->
         {<<"POST">>,   <<"/db/:db/_bulk_docs">>,         {?MODULE, bulk_docs}},
         {<<"POST">>,   <<"/db/:db/_bulk_get">>,          {?MODULE, bulk_get}},
         {<<"POST">>,   <<"/db/:db/find">>,               {?MODULE, find}},
+        %% GET exists for browser EventSource (SUBSCRIBE over SSE)
+        {<<"POST">>,   <<"/db/:db/query">>,              {?MODULE, query}},
+        {<<"GET">>,    <<"/db/:db/query">>,              {?MODULE, query}},
         {<<"GET">>,    <<"/db/:db/changes">>,            {?MODULE, changes}},
 
         {<<"PUT">>,    <<"/db/:db/doc/:id/att/:name">>,  {?MODULE, put_att}},
@@ -175,6 +179,214 @@ find(Req) ->
             end
         end)
     end).
+
+%%====================================================================
+%% BQL query endpoint
+%%
+%% POST body: raw BQL text, or {"query","params","continuation"} as
+%% JSON. GET takes ?q= (for browser EventSource). Plain statements
+%% stream ndjson: one {"row":...} line per row, one final {"meta":...}
+%% line; failures after the 200 is committed appear as an in-band
+%% {"error":...} line. SUBSCRIBE statements need the SSE accept and
+%% stream row / ready / change / error events with a 30s ping.
+%% stream_deferred picks the status after compile, so bad BQL is a
+%% clean 400 before the first byte.
+%%====================================================================
+
+query(Req) ->
+    livery_resp:stream_deferred(fun() -> query_decision(Req) end).
+
+query_decision(Req) ->
+    JsonHs = [{<<"content-type">>, <<"application/json">>}],
+    case prepare_query(Req) of
+        {error, Status, Body} ->
+            {full, Status, JsonHs, Body};
+        {ok, Db, Bql, #{subscribe := true} = QOpts} ->
+            case wants_sse(Req) of
+                true ->
+                    {sse, 200, [],
+                     fun(Emit) -> run_subscribe(Db, Bql, QOpts, Emit) end};
+                false ->
+                    {full, 400, JsonHs,
+                     json:encode(#{error => <<"subscribe_requires_sse">>})}
+            end;
+        {ok, Db, Bql, QOpts} ->
+            {ndjson, 200, [],
+             fun(Emit) -> run_query(Db, Bql, QOpts, Emit) end}
+    end.
+
+%% Resolve the database, read the statement, and compile it once for
+%% admission (the producers re-drive the facade with the raw text).
+prepare_query(Req) ->
+    Name = livery_req:binding(<<"db">>, Req),
+    case barrel_server_dbs:ensure(Name) of
+        {ok, Db} ->
+            case query_input(Req) of
+                {ok, Bql, QOpts} ->
+                    Params = maps:get(params, QOpts, #{}),
+                    case barrel_bql:compile(Bql, #{params => Params}) of
+                        {ok, #{subscribe := Subscribe}} ->
+                            {ok, Db, Bql,
+                             QOpts#{subscribe => Subscribe}};
+                        {error, BqlError} ->
+                            {error, 400, bql_error_body(BqlError)}
+                    end;
+                {error, Reason} ->
+                    {error, 400,
+                     json:encode(#{error => err_bin(Reason)})}
+            end;
+        {error, invalid_name} ->
+            {error, 400, json:encode(#{error => <<"invalid_name">>})};
+        {error, Reason} ->
+            {error, 500, json:encode(#{error => err_bin(Reason)})}
+    end.
+
+query_input(Req) ->
+    case livery_req:method(Req) of
+        <<"GET">> ->
+            case param(<<"q">>, Req) of
+                undefined -> {error, missing_query};
+                <<>> -> {error, missing_query};
+                Bql -> {ok, Bql, #{}}
+            end;
+        _ ->
+            ContentType = livery_req:header(<<"content-type">>, Req, <<>>),
+            IsJson = binary:match(ContentType, <<"application/json">>)
+                     =/= nomatch,
+            case {IsJson, read_body(Req)} of
+                {_, {error, Reason}} -> {error, Reason};
+                {_, {ok, <<>>}} -> {error, missing_query};
+                {false, {ok, Bql}} -> {ok, Bql, #{}};
+                {true, {ok, Bin}} -> json_query_input(Bin)
+            end
+    end.
+
+json_query_input(Bin) ->
+    try json:decode(Bin) of
+        #{<<"query">> := Bql} = Body when is_binary(Bql) ->
+            QOpts0 = case maps:get(<<"params">>, Body, undefined) of
+                Params when is_map(Params) -> #{params => Params};
+                _ -> #{}
+            end,
+            QOpts = case maps:get(<<"continuation">>, Body, undefined) of
+                Token when is_binary(Token) ->
+                    QOpts0#{continuation =>
+                                base64:decode(Token, #{mode => urlsafe})};
+                _ ->
+                    QOpts0
+            end,
+            {ok, Bql, QOpts};
+        _ ->
+            {error, missing_query}
+    catch
+        _:_ -> {error, bad_json}
+    end.
+
+bql_error_body(BqlError) ->
+    Base = #{error => <<"invalid_query">>,
+             message => barrel_bql:format_error(BqlError)},
+    WithLoc = case BqlError of
+        {_, {Line, Column}, _} ->
+            Base#{line => Line, column => Column};
+        _ ->
+            Base
+    end,
+    json:encode(WithLoc).
+
+run_query(Db, Bql, QOpts, Emit) ->
+    FoldOpts = maps:without([subscribe], QOpts),
+    Result = barrel:query_fold(Db, Bql, FoldOpts#{chunk_size => 100},
+        fun(Row, ok) ->
+            case Emit(#{row => Row}) of
+                ok -> {ok, ok};
+                {error, _} -> {stop, ok}
+            end
+        end,
+        ok),
+    case Result of
+        {ok, _, Meta} ->
+            _ = Emit(#{meta => query_meta(Meta)}),
+            ok;
+        {error, Reason} ->
+            _ = Emit(#{error => err_bin(Reason)}),
+            ok
+    end.
+
+query_meta(Meta) ->
+    Base = #{has_more => maps:get(has_more, Meta, false)},
+    Base1 = case maps:get(count, Meta, undefined) of
+        undefined -> Base;
+        Count -> Base#{count => Count}
+    end,
+    case maps:get(continuation, Meta, undefined) of
+        undefined ->
+            Base1;
+        Token ->
+            Base1#{continuation =>
+                       base64:encode(Token, #{mode => urlsafe})}
+    end.
+
+run_subscribe(Db, Bql, QOpts, Emit) ->
+    SubOpts = maps:with([params], QOpts),
+    case barrel:subscribe_query(Db, Bql, SubOpts) of
+        {ok, #{ref := Ref} = Sub} ->
+            subscribe_loop(Ref, Sub, Emit);
+        {error, Reason} ->
+            _ = Emit(#{event => <<"error">>,
+                       data => json:encode(#{error => err_bin(Reason)})}),
+            ok
+    end.
+
+subscribe_loop(Ref, Sub, Emit) ->
+    receive
+        {bql_rows, Ref, Rows} ->
+            case emit_rows(Rows, Emit) of
+                ok -> subscribe_loop(Ref, Sub, Emit);
+                stop -> barrel:unsubscribe_query(Sub)
+            end;
+        {bql_ready, Ref, Meta} ->
+            Ready = #{count => maps:get(count, Meta, 0)},
+            case Emit(#{event => <<"ready">>, data => json:encode(Ready)}) of
+                ok -> subscribe_loop(Ref, Sub, Emit);
+                {error, _} -> barrel:unsubscribe_query(Sub)
+            end;
+        {bql_change, Ref, Change} ->
+            case Emit(#{event => <<"change">>,
+                        data => json:encode(change_event(Change))}) of
+                ok -> subscribe_loop(Ref, Sub, Emit);
+                {error, _} -> barrel:unsubscribe_query(Sub)
+            end;
+        {bql_error, Ref, Reason} ->
+            _ = Emit(#{event => <<"error">>,
+                       data => json:encode(#{error => err_bin(Reason)})}),
+            ok
+    after 30000 ->
+        %% heartbeat: keeps proxies from idling the stream out and
+        %% detects gone clients
+        case Emit(#{event => <<"ping">>, data => <<"{}">>}) of
+            ok -> subscribe_loop(Ref, Sub, Emit);
+            {error, _} -> barrel:unsubscribe_query(Sub)
+        end
+    end.
+
+emit_rows([], _Emit) ->
+    ok;
+emit_rows([Row | Rest], Emit) ->
+    case Emit(#{event => <<"row">>, data => json:encode(Row)}) of
+        ok -> emit_rows(Rest, Emit);
+        {error, _} -> stop
+    end.
+
+change_event(#{action := Action, id := Id} = Change) ->
+    Base = #{action => atom_to_binary(Action, utf8), id => Id},
+    Base1 = case maps:get(rev, Change, undefined) of
+        undefined -> Base;
+        Rev -> Base#{rev => Rev}
+    end,
+    case maps:get(row, Change, undefined) of
+        undefined -> Base1;
+        Row -> Base1#{row => Row}
+    end.
 
 %%====================================================================
 %% Changes feed

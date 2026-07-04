@@ -18,6 +18,12 @@
     t_vector_search/1,
     t_changes_json/1,
     t_changes_sse/1,
+    t_query_ndjson/1,
+    t_query_get/1,
+    t_query_params_json/1,
+    t_query_parse_error/1,
+    t_query_subscribe_requires_sse/1,
+    t_query_subscribe_sse/1,
     t_not_found/1
 ]).
 
@@ -28,7 +34,10 @@
 
 all() ->
     [t_db_lifecycle, t_doc_crud, t_bulk, t_attachment,
-     t_vector_search, t_changes_json, t_changes_sse, t_not_found].
+     t_vector_search, t_changes_json, t_changes_sse,
+     t_query_ndjson, t_query_get, t_query_params_json,
+     t_query_parse_error, t_query_subscribe_requires_sse,
+     t_query_subscribe_sse, t_not_found].
 
 init_per_suite(Config) ->
     %% Load first, then override env (application:load resets to .app defaults).
@@ -126,6 +135,103 @@ t_changes_sse(Config) ->
     ?assertNotEqual(nomatch, binary:match(Body, <<"event: last">>)),
     ok.
 
+t_query_ndjson(Config) ->
+    B = base(Config),
+    {201, _} = req_json(put, url("/doc/q1", B),
+                        #{<<"kind">> => <<"fruit">>, <<"name">> => <<"apple">>}),
+    {201, _} = req_json(put, url("/doc/q2", B),
+                        #{<<"kind">> => <<"fruit">>, <<"name">> => <<"pear">>}),
+    {201, _} = req_json(put, url("/doc/q3", B),
+                        #{<<"kind">> => <<"tool">>, <<"name">> => <<"hammer">>}),
+    {200, Body} = req_raw_post(url("/query", B), [],
+                               <<"SELECT name FROM db WHERE kind = 'fruit'">>),
+    Lines = ndjson_lines(Body),
+    {Rows, Metas} = lists:partition(
+        fun(L) -> maps:is_key(<<"row">>, L) end, Lines),
+    ?assertEqual(
+        [<<"apple">>, <<"pear">>],
+        lists:sort([maps:get(<<"name">>, maps:get(<<"row">>, R))
+                    || R <- Rows])),
+    %% exactly one trailing meta line
+    [Meta] = Metas,
+    ?assertEqual(false,
+                 maps:get(<<"has_more">>, maps:get(<<"meta">>, Meta))),
+    ok.
+
+t_query_get(Config) ->
+    B = base(Config),
+    Q = uri_string:quote("SELECT * FROM db WHERE kind = 'tool'"),
+    {200, Body} = req_raw(get, url("/query?q=" ++ Q, B)),
+    [Row, _Meta] = ndjson_lines(Body),
+    ?assertEqual(<<"q3">>,
+                 maps:get(<<"id">>, maps:get(<<"row">>, Row))),
+    ok.
+
+t_query_params_json(Config) ->
+    B = base(Config),
+    {200, Body} = req_raw_post(url("/query", B),
+        [{<<"content-type">>, <<"application/json">>}],
+        json:encode(#{query => <<"SELECT * FROM db WHERE kind = $k">>,
+                      params => #{k => <<"tool">>}})),
+    [Row, _Meta] = ndjson_lines(Body),
+    ?assertEqual(<<"q3">>,
+                 maps:get(<<"id">>, maps:get(<<"row">>, Row))),
+    ok.
+
+t_query_parse_error(Config) ->
+    B = base(Config),
+    {400, Err} = req(post, url("/query", B), <<"SELECT FROM">>),
+    ?assertEqual(<<"invalid_query">>, maps:get(<<"error">>, Err)),
+    ?assert(is_integer(maps:get(<<"line">>, Err))),
+    ?assert(is_integer(maps:get(<<"column">>, Err))),
+    ?assert(is_binary(maps:get(<<"message">>, Err))),
+    %% semantic errors 400 too
+    {400, Err2} = req(post, url("/query", B),
+                      <<"SELECT * FROM db WHERE _x = 1">>),
+    ?assertEqual(<<"invalid_query">>, maps:get(<<"error">>, Err2)),
+    ok.
+
+t_query_subscribe_requires_sse(Config) ->
+    B = base(Config),
+    {400, Err} = req(post, url("/query", B),
+                     <<"SELECT * FROM db WHERE kind = 'x' SUBSCRIBE">>),
+    ?assertEqual(<<"subscribe_requires_sse">>, maps:get(<<"error">>, Err)),
+    ok.
+
+t_query_subscribe_sse(Config) ->
+    B = base(Config),
+    %% infinite stream: use hackney async and read frames as they come
+    {ok, Client} = hackney:request(
+        post, list_to_binary(url("/query", B)),
+        [{<<"accept">>, <<"text/event-stream">>}],
+        <<"SELECT * FROM db WHERE kind = 'live' SUBSCRIBE">>,
+        [async]),
+    ok = wait_sse(Client, <<"event: ready">>, <<>>),
+    {201, _} = req_json(put, url("/doc/live1", B),
+                        #{<<"kind">> => <<"live">>}),
+    ok = wait_sse(Client, <<"\"action\":\"add\"">>, <<>>),
+    hackney:close(Client),
+    ok.
+
+wait_sse(Client, Pattern, Acc) ->
+    case binary:match(Acc, Pattern) of
+        nomatch ->
+            receive
+                {hackney_response, Client, {status, 200, _}} ->
+                    wait_sse(Client, Pattern, Acc);
+                {hackney_response, Client, {headers, _}} ->
+                    wait_sse(Client, Pattern, Acc);
+                {hackney_response, Client, Bin} when is_binary(Bin) ->
+                    wait_sse(Client, Pattern, <<Acc/binary, Bin/binary>>);
+                {hackney_response, Client, done} ->
+                    {error, stream_closed}
+            after 5000 ->
+                {error, {timeout_waiting_for, Pattern, Acc}}
+            end;
+        _ ->
+            ok
+    end.
+
 t_not_found(Config) ->
     B = base(Config),
     {404, _} = req(get, url("/doc/does-not-exist", B), <<>>),
@@ -149,6 +255,15 @@ req_json(Method, Url, Map) ->
 
 req_raw(Method, Url) ->
     req_raw_h(Method, Url, []).
+
+req_raw_post(Url, Headers, Body) ->
+    {ok, S, _H, RespBody} = hackney:request(post, list_to_binary(Url),
+                                            Headers, Body, [with_body]),
+    {S, RespBody}.
+
+ndjson_lines(Body) ->
+    [json:decode(L)
+     || L <- binary:split(Body, <<"\n">>, [global]), L =/= <<>>].
 
 req_raw_h(Method, Url, Headers) ->
     {ok, S, _H, Body} = hackney:request(Method, list_to_binary(Url), Headers,
