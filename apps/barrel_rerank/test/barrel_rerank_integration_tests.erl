@@ -50,12 +50,22 @@ setup() ->
     Python = get_python(),
     case check_python_deps(Python) of
         ok ->
-            case barrel_rerank:start_link(#{python => Python}) of
+            %% The sidecar port opens in init: a missing interpreter
+            %% crashes the linked server instead of returning an error.
+            %% Trap exits so start_link reports {error, Reason} and the
+            %% suite skips instead of dying.
+            OldTrap = process_flag(trap_exit, true),
+            Result = try barrel_rerank:start_link(#{python => Python})
+                     catch exit:CrashReason -> {error, CrashReason}
+                     end,
+            process_flag(trap_exit, OldTrap),
+            case Result of
                 {ok, Server} ->
                     Server;
-                {error, Reason} ->
+                {error, StartReason} ->
                     io:format(standard_error,
-                              "~n*** Skipping rerank integration tests: ~p~n", [Reason]),
+                              "~n*** Skipping rerank integration tests: ~p~n",
+                              [StartReason]),
                     skip
             end;
         {error, Reason} ->

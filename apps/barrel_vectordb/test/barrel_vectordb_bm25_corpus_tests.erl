@@ -11,8 +11,8 @@
 
 -include_lib("eunit/include/eunit.hrl").
 
--define(CORPUS_FILE, "test/data/bm25_test_corpus.terms").
--define(QUERIES_FILE, "test/data/bm25_test_queries.terms").
+-define(CORPUS_FILE, data_file("bm25_test_corpus.terms")).
+-define(QUERIES_FILE, data_file("bm25_test_queries.terms")).
 
 %%====================================================================
 %% Test Generators
@@ -40,6 +40,11 @@ corpus_test_() ->
 %%====================================================================
 %% Setup/Cleanup
 %%====================================================================
+
+%% Resolve data files relative to this module's beam so the tests work
+%% from any working directory (umbrella runs use the repo root).
+data_file(Name) ->
+    filename:join([filename:dirname(code:which(?MODULE)), "data", Name]).
 
 setup() ->
     %% Load corpus and queries

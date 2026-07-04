@@ -23,8 +23,8 @@
 
 index_only_test_() ->
     {foreach,
-     fun setup_test/0,
-     fun cleanup_test/1,
+     fun setup_store/0,
+     fun cleanup_store/1,
      [
        {"index_only vector is searchable", fun test_search_hit/0},
        {"get on index-only id reports incomplete data", fun test_get_incomplete/0},
@@ -39,8 +39,8 @@ index_only_test_() ->
 
 hybrid_test_() ->
     {foreach,
-     fun setup_test/0,
-     fun cleanup_test/1,
+     fun setup_store/0,
+     fun cleanup_store/1,
      [
        {"hybrid results carry text and metadata", fun test_hybrid_hydrated/0},
        {"linear fusion is hydrated too", fun test_hybrid_linear_hydrated/0},
@@ -76,13 +76,13 @@ restart_rebuild_test() ->
 %% Setup/Teardown
 %%====================================================================
 
-setup_test() ->
+setup_store() ->
     TestDir = mk_dir(),
     mock_embed(),
     {ok, Pid} = start_store(TestDir),
     {Pid, TestDir}.
 
-cleanup_test({_Pid, TestDir}) ->
+cleanup_store({_Pid, TestDir}) ->
     catch barrel_vectordb:stop(?STORE),
     timer:sleep(50),
     unmock_embed(),

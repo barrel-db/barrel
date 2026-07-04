@@ -19,8 +19,8 @@ store_test_() ->
      fun setup_store/0,
      fun cleanup_store/1,
      {foreach,
-      fun setup_test/0,
-      fun cleanup_test/1,
+      fun setup_case/0,
+      fun cleanup_case/1,
       [
         {"add with explicit vector", fun test_add_explicit_vector/0},
         {"get returns stored data", fun test_get/0},
@@ -43,7 +43,7 @@ setup_store() ->
 cleanup_store(_) ->
     ok.
 
-setup_test() ->
+setup_case() ->
     %% Create unique test directory
     TestDir = "/tmp/barrel_vectordb_test_" ++ integer_to_list(erlang:unique_integer([positive])),
     Config = #{
@@ -76,7 +76,7 @@ setup_test() ->
     {ok, Pid} = barrel_vectordb_store:start_link(Config),
     {Pid, TestDir}.
 
-cleanup_test({_Pid, TestDir}) ->
+cleanup_case({_Pid, TestDir}) ->
     %% Stop store
     catch barrel_vectordb_store:stop(),
     timer:sleep(50),  %% Allow gen_server to stop

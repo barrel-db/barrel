@@ -15,8 +15,8 @@ api_test_() ->
      fun setup/0,
      fun cleanup/1,
      {foreach,
-      fun setup_test/0,
-      fun cleanup_test/1,
+      fun setup_store/0,
+      fun cleanup_store/1,
       [
         {"add and get document", fun test_add_get/0},
         {"add with explicit vector", fun test_add_vector/0},
@@ -53,7 +53,7 @@ setup() ->
 cleanup(_) ->
     ok.
 
-setup_test() ->
+setup_store() ->
     TestDir = "/tmp/barrel_vectordb_api_test_" ++ integer_to_list(erlang:unique_integer([positive])),
 
     %% Ensure meck is clean before starting
@@ -98,7 +98,7 @@ setup_test() ->
     }),
     {Pid, TestDir}.
 
-cleanup_test({_Pid, TestDir}) ->
+cleanup_store({_Pid, TestDir}) ->
     catch barrel_vectordb:stop(test_store),
     %% Make sure meck is fully unloaded
     timer:sleep(50),  %% Allow gen_server to stop

@@ -15,19 +15,19 @@
 
 store_backend_test_() ->
     {setup,
-     fun setup_store_test/0,
-     fun cleanup_store_test/1,
+     fun setup_backend_store/0,
+     fun cleanup_backend_store/1,
      [
         {"start store with explicit hnsw backend", fun test_start_hnsw_store/0},
         {"verify backend in stats", fun test_backend_in_stats/0}
      ]}.
 
-setup_store_test() ->
+setup_backend_store() ->
     {ok, _} = application:ensure_all_started(rocksdb),
     os:cmd("rm -rf /tmp/barrel_backend_test"),
     ok.
 
-cleanup_store_test(_) ->
+cleanup_backend_store(_) ->
     catch barrel_vectordb:stop(test_backend_store),
     os:cmd("rm -rf /tmp/barrel_backend_test"),
     ok.

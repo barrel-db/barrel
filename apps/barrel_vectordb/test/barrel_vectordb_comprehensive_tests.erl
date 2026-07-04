@@ -24,8 +24,8 @@ comprehensive_test_() ->
      fun setup/0,
      fun cleanup/1,
      {foreach,
-      fun setup_test/0,
-      fun cleanup_test/1,
+      fun setup_store/0,
+      fun cleanup_store/1,
       [
         %% Basic CRUD
         {"add and retrieve single document", fun test_add_single/0},
@@ -78,7 +78,7 @@ setup() ->
 cleanup(_) ->
     ok.
 
-setup_test() ->
+setup_store() ->
     TestDir = "/tmp/barrel_vectordb_comprehensive_" ++
               integer_to_list(erlang:unique_integer([positive])),
 
@@ -111,7 +111,7 @@ setup_test() ->
     }),
     {Pid, TestDir}.
 
-cleanup_test({_Pid, TestDir}) ->
+cleanup_store({_Pid, TestDir}) ->
     catch barrel_vectordb:stop(comprehensive_test_store),
     timer:sleep(50),
     (catch meck:unload(barrel_embed)),
