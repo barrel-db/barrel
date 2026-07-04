@@ -27,7 +27,14 @@
          indexer_delete_removes_vector/1,
          indexer_nonmatching_acked/1,
          indexer_crash_restart/1,
-         indexer_poison_parked/1]).
+         indexer_poison_parked/1,
+         sync_put_immediate_search/1,
+         sync_embed_failure_fails_put/1,
+         sync_index_failure_healed/1,
+         sync_delete_immediate/1,
+         sync_batch_put/1,
+         explicit_vector_skips_embedder/1,
+         explicit_vector_dimension_check/1]).
 
 all() ->
     [adapter_get,
@@ -46,7 +53,14 @@ all() ->
      indexer_delete_removes_vector,
      indexer_nonmatching_acked,
      indexer_crash_restart,
-     indexer_poison_parked].
+     indexer_poison_parked,
+     sync_put_immediate_search,
+     sync_embed_failure_fails_put,
+     sync_index_failure_healed,
+     sync_delete_immediate,
+     sync_batch_put,
+     explicit_vector_skips_embedder,
+     explicit_vector_dimension_check].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(barrel),
@@ -87,7 +101,14 @@ meck_cases() ->
      indexer_delete_removes_vector,
      indexer_nonmatching_acked,
      indexer_crash_restart,
-     indexer_poison_parked].
+     indexer_poison_parked,
+     sync_put_immediate_search,
+     sync_embed_failure_fails_put,
+     sync_index_failure_healed,
+     sync_delete_immediate,
+     sync_batch_put,
+     explicit_vector_skips_embedder,
+     explicit_vector_dimension_check].
 
 %% Deterministic 3-dim embedder; texts containing "poison" fail.
 mock_embed() ->
@@ -227,9 +248,11 @@ record_policy_persisted(Config) ->
     ok = barrel:close(Db2).
 
 record_sync_mode_rejected(Config) ->
-    ?assertEqual({error, {unsupported, sync_mode}},
-                 open_record(record_sync_db, Config,
-                             #{fields => [<<"t">>], mode => sync})).
+    %% Historical name: sync mode was rejected until the sync write path
+    %% landed; opening a sync-mode database now succeeds.
+    {ok, Db} = open_record(record_sync_db, Config,
+                           #{fields => [<<"t">>], mode => sync}),
+    ok = barrel:close(Db).
 
 record_dimension_mismatch(Config) ->
     Dir = ?config(dir, Config),
@@ -330,6 +353,111 @@ indexer_poison_parked(Config) ->
               Id =:= <<"bad">>] =/= []
     end),
     ?assertEqual(1, barrel_vectordb:count(idx_poison_db)),
+    ok = barrel:close(Db).
+
+%%====================================================================
+%% Test cases: sync mode + explicit vectors
+%%====================================================================
+
+sync_put_immediate_search(Config) ->
+    {ok, Db} = open_record(sync_put_db, Config,
+                           #{fields => [<<"title">>], mode => sync}),
+    {ok, _} = barrel:put_doc(Db, #{<<"id">> => <<"a">>,
+                                   <<"title">> => <<"read your writes">>}),
+    %% No polling: the vector is searchable when put_doc returns
+    ?assert(hit(Db, <<"read your writes">>, <<"a">>)),
+    ?assertEqual([], pending(<<"sync_put_db">>)),
+    ok = barrel:close(Db).
+
+sync_embed_failure_fails_put(Config) ->
+    {ok, Db} = open_record(sync_fail_db, Config,
+                           #{fields => [<<"title">>], mode => sync}),
+    ?assertEqual({error, {embed_failed, poison}},
+                 barrel:put_doc(Db, #{<<"id">> => <<"bad">>,
+                                      <<"title">> => <<"poison text">>})),
+    %% Nothing was written
+    ?assertEqual({error, not_found}, barrel:get_doc(Db, <<"bad">>)),
+    ?assertEqual([], pending(<<"sync_fail_db">>)),
+    ok = barrel:close(Db).
+
+sync_index_failure_healed(Config) ->
+    {ok, Db} = open_record(sync_heal_db, Config,
+                           #{fields => [<<"title">>], mode => sync}),
+    %% Inject one add_index_only failure: the doc commits, the entry
+    %% stays pending, and the nudged indexer heals it.
+    Counter = atomics:new(1, []),
+    meck:new(barrel_vectordb, [passthrough, no_link]),
+    meck:expect(barrel_vectordb, add_index_only,
+        fun(Store, Id, Text, Vector) ->
+            case atomics:add_get(Counter, 1, 1) of
+                1 -> {error, injected};
+                _ -> meck:passthrough([Store, Id, Text, Vector])
+            end
+        end),
+    try
+        {ok, _} = barrel:put_doc(Db, #{<<"id">> => <<"a">>,
+                                       <<"title">> => <<"healed">>}),
+        %% Healed by the indexer (indexer uses the batch entry point,
+        %% which passes through)
+        ok = wait_until(fun() -> hit(Db, <<"healed">>, <<"a">>) end),
+        ok = wait_until(fun() -> pending(<<"sync_heal_db">>) =:= [] end)
+    after
+        meck:unload(barrel_vectordb)
+    end,
+    ok = barrel:close(Db).
+
+sync_delete_immediate(Config) ->
+    {ok, Db} = open_record(sync_del_db, Config,
+                           #{fields => [<<"title">>], mode => sync}),
+    {ok, _} = barrel:put_doc(Db, #{<<"id">> => <<"a">>,
+                                   <<"title">> => <<"short lived">>}),
+    ?assertEqual(1, barrel_vectordb:count(sync_del_db)),
+    {ok, _} = barrel:delete_doc(Db, <<"a">>),
+    ?assertEqual(0, barrel_vectordb:count(sync_del_db)),
+    ?assertEqual([], pending(<<"sync_del_db">>)),
+    ok = barrel:close(Db).
+
+sync_batch_put(Config) ->
+    {ok, Db} = open_record(sync_batch_db, Config,
+                           #{fields => [<<"title">>], mode => sync}),
+    Results = barrel:put_docs(Db, [
+        #{<<"id">> => <<"a">>, <<"title">> => <<"first entry">>},
+        #{<<"id">> => <<"b">>, <<"title">> => <<"second entry">>},
+        #{<<"id">> => <<"c">>, <<"other">> => <<"no title">>}]),
+    ?assertEqual(3, length([ok || {ok, _} <- Results])),
+    ?assert(hit(Db, <<"first entry">>, <<"a">>)),
+    ?assert(hit(Db, <<"second entry">>, <<"b">>)),
+    ?assertEqual(2, barrel_vectordb:count(sync_batch_db)),
+    ?assertEqual([], pending(<<"sync_batch_db">>)),
+    %% A poison doc fails the WHOLE batch before anything is written
+    ?assertEqual({error, {embed_failed, poison}},
+                 barrel:put_docs(Db, [
+                     #{<<"id">> => <<"d">>, <<"title">> => <<"fine">>},
+                     #{<<"id">> => <<"e">>, <<"title">> => <<"poison here">>}])),
+    ?assertEqual({error, not_found}, barrel:get_doc(Db, <<"d">>)),
+    ok = barrel:close(Db).
+
+explicit_vector_skips_embedder(Config) ->
+    {ok, Db} = open_record(explicit_vec_db, Config, #{fields => [<<"title">>]}),
+    Vector = [0.25, 0.5, 0.75],
+    {ok, _} = barrel:put_doc(Db, #{<<"id">> => <<"a">>,
+                                   <<"title">> => <<"explicit">>},
+                             #{vector => Vector}),
+    %% Indexed synchronously at the supplied vector, entry acked
+    {ok, [#{key := <<"a">>}]} = barrel:search_vector(Db, Vector, #{k => 1}),
+    ?assertEqual([], pending(<<"explicit_vec_db">>)),
+    %% The embedder was never called
+    ?assertEqual(0, meck:num_calls(barrel_embed, embed, '_')),
+    ?assertEqual(0, meck:num_calls(barrel_embed, embed_batch, '_')),
+    ok = barrel:close(Db).
+
+explicit_vector_dimension_check(Config) ->
+    {ok, Db} = open_record(explicit_dim_db, Config, #{fields => [<<"title">>]}),
+    ?assertEqual({error, {dimension_mismatch, 3, 2}},
+                 barrel:put_doc(Db, #{<<"id">> => <<"a">>,
+                                      <<"title">> => <<"T">>},
+                                #{vector => [0.1, 0.2]})),
+    ?assertEqual({error, not_found}, barrel:get_doc(Db, <<"a">>)),
     ok = barrel:close(Db).
 
 %%====================================================================

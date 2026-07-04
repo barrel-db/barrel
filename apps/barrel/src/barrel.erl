@@ -90,12 +90,13 @@
     docdb := binary(),
     vstore := atom(),
     embedding => barrel_embedding_policy:policy(),
-    embed => term()
+    embed => term(),
+    dimensions => pos_integer()
 }.
-%% Handle for a composed barrel database. The optional `embedding' and
-%% `embed' fields are present on record-mode databases (opened with the
-%% `embedding' option): the validated policy and the facade's
-%% barrel_embed state.
+%% Handle for a composed barrel database. The optional `embedding',
+%% `embed', and `dimensions' fields are present on record-mode databases
+%% (opened with the `embedding' option): the validated policy, the
+%% facade's barrel_embed state, and the resolved vector dimension.
 
 -type stream() :: term().
 %% Opaque attachment read/write stream handle.
@@ -154,13 +155,7 @@ open_plain(Name, Opts) ->
 open_record(Name, Opts, PolicyMap) ->
     case barrel_embedding_policy:validate(PolicyMap) of
         {ok, Policy} ->
-            case barrel_embedding_policy:mode(Policy) of
-                sync ->
-                    %% Sync mode lands with the sync write path (step 8).
-                    {error, {unsupported, sync_mode}};
-                async ->
-                    do_open_record(Name, Opts, Policy)
-            end;
+            do_open_record(Name, Opts, Policy);
         {error, _} = Err ->
             Err
     end.
@@ -194,7 +189,8 @@ do_open_record(Name, Opts, Policy) ->
                                             {ok, #{name => Name, docdb => DbBin,
                                                    vstore => Name,
                                                    embedding => Policy,
-                                                   embed => EmbedState}};
+                                                   embed => EmbedState,
+                                                   dimensions => Dim}};
                                         {error, _} = IErr ->
                                             _ = barrel_vectordb:stop(Name),
                                             _ = barrel_docdb:close_db(DbBin),
@@ -243,11 +239,21 @@ put_doc(Db, Doc) ->
     put_doc(Db, Doc, #{}).
 
 %% @doc Create or update a document with options.
+%% On record-mode databases: `vector => Vector' supplies an explicit
+%% embedding (skips the embedder, indexed synchronously); a policy in
+%% sync mode embeds before returning (read-your-write search). Both
+%% fail the put on embed/dimension errors BEFORE writing; failures after
+%% the document committed are healed by the indexer.
 -spec put_doc(db(), map(), map()) -> {ok, map()} | {error, term()}.
 put_doc(#{docdb := DbBin} = Db, Doc, Opts) ->
-    Result = barrel_docdb:put_doc(DbBin, Doc, record_write_opts(Db, Opts)),
-    ok = nudge_indexer(Db, Result),
-    Result.
+    case sync_action(Db, Opts) of
+        async ->
+            Result = barrel_docdb:put_doc(DbBin, Doc, record_write_opts(Db, Opts)),
+            ok = nudge_indexer(Db, Result),
+            Result;
+        {sync, ExplicitVector} ->
+            put_doc_sync(Db, Doc, maps:remove(vector, Opts), ExplicitVector)
+    end.
 
 %% @doc Create or update multiple documents in one batch.
 %% Returns a result per input document, in order.
@@ -256,11 +262,20 @@ put_docs(Db, Docs) ->
     put_docs(Db, Docs, #{}).
 
 %% @doc Create or update multiple documents in one batch, with options.
--spec put_docs(db(), [map()], map()) -> [{ok, map()} | {error, term()}].
+%% On a sync-mode record database the batch embeds (embed_batch) before
+%% writing and indexes before returning; an embed failure fails the
+%% whole batch with nothing written.
+-spec put_docs(db(), [map()], map()) -> [{ok, map()} | {error, term()}] | {error, term()}.
 put_docs(#{docdb := DbBin} = Db, Docs, Opts) ->
-    Results = barrel_docdb:put_docs(DbBin, Docs, record_write_opts(Db, Opts)),
-    ok = nudge_indexer(Db, ok),
-    Results.
+    case sync_action(Db, Opts) of
+        {sync, undefined} ->
+            put_docs_sync(Db, Docs, Opts);
+        _ ->
+            %% async, and explicit vectors are a single-put option
+            Results = barrel_docdb:put_docs(DbBin, Docs, record_write_opts(Db, Opts)),
+            ok = nudge_indexer(Db, ok),
+            Results
+    end.
 
 %% @doc Get a document by id.
 -spec get_doc(db(), binary()) -> {ok, map()} | {error, term()}.
@@ -285,12 +300,26 @@ get_docs(#{docdb := DbBin}, DocIds, Opts) ->
 
 %% @doc Delete a document by id.
 %% On record-mode databases the delete is tagged so the indexer removes
-%% the document's vector.
+%% the document's vector; in sync mode the vector is removed before
+%% returning.
 -spec delete_doc(db(), binary()) -> {ok, map()} | {error, term()}.
 delete_doc(#{docdb := DbBin} = Db, DocId) ->
-    Result = barrel_docdb:delete_doc(DbBin, DocId, record_write_opts(Db, #{})),
-    ok = nudge_indexer(Db, Result),
-    Result.
+    case sync_action(Db, #{}) of
+        {sync, undefined} ->
+            WriteOpts = record_write_opts(Db, #{return_hlc => true}),
+            case barrel_docdb:delete_doc(DbBin, DocId, WriteOpts) of
+                {ok, Result} ->
+                    ok = sync_index(Db, maps:get(<<"id">>, Result), deindex,
+                                    maps:get(hlc, Result)),
+                    {ok, maps:remove(hlc, Result)};
+                {error, _} = Err ->
+                    Err
+            end;
+        _ ->
+            Result = barrel_docdb:delete_doc(DbBin, DocId, record_write_opts(Db, #{})),
+            ok = nudge_indexer(Db, Result),
+            Result
+    end.
 
 %% @doc Delete multiple documents by id. docdb has no bulk delete, so this maps
 %% over {@link delete_doc/2} and returns a result per id, in order.
@@ -523,6 +552,147 @@ record_write_opts(#{embedding := _}, Opts) ->
     Opts#{outbox => lists:usort([?EMBED_TAG | Tags])};
 record_write_opts(_Db, Opts) ->
     Opts.
+
+%% @private Decide how a record-mode write indexes: an explicit vector
+%% or a sync-mode policy runs the synchronous pipeline; everything else
+%% (plain databases included) is async.
+-spec sync_action(db(), map()) -> async | {sync, [float()] | undefined}.
+sync_action(#{embedding := Policy}, Opts) ->
+    case maps:get(vector, Opts, undefined) of
+        Vector when is_list(Vector) ->
+            {sync, Vector};
+        undefined ->
+            case barrel_embedding_policy:mode(Policy) of
+                sync -> {sync, undefined};
+                async -> async
+            end
+    end;
+sync_action(_Db, _Opts) ->
+    async.
+
+%% @private Synchronous single put: embed (or validate the explicit
+%% vector) BEFORE writing, write with the embed tag, index, ack. A
+%% failure after the commit leaves the entry pending and nudges the
+%% indexer, which heals it.
+put_doc_sync(#{docdb := DbBin, embedding := Policy, embed := Embed,
+               dimensions := Dim} = Db, Doc, Opts, ExplicitVector) ->
+    DocMap = barrel_doc:to_map(Doc),
+    Action = case ExplicitVector of
+        undefined ->
+            case barrel_embedding_policy:matches(Policy, DocMap) of
+                true ->
+                    Text = barrel_embedding_policy:text(Policy, DocMap),
+                    case embed_one(Text, Embed) of
+                        {ok, Vector} -> {index, Text, Vector};
+                        {error, Reason} -> {error, {embed_failed, Reason}}
+                    end;
+                false ->
+                    deindex
+            end;
+        Vector when length(Vector) =:= Dim ->
+            {index, barrel_embedding_policy:text(Policy, DocMap), Vector};
+        Vector ->
+            {error, {dimension_mismatch, Dim, length(Vector)}}
+    end,
+    case Action of
+        {error, _} = Err ->
+            Err;
+        _ ->
+            WriteOpts = record_write_opts(Db, Opts#{return_hlc => true}),
+            case barrel_docdb:put_doc(DbBin, Doc, WriteOpts) of
+                {ok, Result} ->
+                    ok = sync_index(Db, maps:get(<<"id">>, Result), Action,
+                                    maps:get(hlc, Result)),
+                    {ok, maps:remove(hlc, Result)};
+                {error, _} = Err ->
+                    Err
+            end
+    end.
+
+%% @private Synchronous batch put: embed all matching docs in one batch
+%% before writing (any embed failure fails the whole batch, nothing
+%% written), then index and ack the successful writes.
+put_docs_sync(#{docdb := DbBin, embedding := Policy, embed := Embed} = Db,
+              Docs, Opts) ->
+    DocMaps = [barrel_doc:to_map(D) || D <- Docs],
+    Plans = [case barrel_embedding_policy:matches(Policy, M) of
+                 true -> {embed, barrel_embedding_policy:text(Policy, M)};
+                 false -> deindex
+             end || M <- DocMaps],
+    Texts = [Text || {embed, Text} <- Plans],
+    case embed_many(Texts, Embed) of
+        {ok, Vectors} ->
+            Actions = assign_vectors(Plans, Vectors),
+            WriteOpts = record_write_opts(Db, Opts#{return_hlc => true}),
+            Results = barrel_docdb:put_docs(DbBin, Docs, WriteOpts),
+            ok = sync_index_batch(Db, lists:zip(Results, Actions)),
+            [case R of
+                 {ok, Result} -> {ok, maps:remove(hlc, Result)};
+                 Other -> Other
+             end || R <- Results];
+        {error, Reason} ->
+            {error, {embed_failed, Reason}}
+    end.
+
+%% @private Pair each embed plan with its vector (order preserved).
+assign_vectors([], []) ->
+    [];
+assign_vectors([{embed, Text} | Plans], [Vector | Vectors]) ->
+    [{index, Text, Vector} | assign_vectors(Plans, Vectors)];
+assign_vectors([deindex | Plans], Vectors) ->
+    [deindex | assign_vectors(Plans, Vectors)].
+
+%% @private Apply one index action and ack its outbox entry. On a
+%% vectordb failure the entry stays pending; the nudged indexer heals.
+-spec sync_index(db(), binary(), {index, binary(), [float()]} | deindex,
+                 term()) -> ok.
+sync_index(#{docdb := DbBin, vstore := VStore} = Db, Id, Action, Hlc) ->
+    Applied = case Action of
+        {index, Text, Vector} ->
+            try barrel_vectordb:add_index_only(VStore, Id, Text, Vector)
+            catch Class:Reason -> {error, {Class, Reason}}
+            end;
+        deindex ->
+            try barrel_vectordb:delete(VStore, Id)
+            catch Class:Reason -> {error, {Class, Reason}}
+            end
+    end,
+    case Applied of
+        ok ->
+            _ = barrel_docdb:outbox_ack(DbBin, ?EMBED_TAG, [Hlc]),
+            ok;
+        {error, not_found} ->
+            _ = barrel_docdb:outbox_ack(DbBin, ?EMBED_TAG, [Hlc]),
+            ok;
+        {error, _} ->
+            nudge_indexer(Db, ok)
+    end.
+
+%% @private Batch variant: index the successful writes, ack them; failed
+%% writes (conflicts) have no outbox entry to handle.
+sync_index_batch(_Db, []) ->
+    ok;
+sync_index_batch(Db, [{Result, Action} | Rest]) ->
+    _ = case Result of
+        {ok, Ok} ->
+            sync_index(Db, maps:get(<<"id">>, Ok), Action, maps:get(hlc, Ok));
+        {error, _} ->
+            ok
+    end,
+    sync_index_batch(Db, Rest).
+
+%% @private Embed helpers with crash isolation.
+embed_one(Text, Embed) ->
+    try barrel_embed:embed(Text, Embed)
+    catch Class:Reason -> {error, {Class, Reason}}
+    end.
+
+embed_many([], _Embed) ->
+    {ok, []};
+embed_many(Texts, Embed) ->
+    try barrel_embed:embed_batch(Texts, Embed)
+    catch Class:Reason -> {error, {Class, Reason}}
+    end.
 
 %% @private Wake the record indexer after a successful record-mode
 %% write. The indexer may be restarting; that is fine, it polls as a

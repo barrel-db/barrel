@@ -682,13 +682,17 @@ do_put_doc_apply(StoreRef, DbName, DocId, Revs, NewRev, Deleted, DocBody,
     %% Notify path subscribers
     notify_subscribers(DbName, DocId, NewRev, NextHlc, Deleted, DocBody),
 
-    %% Return result
+    %% Return result. return_hlc => true adds the write's change HLC
+    %% (internal atom key), used by callers that ack outbox entries.
     Result = #{
         <<"id">> => DocId,
         <<"ok">> => true,
         <<"rev">> => NewRev
     },
-    {ok, Result}.
+    case maps:get(return_hlc, Opts, false) of
+        true -> {ok, Result#{hlc => NextHlc}};
+        false -> {ok, Result}
+    end.
 
 %% @doc Put multiple documents in a single batch (batch write)
 %% Options:
@@ -719,12 +723,17 @@ do_put_docs(StoreRef, DbName, Docs, Opts) ->
     end,
 
     %% Notify subscribers and build results (reverse to maintain order)
+    ReturnHlc = maps:get(return_hlc, Opts, false),
     Results = lists:map(
         fun({error, Err}) ->
             Err;
            ({DocId, NewRev, NextHlc, Deleted, DocBody}) ->
             notify_subscribers(DbName, DocId, NewRev, NextHlc, Deleted, DocBody),
-            {ok, #{<<"id">> => DocId, <<"ok">> => true, <<"rev">> => NewRev}}
+            Result = #{<<"id">> => DocId, <<"ok">> => true, <<"rev">> => NewRev},
+            case ReturnHlc of
+                true -> {ok, Result#{hlc => NextHlc}};
+                false -> {ok, Result}
+            end
         end,
         lists:reverse(Notifications)
     ),
@@ -976,7 +985,12 @@ do_delete_doc(StoreRef, DbName, DocId, Opts) ->
             %% Notify path subscribers
             notify_subscribers(DbName, DocId, NewRev, NextHlc, true, #{}),
 
-            {ok, #{<<"id">> => DocId, <<"ok">> => true, <<"rev">> => NewRev}};
+            DeleteResult = #{<<"id">> => DocId, <<"ok">> => true,
+                             <<"rev">> => NewRev},
+            case maps:get(return_hlc, Opts, false) of
+                true -> {ok, DeleteResult#{hlc => NextHlc}};
+                false -> {ok, DeleteResult}
+            end;
 
         not_found ->
             {error, not_found}
