@@ -37,6 +37,9 @@
 %% Embedding column (computed vectors written back by an indexer)
 -export([set_doc_embedding/4]).
 
+%% Retention sweep (also runs on a timer; exposed for tests and tools)
+-export([sweep_retention/1]).
+
 %% Replication API
 -export([
     put_version/5,
@@ -64,12 +67,20 @@
     filter_pid :: pid() | undefined,  %% Compaction filter handler for this database
     compaction_timer :: reference() | undefined,  %% Timer for periodic compaction checks
     compaction_interval :: pos_integer(),  %% Interval between checks in ms (default: 1 hour)
-    compaction_size_threshold :: pos_integer()  %% Size threshold in bytes to trigger compaction
+    compaction_size_threshold :: pos_integer(),  %% Size threshold in bytes to trigger compaction
+    retention_period :: non_neg_integer(),  %% Retention window in seconds (0 = infinite)
+    retention_timer :: reference() | undefined,  %% Timer for periodic retention sweeps
+    retention_interval :: pos_integer()  %% Interval between sweeps in ms
 }).
 
 %% Default compaction settings
 -define(DEFAULT_COMPACTION_INTERVAL, 3600000).  %% 1 hour in ms
 -define(DEFAULT_COMPACTION_SIZE_THRESHOLD, 1073741824).  %% 1 GB in bytes
+
+%% Default retention settings: 30 days, swept every 10 minutes.
+%% retention_period 0 means infinite (no sweeper started).
+-define(DEFAULT_RETENTION_PERIOD, 2592000).  %% 30 days in seconds
+-define(DEFAULT_RETENTION_INTERVAL, 600000).  %% 10 minutes in ms
 
 %%====================================================================
 %% API functions
@@ -173,6 +184,14 @@ outbox_ack(Pid, Tag, Hlcs) ->
 set_doc_embedding(Pid, DocId, ExpectedRev, Vector) ->
     gen_server:call(Pid, {set_doc_embedding, DocId, ExpectedRev, Vector}).
 
+%% @doc Run a retention sweep now. Prunes history entries, superseded
+%% version bodies and expired tombstones older than the retention
+%% window, then advances the history floor. No-op when retention is
+%% infinite (retention_period 0).
+-spec sweep_retention(pid()) -> {ok, map()} | {error, term()}.
+sweep_retention(Pid) ->
+    gen_server:call(Pid, sweep_retention, infinity).
+
 %%====================================================================
 %% Replication API functions
 %%====================================================================
@@ -268,6 +287,18 @@ init([Name, Config]) ->
                     %% Start periodic compaction check timer
                     TimerRef = erlang:send_after(CompactionInterval, self(), compaction_check),
 
+                    %% Retention settings; the sweeper only runs for a
+                    %% finite window
+                    RetentionPeriod = maps:get(retention_period, Config,
+                                               ?DEFAULT_RETENTION_PERIOD),
+                    RetentionInterval = maps:get(retention_check_interval, Config,
+                                                 ?DEFAULT_RETENTION_INTERVAL),
+                    RetentionTimer = case RetentionPeriod of
+                        0 -> undefined;
+                        _ -> erlang:send_after(RetentionInterval, self(),
+                                               retention_sweep)
+                    end,
+
                     logger:info("Database ~s started at ~s", [Name, DbPath]),
                     {ok, #state{
                         name = Name,
@@ -278,7 +309,10 @@ init([Name, Config]) ->
                         filter_pid = FilterPid,
                         compaction_timer = TimerRef,
                         compaction_interval = CompactionInterval,
-                        compaction_size_threshold = CompactionThreshold
+                        compaction_size_threshold = CompactionThreshold,
+                        retention_period = RetentionPeriod,
+                        retention_timer = RetentionTimer,
+                        retention_interval = RetentionInterval
                     }};
                 {error, AttReason} ->
                     %% Close document store if attachment store fails
@@ -292,12 +326,16 @@ init([Name, Config]) ->
     end.
 
 %% @doc Handle synchronous calls
-handle_call(info, _From, #state{name = Name, config = Config, db_path = DbPath} = State) ->
+handle_call(info, _From, #state{name = Name, config = Config, db_path = DbPath,
+                                store_ref = StoreRef,
+                                retention_period = RetentionPeriod} = State) ->
     Info = #{
         name => Name,
         config => Config,
         db_path => DbPath,
-        pid => self()
+        pid => self(),
+        retention_period => RetentionPeriod,
+        history_floor => barrel_history:history_floor(StoreRef, Name)
     },
     {reply, {ok, Info}, State};
 
@@ -347,6 +385,16 @@ handle_call({fold_docs, Fun, Acc, Opts}, _From,
 handle_call({set_doc_embedding, DocId, ExpectedRev, Vector}, _From,
             #state{name = DbName, store_ref = StoreRef} = State) ->
     Result = do_set_doc_embedding(StoreRef, DbName, DocId, ExpectedRev, Vector),
+    {reply, Result, State};
+
+%% Retention sweep (manual trigger; also runs on the timer)
+handle_call(sweep_retention, _From,
+            #state{name = DbName, store_ref = StoreRef,
+                   retention_period = RetentionPeriod} = State) ->
+    Result = case RetentionPeriod of
+        0 -> {ok, #{retention => infinite}};
+        _ -> do_retention_sweep(StoreRef, DbName, RetentionPeriod)
+    end,
     {reply, Result, State};
 
 %% Tagged outbox operations
@@ -431,18 +479,37 @@ handle_info(compaction_check, #state{store_ref = StoreRef,
     TimerRef = erlang:send_after(Interval, self(), compaction_check),
     {noreply, NewState#state{compaction_timer = TimerRef}};
 
+handle_info(retention_sweep, #state{name = DbName, store_ref = StoreRef,
+                                    retention_period = RetentionPeriod,
+                                    retention_interval = Interval} = State) ->
+    case do_retention_sweep(StoreRef, DbName, RetentionPeriod) of
+        {ok, _Stats} -> ok;
+        {error, Reason} ->
+            logger:warning("Database ~s retention sweep failed: ~p",
+                           [DbName, Reason])
+    end,
+    TimerRef = erlang:send_after(Interval, self(), retention_sweep),
+    {noreply, State#state{retention_timer = TimerRef}};
+
 handle_info(_Info, State) ->
     {noreply, State}.
 
 %% @doc Clean up when terminating
 terminate(_Reason, #state{name = Name, store_ref = StoreRef, att_ref = AttRef,
                           filter_pid = FilterPid,
-                          compaction_timer = CompactionTimer}) ->
-    %% Cancel compaction timer 
-    _ = 
+                          compaction_timer = CompactionTimer,
+                          retention_timer = RetentionTimer}) ->
+    %% Cancel compaction timer
+    _ =
       case CompactionTimer of
           undefined -> ok;
           _ -> erlang:cancel_timer(CompactionTimer)
+      end,
+    %% Cancel retention timer
+    _ =
+      case RetentionTimer of
+          undefined -> ok;
+          _ -> erlang:cancel_timer(RetentionTimer)
       end,
     %% Stop compaction filter handler
     _ = 
@@ -503,6 +570,112 @@ do_check_compaction(StoreRef, Threshold, State) ->
             logger:warning("Failed to get database ~s size: ~p", [Name, Reason]),
             State
     end.
+
+%%====================================================================
+%% Retention Sweep
+%%====================================================================
+
+%% @doc Prune everything older than the retention window and advance
+%% the history floor. Walks the retained history up to the cutoff; each
+%% swept entry drops its history row, plus:
+%% - the superseded chain row and archived body of a version that is no
+%%   longer current (live conflict siblings are kept until resolved)
+%% - the whole document when the entry is the current version of an
+%%   unconflicted tombstone (full forget: entity, bodies, chain, feed
+%%   row)
+%% All deletes and the floor advance commit in one batch; re-running a
+%% sweep is a no-op (deletes of missing keys do nothing).
+do_retention_sweep(StoreRef, DbName, RetentionPeriod) ->
+    CutoffMs = erlang:system_time(millisecond) - RetentionPeriod * 1000,
+    Cutoff = barrel_hlc:from_wall_time(CutoffMs),
+    Zero = #{history_swept => 0, superseded_removed => 0,
+             docs_forgotten => 0},
+    {Ops, Stats} = barrel_history:fold(
+        StoreRef, DbName,
+        fun(Entry, {OpsAcc, StatsAcc}) ->
+            {EntryOps, StatsAcc2} =
+                sweep_entry_ops(StoreRef, DbName, Entry, StatsAcc),
+            {ok, {EntryOps ++ OpsAcc, StatsAcc2}}
+        end,
+        {[], Zero},
+        #{to => Cutoff}),
+    FloorOp = {put, barrel_store_keys:db_meta(DbName, <<"history_floor">>),
+               barrel_hlc:encode(Cutoff)},
+    ok = barrel_store_rocksdb:write_batch(StoreRef, [FloorOp | Ops], #{}),
+    {ok, Stats#{floor => Cutoff}}.
+
+%% @private Ops for one expired history entry.
+sweep_entry_ops(StoreRef, DbName,
+                #{hlc := Hlc, id := DocId, version := Token}, Stats) ->
+    HistDel = {delete, barrel_store_keys:history_key(DbName, Hlc)},
+    VersionEnc = barrel_version:encode(barrel_version:from_token(Token)),
+    EntityKey = barrel_store_keys:doc_entity(DbName, DocId),
+    case barrel_store_rocksdb:get_entity(StoreRef, EntityKey) of
+        not_found ->
+            %% Doc already fully forgotten
+            {[HistDel], inc_sweep(history_swept, Stats)};
+        {ok, Columns} ->
+            CurrentEnc = proplists:get_value(?COL_VERSION, Columns),
+            Deleted = proplists:get_value(?COL_DELETED, Columns, <<"false">>)
+                          =:= <<"true">>,
+            NConflicts = proplists:get_value(?COL_NCONFLICTS, Columns, 0),
+            case CurrentEnc of
+                VersionEnc when Deleted andalso NConflicts =:= 0 ->
+                    %% Expired tombstone: the database forgets the doc
+                    {forget_doc_ops(StoreRef, DbName, DocId, Columns)
+                         ++ [HistDel],
+                     inc_sweep(docs_forgotten, Stats)};
+                VersionEnc ->
+                    %% Still current (live doc, or tombstone with
+                    %% unresolved conflicts): state is retained
+                    {[HistDel], inc_sweep(history_swept, Stats)};
+                _Other ->
+                    sweep_old_version_ops(StoreRef, DbName, DocId,
+                                          VersionEnc, HistDel, Stats)
+            end
+    end.
+
+%% @private A version that is no longer current: drop its superseded
+%% chain row and archived body. Live conflict siblings stay until
+%% resolved.
+sweep_old_version_ops(StoreRef, DbName, DocId, VersionEnc, HistDel, Stats) ->
+    ChainKey = barrel_store_keys:doc_version(DbName, DocId, VersionEnc),
+    case barrel_store_rocksdb:get(StoreRef, ChainKey) of
+        {ok, <<1:8, _/binary>>} ->
+            %% Live conflict sibling
+            {[HistDel], inc_sweep(history_swept, Stats)};
+        {ok, _Superseded} ->
+            BodyKey = barrel_store_keys:doc_body_rev(DbName, DocId, VersionEnc),
+            {[HistDel, {delete, ChainKey}, {body_delete, BodyKey}],
+             inc_sweep(superseded_removed, Stats)};
+        not_found ->
+            {[HistDel], inc_sweep(history_swept, Stats)}
+    end.
+
+%% @private Full forget of an expired tombstone: entity, current body,
+%% every chain row and archived body, and the live-feed row. The path
+%% index rows were already removed when the doc was deleted.
+forget_doc_ops(StoreRef, DbName, DocId, Columns) ->
+    ChangeHlc = barrel_hlc:decode(proplists:get_value(?COL_HLC, Columns)),
+    Start = barrel_store_keys:doc_version_prefix(DbName, DocId),
+    End = barrel_store_keys:doc_version_end(DbName, DocId),
+    ChainOps = barrel_store_rocksdb:fold_range(
+        StoreRef, Start, End,
+        fun(Key, _Value, Acc) ->
+            VEnc = barrel_store_keys:decode_doc_version_key(DbName, DocId, Key),
+            {ok, [{delete, Key},
+                  {body_delete,
+                   barrel_store_keys:doc_body_rev(DbName, DocId, VEnc)}
+                  | Acc]}
+        end,
+        []),
+    [{entity_delete, barrel_store_keys:doc_entity(DbName, DocId)},
+     {body_delete, barrel_store_keys:doc_body(DbName, DocId)},
+     {delete, barrel_store_keys:doc_hlc(DbName, ChangeHlc)}
+     | ChainOps].
+
+inc_sweep(Key, Stats) ->
+    maps:update_with(Key, fun(N) -> N + 1 end, Stats).
 
 %%====================================================================
 %% Document Operations

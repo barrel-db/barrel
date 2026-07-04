@@ -210,8 +210,11 @@ replicate_one_shot(Config, Opts) ->
     },
     Checkpoint = barrel_rep_checkpoint:new(CheckpointConfig),
 
-    %% Get starting sequence
-    StartSeq = barrel_rep_checkpoint:get_start_seq(Checkpoint),
+    %% Get starting sequence. A checkpoint older than the source's
+    %% history floor may predate forgotten tombstones: force a full
+    %% resync so current state converges.
+    StartSeq0 = barrel_rep_checkpoint:get_start_seq(Checkpoint),
+    StartSeq = maybe_reset_on_floor(StartSeq0, Source, SourceTransport, RepId),
 
     %% Run replication
     BatchSize = maps:get(batch_size, Opts, 100),
@@ -313,6 +316,28 @@ generate_rep_id(Source, Target) ->
     Data = term_to_binary({Source, Target}),
     Hash = crypto:hash(md5, Data),
     binary:encode_hex(Hash, lowercase).
+
+%% @private A checkpoint below the source's history floor predates the
+%% retention window: tombstones forgotten in that gap would never
+%% replicate. Restart from the beginning (current state re-syncs).
+maybe_reset_on_floor(first, _Source, _SourceTransport, _RepId) ->
+    first;
+maybe_reset_on_floor(StartSeq, Source, SourceTransport, RepId) ->
+    Floor = try SourceTransport:db_info(Source) of
+        {ok, #{history_floor := F}} -> F;
+        _ -> undefined
+    catch
+        _:_ -> undefined
+    end,
+    case Floor =/= undefined andalso barrel_hlc:less(StartSeq, Floor) of
+        true ->
+            logger:warning(
+                "replication ~s: checkpoint predates source history floor, "
+                "forcing full resync", [RepId]),
+            first;
+        false ->
+            StartSeq
+    end.
 
 %% @private Create new stats map
 new_stats() ->

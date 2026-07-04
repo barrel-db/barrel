@@ -233,9 +233,36 @@ many_revisions_get_pruned(Config) ->
     ok.
 
 pruning_deletes_bodies(_Config) ->
-    %% Rev-tree pruning is gone; archived version bodies are owned
-    %% by the retention sweeper (phase 3 step 5), with its own tests.
-    {skip, revtree_removed}.
+    %% Archived version bodies are owned by the retention sweeper: a
+    %% superseded version's body disappears once it leaves the window.
+    Db = <<"compaction_retention_db">>,
+    {ok, _} = barrel_docdb:create_db(Db, #{
+        data_dir => "/tmp/barrel_test_compaction_retention",
+        retention_period => 1
+    }),
+    try
+        DocId = <<"pruned_body_doc">>,
+        {ok, #{<<"rev">> := Rev1}} =
+            barrel_docdb:put_doc(Db, #{<<"id">> => DocId, <<"v">> => 1}),
+        {ok, _} =
+            barrel_docdb:put_doc(Db, #{<<"id">> => DocId, <<"_rev">> => Rev1,
+                                       <<"v">> => 2}),
+        {ok, _} = barrel_docdb:get_version_body(Db, DocId, Rev1),
+
+        timer:sleep(1200),
+        {ok, Stats} = barrel_docdb:sweep_retention(Db),
+        ?assertEqual(1, maps:get(superseded_removed, Stats)),
+        ?assertEqual({error, not_found},
+                     barrel_docdb:get_version_body(Db, DocId, Rev1)),
+
+        %% The winner is untouched
+        {ok, Doc} = barrel_docdb:get_doc(Db, DocId),
+        ?assertEqual(2, maps:get(<<"v">>, Doc))
+    after
+        barrel_docdb:delete_db(Db),
+        os:cmd("rm -rf /tmp/barrel_test_compaction_retention")
+    end,
+    ok.
 
 pruning_preserves_winner(Config) ->
     DbName = proplists:get_value(db_name, Config),

@@ -145,7 +145,8 @@
     fold_history/4,
     get_doc_versions/2,
     get_version_body/3,
-    history_floor/1
+    history_floor/1,
+    sweep_retention/1
 ]).
 
 %% Local documents (for checkpoints, not replicated)
@@ -1513,6 +1514,14 @@ history_floor(Db) ->
         undefined ->
             {error, not_found}
     end.
+
+%% @doc Run a retention sweep now (the database also sweeps on a
+%% timer). Returns sweep statistics and the new floor.
+-spec sweep_retention(binary() | pid()) -> {ok, map()} | {error, term()}.
+sweep_retention(Db) ->
+    with_db(Db, fun(Pid) ->
+        barrel_db_server:sweep_retention(Pid)
+    end).
 
 %%====================================================================
 %% Local Documents

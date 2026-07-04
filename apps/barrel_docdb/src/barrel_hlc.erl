@@ -62,7 +62,8 @@
 
 %% Accessor functions
 -export([
-    wall_time/1
+    wall_time/1,
+    from_wall_time/1
 ]).
 
 %% Types
@@ -284,6 +285,13 @@ max() ->
 %%====================================================================
 %% Accessor Functions
 %%====================================================================
+
+%% @doc A timestamp at a given wall time (milliseconds since epoch)
+%% with a zero logical component. Used as a range cutoff (sorts before
+%% every real timestamp of that wall time).
+-spec from_wall_time(non_neg_integer()) -> timestamp().
+from_wall_time(WallMs) when is_integer(WallMs), WallMs >= 0 ->
+    #timestamp{wall_time = WallMs, logical = 0}.
 
 %% @doc Extract wall_time (milliseconds since epoch) from a timestamp.
 -spec wall_time(timestamp()) -> non_neg_integer().
