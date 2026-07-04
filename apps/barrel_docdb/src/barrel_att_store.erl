@@ -63,7 +63,7 @@ put(AttRef, DbName, DocId, AttName, Data, Opts) ->
     B:put(AttRef, DbName, DocId, AttName, Data, Opts).
 
 -spec get(att_ref(), binary(), binary(), binary()) ->
-    {ok, binary()} | {error, term()}.
+    {ok, binary()} | not_found | {error, term()}.
 get(AttRef, DbName, DocId, AttName) ->
     B = backend(AttRef),
     B:get(AttRef, DbName, DocId, AttName).
