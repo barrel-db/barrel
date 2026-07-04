@@ -97,6 +97,11 @@
 
 -export_type([db/0]).
 
+%% Outbox tag carried by every record-mode write (and, via docdb
+%% config, by replication-applied writes); consumed by the record
+%% indexer.
+-define(EMBED_TAG, <<"embed">>).
+
 -type db() :: #{
     name := atom(),
     docdb := binary(),
@@ -174,7 +179,12 @@ open_record(Name, Opts, PolicyMap) ->
 
 do_open_record(Name, Opts, Policy) ->
     DbBin = atom_to_binary(Name, utf8),
-    DocOpts = maps:get(docdb, Opts, #{}),
+    %% Replicated arrivals must reach the indexer too: docdb tags
+    %% replication-applied writes with the embed tag (docdb stays
+    %% ignorant of why). Note: a docdb already running as plain in this
+    %% VM keeps its config; runtime config update is a follow-up.
+    DocOpts0 = maps:get(docdb, Opts, #{}),
+    DocOpts = DocOpts0#{outbox_tags_on_replication => [?EMBED_TAG]},
     VecConfig0 = maps:get(vectordb, Opts, #{}),
     case resolve_dimension(Policy, VecConfig0) of
         {ok, Dim} ->
@@ -679,10 +689,6 @@ ensure_docdb(DbBin, DocOpts) ->
 %%====================================================================
 %% Internal: record mode
 %%====================================================================
-
-%% Outbox tag carried by every record-mode write; consumed by the
-%% record indexer.
--define(EMBED_TAG, <<"embed">>).
 
 %% Local doc holding the persisted embedding policy.
 -define(POLICY_DOC, <<"_barrel/embedding">>).

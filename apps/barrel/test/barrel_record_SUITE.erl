@@ -42,7 +42,9 @@
          byo_embedding_dimension_check/1,
          byo_embedding_not_path_indexed/1,
          computed_embedding_stored/1,
-         computed_roundtrip_reembeds/1]).
+         computed_roundtrip_reembeds/1,
+         replicated_docs_embedded/1,
+         replicated_loser_not_reembedded/1]).
 
 all() ->
     [adapter_get,
@@ -76,7 +78,9 @@ all() ->
      byo_embedding_dimension_check,
      byo_embedding_not_path_indexed,
      computed_embedding_stored,
-     computed_roundtrip_reembeds].
+     computed_roundtrip_reembeds,
+     replicated_docs_embedded,
+     replicated_loser_not_reembedded].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(barrel),
@@ -132,7 +136,9 @@ meck_cases() ->
      byo_embedding_dimension_check,
      byo_embedding_not_path_indexed,
      computed_embedding_stored,
-     computed_roundtrip_reembeds].
+     computed_roundtrip_reembeds,
+     replicated_docs_embedded,
+     replicated_loser_not_reembedded].
 
 %% Deterministic 3-dim embedder; texts containing "poison" fail.
 mock_embed() ->
@@ -657,6 +663,65 @@ vector_add_guards(Config) ->
     {ok, PlainInfo} = barrel:info(Plain),
     ?assertEqual(false, maps:is_key(embedding, PlainInfo)),
     ok = barrel:close(Plain).
+
+%% Docs arriving via replication reach the indexer: create, update and
+%% delete on a plain source propagate into the record target's vectors.
+replicated_docs_embedded(Config) ->
+    Dir = ?config(dir, Config),
+    Src = <<"rep_embed_src">>,
+    {ok, _} = barrel_docdb:create_db(Src, #{data_dir => Dir}),
+    {ok, Db} = open_record(rep_embed_db, Config, #{fields => [<<"title">>]}),
+    try
+        {ok, _} = barrel_docdb:put_doc(
+            Src, #{<<"id">> => <<"a">>, <<"title">> => <<"synced text">>}),
+        {ok, _} = barrel_rep:replicate(Src, <<"rep_embed_db">>),
+        ok = wait_until(fun() -> hit(Db, <<"synced text">>, <<"a">>) end),
+        ok = wait_until(fun() -> pending(<<"rep_embed_db">>) =:= [] end),
+        %% update re-embeds
+        {ok, SrcDoc} = barrel_docdb:get_doc(Src, <<"a">>),
+        {ok, _} = barrel_docdb:put_doc(
+            Src, SrcDoc#{<<"title">> => <<"updated text">>}),
+        {ok, _} = barrel_rep:replicate(Src, <<"rep_embed_db">>),
+        ok = wait_until(fun() -> hit(Db, <<"updated text">>, <<"a">>) end),
+        %% delete deindexes
+        {ok, #{<<"_rev">> := Rev}} = barrel_docdb:get_doc(Src, <<"a">>),
+        {ok, _} = barrel_docdb:delete_doc(Src, <<"a">>, #{rev => Rev}),
+        {ok, _} = barrel_rep:replicate(Src, <<"rep_embed_db">>),
+        ok = wait_until(fun() ->
+            barrel_vectordb:count(rep_embed_db) =:= 0
+        end),
+        ok = wait_until(fun() -> pending(<<"rep_embed_db">>) =:= [] end)
+    after
+        _ = barrel:close(Db),
+        _ = barrel_docdb:delete_db(Src),
+        _ = barrel_docdb:delete_db(<<"rep_embed_db">>)
+    end.
+
+%% A concurrent loser arrival leaves the winner's body unchanged: no
+%% outbox entry, no re-embed.
+replicated_loser_not_reembedded(Config) ->
+    {ok, Db} = open_record(rep_loser_db, Config, #{fields => [<<"title">>]}),
+    try
+        %% fabricated remote version issued BEFORE the local write
+        LoserV = barrel_version:new(barrel_hlc:new_hlc(), <<"peer_x">>),
+        LoserVV = barrel_vv:bump(barrel_vv:new(), LoserV),
+        {ok, _} = barrel:put_doc(Db, #{<<"id">> => <<"a">>,
+                                       <<"title">> => <<"local text">>}),
+        ok = wait_until(fun() -> hit(Db, <<"local text">>, <<"a">>) end),
+        ok = wait_until(fun() -> pending(<<"rep_loser_db">>) =:= [] end),
+        {ok, _, Winner} = barrel_docdb:put_version(
+            <<"rep_loser_db">>,
+            #{<<"id">> => <<"a">>, <<"title">> => <<"loser text">>},
+            barrel_version:to_token(LoserV), barrel_vv:encode(LoserVV),
+            false),
+        ?assertNotEqual(barrel_version:to_token(LoserV), Winner),
+        %% no pending entry, winner's vector still ranks
+        ?assertEqual([], pending(<<"rep_loser_db">>)),
+        ?assert(hit(Db, <<"local text">>, <<"a">>))
+    after
+        _ = barrel:close(Db),
+        _ = barrel_docdb:delete_db(<<"rep_loser_db">>)
+    end.
 
 %%====================================================================
 %% Helpers
