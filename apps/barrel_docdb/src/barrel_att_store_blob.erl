@@ -23,9 +23,12 @@
 
 %% API
 -export([open/2, close/1]).
--export([put/5, put/6, get/4, delete/4]).
+-export([put/5, put/6, get/4, delete/4, delete/5]).
 -export([delete_all/3]).
 -export([fold/5]).
+
+%% Attachment change feed (sync support; see barrel_att_feed)
+-export([att_changes/4, att_floor/2, sweep_att_feed/3, rebuild_feed/2]).
 
 %% Streaming API
 -export([put_stream/5, put_stream/6]).
@@ -98,28 +101,66 @@ put(AttRef, DbName, DocId, AttName, Data) ->
 %% @doc Store an attachment with options
 %% Options:
 %%   - sync: boolean() - if true, sync to disk before returning (default: false)
+%% Options:
+%%   - sync: sync to disk before returning
+%%   - content_type: override the name-derived content type
+%%     (replication preserves the source's)
+%%   - origin_hlc: replicated write; the last-write-wins guard may
+%%     answer {ok, ignored}
+%%   - expected_digest: verify the data against a digest before
+%%     committing anything
 -spec put(att_ref(), db_name(), docid(), binary(), binary(), map()) ->
-    {ok, att_info()} | {error, term()}.
+    {ok, att_info()} | {ok, ignored} | {error, term()}.
 put(AttRef, DbName, DocId, AttName, Data, Opts) when is_binary(Data) ->
-    #{chunk_threshold := Threshold, chunk_size := ChunkSize} = AttRef,
+    #{ref := Ref, chunk_threshold := Threshold,
+      chunk_size := ChunkSize} = AttRef,
     DataSize = byte_size(Data),
     Digest = compute_digest(Data),
-    ContentType = mimerl:filename(AttName),
+    ContentType = maps:get(content_type, Opts, mimerl:filename(AttName)),
     Sync = maps:get(sync, Opts, false),
-
-    case DataSize >= Threshold of
-        true ->
-            %% Large attachment - store as chunks
-            put_chunked(AttRef, DbName, DocId, AttName, Data, ContentType, Digest, ChunkSize, Sync);
-        false ->
-            %% Small attachment - store as single value
-            put_single(AttRef, DbName, DocId, AttName, Data, ContentType, Digest, Sync)
+    DigestOk = case maps:get(expected_digest, Opts, undefined) of
+        undefined -> ok;
+        Digest -> ok;
+        _Other -> {error, digest_mismatch}
+    end,
+    case DigestOk of
+        {error, _} = DigestErr ->
+            DigestErr;
+        ok ->
+            case resolve_origin(Ref, DbName, DocId, AttName, Opts, Digest) of
+                ignored ->
+                    {ok, ignored};
+                {apply, OriginHlc} ->
+                    NewChunkCount = case DataSize >= Threshold of
+                        true -> (DataSize + ChunkSize - 1) div ChunkSize;
+                        false -> 0
+                    end,
+                    Cleanup = stale_chunk_ops(Ref, DbName, DocId, AttName,
+                                              NewChunkCount),
+                    case DataSize >= Threshold of
+                        true ->
+                            put_chunked(AttRef, DbName, DocId, AttName, Data,
+                                        ContentType, Digest, ChunkSize, Sync,
+                                        OriginHlc, Cleanup);
+                        false ->
+                            put_single(AttRef, DbName, DocId, AttName, Data,
+                                       ContentType, Digest, Sync, OriginHlc,
+                                       Cleanup)
+                    end
+            end
     end.
 
-%% @private Store as single value (small attachment)
-put_single(#{ref := Ref}, DbName, DocId, AttName, Data, ContentType, Digest, Sync) ->
+%% @private Store as single value (small attachment). One WriteBatch:
+%% blob, stale-chunk cleanup (a previously chunked version), and the
+%% feed row.
+put_single(#{ref := Ref}, DbName, DocId, AttName, Data, ContentType,
+           Digest, Sync, OriginHlc, Cleanup) ->
     Key = make_key(DbName, DocId, AttName),
-    case rocksdb:put(Ref, Key, Data, [{sync, Sync}]) of
+    FeedOps = barrel_att_feed:ops(
+        Ref, DbName, DocId, AttName, put, OriginHlc,
+        #{digest => Digest, length => byte_size(Data),
+          content_type => ContentType}),
+    case apply_batch(Ref, [{put, Key, Data} | Cleanup ++ FeedOps], Sync) of
         ok ->
             AttInfo = #{
                 name => AttName,
@@ -133,12 +174,15 @@ put_single(#{ref := Ref}, DbName, DocId, AttName, Data, ContentType, Digest, Syn
             {error, Reason}
     end.
 
-%% @private Store as chunks (large attachment)
-put_chunked(#{ref := Ref}, DbName, DocId, AttName, Data, ContentType, Digest, ChunkSize, Sync) ->
+%% @private Store as chunks (large attachment). Chunks are written
+%% first (invisible until the metadata lands), then metadata + feed
+%% row commit in one batch; the cleanup delete_range clears stale
+%% chunks from a previously larger version. This closes the old
+%% metadata-before-chunks torn-read window.
+put_chunked(#{ref := Ref}, DbName, DocId, AttName, Data, ContentType,
+            Digest, ChunkSize, Sync, OriginHlc, Cleanup) ->
     DataSize = byte_size(Data),
     ChunkCount = (DataSize + ChunkSize - 1) div ChunkSize,
-
-    %% Store metadata first
     MetaKey = make_key(DbName, DocId, AttName),
     MetaValue = encode_chunk_meta(#{
         chunk_size => ChunkSize,
@@ -147,11 +191,14 @@ put_chunked(#{ref := Ref}, DbName, DocId, AttName, Data, ContentType, Digest, Ch
         content_type => ContentType,
         digest => Digest
     }),
-
-    case rocksdb:put(Ref, MetaKey, MetaValue, [{sync, false}]) of
+    case put_chunks(Ref, DbName, DocId, AttName, Data, ChunkSize, 0, false) of
         ok ->
-            %% Store chunks
-            case put_chunks(Ref, DbName, DocId, AttName, Data, ChunkSize, 0, Sync) of
+            FeedOps = barrel_att_feed:ops(
+                Ref, DbName, DocId, AttName, put, OriginHlc,
+                #{digest => Digest, length => DataSize,
+                  content_type => ContentType}),
+            case apply_batch(Ref, [{put, MetaKey, MetaValue}
+                                   | Cleanup ++ FeedOps], Sync) of
                 ok ->
                     AttInfo = #{
                         name => AttName,
@@ -164,12 +211,12 @@ put_chunked(#{ref := Ref}, DbName, DocId, AttName, Data, ContentType, Digest, Ch
                     },
                     {ok, AttInfo};
                 {error, _} = Error ->
-                    %% Cleanup on error
                     delete_chunked(Ref, DbName, DocId, AttName, ChunkCount),
                     Error
             end;
-        {error, Reason} ->
-            {error, Reason}
+        {error, _} = Error ->
+            delete_chunked(Ref, DbName, DocId, AttName, ChunkCount),
+            Error
     end.
 
 %% @private Store individual chunks
@@ -316,24 +363,40 @@ get_chunks(#{ref := Ref} = AttRef, DbName, DocId, AttName, Index, ChunkCount, Ac
 %% @doc Delete an attachment
 %% Handles both single-value and chunked attachments.
 -spec delete(att_ref(), db_name(), docid(), binary()) -> ok | {error, term()}.
-delete(#{ref := Ref}, DbName, DocId, AttName) ->
-    Key = make_key(DbName, DocId, AttName),
-    %% First check if chunked
-    case rocksdb:get(Ref, Key, []) of
-        {ok, Value} ->
-            case is_chunked_metadata(Value) of
-                {true, #{chunk_count := ChunkCount}} ->
-                    %% Delete chunks first, then metadata
-                    delete_chunked(Ref, DbName, DocId, AttName, ChunkCount),
-                    rocksdb:delete(Ref, Key, []);
-                false ->
-                    %% Single value
-                    rocksdb:delete(Ref, Key, [])
-            end;
-        not_found ->
+delete(AttRef, DbName, DocId, AttName) ->
+    delete(AttRef, DbName, DocId, AttName, #{}).
+
+%% @doc Delete with options (origin_hlc for replicated deletes: the
+%% last-write-wins guard applies, and a tombstone lands even when the
+%% attachment was never seen locally).
+-spec delete(att_ref(), db_name(), docid(), binary(), map()) ->
+    ok | {error, term()}.
+delete(#{ref := Ref}, DbName, DocId, AttName, Opts) ->
+    case resolve_origin(Ref, DbName, DocId, AttName, Opts, <<>>) of
+        ignored ->
             ok;
-        {error, _} = Error ->
-            Error
+        {apply, OriginHlc} ->
+            Key = make_key(DbName, DocId, AttName),
+            BlobExists = case rocksdb:get(Ref, Key, []) of
+                {ok, _} -> true;
+                _ -> false
+            end,
+            IndexExists = barrel_att_feed:index_get(
+                              Ref, DbName, DocId, AttName) =/= not_found,
+            case BlobExists orelse IndexExists
+                 orelse maps:is_key(origin_hlc, Opts) of
+                false ->
+                    %% local delete of something never written: no-op
+                    ok;
+                true ->
+                    Ops = [{delete, Key},
+                           {delete_range, <<Key/binary, 0>>,
+                            <<Key/binary, 1>>}
+                           | barrel_att_feed:ops(Ref, DbName, DocId,
+                                                 AttName, delete,
+                                                 OriginHlc, #{})],
+                    apply_batch(Ref, Ops, maps:get(sync, Opts, false))
+            end
     end.
 
 %% @private Delete chunks
@@ -450,6 +513,128 @@ extract_att_name(Key, Prefix) ->
     <<_:PrefixLen/binary, AttName/binary>> = Key,
     AttName.
 
+%% @private Apply a list of ops as one WriteBatch.
+apply_batch(Ref, Ops, Sync) ->
+    {ok, Batch} = rocksdb:batch(),
+    try
+        lists:foreach(
+            fun({put, K, V}) -> ok = rocksdb:batch_put(Batch, K, V);
+               ({delete, K}) -> ok = rocksdb:batch_delete(Batch, K);
+               ({delete_range, S, E}) ->
+                    ok = rocksdb:batch_delete_range(Batch, S, E)
+            end,
+            Ops),
+        rocksdb:write_batch(Ref, Batch, [{sync, Sync}])
+    after
+        rocksdb:release_batch(Batch)
+    end.
+
+%% @private Local writes mint a fresh origin; replicated writes carry
+%% theirs through the LWW guard.
+resolve_origin(Ref, DbName, DocId, AttName, Opts, Digest) ->
+    case maps:get(origin_hlc, Opts, undefined) of
+        undefined ->
+            {apply, barrel_hlc:new_hlc()};
+        Origin ->
+            case barrel_att_feed:check(Ref, DbName, DocId, AttName,
+                                       Origin, Digest) of
+                apply -> {apply, Origin};
+                ignored -> ignored
+            end
+    end.
+
+%% @private delete_range ops clearing chunk rows past the new count
+%% (an overwrite by a smaller or unchunked version leaked them before).
+stale_chunk_ops(Ref, DbName, DocId, AttName, NewChunkCount) ->
+    Key = make_key(DbName, DocId, AttName),
+    case rocksdb:get(Ref, Key, []) of
+        {ok, Value} ->
+            case is_chunked_metadata(Value) of
+                {true, #{chunk_count := OldCount}}
+                  when OldCount > NewChunkCount ->
+                    [{delete_range,
+                      make_chunk_key(DbName, DocId, AttName, NewChunkCount),
+                      <<Key/binary, 1>>}];
+                _ ->
+                    []
+            end;
+        _ ->
+            []
+    end.
+
+%%====================================================================
+%% Attachment change feed (sync support)
+%%====================================================================
+
+%% @doc Feed entries since an HLC (exclusive). See barrel_att_feed.
+-spec att_changes(att_ref(), db_name(), barrel_hlc:timestamp() | first,
+                  map()) ->
+    {ok, [barrel_att_feed:entry()], barrel_hlc:timestamp() | first}.
+att_changes(#{ref := Ref}, DbName, Since, Opts) ->
+    barrel_att_feed:att_changes(Ref, DbName, Since, Opts).
+
+-spec att_floor(att_ref(), db_name()) ->
+    barrel_hlc:timestamp() | undefined.
+att_floor(#{ref := Ref}, DbName) ->
+    barrel_att_feed:att_floor(Ref, DbName).
+
+-spec sweep_att_feed(att_ref(), db_name(), barrel_hlc:timestamp()) ->
+    {ok, #{tombstones_swept := non_neg_integer()}}.
+sweep_att_feed(#{ref := Ref}, DbName, Cutoff) ->
+    barrel_att_feed:sweep(Ref, DbName, Cutoff).
+
+%% @doc Maintenance escape hatch: synthesize feed rows for attachments
+%% written before the feed existed (format-break stance: they do not
+%% sync otherwise). Rebuilt entries carry the MINIMUM origin so any
+%% real write, local or remote, wins the LWW race against them; two
+%% rebuilt replicas converge by digest tie-break. Safe to re-run.
+-spec rebuild_feed(att_ref(), db_name()) -> {ok, #{rows := non_neg_integer()}}.
+rebuild_feed(#{ref := Ref} = AttRef, DbName) ->
+    DbPrefix = <<(byte_size(DbName)):16, DbName/binary>>,
+    ReadOpts = [{iterate_lower_bound, DbPrefix},
+                {iterate_upper_bound, prefix_end(DbPrefix)}],
+    {ok, Itr} = rocksdb:iterator(Ref, ReadOpts),
+    Atts = try
+        rebuild_scan(rocksdb:iterator_move(Itr, first), Itr, DbName, [])
+    after
+        rocksdb:iterator_close(Itr)
+    end,
+    MinOrigin = barrel_hlc:min(),
+    N = lists:foldl(
+        fun({DocId, AttName}, Count) ->
+            case get_info(AttRef, DbName, DocId, AttName) of
+                {ok, #{digest := Digest, length := Length,
+                       content_type := ContentType}} ->
+                    Ops = barrel_att_feed:ops(
+                        Ref, DbName, DocId, AttName, put, MinOrigin,
+                        #{digest => Digest, length => Length,
+                          content_type => ContentType}),
+                    ok = apply_batch(Ref, Ops, false),
+                    Count + 1;
+                _ ->
+                    Count
+            end
+        end,
+        0,
+        Atts),
+    {ok, #{rows => N}}.
+
+rebuild_scan({error, _}, _Itr, _DbName, Acc) ->
+    lists:reverse(Acc);
+rebuild_scan({ok, Key, _Value}, Itr, DbName, Acc) ->
+    DbLen = byte_size(DbName),
+    Acc1 = case Key of
+        <<DbLen:16, DbName:DbLen/binary, IdLen:16, DocId:IdLen/binary,
+          $:, AttName/binary>> ->
+            case binary:match(AttName, <<0>>) of
+                nomatch -> [{DocId, AttName} | Acc];
+                _ -> Acc
+            end;
+        _ ->
+            Acc
+    end,
+    rebuild_scan(rocksdb:iterator_move(Itr, next), Itr, DbName, Acc1).
+
 %% Compute SHA-256 digest of data
 compute_digest(Data) ->
     Digest = crypto:hash(sha256, Data),
@@ -462,16 +647,24 @@ to_hex(Bin) ->
 hex_char(N) when N < 10 -> $0 + N;
 hex_char(N) -> $a + N - 10.
 
-%% Iterator fold loop
+%% Iterator fold loop. Chunk keys share the doc prefix (name + NUL +
+%% index); attachment names cannot contain NUL, so skip them here or
+%% they leak into list_attachments/delete_all.
 fold_loop({ok, Key, Value}, Itr, Prefix, Fun, Acc) ->
     AttName = extract_att_name(Key, Prefix),
-    case Fun(AttName, Value, Acc) of
-        {ok, Acc1} ->
-            fold_loop(rocksdb:iterator_move(Itr, next), Itr, Prefix, Fun, Acc1);
-        {stop, Acc1} ->
-            Acc1;
-        stop ->
-            Acc
+    case binary:match(AttName, <<0>>) of
+        nomatch ->
+            case Fun(AttName, Value, Acc) of
+                {ok, Acc1} ->
+                    fold_loop(rocksdb:iterator_move(Itr, next), Itr, Prefix,
+                              Fun, Acc1);
+                {stop, Acc1} ->
+                    Acc1;
+                stop ->
+                    Acc
+            end;
+        _ ->
+            fold_loop(rocksdb:iterator_move(Itr, next), Itr, Prefix, Fun, Acc)
     end;
 fold_loop({error, invalid_iterator}, _Itr, _Prefix, _Fun, Acc) ->
     Acc;
@@ -542,7 +735,9 @@ put_stream(AttRef, DbName, DocId, AttName, ContentType, Opts) ->
         chunk_index => 0,
         total_length => 0,
         hash_ctx => crypto:hash_init(sha256),
-        buffer => <<>>
+        buffer => <<>>,
+        origin_hlc => maps:get(origin_hlc, Opts, undefined),
+        expected_digest => maps:get(expected_digest, Opts, undefined)
     }}.
 
 %% @doc Write data to a put stream
@@ -581,12 +776,17 @@ write_single_chunk(#{att_ref := #{ref := Ref}, db_name := DbName, doc_id := DocI
             Error
     end.
 
-%% @doc Finish a put stream and write metadata
--spec finish_stream(map()) -> {ok, att_info()} | {error, term()}.
+%% @doc Finish a put stream: verify the digest, run the LWW guard, and
+%% commit metadata + feed row in one batch. Nothing is visible until
+%% this batch lands (chunks without metadata are unreadable), so a
+%% digest mismatch or a lost LWW race leaves nothing committed.
+-spec finish_stream(map()) ->
+    {ok, att_info()} | {ok, ignored} | {error, term()}.
 finish_stream(#{type := write, att_ref := #{ref := Ref}, db_name := DbName,
                 doc_id := DocId, att_name := AttName, content_type := ContentType,
                 chunk_size := ChunkSize, sync := Sync, chunk_index := ChunkIndex,
-                total_length := TotalLen, hash_ctx := HashCtx, buffer := Buffer}) ->
+                total_length := TotalLen, hash_ctx := HashCtx, buffer := Buffer,
+                origin_hlc := OriginOpt, expected_digest := ExpectedDigest}) ->
     %% Write any remaining buffered data as final chunk
     {FinalChunkIndex, FinalLen, FinalHashCtx} = case Buffer of
         <<>> ->
@@ -606,29 +806,60 @@ finish_stream(#{type := write, att_ref := #{ref := Ref}, db_name := DbName,
     DigestBin = crypto:hash_final(FinalHashCtx),
     Digest = <<"sha256-", (to_hex(DigestBin))/binary>>,
 
-    %% Write metadata
-    MetaKey = make_key(DbName, DocId, AttName),
-    MetaValue = encode_chunk_meta(#{
-        chunk_size => ChunkSize,
-        chunk_count => FinalChunkIndex,
-        length => FinalLen,
-        content_type => ContentType,
-        digest => Digest
-    }),
-
-    case rocksdb:put(Ref, MetaKey, MetaValue, [{sync, Sync}]) of
-        ok ->
-            {ok, #{
-                name => AttName,
-                content_type => ContentType,
-                length => FinalLen,
-                digest => Digest,
-                chunked => true,
-                chunk_size => ChunkSize,
-                chunk_count => FinalChunkIndex
-            }};
-        {error, _} = Error ->
-            Error
+    CleanupWritten = fun() ->
+        delete_chunked(Ref, DbName, DocId, AttName, FinalChunkIndex)
+    end,
+    case ExpectedDigest =/= undefined andalso ExpectedDigest =/= Digest of
+        true ->
+            CleanupWritten(),
+            {error, digest_mismatch};
+        false ->
+            OriginDecision = case OriginOpt of
+                undefined ->
+                    {apply, barrel_hlc:new_hlc()};
+                Origin ->
+                    case barrel_att_feed:check(Ref, DbName, DocId, AttName,
+                                               Origin, Digest) of
+                        apply -> {apply, Origin};
+                        ignored -> ignored
+                    end
+            end,
+            case OriginDecision of
+                ignored ->
+                    CleanupWritten(),
+                    {ok, ignored};
+                {apply, OriginHlc} ->
+                    MetaKey = make_key(DbName, DocId, AttName),
+                    MetaValue = encode_chunk_meta(#{
+                        chunk_size => ChunkSize,
+                        chunk_count => FinalChunkIndex,
+                        length => FinalLen,
+                        content_type => ContentType,
+                        digest => Digest
+                    }),
+                    Cleanup = stale_chunk_ops(Ref, DbName, DocId, AttName,
+                                              FinalChunkIndex),
+                    FeedOps = barrel_att_feed:ops(
+                        Ref, DbName, DocId, AttName, put, OriginHlc,
+                        #{digest => Digest, length => FinalLen,
+                          content_type => ContentType}),
+                    case apply_batch(Ref, [{put, MetaKey, MetaValue}
+                                           | Cleanup ++ FeedOps], Sync) of
+                        ok ->
+                            {ok, #{
+                                name => AttName,
+                                content_type => ContentType,
+                                length => FinalLen,
+                                digest => Digest,
+                                chunked => true,
+                                chunk_size => ChunkSize,
+                                chunk_count => FinalChunkIndex
+                            }};
+                        {error, _} = Error ->
+                            CleanupWritten(),
+                            Error
+                    end
+            end
     end.
 
 %% @doc Abort a put stream and clean up any written chunks

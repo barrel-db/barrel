@@ -80,6 +80,8 @@ groups() ->
     ].
 
 init_per_suite(Config) ->
+    %% the attachment feed mints HLCs at every commit point
+    {ok, _} = application:ensure_all_started(barrel_docdb),
     Config.
 
 end_per_suite(_Config) ->
