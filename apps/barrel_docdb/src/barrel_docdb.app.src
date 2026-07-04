@@ -11,7 +11,8 @@
         rocksdb,
         hlc,
         match_trie,
-        instrument
+        instrument,
+        hackney
     ]},
     {env, [
         {data_dir, "data/barrel_docdb"},
