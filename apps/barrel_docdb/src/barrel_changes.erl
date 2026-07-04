@@ -30,6 +30,9 @@
     delete_old_change/4
 ]).
 
+%% Change value codec (shared with the channel feed, barrel_channel)
+-export([encode_change/1]).
+
 %% Path-indexed changes API
 -export([
     write_path_index_ops/3,

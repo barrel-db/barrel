@@ -1,0 +1,222 @@
+%% @doc Write-time channels: named subsets of a database materialized
+%% into per-channel change feeds (prefix 0x1E) as documents are
+%% written, so partial sync reads one bounded range scan instead of
+%% filtering the global feed.
+%%
+%% A channel is a set of MQTT-style patterns over the document's ars
+%% topics (`field/value', `+' matches one segment, a trailing `#'
+%% matches the rest). Channels are db create-time config:
+%% `channels => #{Name => [Pattern]}', compiled at init into
+%% `persistent_term {barrel_channels, DbName}'. Immutable in v1; only
+%% writes made after creation are indexed.
+%%
+%% Feed semantics: one member row per doc per channel, moved to the
+%% doc's current change HLC on every write (the forget-time cleanup
+%% relies on row HLC == doc COL_HLC). Deletes land member rows carrying
+%% the tombstone in the channels the doc was in. A doc that stops
+%% matching gets a leave row (an event, swept by retention); readers
+%% skip leave rows unless asked, and replicas simply stop receiving
+%% the departed doc (no target-side delete).
+-module(barrel_channel).
+
+-export([
+    compile/1,
+    install/2,
+    uninstall/1,
+    names/1,
+    channels/1,
+    match/2,
+    write_ops/6
+]).
+
+%% Row codec (used by the read side and tests)
+-export([encode_row/2, decode_row/1]).
+
+-export_type([config/0, compiled/0, row/0]).
+
+-type pattern_segments() :: [binary() | plus | hash].
+-type config() :: #{binary() => [binary()]}.
+-type compiled() :: #{binary() => [pattern_segments()]}.
+-type row() :: #{flag := member | leave,
+                 id := binary(),
+                 rev := binary(),
+                 deleted := boolean(),
+                 num_conflicts := non_neg_integer()}.
+
+-define(FLAG_LEAVE, 0).
+-define(FLAG_MEMBER, 1).
+
+%%====================================================================
+%% Config
+%%====================================================================
+
+%% @doc Validate and compile a channels config map.
+-spec compile(term()) -> {ok, compiled()} | {error, term()}.
+compile(Config) when is_map(Config) ->
+    try
+        {ok, maps:fold(
+            fun(Name, Patterns, Acc) ->
+                ok = validate_name(Name),
+                Acc#{Name => [compile_pattern(Name, P) || P <- patterns(Name, Patterns)]}
+            end,
+            #{},
+            Config)}
+    catch
+        throw:Reason -> {error, Reason}
+    end;
+compile(Other) ->
+    {error, {invalid_channels, Other}}.
+
+validate_name(Name) when is_binary(Name), byte_size(Name) > 0 ->
+    case binary:match(Name, [<<0>>, <<16#FF>>]) of
+        nomatch -> ok;
+        _ -> throw({invalid_channel_name, Name})
+    end;
+validate_name(Name) ->
+    throw({invalid_channel_name, Name}).
+
+patterns(_Name, Patterns) when is_list(Patterns), Patterns =/= [] ->
+    Patterns;
+patterns(Name, Other) ->
+    throw({invalid_channel_patterns, Name, Other}).
+
+compile_pattern(Name, Pattern) when is_binary(Pattern), byte_size(Pattern) > 0 ->
+    Segments = binary:split(Pattern, <<"/">>, [global]),
+    compile_segments(Name, Pattern, Segments, []);
+compile_pattern(Name, Pattern) ->
+    throw({invalid_channel_pattern, Name, Pattern}).
+
+compile_segments(_Name, _Pattern, [], Acc) ->
+    lists:reverse(Acc);
+compile_segments(_Name, _Pattern, [<<"#">>], Acc) ->
+    lists:reverse([hash | Acc]);
+compile_segments(Name, Pattern, [<<"#">> | _More], _Acc) ->
+    throw({invalid_channel_pattern, Name, Pattern});
+compile_segments(Name, Pattern, [<<"+">> | Rest], Acc) ->
+    compile_segments(Name, Pattern, Rest, [plus | Acc]);
+compile_segments(Name, Pattern, [<<>> | _], _Acc) ->
+    throw({invalid_channel_pattern, Name, Pattern});
+compile_segments(Name, Pattern, [Seg | Rest], Acc) ->
+    compile_segments(Name, Pattern, Rest, [Seg | Acc]).
+
+%% @doc Publish a compiled config for a database.
+-spec install(binary(), compiled()) -> ok.
+install(DbName, Compiled) ->
+    persistent_term:put({barrel_channels, DbName}, Compiled).
+
+-spec uninstall(binary()) -> ok.
+uninstall(DbName) ->
+    _ = persistent_term:erase({barrel_channels, DbName}),
+    ok.
+
+%% @doc The configured channels of a database (empty when none).
+-spec channels(binary()) -> compiled().
+channels(DbName) ->
+    persistent_term:get({barrel_channels, DbName}, #{}).
+
+-spec names(binary()) -> [binary()].
+names(DbName) ->
+    maps:keys(channels(DbName)).
+
+%%====================================================================
+%% Matching
+%%====================================================================
+
+%% @doc Channels whose pattern set matches any of the given topics.
+-spec match(compiled(), [binary()]) -> [binary()].
+match(Compiled, _Topics) when map_size(Compiled) =:= 0 ->
+    [];
+match(Compiled, Topics) ->
+    Split = [binary:split(T, <<"/">>, [global]) || T <- Topics],
+    [Name || {Name, Patterns} <- maps:to_list(Compiled),
+             any_topic_matches(Patterns, Split)].
+
+any_topic_matches(Patterns, SplitTopics) ->
+    lists:any(
+        fun(TopicSegs) ->
+            lists:any(fun(P) -> segments_match(P, TopicSegs) end, Patterns)
+        end,
+        SplitTopics).
+
+segments_match([hash], _Rest) -> true;
+segments_match([], []) -> true;
+segments_match([], _Rest) -> false;
+segments_match(_Pattern, []) -> false;
+segments_match([plus | PRest], [_ | TRest]) ->
+    segments_match(PRest, TRest);
+segments_match([Seg | PRest], [Seg | TRest]) ->
+    segments_match(PRest, TRest);
+segments_match(_, _) ->
+    false.
+
+%%====================================================================
+%% Write ops
+%%====================================================================
+
+%% @doc Batch ops for one applied write. DocInfo carries id, rev,
+%% deleted, num_conflicts. Old rows (at OldHlc) are deleted for ALL
+%% configured channels: deleting an absent key is a RocksDB no-op, and
+%% it removes any old-membership bookkeeping.
+-spec write_ops(binary(), barrel_hlc:timestamp(), map(),
+                [binary()], barrel_hlc:timestamp() | undefined,
+                [binary()]) -> [term()].
+write_ops(DbName, NewHlc, DocInfo, NewTopics, OldHlc, OldTopics) ->
+    case channels(DbName) of
+        Compiled when map_size(Compiled) =:= 0 ->
+            [];
+        Compiled ->
+            DeleteOps = case OldHlc of
+                undefined -> [];
+                _ -> [{delete,
+                       barrel_store_keys:channel_key(DbName, C, OldHlc)}
+                      || C <- maps:keys(Compiled)]
+            end,
+            Deleted = maps:get(deleted, DocInfo, false),
+            RowOps = case Deleted of
+                true ->
+                    %% the tombstone lands where the doc was
+                    [{put,
+                      barrel_store_keys:channel_key(DbName, C, NewHlc),
+                      encode_row(member, DocInfo)}
+                     || C <- match(Compiled, OldTopics)];
+                false ->
+                    InNew = match(Compiled, NewTopics),
+                    InOld = match(Compiled, OldTopics),
+                    [{put,
+                      barrel_store_keys:channel_key(DbName, C, NewHlc),
+                      encode_row(member, DocInfo)}
+                     || C <- InNew]
+                    ++
+                    [{put,
+                      barrel_store_keys:channel_key(DbName, C, NewHlc),
+                      encode_row(leave, DocInfo)}
+                     || C <- InOld -- InNew]
+            end,
+            DeleteOps ++ RowOps
+    end.
+
+%%====================================================================
+%% Row codec
+%%====================================================================
+
+-spec encode_row(member | leave, map()) -> binary().
+encode_row(Flag, DocInfo) ->
+    FlagByte = case Flag of
+        member -> ?FLAG_MEMBER;
+        leave -> ?FLAG_LEAVE
+    end,
+    Change = barrel_changes:encode_change(maps:remove(doc, DocInfo)),
+    <<FlagByte:8, Change/binary>>.
+
+-spec decode_row(binary()) -> row().
+decode_row(<<FlagByte:8, DocIdLen:16, DocId:DocIdLen/binary,
+             RevLen:16, Rev:RevLen/binary, Deleted:8, NumConflicts:16,
+             _HasDoc:8, _Rest/binary>>) ->
+    #{flag => case FlagByte of
+                  ?FLAG_MEMBER -> member;
+                  ?FLAG_LEAVE -> leave
+              end,
+      id => DocId,
+      rev => Rev,
+      deleted => Deleted =:= 1,
+      num_conflicts => NumConflicts}.

@@ -92,6 +92,10 @@
 -export([history_key/2, history_prefix/1, history_end/1,
          decode_history_key/2]).
 
+%% Per-channel change feeds (write-time partial sync)
+-export([channel_key/3, channel_prefix/2, channel_end/2,
+         decode_channel_key/2]).
+
 
 %% HLC encoding/decoding
 -export([encode_hlc/1, decode_hlc/1, decode_hlc_key/2]).
@@ -129,6 +133,7 @@
 -define(PREFIX_CHANGES, 16#1B).       %% Prefix changes posting: prefix + bucket → [HLC:12, change, ...]
 -define(PREFIX_HISTORY, 16#1C).       %% Retained history log: DbName + change HLC → history entry
 -define(PREFIX_DOC_VERSION, 16#1D).   %% Version chain: DbName + DocId + ':' + version → sibling entry
+-define(PREFIX_CHANNEL, 16#1E).       %% Per-channel change feed: DbName + channel (null-terminated) + HLC → row
 
 %% Value prefix max length for value-first index (128 bytes)
 -define(VALUE_PREFIX_MAX_LEN, 128).
@@ -366,6 +371,40 @@ history_end(DbName) ->
     <<?PREFIX_HISTORY, (encode_name(DbName))/binary,
       16#FF, 16#FF, 16#FF, 16#FF, 16#FF, 16#FF, 16#FF, 16#FF,
       16#FF, 16#FF, 16#FF, 16#FF>>.
+
+%%====================================================================
+%% Per-Channel Change Feed Keys (write-time partial sync)
+%%====================================================================
+
+%% @doc Key for a channel feed row at a change-sequence HLC. One row
+%% per doc per channel: rewrites delete the previous HLC key.
+-spec channel_key(db_name(), binary(), barrel_hlc:timestamp()) -> binary().
+channel_key(DbName, Channel, Hlc) ->
+    <<?PREFIX_CHANNEL, (encode_name(DbName))/binary,
+      (encode_topic(Channel))/binary, (encode_hlc(Hlc))/binary>>.
+
+%% @doc Start key for scanning one channel's feed.
+-spec channel_prefix(db_name(), binary()) -> binary().
+channel_prefix(DbName, Channel) ->
+    <<?PREFIX_CHANNEL, (encode_name(DbName))/binary,
+      (encode_topic(Channel))/binary>>.
+
+%% @doc End marker for a channel feed range scan.
+-spec channel_end(db_name(), binary()) -> binary().
+channel_end(DbName, Channel) ->
+    <<(channel_prefix(DbName, Channel))/binary,
+      16#FF, 16#FF, 16#FF, 16#FF, 16#FF, 16#FF, 16#FF, 16#FF,
+      16#FF, 16#FF, 16#FF, 16#FF>>.
+
+%% @doc Extract {Channel, Hlc} from a channel feed key.
+-spec decode_channel_key(db_name(), binary()) ->
+    {binary(), barrel_hlc:timestamp()}.
+decode_channel_key(DbName, Key) ->
+    NameLen = byte_size(DbName),
+    PrefixLen = 1 + 2 + NameLen,
+    <<_:PrefixLen/binary, Rest/binary>> = Key,
+    {Channel, HlcBin} = split_on_null(Rest),
+    {Channel, decode_hlc(HlcBin)}.
 
 %% @doc Extract the change HLC from a history key.
 -spec decode_history_key(db_name(), binary()) -> barrel_hlc:timestamp().
