@@ -188,10 +188,18 @@ do_open_record(Name, Opts, Policy) ->
                             },
                             case barrel_vectordb:start_link(VecConfig) of
                                 {ok, _StorePid} ->
-                                    {ok, #{name => Name, docdb => DbBin,
-                                           vstore => Name,
-                                           embedding => Policy,
-                                           embed => EmbedState}};
+                                    case start_indexer(Name, DbBin, Policy,
+                                                       EmbedState) of
+                                        ok ->
+                                            {ok, #{name => Name, docdb => DbBin,
+                                                   vstore => Name,
+                                                   embedding => Policy,
+                                                   embed => EmbedState}};
+                                        {error, _} = IErr ->
+                                            _ = barrel_vectordb:stop(Name),
+                                            _ = barrel_docdb:close_db(DbBin),
+                                            IErr
+                                    end;
                                 {error, _} = VErr ->
                                     _ = barrel_docdb:close_db(DbBin),
                                     VErr
@@ -207,9 +215,14 @@ do_open_record(Name, Opts, Policy) ->
             Err
     end.
 
-%% @doc Close a composed barrel database (vector store then document database).
+%% @doc Close a composed barrel database (indexer, then vector store,
+%% then document database).
 -spec close(db()) -> ok | {error, term()}.
-close(#{docdb := DbBin, vstore := Store}) ->
+close(#{name := Name, docdb := DbBin, vstore := Store} = Db) ->
+    _ = case Db of
+        #{embedding := _} -> barrel_record_sup:stop_indexer(Name);
+        _ -> ok
+    end,
     _ = barrel_vectordb:stop(Store),
     barrel_docdb:close_db(DbBin).
 
@@ -512,26 +525,34 @@ record_write_opts(_Db, Opts) ->
     Opts.
 
 %% @private Wake the record indexer after a successful record-mode
-%% write. The indexer (own process, started with the database) may not
-%% be running; that is fine, it polls as a fallback.
+%% write. The indexer may be restarting; that is fine, it polls as a
+%% fallback.
 -spec nudge_indexer(db(), term()) -> ok.
 nudge_indexer(#{name := Name, embedding := _}, Result) ->
     case Result of
-        {error, _} ->
-            ok;
-        _ ->
-            case erlang:whereis(record_indexer_name(Name)) of
-                undefined -> ok;
-                Pid -> gen_server:cast(Pid, nudge)
-            end
+        {error, _} -> ok;
+        _ -> barrel_record_indexer:nudge(Name)
     end;
 nudge_indexer(_Db, _Result) ->
     ok.
 
-%% @private Registered name of a database's record indexer.
--spec record_indexer_name(atom()) -> atom().
-record_indexer_name(Name) ->
-    list_to_atom("barrel_record_indexer_" ++ atom_to_list(Name)).
+%% @private Start the per-database indexer under barrel_record_sup.
+%% Record mode needs the barrel application running (the supervisor).
+-spec start_indexer(atom(), binary(), barrel_embedding_policy:policy(), term()) ->
+    ok | {error, term()}.
+start_indexer(Name, DbBin, Policy, EmbedState) ->
+    case erlang:whereis(barrel_record_sup) of
+        undefined ->
+            {error, barrel_app_not_started};
+        _Pid ->
+            case barrel_record_sup:start_indexer(#{
+                     name => Name, db => DbBin, vstore => Name,
+                     policy => Policy, embed => EmbedState}) of
+                {ok, _} -> ok;
+                {error, {already_started, _}} -> ok;
+                {error, _} = Err -> Err
+            end
+    end.
 
 %% @private Resolve the vector dimension from policy and vectordb config
 %% (they must agree when both are set).

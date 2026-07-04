@@ -2,8 +2,9 @@
 %%% @doc barrel top level supervisor.
 %%%
 %%% barrel is an embeddable library: composed databases are opened on
-%%% demand by the embedding application via {@link barrel:open/2}, so this
-%%% supervisor has no static children of its own.
+%%% demand by the embedding application via {@link barrel:open/2}. The
+%%% only static child is the record-indexer supervisor, which hosts one
+%%% indexer per record-mode database.
 %%% @end
 %%%-------------------------------------------------------------------
 -module(barrel_sup).
@@ -25,4 +26,12 @@ init([]) ->
         intensity => 5,
         period => 60
     },
-    {ok, {SupFlags, []}}.
+    Children = [
+        #{
+            id => barrel_record_sup,
+            start => {barrel_record_sup, start_link, []},
+            type => supervisor,
+            shutdown => infinity
+        }
+    ],
+    {ok, {SupFlags, Children}}.

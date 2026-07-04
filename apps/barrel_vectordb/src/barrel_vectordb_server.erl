@@ -702,7 +702,11 @@ start_docstore(Module, Name, ModConfig) ->
     end.
 
 %% @private Write {Id, Text, Metadata} pairs to an external docstore (no-op for
-%% the default, which already wrote them into the RocksDB batch).
+%% the default, which already wrote them into the RocksDB batch). An empty pair
+%% list never touches the backend: index-only writes produce no doc pairs, and
+%% read-only backends must not be asked to write nothing.
+docstore_multi_put(_Docstore, []) ->
+    ok;
 docstore_multi_put(undefined, _Pairs) ->
     ok;
 docstore_multi_put({Module, Ctx}, Pairs) ->
