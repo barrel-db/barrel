@@ -73,6 +73,17 @@ routes() ->
         {<<"GET">>,    <<"/db/:db/query">>,              {?MODULE, query}},
         {<<"GET">>,    <<"/db/:db/changes">>,            {?MODULE, changes}},
 
+        %% Replication wire (barrel_rep_transport over HTTP)
+        {<<"GET">>,    <<"/db/:db/_sync/info">>,         {barrel_server_sync, info}},
+        {<<"POST">>,   <<"/db/:db/_sync/hlc">>,          {barrel_server_sync, sync_hlc}},
+        {<<"POST">>,   <<"/db/:db/_sync/changes">>,      {barrel_server_sync, changes}},
+        {<<"POST">>,   <<"/db/:db/_sync/diff">>,         {barrel_server_sync, diff}},
+        {<<"GET">>,    <<"/db/:db/_sync/doc/:id">>,      {barrel_server_sync, get_doc}},
+        {<<"PUT">>,    <<"/db/:db/_sync/doc/:id">>,      {barrel_server_sync, put_version}},
+        {<<"GET">>,    <<"/db/:db/_sync/local/:id">>,    {barrel_server_sync, get_local}},
+        {<<"PUT">>,    <<"/db/:db/_sync/local/:id">>,    {barrel_server_sync, put_local}},
+        {<<"DELETE">>, <<"/db/:db/_sync/local/:id">>,    {barrel_server_sync, delete_local}},
+
         {<<"PUT">>,    <<"/db/:db/doc/:id/att/:name">>,  {?MODULE, put_att}},
         {<<"GET">>,    <<"/db/:db/doc/:id/att/:name">>,  {?MODULE, get_att}},
         {<<"DELETE">>, <<"/db/:db/doc/:id/att/:name">>,  {?MODULE, delete_att}},
