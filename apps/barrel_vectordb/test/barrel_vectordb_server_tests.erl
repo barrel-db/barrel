@@ -37,6 +37,19 @@ index_only_test_() ->
      ]
     }.
 
+hybrid_test_() ->
+    {foreach,
+     fun setup_test/0,
+     fun cleanup_test/1,
+     [
+       {"hybrid results carry text and metadata", fun test_hybrid_hydrated/0},
+       {"linear fusion is hydrated too", fun test_hybrid_linear_hydrated/0},
+       {"include flags are honored", fun test_hybrid_include_flags/0},
+       {"index-only entries hydrate as empty metadata", fun test_hybrid_index_only/0},
+       {"query_vector skips the embedder", fun test_hybrid_query_vector_skips_embed/0}
+     ]
+    }.
+
 restart_rebuild_test() ->
     %% Standalone (owns its dir): the ANN index rebuilds from the vectors
     %% CF on restart, which includes index-only rows.
@@ -188,3 +201,69 @@ test_bm25() ->
         ?STORE, <<"b">>, <<"lazy dogs sleep">>, [0.0, 1.0, 0.0]),
     {ok, Hits} = barrel_vectordb:search_bm25(?STORE, <<"quick fox">>, #{k => 2}),
     ?assertMatch([{<<"a">>, _Score} | _], Hits).
+
+%%====================================================================
+%% Test Cases - hybrid hydration + query_vector
+%%====================================================================
+
+test_hybrid_hydrated() ->
+    ok = barrel_vectordb:add_vector(
+        ?STORE, <<"a">>, <<"the quick brown fox">>, #{kind => fox},
+        [1.0, 0.0, 0.0]),
+    ok = barrel_vectordb:add_vector(
+        ?STORE, <<"b">>, <<"lazy dogs sleep">>, #{kind => dog},
+        [0.0, 1.0, 0.0]),
+    {ok, Results} = barrel_vectordb:search_hybrid(
+        ?STORE, <<"quick fox">>,
+        #{k => 2, query_vector => [1.0, 0.0, 0.0]}),
+    ?assert(length(Results) >= 1),
+    [Top | _] = Results,
+    ?assertEqual(<<"a">>, maps:get(key, Top)),
+    ?assertEqual(<<"the quick brown fox">>, maps:get(text, Top)),
+    ?assertEqual(#{kind => fox}, maps:get(metadata, Top)),
+    ?assert(is_float(maps:get(score, Top))).
+
+test_hybrid_linear_hydrated() ->
+    ok = barrel_vectordb:add_vector(
+        ?STORE, <<"a">>, <<"alpha bravo">>, #{n => 1}, [1.0, 0.0, 0.0]),
+    {ok, [Top | _]} = barrel_vectordb:search_hybrid(
+        ?STORE, <<"alpha">>,
+        #{k => 1, fusion => linear, query_vector => [1.0, 0.0, 0.0]}),
+    ?assertEqual(<<"alpha bravo">>, maps:get(text, Top)),
+    ?assertEqual(#{n => 1}, maps:get(metadata, Top)).
+
+test_hybrid_include_flags() ->
+    ok = barrel_vectordb:add_vector(
+        ?STORE, <<"a">>, <<"alpha bravo">>, #{n => 1}, [1.0, 0.0, 0.0]),
+    {ok, [Bare | _]} = barrel_vectordb:search_hybrid(
+        ?STORE, <<"alpha">>,
+        #{k => 1, query_vector => [1.0, 0.0, 0.0],
+          include_text => false, include_metadata => false}),
+    ?assertEqual(false, maps:is_key(text, Bare)),
+    ?assertEqual(false, maps:is_key(metadata, Bare)),
+    ?assert(maps:is_key(key, Bare)),
+    ?assert(maps:is_key(score, Bare)).
+
+test_hybrid_index_only() ->
+    %% Index-only entries have no stored doc data: they must still rank,
+    %% with empty metadata and no text.
+    ok = barrel_vectordb:add_index_only(
+        ?STORE, <<"a">>, <<"alpha bravo">>, [1.0, 0.0, 0.0]),
+    {ok, [Top | _]} = barrel_vectordb:search_hybrid(
+        ?STORE, <<"alpha">>,
+        #{k => 1, query_vector => [1.0, 0.0, 0.0]}),
+    ?assertEqual(<<"a">>, maps:get(key, Top)),
+    ?assertEqual(#{}, maps:get(metadata, Top)),
+    ?assertEqual(false, maps:is_key(text, Top)).
+
+test_hybrid_query_vector_skips_embed() ->
+    ok = barrel_vectordb:add_index_only(
+        ?STORE, <<"a">>, <<"alpha">>, [1.0, 0.0, 0.0]),
+    %% The mocked embedder always fails, so hybrid WITHOUT query_vector
+    %% propagates the embed error...
+    ?assertMatch({error, _},
+                 barrel_vectordb:search_hybrid(?STORE, <<"alpha">>, #{k => 1})),
+    %% ...and WITH query_vector it succeeds without touching the embedder.
+    {ok, [_ | _]} = barrel_vectordb:search_hybrid(
+        ?STORE, <<"alpha">>, #{k => 1, query_vector => [1.0, 0.0, 0.0]}),
+    ok.

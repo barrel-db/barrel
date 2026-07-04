@@ -469,9 +469,15 @@ process_single_op({call, From, {search_bm25, Query, Opts}}, State) ->
     Result = do_search_bm25(State, Query, Opts),
     {{reply, From, Result}, State};
 
-%% Hybrid search (BM25 + vector)
+%% Hybrid search (BM25 + vector). A caller-supplied query_vector skips
+%% the internal embedder, so embedder-less stores (callers embedding
+%% queries themselves) can run hybrid search.
 process_single_op({call, From, {search_hybrid, Query, Opts}}, State) ->
-    case do_embed(Query, State) of
+    Embedded = case maps:get(query_vector, Opts, undefined) of
+        undefined -> do_embed(Query, State);
+        QueryVector when is_list(QueryVector) -> {ok, QueryVector}
+    end,
+    case Embedded of
         {ok, Vector} ->
             Result = do_search_hybrid(State, Query, Opts, Vector),
             {{reply, From, Result}, State};
@@ -1333,7 +1339,42 @@ do_search_hybrid(#state{} = State, Query, Opts, Vector) ->
             linear_merge(BM25Results, VectorResults, K, BM25Weight, VectorWeight)
     end,
 
-    {ok, Merged}.
+    %% Attach text/metadata to the fused top-K (one batch fetch)
+    {ok, hydrate_hybrid_results(Merged, Opts, State)}.
+
+%% @private Attach text/metadata to fused {Id, Score} pairs, honoring
+%% include_text / include_metadata (both default true). Mirrors the
+%% vector-search result semantics: a missing metadata row means empty
+%% metadata (index-only entries), missing text is omitted.
+hydrate_hybrid_results([], _Opts, _State) ->
+    [];
+hydrate_hybrid_results(Pairs, Opts, #state{db = Db, cf_metadata = CfM,
+                                           cf_text = CfT, docstore = Docstore}) ->
+    IncludeText = maps:get(include_text, Opts, true),
+    IncludeMeta = maps:get(include_metadata, Opts, true),
+    case IncludeText orelse IncludeMeta of
+        false ->
+            [#{key => Id, score => Score} || {Id, Score} <- Pairs];
+        true ->
+            Ids = [Id || {Id, _} <- Pairs],
+            {MetaResults, TextResults} =
+                docstore_search_fetch(Docstore, Db, CfM, CfT, Ids,
+                                      IncludeMeta, IncludeText),
+            lists:map(
+                fun({{Id, Score}, MetaRes, TextRes}) ->
+                    R0 = #{key => Id, score => Score},
+                    R1 = case {IncludeMeta, MetaRes} of
+                        {true, {ok, MetaBin}} -> R0#{metadata => binary_to_term(MetaBin)};
+                        {true, not_found} -> R0#{metadata => #{}};
+                        _ -> R0
+                    end,
+                    case {IncludeText, TextRes} of
+                        {true, {ok, TextBin}} -> R1#{text => TextBin};
+                        _ -> R1
+                    end
+                end,
+                lists:zip3(Pairs, MetaResults, TextResults))
+    end.
 
 %% Reciprocal Rank Fusion
 %% RRFk is the ranking constant (default 60, higher values = less emphasis on top ranks)
@@ -1358,12 +1399,9 @@ rrf_merge(BM25Results, VectorResults, K, BM25Weight, VectorWeight, RRFk) ->
         {Id, BM25RRF + VectorRRF}
     end, AllIds),
 
-    %% Sort and take top K
+    %% Sort and take top K; hydration attaches text/metadata afterwards
     Sorted = lists:sort(fun({_, S1}, {_, S2}) -> S1 > S2 end, Scores),
-    TopK = lists:sublist(Sorted, K),
-
-    %% Build result maps (without metadata for now)
-    [#{key => Id, score => Score} || {Id, Score} <- TopK].
+    lists:sublist(Sorted, K).
 
 %% Linear combination of scores
 linear_merge(BM25Results, VectorResults, K, BM25Weight, VectorWeight) ->
@@ -1394,11 +1432,9 @@ linear_merge(BM25Results, VectorResults, K, BM25Weight, VectorWeight) ->
         {Id, BM25Weight * BM25Score + VectorWeight * VectorScore}
     end, AllIds),
 
-    %% Sort and take top K
+    %% Sort and take top K; hydration attaches text/metadata afterwards
     Sorted = lists:sort(fun({_, S1}, {_, S2}) -> S1 > S2 end, Scores),
-    TopK = lists:sublist(Sorted, K),
-
-    [#{key => Id, score => Score} || {Id, Score} <- TopK].
+    lists:sublist(Sorted, K).
 
 %% Build rank map from ordered list
 build_rank_map(Ids) ->

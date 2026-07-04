@@ -580,9 +580,16 @@ search_bm25(Store, Query, Opts) when is_binary(Query) ->
 %% }).
 %% '''
 %%
+%% Results carry `text' and `metadata' like vector search (disable with
+%% `include_text => false' / `include_metadata => false'). Passing
+%% `query_vector => Vector' skips the internal embedder for the vector
+%% leg, so stores without an embedder can run hybrid search when the
+%% caller embeds the query itself.
+%%
 %% @param Store Store name or pid
-%% @param Query Text query
-%% @param Opts Search options (k, bm25_weight, vector_weight, fusion)
+%% @param Query Text query (used for the BM25 leg)
+%% @param Opts Search options (k, bm25_weight, vector_weight, fusion,
+%%        rrf_k, query_vector, include_text, include_metadata)
 %% @returns `{ok, Results}' list of result maps sorted by combined score
 -spec search_hybrid(store(), text(), search_opts()) ->
     {ok, [search_result()]} | {error, term()}.
