@@ -89,6 +89,8 @@
     add_vector/5,
     add_batch/2,
     add_vector_batch/2,
+    add_index_only/4,
+    add_index_only_batch/2,
     get/2,
     update/4,
     upsert/4,
@@ -366,6 +368,42 @@ add_batch(Store, Docs) ->
     {ok, #{inserted := non_neg_integer()}} | {error, term()}.
 add_vector_batch(Store, Docs) ->
     barrel_vectordb_server:add_vector_batch(Store, Docs).
+
+%% @doc Index a vector without storing text or metadata.
+%%
+%% For callers that own document storage elsewhere (for example a
+%% document database fronted by a `barrel_vectordb_docstore' adapter):
+%% the vector is written to the vector column family in the atomic batch
+%% (it stays authoritative for index rebuild on restart), `Text' feeds
+%% the BM25 index transiently and is then dropped, and no text/metadata
+%% is stored anywhere. Any stale text/metadata rows from a previous full
+%% `add' are cleared in the same batch.
+%%
+%% Idempotent upsert by id: re-adding replaces the vector and the BM25
+%% entry, so a crashed producer can safely re-drive the same entries.
+%% Use {@link delete/2} to remove an entry.
+%%
+%% @param Store Store name or pid
+%% @param Id Unique document identifier
+%% @param Text Text for BM25 indexing only (`<<>>' skips BM25)
+%% @param Vector Pre-computed embedding vector
+%% @returns `ok' on success, `{error, Reason}' on failure
+-spec add_index_only(store(), id(), text(), vector()) -> ok | {error, term()}.
+add_index_only(Store, Id, Text, Vector) ->
+    barrel_vectordb_server:add_index_only(Store, Id, Text, Vector).
+
+%% @doc Index multiple vectors without storing text or metadata.
+%%
+%% Batch form of {@link add_index_only/4}: one atomic RocksDB write for
+%% all vectors.
+%%
+%% @param Store Store name or pid
+%% @param Entries List of `{Id, Text, Vector}' tuples
+%% @returns `{ok, Stats}' on success, `{error, Reason}' on failure
+-spec add_index_only_batch(store(), [{id(), text(), vector()}]) ->
+    {ok, #{inserted := non_neg_integer()}} | {error, term()}.
+add_index_only_batch(Store, Entries) ->
+    barrel_vectordb_server:add_index_only_batch(Store, Entries).
 
 %% @doc Get a document by ID.
 %%

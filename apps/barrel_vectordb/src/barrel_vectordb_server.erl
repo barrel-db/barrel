@@ -31,6 +31,8 @@
     add_vector/5,
     add_batch/2,
     add_vector_batch/2,
+    add_index_only/4,
+    add_index_only_batch/2,
     get/2,
     update/4,
     upsert/4,
@@ -128,6 +130,18 @@ add_batch(Store, Docs) ->
     {ok, #{inserted := non_neg_integer()}} | {error, term()}.
 add_vector_batch(Store, Docs) ->
     gen_batch_server:call(Store, {add_vector_batch, Docs}, ?LONG_TIMEOUT).
+
+%% @doc Index a vector without storing text/metadata (see barrel_vectordb).
+-spec add_index_only(atom() | pid(), binary(), binary(), [float()]) ->
+    ok | {error, term()}.
+add_index_only(Store, Id, Text, Vector) ->
+    gen_batch_server:call(Store, {index_only, Id, Text, Vector}, ?LONG_TIMEOUT).
+
+%% @doc Index multiple vectors without storing text/metadata.
+-spec add_index_only_batch(atom() | pid(), [{binary(), binary(), [float()]}]) ->
+    {ok, #{inserted := non_neg_integer()}} | {error, term()}.
+add_index_only_batch(Store, Entries) ->
+    gen_batch_server:call(Store, {index_only_batch, Entries}, ?LONG_TIMEOUT).
 
 %% @doc Get document by ID.
 -spec get(atom() | pid(), binary()) -> {ok, map()} | not_found | {error, term()}.
@@ -312,6 +326,8 @@ partition_ops(Ops) ->
             {_, _, {add_vector, _, _, _, _}} -> false;
             {_, _, {add_batch, _}} -> false;
             {_, _, {add_vector_batch, _}} -> false;
+            {_, _, {index_only, _, _, _}} -> false;
+            {_, _, {index_only_batch, _}} -> false;
             _ -> true  % reads: get, search, peek, stats, count, delete, update, upsert
         end
     end, Ops).
@@ -580,6 +596,44 @@ apply_write_to_rocksdb_batch({add_vector, Id, Text, Metadata, Vector}, Batch, Cf
         Other ->
             {error, {dimension_mismatch, Dim, Other}}
     end;
+apply_write_to_rocksdb_batch({index_only, Id, _Text, Vector}, Batch, CfV, CfM, CfT, Dim, _Docstore) ->
+    case length(Vector) of
+        Dim ->
+            %% Vector CF only: it stays authoritative for index rebuild.
+            %% Clear any stale text/metadata rows from a previous full add
+            %% so reads never pair the new vector with old doc data. The
+            %% external docstore is never written (the caller owns docs).
+            VectorBin = encode_vector(Vector),
+            ok = rocksdb:batch_put(Batch, CfV, Id, VectorBin),
+            ok = rocksdb:batch_delete(Batch, CfM, Id),
+            ok = rocksdb:batch_delete(Batch, CfT, Id),
+            {ok, {Id, Vector}, []};
+        Other ->
+            {error, {dimension_mismatch, Dim, Other}}
+    end;
+apply_write_to_rocksdb_batch({index_only_batch, Entries}, Batch, CfV, CfM, CfT, Dim, _Docstore) ->
+    Results = lists:map(
+        fun({Id, _Text, Vector}) ->
+            case length(Vector) of
+                Dim ->
+                    VectorBin = encode_vector(Vector),
+                    ok = rocksdb:batch_put(Batch, CfV, Id, VectorBin),
+                    ok = rocksdb:batch_delete(Batch, CfM, Id),
+                    ok = rocksdb:batch_delete(Batch, CfT, Id),
+                    {ok, {Id, Vector}, []};
+                Other ->
+                    {error, {dimension_mismatch, Dim, Other}}
+            end
+        end,
+        Entries
+    ),
+    case [E || {error, _} = E <- Results] of
+        [] ->
+            Vectors = [{Id, Vec} || {ok, {Id, Vec}, _} <- Results],
+            {ok, Vectors, []};
+        [FirstError | _] ->
+            FirstError
+    end;
 apply_write_to_rocksdb_batch({add_vector_batch, Docs}, Batch, CfV, CfM, CfT, Dim, Docstore) ->
     %% Process batch - collect all vectors
     Results = lists:map(
@@ -761,7 +815,12 @@ prepare_writes([{call, From, {add_batch, Docs}} | Rest], State, Acc) ->
             {error, From, Reason, lists:reverse(Acc)}
     end;
 prepare_writes([{call, From, {add_vector_batch, Docs}} | Rest], State, Acc) ->
-    prepare_writes(Rest, State, [{From, {add_vector_batch, Docs}, prepared} | Acc]).
+    prepare_writes(Rest, State, [{From, {add_vector_batch, Docs}, prepared} | Acc]);
+prepare_writes([{call, From, {index_only, _Id, _Text, _Vector} = Op} | Rest], State, Acc) ->
+    %% Explicit vector, nothing to embed
+    prepare_writes(Rest, State, [{From, Op, prepared} | Acc]);
+prepare_writes([{call, From, {index_only_batch, _Entries} = Op} | Rest], State, Acc) ->
+    prepare_writes(Rest, State, [{From, Op, prepared} | Acc]).
 
 %% Prepare embeddings for batch add
 prepare_batch_embeddings(Docs, State) ->
@@ -1112,10 +1171,13 @@ combine_search_results([], [], [], [], _Filter, _IncludeText, _IncludeMeta, Acc)
 combine_search_results([Id | Ids], [Distance | Distances],
                        [MetaRes | MetaResults], [TextRes | TextResults],
                        Filter, IncludeText, IncludeMeta, Acc) ->
-    %% Parse metadata if available
+    %% Parse metadata if available. A missing row is NOT an error: index-only
+    %% entries store no metadata (their doc data lives elsewhere), so they
+    %% filter and return as empty metadata. Only fetch errors drop the hit.
     Metadata = case MetaRes of
         {ok, MetadataBin} -> binary_to_term(MetadataBin);
         not_needed -> #{};
+        not_found -> #{};
         _ -> undefined
     end,
 
@@ -1126,7 +1188,7 @@ combine_search_results([Id | Ids], [Distance | Distances],
         _ -> undefined
     end,
 
-    %% Check filter (skip if metadata couldn't be fetched for filtering)
+    %% Check filter (skip only when metadata could not be fetched)
     PassesFilter = case Metadata of
         undefined -> false;
         _ -> Filter(Metadata)
@@ -1193,6 +1255,11 @@ bm25_pairs_of({add_vector, Id, Text, _Metadata, _Vector}) ->
     [{Id, Text}];
 bm25_pairs_of({add_vector_batch, Docs}) ->
     [{Id, Text} || {Id, Text, _Metadata, _Vector} <- Docs];
+bm25_pairs_of({index_only, Id, Text, _Vector}) when Text =/= <<>> ->
+    %% Text is used transiently for BM25 and then dropped (not stored).
+    [{Id, Text}];
+bm25_pairs_of({index_only_batch, Entries}) ->
+    [{Id, Text} || {Id, Text, _Vector} <- Entries, Text =/= <<>>];
 bm25_pairs_of(_) ->
     [].
 
