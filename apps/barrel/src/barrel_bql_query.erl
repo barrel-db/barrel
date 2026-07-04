@@ -14,7 +14,8 @@
 -export([
     run/3,
     fold/5,
-    explain/2
+    explain/2,
+    subscribe_plan/3
 ]).
 
 -define(MAX_FETCH_K, 1000).
@@ -47,6 +48,21 @@ fold(Db, Plan, Opts, Fun, Acc0) ->
             {ok, fold_rows(Rows, Fun, Acc0), Meta};
         {error, _} = Error ->
             Error
+    end.
+
+%% @doc Start a live query for a compiled SUBSCRIBE plan. Deltas go to
+%% the owner; see barrel_bql_live for the message shapes.
+-spec subscribe_plan(barrel:db(), barrel_bql_lower:plan(), map()) ->
+    {ok, #{ref := reference(), pid := pid()}} | {error, term()}.
+subscribe_plan(_Db, #{subscribe := false}, _Opts) ->
+    {error, missing_subscribe};
+subscribe_plan(Db, #{subscribe := true} = Plan, Opts) ->
+    Owner = maps:get(owner, Opts, self()),
+    Ref = make_ref(),
+    case barrel_bql_live_sup:start_child(
+             #{db => Db, plan => Plan, owner => Owner, ref => Ref}) of
+        {ok, Pid} -> {ok, #{ref => Ref, pid => Pid}};
+        {error, _} = Error -> Error
     end.
 
 -spec explain(barrel:db(), barrel_bql_lower:plan()) ->

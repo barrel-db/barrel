@@ -140,14 +140,22 @@ find_opts(Opts) ->
     maps:with([chunk_size, continuation], Opts).
 
 collect_frames(DbName, Plan, Opts) ->
-    #{spec := Spec, unnest := Unnest, post := #{residual := Residual}} =
-        Plan,
+    #{spec := Spec, unnest := Unnest,
+      post := #{residual := Residual, order := Order, offset := Offset,
+                limit := Limit}} = Plan,
     ChunkSize = maps:get(chunk_size, Opts, 1000),
+    %% Bounded queries without ORDER BY can stop scanning once enough
+    %% surviving frames are collected; a sort needs everything.
+    Need = case {Order, Limit} of
+        {undefined, undefined} -> infinity;
+        {undefined, _} -> Offset + Limit;
+        {_, _} -> infinity
+    end,
     collect_frames_loop(DbName, Spec, Unnest, Residual, ChunkSize,
-                        undefined, []).
+                        Need, undefined, []).
 
-collect_frames_loop(DbName, Spec, Unnest, Residual, ChunkSize, Cont,
-                    Acc) ->
+collect_frames_loop(DbName, Spec, Unnest, Residual, ChunkSize, Need,
+                    Cont, Acc) ->
     FindOpts = case Cont of
         undefined -> #{chunk_size => ChunkSize};
         _ -> #{chunk_size => ChunkSize, continuation => Cont}
@@ -158,12 +166,13 @@ collect_frames_loop(DbName, Spec, Unnest, Residual, ChunkSize, Cont,
                                Frame <- row_frames(Row, Unnest),
                                residual_match(Residual, Frame)],
             Acc1 = Acc ++ Frames,
+            Done = Need =/= infinity andalso length(Acc1) >= Need,
             case Meta of
-                #{has_more := true, continuation := Cont1} ->
+                #{has_more := true, continuation := Cont1} when not Done ->
                     collect_frames_loop(DbName, Spec, Unnest, Residual,
-                                        ChunkSize, Cont1, Acc1);
-                #{last_seq := LastSeq} ->
-                    {ok, Acc1, LastSeq}
+                                        ChunkSize, Need, Cont1, Acc1);
+                _ ->
+                    {ok, Acc1, maps:get(last_seq, Meta, first)}
             end;
         {error, _} = Error ->
             Error

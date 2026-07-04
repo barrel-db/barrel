@@ -632,18 +632,20 @@ lower(Canon) ->
         Offset = case int_opt(Offset0) of undefined -> 0; O -> O end,
         Empty = IdEmpty orelse Limit =:= 0,
         IsCollection = element(1, Source) =:= collection,
+        %% LIMIT/OFFSET always run in the post stage: the engine's
+        %% chunked path only uses a spec limit to size chunks, it does
+        %% not enforce a total bound across continuations. The
+        %% executor early-stops once offset+limit frames are
+        %% collected, so LIMIT queries stay bounded.
         Streamable = IsCollection andalso Order =:= []
                      andalso Unnest =:= undefined
-                     andalso IdResidualCs =:= [],
-        PushDown = Streamable andalso not Empty,
+                     andalso IdResidualCs =:= []
+                     andalso Limit =:= undefined
+                     andalso Offset =:= 0,
         Spec0 = #{include_docs => true, select => ['*']},
-        Spec1 = case IsCollection of
+        Spec = case IsCollection of
             true -> add_scan(Spec0, EngineConds, IdScan, Unnest);
             false -> Spec0
-        end,
-        Spec = case PushDown of
-            true -> add_limit(Spec1, Limit, Offset);
-            false -> Spec1
         end,
         PostOrder = case Order of
             [] -> undefined;
@@ -660,11 +662,8 @@ lower(Canon) ->
                 residual => ResidualConds,
                 doc_where => DocConds,
                 order => PostOrder,
-                offset => case PushDown of true -> 0; false -> Offset end,
-                limit => case PushDown of
-                    true -> undefined;
-                    false -> Limit
-                end,
+                offset => Offset,
+                limit => Limit,
                 project => lower_select(Select, Canon, Source),
                 empty => Empty
             },
@@ -802,11 +801,6 @@ add_scan(Spec0, EngineConds, IdScan, Unnest) ->
             %% Unconstrained query: full primary-key scan.
             Spec2#{id_range => {undefined, undefined}}
     end.
-
-add_limit(Spec, undefined, 0) -> Spec;
-add_limit(Spec, undefined, Offset) -> Spec#{offset => Offset};
-add_limit(Spec, Limit, 0) -> Spec#{limit => Limit};
-add_limit(Spec, Limit, Offset) -> Spec#{limit => Limit, offset => Offset}.
 
 order_warning([], _IsCollection) -> [];
 order_warning([{{path, _, _, Comps}, _} | _], true) ->

@@ -45,7 +45,10 @@
     query/3,
     query_fold/5,
     explain_query/2,
-    explain_query/3
+    explain_query/3,
+    subscribe_query/2,
+    subscribe_query/3,
+    unsubscribe_query/1
 ]).
 
 %% Attachments / blobs (barrel_docdb; backend pluggable per database)
@@ -419,6 +422,36 @@ explain_query(Db, Bql, Opts) ->
     case compile_bql(Bql, Opts) of
         {ok, Plan} -> barrel_bql_query:explain(Db, Plan);
         {error, _} = Error -> Error
+    end.
+
+%% @doc Start a live query for a BQL SUBSCRIBE statement. The initial
+%% snapshot and add/change/remove deltas are pushed to the owner
+%% process (default: the caller); see barrel_bql_live for the message
+%% shapes. Returns an opaque subscription for unsubscribe_query/1;
+%% monitor its pid for crash signals. Owner death tears the query
+%% down.
+-spec subscribe_query(db(), binary() | string()) ->
+    {ok, #{ref := reference(), pid := pid()}} | {error, term()}.
+subscribe_query(Db, Bql) ->
+    subscribe_query(Db, Bql, #{}).
+
+%% @doc Like subscribe_query/2 with options: params, owner.
+-spec subscribe_query(db(), binary() | string(), map()) ->
+    {ok, #{ref := reference(), pid := pid()}} | {error, term()}.
+subscribe_query(Db, Bql, Opts) ->
+    case compile_bql(Bql, Opts) of
+        {ok, Plan} ->
+            barrel_bql_query:subscribe_plan(Db, Plan,
+                                            maps:with([owner], Opts));
+        {error, _} = Error ->
+            Error
+    end.
+
+%% @doc Stop a live query. Idempotent.
+-spec unsubscribe_query(#{ref := reference(), pid := pid()}) -> ok.
+unsubscribe_query(#{pid := Pid}) ->
+    try gen_server:call(Pid, stop)
+    catch exit:_ -> ok
     end.
 
 compile_bql(Bql, Opts) ->

@@ -3,8 +3,9 @@
 %%%
 %%% barrel is an embeddable library: composed databases are opened on
 %%% demand by the embedding application via {@link barrel:open/2}. The
-%%% only static child is the record-indexer supervisor, which hosts one
-%%% indexer per record-mode database.
+%%% static children are the record-indexer supervisor (one indexer per
+%%% record-mode database) and the live-query supervisor (one worker
+%%% per SUBSCRIBE statement).
 %%% @end
 %%%-------------------------------------------------------------------
 -module(barrel_sup).
@@ -30,6 +31,12 @@ init([]) ->
         #{
             id => barrel_record_sup,
             start => {barrel_record_sup, start_link, []},
+            type => supervisor,
+            shutdown => infinity
+        },
+        #{
+            id => barrel_bql_live_sup,
+            start => {barrel_bql_live_sup, start_link, []},
             type => supervisor,
             shutdown => infinity
         }

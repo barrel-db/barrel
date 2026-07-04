@@ -179,13 +179,16 @@ unconstrained_query_scans_ids_test() ->
 %% Placement: limit/offset pushdown, streamable, order, unnest
 %%--------------------------------------------------------------------
 
-limit_pushdown_test() ->
-    #{spec := Spec, post := Post, streamable := true} =
+limit_stays_post_side_test() ->
+    %% the engine's chunked path cannot enforce a total limit across
+    %% continuations: LIMIT/OFFSET run post-side and the executor
+    %% early-stops, so the plan is not streamable
+    #{spec := Spec, post := Post, streamable := false} =
         plan("SELECT a FROM db WHERE b = 1 LIMIT 5 OFFSET 2"),
-    ?assertEqual(5, maps:get(limit, Spec)),
-    ?assertEqual(2, maps:get(offset, Spec)),
-    ?assertEqual(undefined, maps:get(limit, Post)),
-    ?assertEqual(0, maps:get(offset, Post)).
+    ?assertNot(maps:is_key(limit, Spec)),
+    ?assertNot(maps:is_key(offset, Spec)),
+    ?assertEqual(5, maps:get(limit, Post)),
+    ?assertEqual(2, maps:get(offset, Post)).
 
 order_by_blocks_pushdown_test() ->
     #{spec := Spec, post := Post, streamable := false,
