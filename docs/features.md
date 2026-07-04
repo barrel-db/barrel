@@ -25,8 +25,9 @@ them; each underlying app stays usable on its own.
 | Batches (`put_docs`/`get_docs`/`delete_docs`, `vector_add_batch`) | Ready | Per-element results, in order. |
 | Attachments (blobs) | Ready | Document attachments; pluggable backend per db via `barrel_att_backend` (RocksDB BlobDB default). Streaming read/write. |
 | Vector search | Ready | `barrel_vectordb`; HNSW by default. |
-| BM25 keyword search | Opt-in | Enable with `bm25_backend => memory` (or `disk`) at open. |
-| Hybrid search (vector + BM25) | Opt-in | Needs BM25 enabled and an embedder for text queries. |
+| Record mode (policy-driven vector indexing) | Ready | Documents auto-embed per policy; async (healed) or sync (read-your-write); explicit vectors via put option. See [record-mode](guides/record-mode.md). |
+| BM25 keyword search | Opt-in | Enable with `bm25_backend => memory` (or `disk`) at open; disk by default in record mode. |
+| Hybrid search (vector + BM25) | Opt-in | Needs BM25 enabled; results carry text/metadata. Text queries need an embedder (or `query_vector`). |
 | Embeddings | Opt-in | `barrel_embed` (local Python, Ollama, OpenAI, ...). Auto-embed and text hybrid need it. |
 | Reranking | Opt-in | `barrel_rerank` (cross-encoder). |
 | FAISS index backend | Opt-in | `barrel_faiss`; needs the FAISS C++ library, excluded from the default build (`rebar3 as faiss`). |

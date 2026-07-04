@@ -71,6 +71,11 @@ ok = barrel:close_attachment_reader(R1).
 
 ## Vectors and search
 
+To keep vectors in sync with documents automatically, open the database with
+an embedding policy instead of managing them by hand: see
+[record mode](record-mode.md). The direct vector API below applies to plain
+databases.
+
 ```erlang
 ok = barrel:vector_add(Db, <<"a">>, <<"hello world">>, #{}, Vector),
 {ok, #{inserted := 2}} = barrel:vector_add_batch(Db, [
