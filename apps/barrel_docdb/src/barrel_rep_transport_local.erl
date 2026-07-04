@@ -24,6 +24,10 @@
     sync_hlc/2
 ]).
 
+%% Attachment sync (optional callbacks)
+-export([att_changes/3, diff_attachments/2, get_attachment_stream/3,
+         put_attachment/5, delete_attachment/4]).
+
 %%====================================================================
 %% barrel_rep_transport callbacks
 %%====================================================================
@@ -86,3 +90,63 @@ db_info(DbName) ->
     {ok, barrel_hlc:timestamp()} | {error, term()}.
 sync_hlc(_DbName, RemoteHlc) ->
     barrel_docdb:sync_hlc(RemoteHlc).
+
+%%====================================================================
+%% Attachment sync
+%%====================================================================
+
+att_changes(DbName, Since, Opts) ->
+    barrel_docdb:att_changes(DbName, Since, Opts).
+
+diff_attachments(DbName, Entries) ->
+    barrel_docdb:diff_attachments(DbName, Entries).
+
+get_attachment_stream(DbName, DocId, Name) ->
+    case barrel_docdb:get_attachment_info(DbName, DocId, Name) of
+        {ok, Info} ->
+            case barrel_docdb:open_attachment_stream(DbName, DocId, Name) of
+                {ok, Stream} -> {ok, Info, read_fun(Stream)};
+                {error, _} = Error -> Error
+            end;
+        {error, _} = Error ->
+            Error
+    end.
+
+read_fun(Stream) ->
+    fun() ->
+        case barrel_docdb:read_attachment_chunk(Stream) of
+            {ok, Chunk, Stream2} -> {ok, Chunk, read_fun(Stream2)};
+            eof -> eof;
+            {error, _} = Error -> Error
+        end
+    end.
+
+put_attachment(DbName, DocId, Name, Meta, ReadFun) ->
+    #{content_type := ContentType, digest := Digest,
+      origin_hlc := OriginHlc} = Meta,
+    case barrel_docdb:open_attachment_writer(
+             DbName, DocId, Name, ContentType,
+             #{origin_hlc => OriginHlc, expected_digest => Digest}) of
+        {ok, Writer} -> pump(ReadFun, Writer);
+        {error, _} = Error -> Error
+    end.
+
+pump(ReadFun, Writer) ->
+    case ReadFun() of
+        {ok, Chunk, NextReadFun} ->
+            case barrel_docdb:write_attachment_chunk(Writer, Chunk) of
+                {ok, Writer2} -> pump(NextReadFun, Writer2);
+                {error, _} = Error ->
+                    _ = barrel_docdb:abort_attachment_writer(Writer),
+                    Error
+            end;
+        eof ->
+            barrel_docdb:finish_attachment_writer(Writer);
+        {error, _} = Error ->
+            _ = barrel_docdb:abort_attachment_writer(Writer),
+            Error
+    end.
+
+delete_attachment(DbName, DocId, Name, Meta) ->
+    barrel_docdb:delete_attachment(
+        DbName, DocId, Name, maps:with([origin_hlc], Meta)).

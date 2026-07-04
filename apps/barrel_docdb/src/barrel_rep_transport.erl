@@ -69,3 +69,40 @@
 %% Synchronize HLC with remote timestamp (optional - for distributed ordering)
 -callback sync_hlc(Endpoint :: term(), Hlc :: barrel_hlc:timestamp()) ->
     {ok, barrel_hlc:timestamp()} | {error, term()}.
+
+%%====================================================================
+%% Optional: attachment sync
+%%====================================================================
+%% Attachments replicate out-of-band, content-addressed by SHA-256
+%% digest with last-write-wins on an origin HLC (see barrel_att_feed).
+%% Transports lacking these degrade: the attachment phase reports
+%% att_sync => skipped. read_fun() is the transport-neutral pull
+%% stream: fun(() -> {ok, Chunk, NextReadFun} | eof | {error, term()}).
+
+-callback att_changes(Endpoint :: term(), Since :: seq() | first,
+                      Opts :: map()) ->
+    {ok, [map()], LastSeq :: seq() | first} | {error, term()}.
+
+-callback diff_attachments(Endpoint :: term(),
+                           [#{id := docid(), name := binary(),
+                              digest := binary()}]) ->
+    {ok, [#{id := docid(), name := binary(),
+            status := have | missing}]} | {error, term()}.
+
+-callback get_attachment_stream(Endpoint :: term(), DocId :: docid(),
+                                Name :: binary()) ->
+    {ok, Info :: map(), ReadFun :: fun()} | {error, not_found}
+    | {error, term()}.
+
+-callback put_attachment(Endpoint :: term(), DocId :: docid(),
+                         Name :: binary(), Meta :: map(),
+                         ReadFun :: fun()) ->
+    {ok, map()} | {ok, ignored} | {error, term()}.
+
+-callback delete_attachment(Endpoint :: term(), DocId :: docid(),
+                            Name :: binary(), Meta :: map()) ->
+    ok | {error, term()}.
+
+-optional_callbacks([att_changes/3, diff_attachments/2,
+                     get_attachment_stream/3, put_attachment/5,
+                     delete_attachment/4]).

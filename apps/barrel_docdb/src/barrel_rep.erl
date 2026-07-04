@@ -90,7 +90,8 @@
     doc_read_failures := non_neg_integer(),
     doc_write_failures := non_neg_integer(),
     start_seq := seq() | first,
-    last_seq := seq() | first
+    last_seq := seq() | first,
+    att_sync := disabled | skipped | map()
 }.
 
 -export_type([rep_config/0, rep_result/0, filter_opts/0]).
@@ -238,13 +239,34 @@ replicate_one_shot(Config, Opts) ->
                 false -> ok
             end,
 
-            %% Build result
-            Result = Stats#{
-                ok => true,
-                start_seq => StartSeq,
-                last_seq => barrel_rep_checkpoint:get_last_seq(FinalCheckpoint)
-            },
-            {ok, Result};
+            %% Attachment phase (independent lifecycle + checkpoint;
+            %% degrades to skipped without transport/backend support)
+            AttSync = case maps:get(attachments, Opts, true) of
+                false ->
+                    disabled;
+                true ->
+                    barrel_rep_att:sync(Source, Target, SourceTransport,
+                                        TargetTransport,
+                                        Opts#{rep_id => RepId})
+            end,
+            case AttSync of
+                {error, AttReason} ->
+                    barrel_metrics:inc_rep_errors(RepId),
+                    {error, {att_sync_failed, AttReason}};
+                _ ->
+                    %% Build result
+                    Result = Stats#{
+                        ok => true,
+                        start_seq => StartSeq,
+                        last_seq => barrel_rep_checkpoint:get_last_seq(
+                            FinalCheckpoint),
+                        att_sync => case AttSync of
+                            {ok, AttStats} -> AttStats;
+                            Other -> Other
+                        end
+                    },
+                    {ok, Result}
+            end;
         {error, _} = Error ->
             %% Record error metric
             barrel_metrics:inc_rep_errors(RepId),
