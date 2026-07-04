@@ -25,8 +25,10 @@
     uninstall/1,
     names/1,
     channels/1,
+    topics/1,
     match/2,
-    write_ops/6
+    write_ops/6,
+    move_ops/5
 ]).
 
 %% Row codec (used by the read side and tests)
@@ -118,6 +120,13 @@ channels(DbName) ->
 names(DbName) ->
     maps:keys(channels(DbName)).
 
+%% @doc The ars topics of a document body ([] for tombstones).
+-spec topics(map() | undefined) -> [binary()].
+topics(undefined) ->
+    [];
+topics(Body) when is_map(Body) ->
+    barrel_ars:paths_to_topics(barrel_ars:analyze(Body)).
+
 %%====================================================================
 %% Matching
 %%====================================================================
@@ -194,6 +203,37 @@ write_ops(DbName, NewHlc, DocInfo, NewTopics, OldHlc, OldTopics) ->
             end,
             DeleteOps ++ RowOps
     end.
+
+%% @doc Batch ops moving a doc's channel rows from OldHlc to NewHlc
+%% without recomputing membership: point-read each configured channel
+%% at OldHlc and rewrite what exists. This is the concurrent-loser
+%% path, where the winner's feed row moves but its body (possibly a
+%% tombstone, whose membership cannot be derived) is unchanged. Member
+%% rows are re-encoded from DocInfo (fresh rev and conflict count);
+%% leave rows move verbatim.
+-spec move_ops(fun((binary()) -> {ok, binary()} | not_found |
+                                 {error, term()}),
+               binary(), barrel_hlc:timestamp(), barrel_hlc:timestamp(),
+               map()) -> [term()].
+move_ops(Get, DbName, OldHlc, NewHlc, DocInfo) ->
+    lists:flatmap(
+        fun(Channel) ->
+            OldKey = barrel_store_keys:channel_key(DbName, Channel, OldHlc),
+            case Get(OldKey) of
+                {ok, Value} ->
+                    NewValue = case decode_row(Value) of
+                        #{flag := member} -> encode_row(member, DocInfo);
+                        #{flag := leave} -> Value
+                    end,
+                    [{delete, OldKey},
+                     {put,
+                      barrel_store_keys:channel_key(DbName, Channel, NewHlc),
+                      NewValue}];
+                _ ->
+                    []
+            end
+        end,
+        names(DbName)).
 
 %%====================================================================
 %% Row codec

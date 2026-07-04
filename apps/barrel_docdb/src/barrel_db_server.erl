@@ -247,6 +247,16 @@ fold_local_docs(Pid, Prefix, Fun, Acc) ->
 init([Name, Config]) ->
     process_flag(trap_exit, true),
 
+    %% Validate the channels config before opening anything: a bad
+    %% pattern set must fail the open, not the first write.
+    case barrel_channel:compile(maps:get(channels, Config, #{})) of
+        {ok, CompiledChannels} ->
+            init(Name, Config, CompiledChannels);
+        {error, ChanReason} ->
+            {stop, {invalid_channels, ChanReason}}
+    end.
+
+init(Name, Config, CompiledChannels) ->
     %% Get data directory from config. Fall back to the `data_dir' app env so a
     %% node can relocate ALL of its dbs (including internal ones created with no
     %% opts) off the shared default - lets two local nodes use distinct dirs.
@@ -286,6 +296,7 @@ init([Name, Config]) ->
                     persistent_term:put({barrel_store, Name}, StoreRef),
                     persistent_term:put({barrel_source, Name},
                                         ensure_source_id(StoreRef, Name)),
+                    ok = barrel_channel:install(Name, CompiledChannels),
 
                     %% Compaction settings from config (or defaults)
                     CompactionInterval = maps:get(compaction_interval, Config,
@@ -538,6 +549,7 @@ terminate(_Reason, #state{name = Name, store_ref = StoreRef, att_ref = AttRef,
     persistent_term:erase({barrel_db, Name}),
     persistent_term:erase({barrel_store, Name}),
     persistent_term:erase({barrel_source, Name}),
+    ok = barrel_channel:uninstall(Name),
     %% Close document store (includes body CF)
     _ =
       case StoreRef of
@@ -598,6 +610,7 @@ release_stale_refs(Name) ->
             persistent_term:erase({barrel_store, Name}),
             persistent_term:erase({barrel_db, Name}),
             persistent_term:erase({barrel_source, Name}),
+            ok = barrel_channel:uninstall(Name),
             ok
     end.
 
@@ -842,6 +855,27 @@ decode_sibling_entry(<<FlagByte:8, DelByte:8, VVBin/binary>>) ->
 %% the version chain and its body to the version-keyed archive.
 %% Returns {AllOps, NotifyInfo} with NotifyInfo =
 %% {DocId, NewToken, NextHlc, Deleted, DocBody}.
+%% @private Channel feed ops for an applied write. Topics are derived
+%% from the bodies only when channels are configured; tombstone bodies
+%% have no topics.
+channel_ops(DbName, NewHlc, DocInfo, DocBody, OldHlc, OldDocBody,
+            OldDeleted) ->
+    case barrel_channel:channels(DbName) of
+        Empty when map_size(Empty) =:= 0 ->
+            [];
+        _ ->
+            NewTopics = case maps:get(deleted, DocInfo) of
+                true -> [];
+                false -> barrel_channel:topics(DocBody)
+            end,
+            OldTopics = case OldDeleted of
+                true -> [];
+                false -> barrel_channel:topics(OldDocBody)
+            end,
+            barrel_channel:write_ops(DbName, NewHlc, DocInfo, NewTopics,
+                                     OldHlc, OldTopics)
+    end.
+
 build_write_ops(StoreRef, DbName, DocRecord, Old, Opts) ->
     #{id := DocId, deleted := Deleted, doc := DocBody} = DocRecord,
     DocEntityKey = barrel_store_keys:doc_entity(DbName, DocId),
@@ -958,11 +992,16 @@ build_write_ops(StoreRef, DbName, DocRecord, Old, Opts) ->
         DbName, NextHlc, DocId, NewVersion, Deleted,
         maps:get(history_cause, Opts, local), NewVV),
 
+    %% Per-channel feed rows (write-time partial sync)
+    ChannelOps = channel_ops(DbName, NextHlc, DocInfo, DocBody, OldHlc,
+                             OldDocBody, OldDeleted),
+
     %% Write new body to current location (no version in key)
     BodyKey = barrel_store_keys:doc_body(DbName, DocId),
     BodyOp = {body_put, BodyKey, CborBody},
     AllOps = DocOps ++ HlcDeleteOps ++ PathIndexOps ++ ChangeOps ++ PathHlcOps
-        ++ ArchiveOps ++ ChainOps ++ OutboxOps ++ HistoryOps ++ [BodyOp],
+        ++ ArchiveOps ++ ChainOps ++ OutboxOps ++ HistoryOps ++ ChannelOps
+        ++ [BodyOp],
     {AllOps, {DocId, NewToken, NextHlc, Deleted, DocBody}}.
 
 %% @doc Put multiple documents in a single batch (batch write)
@@ -1153,9 +1192,14 @@ do_delete_doc(StoreRef, DbName, DocId, Opts) ->
             HistoryOps = barrel_history:write_ops(
                 DbName, NextHlc, DocId, NewVersion, true, local, NewVV),
 
+            %% The tombstone lands in the channels the doc was in
+            ChannelOps = channel_ops(DbName, NextHlc, NewDocInfo, undefined,
+                                     OldHlc, OldDocBody, OldDeleted),
+
             %% Write batch atomically
             AllOps = DocOps ++ HlcDeleteOps ++ PathIndexOps ++ ChangeOps ++ PathHlcOps
-                ++ ArchiveOps ++ ChainOps ++ OutboxOps ++ HistoryOps,
+                ++ ArchiveOps ++ ChainOps ++ OutboxOps ++ HistoryOps
+                ++ ChannelOps,
             WriteOpts = #{sync => maps:get(sync, Opts, false)},
             ok = barrel_store_rocksdb:write_batch(StoreRef, AllOps, WriteOpts),
 
@@ -1474,10 +1518,18 @@ apply_remote_current(StoreRef, DbName, DocId, DocBody, Version, VV, Deleted,
         DbName, ChangeHlc, DocId, Version, Deleted, replicated, VV),
     OutboxOps = barrel_outbox:write_ops(DbName, Tags, ChangeHlc, OldHlc,
                                         DocId, Token, Deleted),
+    %% Replicated arrivals land in channel feeds too
+    OldDeleted = case Old of
+        undefined -> false;
+        _ -> maps:get(deleted, Old)
+    end,
+    ChannelOps = channel_ops(DbName, ChangeHlc, DocInfo, DocBody, OldHlc,
+                             OldDocBody, OldDeleted),
     CborBody = barrel_docdb_codec_cbor:encode_cbor(DocBody),
     BodyOp = {body_put, barrel_store_keys:doc_body(DbName, DocId), CborBody},
     AllOps = DocOps ++ HlcDeleteOps ++ PathIndexOps ++ ChangeOps ++ PathHlcOps
-        ++ ArchiveOps ++ ChainOps ++ OutboxOps ++ HistoryOps ++ [BodyOp],
+        ++ ArchiveOps ++ ChainOps ++ OutboxOps ++ HistoryOps ++ ChannelOps
+        ++ [BodyOp],
     ok = barrel_store_rocksdb:write_batch(StoreRef, AllOps, #{}),
     notify_subscribers(DbName, DocId, Token, ChangeHlc, Deleted, DocBody),
     {ok, DocId, Token}.
@@ -1528,8 +1580,14 @@ keep_local_add_conflict(StoreRef, DbName, DocId, RemoteBody, Version, RemoteVV,
     HistoryOps = barrel_history:write_ops(
         DbName, ChangeHlc, DocId, Version, RemoteDeleted, replicated,
         SiblingVV),
+    %% The winner's feed row moves to ChangeHlc; its channel rows move
+    %% with it (point-read move: a tombstone winner's membership cannot
+    %% be recomputed from its body)
+    ChannelOps = barrel_channel:move_ops(
+        fun(Key) -> barrel_store_rocksdb:get(StoreRef, Key) end,
+        DbName, OldHlc, ChangeHlc, DocInfo),
     AllOps = DocOps ++ HlcDeleteOps ++ ChangeOps ++ PathHlcOps
-        ++ ChainOps ++ ArchiveOps ++ HistoryOps ++ ExtraOps,
+        ++ ChainOps ++ ArchiveOps ++ HistoryOps ++ ChannelOps ++ ExtraOps,
     ok = barrel_store_rocksdb:write_batch(StoreRef, AllOps, #{}),
     notify_subscribers(DbName, DocId, LocalToken, ChangeHlc, LocalDeleted,
                        LocalBody),
