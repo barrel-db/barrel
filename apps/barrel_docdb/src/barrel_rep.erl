@@ -63,7 +63,8 @@
     replicate/2,
     replicate/3,
     replicate_one_shot/1,
-    replicate_one_shot/2
+    replicate_one_shot/2,
+    rep_id/5
 ]).
 
 %% Types
@@ -204,7 +205,8 @@ replicate_one_shot(Config, Opts) ->
 
     %% Generate replication ID (a filtered replication is a different
     %% stream: it must not share the full replication's checkpoint)
-    RepId = generate_rep_id(Source, Target, maps:get(filter, Opts, #{})),
+    RepId = rep_id(Source, SourceTransport, Target, TargetTransport,
+                   maps:get(filter, Opts, #{})),
 
     %% Create checkpoint state
     CheckpointConfig = Config#{
@@ -333,18 +335,29 @@ do_replicate(Source, Target, SourceTransport, TargetTransport, Since,
             {error, Reason}
     end.
 
-%% @private Generate deterministic replication ID based on source and
-%% target (and the filter when one is set: filtered streams keep their
-%% own checkpoints). The unfiltered form hashes the legacy 2-tuple so
-%% existing checkpoints stay valid.
-generate_rep_id(Source, Target, Filter) when map_size(Filter) =:= 0 ->
-    Data = term_to_binary({Source, Target}),
-    Hash = crypto:hash(md5, Data),
-    binary:encode_hex(Hash, lowercase);
-generate_rep_id(Source, Target, Filter) ->
-    Data = term_to_binary({Source, Target, Filter}),
+%% @doc Deterministic replication ID. Each endpoint contributes its
+%% rep_id_term/1 when its transport exports one (network transports:
+%% the credential-free URL), else the endpoint term itself; a filter
+%% joins the hash when set (filtered streams keep their own
+%% checkpoints). The unfiltered local form hashes the legacy 2-tuple
+%% so existing checkpoints stay valid.
+-spec rep_id(term(), module(), term(), module(), map()) -> binary().
+rep_id(Source, SourceTransport, Target, TargetTransport, Filter) ->
+    SourceId = endpoint_id(SourceTransport, Source),
+    TargetId = endpoint_id(TargetTransport, Target),
+    Data = case map_size(Filter) of
+        0 -> term_to_binary({SourceId, TargetId});
+        _ -> term_to_binary({SourceId, TargetId, Filter})
+    end,
     Hash = crypto:hash(md5, Data),
     binary:encode_hex(Hash, lowercase).
+
+endpoint_id(Transport, Endpoint) ->
+    _ = code:ensure_loaded(Transport),
+    case erlang:function_exported(Transport, rep_id_term, 1) of
+        true -> Transport:rep_id_term(Endpoint);
+        false -> Endpoint
+    end.
 
 %% @private A checkpoint below the source's history floor predates the
 %% retention window: tombstones forgotten in that gap would never

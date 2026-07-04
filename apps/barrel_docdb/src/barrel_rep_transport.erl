@@ -103,6 +103,13 @@
                             Name :: binary(), Meta :: map()) ->
     ok | {error, term()}.
 
+%% Stable identity of an endpoint for replication-id derivation.
+%% Network transports return the credential-free normalized locator
+%% (e.g. the URL) so checkpoints survive restarts and token rotation.
+%% Without it the endpoint term itself is hashed (the local
+%% transport's db name).
+-callback rep_id_term(Endpoint :: term()) -> term().
+
 -optional_callbacks([att_changes/3, diff_attachments/2,
                      get_attachment_stream/3, put_attachment/5,
-                     delete_attachment/4]).
+                     delete_attachment/4, rep_id_term/1]).

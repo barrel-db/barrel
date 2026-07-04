@@ -21,6 +21,9 @@
     delete/1
 ]).
 
+%% Seq wire codec (base64 of the 12-byte HLC; <<"first">> sentinel)
+-export([encode_seq/1, decode_seq/1]).
+
 %% Internal API for reading checkpoints
 -export([
     read_checkpoint_doc/3
