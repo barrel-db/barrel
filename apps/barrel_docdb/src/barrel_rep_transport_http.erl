@@ -61,27 +61,28 @@ endpoint(Url) when is_binary(Url); is_list(Url) ->
 normalize_url(Url0) ->
     Url = unicode:characters_to_binary(Url0),
     case uri_string:parse(Url) of
-        #{scheme := Scheme0, host := Host0, path := Path0} = Parsed
-          when Scheme0 =:= "http"; Scheme0 =:= "https";
-               Scheme0 =:= <<"http">>; Scheme0 =:= <<"https">> ->
-            case maps:is_key(query, Parsed) orelse
-                 maps:is_key(fragment, Parsed) of
-                true -> erlang:error({invalid_sync_url, Url});
-                false -> ok
-            end,
+        #{scheme := Scheme0, host := Host0, path := Path0} = Parsed ->
             Scheme = string:lowercase(to_bin(Scheme0)),
             Host = string:lowercase(to_bin(Host0)),
             Path = strip_trailing_slash(to_bin(Path0)),
-            case Path of
-                <<"/db/", DbName/binary>> when DbName =/= <<>> -> ok;
-                _ -> erlang:error({invalid_sync_url, Url})
+            SchemeOk = lists:member(Scheme, [<<"http">>, <<"https">>]),
+            Clean = not (maps:is_key(query, Parsed)
+                         orelse maps:is_key(fragment, Parsed)),
+            PathOk = case Path of
+                <<"/db/", DbName/binary>> when DbName =/= <<>> -> true;
+                _ -> false
             end,
-            PortPart = case maps:get(port, Parsed, undefined) of
-                undefined -> <<>>;
-                Port -> <<":", (integer_to_binary(Port))/binary>>
-            end,
-            <<Scheme/binary, "://", Host/binary, PortPart/binary,
-              Path/binary>>;
+            case SchemeOk andalso Clean andalso PathOk of
+                true ->
+                    PortPart = case maps:get(port, Parsed, undefined) of
+                        undefined -> <<>>;
+                        Port -> <<":", (integer_to_binary(Port))/binary>>
+                    end,
+                    <<Scheme/binary, "://", Host/binary, PortPart/binary,
+                      Path/binary>>;
+                false ->
+                    erlang:error({invalid_sync_url, Url})
+            end;
         _ ->
             erlang:error({invalid_sync_url, Url})
     end.
