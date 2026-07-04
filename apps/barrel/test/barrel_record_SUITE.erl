@@ -36,7 +36,11 @@
          explicit_vector_skips_embedder/1,
          explicit_vector_dimension_check/1,
          search_end_to_end/1,
-         vector_add_guards/1]).
+         vector_add_guards/1,
+         byo_embedding_async/1,
+         byo_embedding_sync_and_precedence/1,
+         byo_embedding_dimension_check/1,
+         byo_embedding_not_path_indexed/1]).
 
 all() ->
     [adapter_get,
@@ -64,7 +68,11 @@ all() ->
      explicit_vector_skips_embedder,
      explicit_vector_dimension_check,
      search_end_to_end,
-     vector_add_guards].
+     vector_add_guards,
+     byo_embedding_async,
+     byo_embedding_sync_and_precedence,
+     byo_embedding_dimension_check,
+     byo_embedding_not_path_indexed].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(barrel),
@@ -114,7 +122,11 @@ meck_cases() ->
      explicit_vector_skips_embedder,
      explicit_vector_dimension_check,
      search_end_to_end,
-     vector_add_guards].
+     vector_add_guards,
+     byo_embedding_async,
+     byo_embedding_sync_and_precedence,
+     byo_embedding_dimension_check,
+     byo_embedding_not_path_indexed].
 
 %% Deterministic 3-dim embedder; texts containing "poison" fail.
 mock_embed() ->
@@ -493,6 +505,72 @@ search_end_to_end(Config) ->
     ?assertEqual(<<"a">>, maps:get(key, HTop)),
     ?assertEqual(<<"quick brown fox">>, maps:get(text, HTop)),
     ?assertEqual(#{<<"kind">> => <<"animal">>}, maps:get(metadata, HTop)),
+    ok = barrel:close(Db).
+
+byo_embedding_async(Config) ->
+    %% Fields-less policy: bring-your-own embeddings, no embedder needed.
+    {ok, Db} = open_record(byo_async_db, Config, #{}),
+    Vector = [0.1, 0.2, 0.3],
+    {ok, _} = barrel:put_doc(Db, #{<<"id">> => <<"a">>,
+                                   <<"title">> => <<"carried">>,
+                                   <<"_embedding">> => Vector}),
+    %% The vector persists in the body and the indexer picks it up
+    {ok, Doc} = barrel:get_doc(Db, <<"a">>),
+    ?assertEqual(Vector, maps:get(<<"_embedding">>, Doc)),
+    ok = wait_until(fun() ->
+        case barrel:search_vector(Db, Vector, #{k => 1}) of
+            {ok, [#{key := <<"a">>} = Hit]} ->
+                %% _embedding never leaks into search metadata
+                not maps:is_key(<<"_embedding">>, maps:get(metadata, Hit, #{}));
+            _ -> false
+        end
+    end),
+    ok = wait_until(fun() -> pending(<<"byo_async_db">>) =:= [] end),
+    %% The embedder was never called
+    ?assertEqual(0, meck:num_calls(barrel_embed, embed, '_')),
+    ?assertEqual(0, meck:num_calls(barrel_embed, embed_batch, '_')),
+    ok = barrel:close(Db).
+
+byo_embedding_sync_and_precedence(Config) ->
+    %% Sync mode + fields: a carried _embedding wins over the policy
+    {ok, Db} = open_record(byo_sync_db, Config,
+                           #{fields => [<<"title">>], mode => sync}),
+    Vector = [0.9, 0.8, 0.7],
+    {ok, _} = barrel:put_doc(Db, #{<<"id">> => <<"a">>,
+                                   <<"title">> => <<"has fields too">>,
+                                   <<"_embedding">> => Vector}),
+    %% Indexed at the carried vector immediately, embedder skipped
+    {ok, [#{key := <<"a">>}]} = barrel:search_vector(Db, Vector, #{k => 1}),
+    ?assertEqual([], pending(<<"byo_sync_db">>)),
+    ?assertEqual(0, meck:num_calls(barrel_embed, embed, '_')),
+    ok = barrel:close(Db).
+
+byo_embedding_dimension_check(Config) ->
+    {ok, Db} = open_record(byo_dim_db, Config, #{}),
+    %% Single put: fails before the write
+    ?assertEqual({error, {dimension_mismatch, 3, 2}},
+                 barrel:put_doc(Db, #{<<"id">> => <<"a">>,
+                                      <<"_embedding">> => [0.1, 0.2]})),
+    ?assertEqual({error, not_found}, barrel:get_doc(Db, <<"a">>)),
+    %% Batch: whole batch rejected before the write
+    ?assertEqual({error, {dimension_mismatch, 3, 4}},
+                 barrel:put_docs(Db, [
+                     #{<<"id">> => <<"b">>, <<"_embedding">> => [0.1, 0.2, 0.3]},
+                     #{<<"id">> => <<"c">>,
+                       <<"_embedding">> => [0.1, 0.2, 0.3, 0.4]}])),
+    ?assertEqual({error, not_found}, barrel:get_doc(Db, <<"b">>)),
+    ok = barrel:close(Db).
+
+byo_embedding_not_path_indexed(Config) ->
+    {ok, Db} = open_record(byo_ars_db, Config, #{}),
+    {ok, _} = barrel:put_doc(Db, #{<<"id">> => <<"a">>,
+                                   <<"kind">> => <<"note">>,
+                                   <<"_embedding">> => [0.1, 0.2, 0.3]}),
+    %% Regular fields query fine; the vector is not in the path index
+    {ok, Rows, _} = barrel:find(Db, #{where => [{path, [<<"kind">>], <<"note">>}]}),
+    ?assertEqual(1, length(Rows)),
+    {ok, NoRows, _} = barrel:find(Db, #{where => [{exists, [<<"_embedding">>]}]}),
+    ?assertEqual(0, length(NoRows)),
     ok = barrel:close(Db).
 
 vector_add_guards(Config) ->

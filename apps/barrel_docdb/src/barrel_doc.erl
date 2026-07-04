@@ -230,12 +230,17 @@ trim_history(EncodedRevs, Ancestors, Limit) ->
 %% Document Processing
 %%====================================================================
 
-%% @doc Remove metadata fields from document
+%% @doc Remove metadata fields from document.
+%% `_'-prefixed top-level fields are reserved metadata and are stripped
+%% before storage, with one exception: `<<"_embedding">>' persists in the
+%% body so a client-supplied vector travels with its document (it is
+%% never path-indexed; see barrel_ars).
 -spec doc_without_meta(doc()) -> doc().
 doc_without_meta(Doc) ->
     maps:filter(
         fun
             (<<"_attachments">>, _) -> false;
+            (<<"_embedding">>, _) -> true;
             (<<"_", _/binary>>, _) -> false;
             (_, _) -> true
         end,

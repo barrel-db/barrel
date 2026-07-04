@@ -33,12 +33,17 @@ validate_full_test() ->
     ?assertEqual(384, maps:get(dimensions, P)),
     ?assertEqual([<<"kind">>], maps:get(metadata_fields, P)).
 
+validate_fields_optional_test() ->
+    %% No fields: bring-your-own-embeddings mode, never auto-embeds
+    {ok, P} = barrel_embedding_policy:validate(#{}),
+    ?assertEqual([], maps:get(fields, P)),
+    ?assertNot(barrel_embedding_policy:matches(P, #{<<"title">> => <<"x">>})),
+    ?assertEqual(<<>>, barrel_embedding_policy:text(P, #{<<"title">> => <<"x">>})),
+    {ok, P2} = barrel_embedding_policy:validate(#{fields => []}),
+    ?assertEqual([], maps:get(fields, P2)).
+
 validate_errors_test_() ->
     [
-     ?_assertMatch({error, {missing_option, fields}},
-                   barrel_embedding_policy:validate(#{})),
-     ?_assertMatch({error, {invalid_option, fields, empty}},
-                   barrel_embedding_policy:validate(#{fields => []})),
      ?_assertMatch({error, {invalid_field, _}},
                    barrel_embedding_policy:validate(#{fields => [42]})),
      ?_assertMatch({error, {invalid_option, mode, _}},

@@ -43,8 +43,11 @@
 %% field names/indices ending with the value.
 -spec analyze(map() | binary()) -> [{Path :: [term()], binary()}].
 analyze(Doc) when is_map(Doc) ->
-    %% Build paths in reverse for O(n) complexity, then reverse each path
-    analyze_doc(Doc, [], []);
+    %% Build paths in reverse for O(n) complexity, then reverse each path.
+    %% Reserved top-level fields (`_' prefix, e.g. the persisted
+    %% `_embedding' vector) are never path-indexed.
+    analyze_doc(maps:filter(fun(K, _V) -> not reserved_field(K) end, Doc),
+                [], []);
 analyze(Doc) when is_binary(Doc) ->
     %% Indexed CBOR - use barrel_doc API to access values via index
     case barrel_doc:is_indexed(Doc) of
@@ -52,8 +55,13 @@ analyze(Doc) when is_binary(Doc) ->
             Keys = barrel_doc:keys(Doc),
             lists:foldl(
                 fun(K, Acc) ->
-                    V = barrel_doc:get(Doc, [K]),
-                    analyze_value(V, [K], Acc)
+                    case reserved_field(K) of
+                        true ->
+                            Acc;
+                        false ->
+                            V = barrel_doc:get(Doc, [K]),
+                            analyze_value(V, [K], Acc)
+                    end
                 end,
                 [],
                 Keys
@@ -64,6 +72,10 @@ analyze(Doc) when is_binary(Doc) ->
     end;
 analyze(_) ->
     [].
+
+%% @private Reserved top-level fields are metadata, never indexed.
+reserved_field(<<"_", _/binary>>) -> true;
+reserved_field(_) -> false.
 
 %% @doc Compute the difference between old and new paths.
 %% Returns {Added, Removed} where:

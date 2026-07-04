@@ -26,6 +26,10 @@
 %%% shorthand for a top-level field). Only binary values embed; missing
 %%% fields and non-binary values are skipped. Without `metadata_fields',
 %%% metadata is the document minus `id' and `_'-prefixed keys.
+%%%
+%%% `fields' is optional: a policy without fields never auto-embeds and
+%%% relies on client-supplied vectors (the `<<"_embedding">>' document
+%%% field or the `vector' put option).
 %%% @end
 %%%-------------------------------------------------------------------
 -module(barrel_embedding_policy).
@@ -108,9 +112,10 @@ mode(#{mode := Mode}) ->
 %%====================================================================
 
 normalize(Map) ->
-    Fields = case maps:get(fields, Map, undefined) of
-        undefined -> throw({missing_option, fields});
-        [] -> throw({invalid_option, fields, empty});
+    %% fields is optional: a policy without fields never auto-embeds
+    %% (bring-your-own-embeddings via the _embedding document field or
+    %% the vector put option).
+    Fields = case maps:get(fields, Map, []) of
         Fs when is_list(Fs) -> [normalize_field(F) || F <- Fs];
         Other -> throw({invalid_option, fields, Other})
     end,

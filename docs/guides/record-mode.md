@@ -72,17 +72,37 @@ before `put_doc` returns, so a search issued right after sees the document.
 An embed failure fails the put with `{error, {embed_failed, Reason}}` and
 nothing is written.
 
-## Explicit vectors
+## Bring your own embeddings
 
-Supply your own embedding for one document; it skips the embedder and
-indexes synchronously (works in both modes):
+Carry the embedding inside the document in the reserved `_embedding` field.
+It persists with the document (so it survives crashes and will travel with
+replication), it is indexed instead of anything the policy would embed, and
+it works over the REST server with no API changes:
+
+```erlang
+{ok, _} = barrel:put_doc(Db, #{<<"id">> => <<"a">>,
+                               <<"title">> => <<"quick fox">>,
+                               <<"_embedding">> => Vector}).
+```
+
+With client-supplied embeddings the policy can be empty: open with
+`embedding => #{dimensions => 768}` (no `fields`) and no embedder is needed
+at all. `_embedding` is never path-indexed and never appears in search
+metadata. The vector length is checked against the database dimension before
+the write; batches with a wrong-length `_embedding` are rejected whole.
+
+In async mode the indexer picks the carried vector up from the stored
+document; in sync mode it is indexed before the put returns.
+
+For a one-off vector that should NOT be stored in the document, use the put
+option instead; it always indexes synchronously:
 
 ```erlang
 {ok, _} = barrel:put_doc(Db, Doc, #{vector => Vector}).
 ```
 
-The vector length must match the database dimension, checked before the
-write.
+Precedence when several sources are present: the `vector` option, then the
+document's `_embedding`, then the policy's fields.
 
 ## Notes
 

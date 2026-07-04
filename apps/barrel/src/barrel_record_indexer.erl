@@ -46,6 +46,7 @@
     vstore :: atom(),
     policy :: barrel_embedding_policy:policy(),
     embed :: term(),
+    dimensions :: pos_integer(),
     batch_size :: pos_integer(),
     poll :: pos_integer(),
     timer :: reference() | undefined,
@@ -89,6 +90,7 @@ init(#{name := Name, db := DbBin, vstore := VStore,
         vstore = VStore,
         policy = Policy,
         embed = Embed,
+        dimensions = maps:get(dimensions, Config, 768),
         batch_size = maps:get(batch_size, Config, ?BATCH_SIZE),
         poll = ?POLL_MIN
     },
@@ -165,8 +167,12 @@ process_entries(Entries, #state{failures = Failures} = State) ->
     {length(Acks), State3}.
 
 %% @private Split entries by the CURRENT document state: deleted or
-%% missing or non-matching docs lose their vector; matching docs embed.
-classify(Entries, #state{db = DbBin, policy = Policy} = State) ->
+%% missing or non-matching docs lose their vector; docs carrying an
+%% `_embedding' index it directly; matching docs embed their policy
+%% text. A carried vector of the wrong dimension counts as a failure
+%% (parks after ?MAX_FAILURES) and stays un-acked.
+classify(Entries, #state{db = DbBin, policy = Policy,
+                         dimensions = Dim} = State0) ->
     {Deleted, Live} = lists:partition(
         fun(#{deleted := D}) -> D end, Entries),
     LiveIds = [Id || #{id := Id} <- Live],
@@ -174,36 +180,56 @@ classify(Entries, #state{db = DbBin, policy = Policy} = State) ->
         [] -> [];
         _ -> barrel_docdb:get_docs(DbBin, LiveIds)
     end,
-    {ToDelete0, ToIndex} = case Docs of
+    {ToDelete0, ToIndex, State} = case Docs of
         {error, _} ->
             %% Database going away; process nothing this round
-            {[], []};
+            {[], [], State0};
         _ ->
             lists:foldl(
-                fun({#{id := Id, hlc := Hlc}, DocRes}, {DelAcc, IdxAcc}) ->
+                fun({#{id := Id, hlc := Hlc}, DocRes}, {DelAcc, IdxAcc, StAcc}) ->
                     case DocRes of
                         {ok, Doc} ->
-                            case barrel_embedding_policy:matches(Policy, Doc) of
-                                true ->
-                                    Text = barrel_embedding_policy:text(Policy, Doc),
-                                    {DelAcc, [{Id, Hlc, Text} | IdxAcc]};
-                                false ->
+                            case doc_plan(Policy, Dim, Doc) of
+                                {index, Plan} ->
+                                    {DelAcc, [{Id, Hlc, Plan} | IdxAcc], StAcc};
+                                deindex ->
                                     %% Stale vector (if any) must go
-                                    {[{Id, Hlc} | DelAcc], IdxAcc}
+                                    {[{Id, Hlc} | DelAcc], IdxAcc, StAcc};
+                                {bad_dimension, Len} ->
+                                    {DelAcc, IdxAcc,
+                                     bump_failure(Id, {dimension_mismatch, Dim, Len},
+                                                  StAcc)}
                             end;
                         {error, not_found} ->
                             %% Deleted between fold and read
-                            {[{Id, Hlc} | DelAcc], IdxAcc};
+                            {[{Id, Hlc} | DelAcc], IdxAcc, StAcc};
                         {error, _} ->
                             %% Transient read error: leave un-acked
-                            {DelAcc, IdxAcc}
+                            {DelAcc, IdxAcc, StAcc}
                     end
                 end,
-                {[], []},
+                {[], [], State0},
                 lists:zip(Live, Docs))
     end,
     DeletedPairs = [{Id, Hlc} || #{id := Id, hlc := Hlc} <- Deleted],
     {DeletedPairs ++ ToDelete0, lists:reverse(ToIndex), State}.
+
+%% @private How the current document indexes: carried vector, policy
+%% text, or not at all.
+doc_plan(Policy, Dim, Doc) ->
+    case maps:get(<<"_embedding">>, Doc, undefined) of
+        Vector when is_list(Vector), length(Vector) =:= Dim ->
+            {index, {given, barrel_embedding_policy:text(Policy, Doc), Vector}};
+        Vector when is_list(Vector) ->
+            {bad_dimension, length(Vector)};
+        _ ->
+            case barrel_embedding_policy:matches(Policy, Doc) of
+                true ->
+                    {index, {embed, barrel_embedding_policy:text(Policy, Doc)}};
+                false ->
+                    deindex
+            end
+    end.
 
 %% @private Remove vectors; vectordb errors leave entries un-acked.
 delete_vectors(Pairs, #state{vstore = VStore} = State) ->
@@ -218,44 +244,57 @@ delete_vectors(Pairs, #state{vstore = VStore} = State) ->
         Pairs),
     {Acks, State}.
 
-%% @private Embed and index matching documents. A batch embed failure
-%% falls back to per-item embeds; per-item failures bump the poison
-%% counter and stay un-acked.
+%% @private Index planned documents: carried vectors go straight to the
+%% store; policy texts embed first (batch, with per-item fallback so one
+%% poison document cannot fail the batch).
 index_docs([], State) ->
     {[], State};
-index_docs(Items, #state{embed = Embed} = State) ->
-    Texts = [Text || {_Id, _Hlc, Text} <- Items],
+index_docs(Items, State0) ->
+    {Given, ToEmbed} = lists:partition(
+        fun({_Id, _Hlc, {given, _Text, _Vector}}) -> true;
+           ({_Id, _Hlc, {embed, _Text}}) -> false
+        end,
+        Items),
+    GivenEntries = [{Id, Text, Vector}
+                    || {Id, _Hlc, {given, Text, Vector}} <- Given],
+    GivenHlcs = [Hlc || {_Id, Hlc, _Plan} <- Given],
+    {EmbedEntries, EmbedHlcs, State} = embed_items(ToEmbed, State0),
+    write_index(GivenEntries ++ EmbedEntries, GivenHlcs ++ EmbedHlcs, State).
+
+embed_items([], State) ->
+    {[], [], State};
+embed_items(Items, #state{embed = Embed} = State) ->
+    Texts = [Text || {_Id, _Hlc, {embed, Text}} <- Items],
     case safe(fun() -> barrel_embed:embed_batch(Texts, Embed) end) of
         {ok, Vectors} when length(Vectors) =:= length(Items) ->
             Entries = [{Id, Text, Vector}
-                       || {{Id, _Hlc, Text}, Vector} <- lists:zip(Items, Vectors)],
-            write_index(Entries, [Hlc || {_Id, Hlc, _} <- Items], Items, State);
+                       || {{Id, _Hlc, {embed, Text}}, Vector}
+                          <- lists:zip(Items, Vectors)],
+            {Entries, [Hlc || {_Id, Hlc, _Plan} <- Items], State};
         _BatchFailure ->
-            index_docs_one_by_one(Items, State)
+            embed_items_one_by_one(Items, State)
     end.
 
-index_docs_one_by_one(Items, #state{embed = Embed} = State0) ->
-    {Entries, Hlcs, OkItems, State} = lists:foldl(
-        fun({Id, Hlc, Text} = Item, {EntAcc, HlcAcc, ItemAcc, StAcc}) ->
+embed_items_one_by_one(Items, #state{embed = Embed} = State0) ->
+    {Entries, Hlcs, State} = lists:foldl(
+        fun({Id, Hlc, {embed, Text}}, {EntAcc, HlcAcc, StAcc}) ->
             case safe(fun() -> barrel_embed:embed(Text, Embed) end) of
                 {ok, Vector} ->
-                    {[{Id, Text, Vector} | EntAcc], [Hlc | HlcAcc],
-                     [Item | ItemAcc], StAcc};
+                    {[{Id, Text, Vector} | EntAcc], [Hlc | HlcAcc], StAcc};
                 Failure ->
-                    {EntAcc, HlcAcc, ItemAcc, bump_failure(Id, Failure, StAcc)}
+                    {EntAcc, HlcAcc, bump_failure(Id, Failure, StAcc)}
             end
         end,
-        {[], [], [], State0},
+        {[], [], State0},
         Items),
-    write_index(lists:reverse(Entries), lists:reverse(Hlcs),
-                lists:reverse(OkItems), State).
+    {lists:reverse(Entries), lists:reverse(Hlcs), State}.
 
 %% @private Index embedded entries; success clears poison counters and
 %% acks, vectordb failure leaves everything un-acked for retry.
-write_index([], _Hlcs, _Items, State) ->
+write_index([], _Hlcs, State) ->
     {[], State};
-write_index(Entries, Hlcs, _Items, #state{vstore = VStore,
-                                          failures = Failures} = State) ->
+write_index(Entries, Hlcs, #state{vstore = VStore,
+                                  failures = Failures} = State) ->
     case safe(fun() -> barrel_vectordb:add_index_only_batch(VStore, Entries) end) of
         {ok, _Stats} ->
             Cleared = maps:without([Id || {Id, _, _} <- Entries], Failures),
