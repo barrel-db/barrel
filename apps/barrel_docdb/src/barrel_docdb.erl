@@ -109,7 +109,9 @@
 -export([
     find/2,
     find/3,
-    explain/2
+    explain/2,
+    query/2,
+    query/3
 ]).
 
 %% Changes
@@ -1248,6 +1250,47 @@ explain(Db, QuerySpec) ->
                 Error
         end
     end).
+
+%% @doc Run a BQL query (see barrel_bql) against document indexes.
+%%
+%% Table-function sources and SUBSCRIBE need the barrel facade: this
+%% entry point is documents only.
+%%
+%% == Example ==
+%% ```
+%% {ok, Rows, Meta} = barrel_docdb:query(<<"mydb">>,
+%%     <<"SELECT title FROM db WHERE type = 'post' LIMIT 10">>),
+%% {ok, Rows2, _} = barrel_docdb:query(<<"mydb">>,
+%%     <<"SELECT * FROM db WHERE org = $org">>,
+%%     #{params => #{<<"org">> => <<"acme">>}}).
+%% '''
+%%
+%% Streamable queries (no ORDER BY, no UNNEST) keep find/3's chunk
+%% semantics: Meta carries has_more and a continuation to pass back in
+%% Opts. ORDER BY and UNNEST materialize the full result.
+%%
+%% @param Db Database name or pid
+%% @param Bql BQL source text
+%% @param Opts params, chunk_size, continuation
+-spec 'query'(binary() | pid(), binary() | string()) ->
+    {ok, [map()], map()} | {error, term()}.
+'query'(Db, Bql) ->
+    'query'(Db, Bql, #{}).
+
+-spec 'query'(binary() | pid(), binary() | string(), map()) ->
+    {ok, [map()], map()} | {error, term()}.
+'query'(Db, Bql, Opts) ->
+    Params = maps:get(params, Opts, #{}),
+    case barrel_bql:compile(Bql, #{params => Params}) of
+        {ok, #{source := {table_fn, Fn, _}}} ->
+            {error, {table_fn_requires_facade, Fn}};
+        {ok, #{subscribe := true}} ->
+            {error, {unsupported, subscribe}};
+        {ok, Plan} ->
+            barrel_bql_exec:run(Db, Plan, maps:remove(params, Opts));
+        {error, _} = Error ->
+            Error
+    end.
 
 %%====================================================================
 %% Changes

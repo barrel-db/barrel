@@ -160,10 +160,15 @@ id_contradiction_is_empty_test() ->
         plan("SELECT * FROM db WHERE id = 'x' AND id = 'y'").
 
 id_scan_combines_with_where_test() ->
-    #{spec := Spec} =
+    %% the engine's id scan is standalone: field conjuncts post-filter
+    %% the scanned rows, and the plan materializes
+    #{spec := Spec, post := #{residual := Residual},
+      streamable := false, warnings := Warnings} =
         plan("SELECT * FROM db WHERE id >= 'a' AND type = 'x'"),
     ?assertEqual({<<"a">>, undefined}, maps:get(id_range, Spec)),
-    ?assertEqual([{path, [<<"type">>], <<"x">>}], maps:get(where, Spec)).
+    ?assertNot(maps:is_key(where, Spec)),
+    ?assertEqual([{path, {b, [<<"type">>]}, <<"x">>}], Residual),
+    ?assert(lists:member({id_scan_post_filter, 1}, Warnings)).
 
 unconstrained_query_scans_ids_test() ->
     #{spec := Spec} = plan("SELECT * FROM db"),

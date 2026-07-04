@@ -612,15 +612,29 @@ lower(Canon) ->
         {IdCs, EngineCs, DocCs, ResidualCs} =
             classify_conjuncts(Where, Source),
         {IdScan, IdEmpty} = merge_id_conjuncts(IdCs),
-        {EngineConds, Warnings0} = lower_conds(EngineCs, fun engine_path/1),
+        %% The engine's id scan is standalone (no where combines with
+        %% it): under an id scan, field conjuncts post-filter the
+        %% scanned rows as frame residuals.
+        {EngineCs1, IdResidualCs} = case IdScan of
+            none -> {EngineCs, []};
+            _ -> {[], EngineCs}
+        end,
+        {EngineConds, Warnings0} =
+            lower_conds(EngineCs1, fun engine_path/1),
         {DocConds, _} = lower_conds(DocCs, fun engine_path/1),
-        {ResidualConds, _} = lower_conds(ResidualCs, fun tagged_path/1),
+        {ResidualConds, _} =
+            lower_conds(ResidualCs ++ IdResidualCs, fun tagged_path/1),
+        IdFilterWarnings = case IdResidualCs of
+            [] -> [];
+            _ -> [{id_scan_post_filter, length(IdResidualCs)}]
+        end,
         Limit = int_opt(Limit0),
         Offset = case int_opt(Offset0) of undefined -> 0; O -> O end,
         Empty = IdEmpty orelse Limit =:= 0,
         IsCollection = element(1, Source) =:= collection,
         Streamable = IsCollection andalso Order =:= []
-                     andalso Unnest =:= undefined,
+                     andalso Unnest =:= undefined
+                     andalso IdResidualCs =:= [],
         PushDown = Streamable andalso not Empty,
         Spec0 = #{include_docs => true, select => ['*']},
         Spec1 = case IsCollection of
@@ -636,7 +650,8 @@ lower(Canon) ->
             [{OrderPath, Dir}] -> {project_key_pair(OrderPath, Source), Dir}
         end,
         Warnings = lists:usort(
-            Warnings0 ++ order_warning(Order, IsCollection)),
+            Warnings0 ++ IdFilterWarnings
+            ++ order_warning(Order, IsCollection)),
         {ok, #{
             spec => Spec,
             source => Source,
