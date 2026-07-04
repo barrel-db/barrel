@@ -21,10 +21,11 @@
 
 -export([
     canonicalize/2,
-    validate/1
+    validate/1,
+    lower/1
 ]).
 
--export_type([canon/0, cpath/0, cexpr/0]).
+-export_type([canon/0, cpath/0, cexpr/0, plan/0, tagged_path/0]).
 
 -type loc() :: barrel_bql_ast:loc().
 -type var() :: base | unnest.
@@ -60,6 +61,34 @@
 }.
 
 -define(TABLE_FNS, [<<"vector_top_k">>, <<"bm25_top_k">>, <<"hybrid_top_k">>]).
+
+%% Executable plan. spec is a barrel_query query_spec (a fetch template
+%% for table-fn sources). post is applied per row by the executor:
+%% residual (unnest-frame conditions, tagged paths), doc_where (table-fn
+%% doc conditions in plain engine shape for barrel_query:match/2),
+%% order, offset/limit (when not pushed into the spec), project.
+-type tagged_path() :: {b, comps()} | {u, comps()}.
+-type project_key() :: {b, comps()} | {u, comps()} | {score, binary()}.
+-type plan() :: #{
+    spec := map(),
+    source := {collection, binary()}
+            | {table_fn, vector_top_k | bm25_top_k | hybrid_top_k,
+               #{query := binary(), k := pos_integer(),
+                 ef_search => pos_integer()}},
+    unnest := undefined | #{path := comps(), alias := binary()},
+    post := #{
+        residual := [term()],
+        doc_where := [term()],
+        order := undefined | {project_key(), asc | desc},
+        offset := non_neg_integer(),
+        limit := undefined | pos_integer(),
+        project := star | [{b | u | score, comps() | binary(), binary()}],
+        empty := boolean()
+    },
+    subscribe := boolean(),
+    streamable := boolean(),
+    warnings := [term()]
+}.
 
 %%====================================================================
 %% Canonicalize
@@ -431,6 +460,7 @@ check_where(Conjuncts) ->
 check_conjunct(Conjunct) ->
     check_null_literals(Conjunct),
     check_source_refs(Conjunct),
+    check_score_refs(Conjunct),
     check_id_use(Conjunct, top).
 
 check_null_literals({'and', _, A, B}) ->
@@ -455,6 +485,23 @@ check_source_refs(Leaf) ->
     case leaf_path(Leaf) of
         {path, Loc, base, []} ->
             fail(Loc, {unsupported, bare_source_reference});
+        _ ->
+            ok
+    end.
+
+%% _score/_distance are search columns, not document fields: a WHERE on
+%% them would need a second evaluator alongside barrel_query:match/2.
+%% v1 confines them to SELECT and ORDER BY.
+check_score_refs({'and', _, A, B}) ->
+    check_score_refs(A), check_score_refs(B);
+check_score_refs({'or', _, A, B}) ->
+    check_score_refs(A), check_score_refs(B);
+check_score_refs(Leaf) ->
+    case leaf_path(Leaf) of
+        {path, Loc, base, [<<"_score">>]} ->
+            fail(Loc, {unsupported, score_in_where});
+        {path, Loc, base, [<<"_distance">>]} ->
+            fail(Loc, {unsupported, score_in_where});
         _ ->
             ok
     end.
@@ -548,6 +595,331 @@ projection_name(#{path := {path, Loc, _, Comps}}, _Canon) ->
         Key when is_binary(Key) -> Key;
         _Index -> fail(Loc, {alias_required, indexed_projection})
     end.
+
+%%====================================================================
+%% Lower
+%%====================================================================
+
+-spec lower(canon()) ->
+    {ok, plan()} | {error, {invalid_query, loc() | undefined, tuple()}}.
+lower(Canon) ->
+    #{select := Select, source := Source0, unnest := Unnest0,
+      where := Where, order_by := Order, limit := Limit0,
+      offset := Offset0, subscribe := Subscribe} = Canon,
+    try
+        Source = lower_source(Source0),
+        Unnest = lower_unnest(Unnest0),
+        {IdCs, EngineCs, DocCs, ResidualCs} =
+            classify_conjuncts(Where, Source),
+        {IdScan, IdEmpty} = merge_id_conjuncts(IdCs),
+        {EngineConds, Warnings0} = lower_conds(EngineCs, fun engine_path/1),
+        {DocConds, _} = lower_conds(DocCs, fun engine_path/1),
+        {ResidualConds, _} = lower_conds(ResidualCs, fun tagged_path/1),
+        Limit = int_opt(Limit0),
+        Offset = case int_opt(Offset0) of undefined -> 0; O -> O end,
+        Empty = IdEmpty orelse Limit =:= 0,
+        IsCollection = element(1, Source) =:= collection,
+        Streamable = IsCollection andalso Order =:= []
+                     andalso Unnest =:= undefined,
+        PushDown = Streamable andalso not Empty,
+        Spec0 = #{include_docs => true, select => ['*']},
+        Spec1 = case IsCollection of
+            true -> add_scan(Spec0, EngineConds, IdScan, Unnest);
+            false -> Spec0
+        end,
+        Spec = case PushDown of
+            true -> add_limit(Spec1, Limit, Offset);
+            false -> Spec1
+        end,
+        PostOrder = case Order of
+            [] -> undefined;
+            [{OrderPath, Dir}] -> {project_key_pair(OrderPath, Source), Dir}
+        end,
+        Warnings = lists:usort(
+            Warnings0 ++ order_warning(Order, IsCollection)),
+        {ok, #{
+            spec => Spec,
+            source => Source,
+            unnest => Unnest,
+            post => #{
+                residual => ResidualConds,
+                doc_where => DocConds,
+                order => PostOrder,
+                offset => case PushDown of true -> 0; false -> Offset end,
+                limit => case PushDown of
+                    true -> undefined;
+                    false -> Limit
+                end,
+                project => lower_select(Select, Canon, Source),
+                empty => Empty
+            },
+            subscribe => Subscribe,
+            streamable => Streamable,
+            warnings => Warnings
+        }}
+    catch
+        throw:{invalid_query, _, _} = Error -> {error, Error}
+    end.
+
+lower_source({collection, _, Name}) ->
+    {collection, Name};
+lower_source({table_fn, Loc, NameBin, Args}) ->
+    Fn = binary_to_atom(NameBin, utf8),
+    {table_fn, Fn, normalize_fn_args(Fn, Loc, Args)}.
+
+lower_unnest(undefined) ->
+    undefined;
+lower_unnest(#{path := {path, _, base, Comps}, alias := Alias}) ->
+    #{path => Comps, alias => Alias}.
+
+%% Conjuncts touching the unnest alias are frame-residual; id conjuncts
+%% become the primary-key scan; the rest feed the engine (collection) or
+%% the doc-residual filter (table functions, where the hit set is the
+%% driving relation and the engine is not consulted).
+classify_conjuncts(Where, Source) ->
+    lists:foldr(
+        fun(Conjunct, {Id, Engine, Doc, Residual}) ->
+            case conjunct_uses_unnest(Conjunct) of
+                true ->
+                    {Id, Engine, Doc, [Conjunct | Residual]};
+                false ->
+                    case Source of
+                        {table_fn, _, _} ->
+                            {Id, Engine, [Conjunct | Doc], Residual};
+                        {collection, _} ->
+                            case id_conjunct(Conjunct) of
+                                true -> {[Conjunct | Id], Engine, Doc,
+                                         Residual};
+                                false -> {Id, [Conjunct | Engine], Doc,
+                                          Residual}
+                            end
+                    end
+            end
+        end,
+        {[], [], [], []},
+        Where).
+
+conjunct_uses_unnest(Conjunct) ->
+    lists:any(fun({path, _, Var, _}) -> Var =:= unnest end,
+              expr_paths(Conjunct)).
+
+id_conjunct({cmp, _, _, {path, _, base, [<<"id">>]}, _}) -> true;
+id_conjunct({like, _, {path, _, base, [<<"id">>]}, _, false}) -> true;
+id_conjunct(_) -> false.
+
+%%--------------------------------------------------------------------
+%% Document-id scan: merge id conjuncts into one end-exclusive range
+%%--------------------------------------------------------------------
+
+merge_id_conjuncts([]) ->
+    {none, false};
+merge_id_conjuncts([{like, _, _, Pattern, false}]) ->
+    {prefix, Stem} = like_prefix(Pattern),
+    {{prefix, Stem}, false};
+merge_id_conjuncts(Conjuncts) ->
+    {Start, End} = lists:foldl(
+        fun(Conjunct, {S, E}) ->
+            {S1, E1} = id_range_of(Conjunct),
+            {max_start(S, S1), min_end(E, E1)}
+        end,
+        {undefined, undefined},
+        Conjuncts),
+    Empty = Start =/= undefined andalso End =/= undefined
+            andalso Start >= End,
+    {{range, Start, End}, Empty}.
+
+id_range_of({cmp, _, '=', _, {lit, _, V}}) -> {V, <<V/binary, 0>>};
+id_range_of({cmp, _, '>', _, {lit, _, V}}) -> {<<V/binary, 0>>, undefined};
+id_range_of({cmp, _, '>=', _, {lit, _, V}}) -> {V, undefined};
+id_range_of({cmp, _, '<', _, {lit, _, V}}) -> {undefined, V};
+id_range_of({cmp, _, '<=', _, {lit, _, V}}) -> {undefined, <<V/binary, 0>>};
+id_range_of({like, _, _, Pattern, false}) ->
+    {prefix, Stem} = like_prefix(Pattern),
+    End = case bin_increment(Stem) of
+        overflow -> undefined;
+        Next -> Next
+    end,
+    {Stem, End}.
+
+max_start(undefined, B) -> B;
+max_start(A, undefined) -> A;
+max_start(A, B) -> max(A, B).
+
+min_end(undefined, B) -> B;
+min_end(A, undefined) -> A;
+min_end(A, B) -> min(A, B).
+
+%% Smallest binary greater than all binaries prefixed by Bin.
+bin_increment(Bin) ->
+    case bin_increment_rev(lists:reverse(binary_to_list(Bin))) of
+        overflow -> overflow;
+        Bytes -> list_to_binary(lists:reverse(Bytes))
+    end.
+
+bin_increment_rev([]) -> overflow;
+bin_increment_rev([255 | Rest]) -> bin_increment_rev(Rest);
+bin_increment_rev([Byte | Rest]) -> [Byte + 1 | Rest].
+
+%%--------------------------------------------------------------------
+%% Spec assembly
+%%--------------------------------------------------------------------
+
+add_scan(Spec0, EngineConds, IdScan, Unnest) ->
+    Spec1 = case EngineConds of
+        [] -> Spec0;
+        _ -> Spec0#{where => EngineConds}
+    end,
+    Spec2 = case IdScan of
+        none -> Spec1;
+        {prefix, Prefix} -> Spec1#{id_prefix => Prefix};
+        {range, Start, End} -> Spec1#{id_range => {Start, End}}
+    end,
+    HasScan = maps:is_key(where, Spec2) orelse maps:is_key(id_prefix, Spec2)
+              orelse maps:is_key(id_range, Spec2),
+    case {HasScan, Unnest} of
+        {true, _} ->
+            Spec2;
+        {false, #{path := UnnestComps}} ->
+            %% Widest index-friendly approximation: rows without the
+            %% array produce zero unnest frames anyway.
+            Spec2#{where => [{exists, UnnestComps}]};
+        {false, undefined} ->
+            %% Unconstrained query: full primary-key scan.
+            Spec2#{id_range => {undefined, undefined}}
+    end.
+
+add_limit(Spec, undefined, 0) -> Spec;
+add_limit(Spec, undefined, Offset) -> Spec#{offset => Offset};
+add_limit(Spec, Limit, 0) -> Spec#{limit => Limit};
+add_limit(Spec, Limit, Offset) -> Spec#{limit => Limit, offset => Offset}.
+
+order_warning([], _IsCollection) -> [];
+order_warning([{{path, _, _, Comps}, _} | _], true) ->
+    [{order_by_materializes, Comps}];
+order_warning(_, false) -> [].
+
+int_opt(undefined) -> undefined;
+int_opt({integer, _, N}) -> N.
+
+%%--------------------------------------------------------------------
+%% Condition lowering onto the engine DSL
+%%--------------------------------------------------------------------
+
+lower_conds(Conjuncts, PathFun) ->
+    lists:mapfoldr(
+        fun(Conjunct, Warnings) ->
+            {Cond, W} = lower_cond(Conjunct, PathFun),
+            {Cond, W ++ Warnings}
+        end,
+        [],
+        Conjuncts).
+
+lower_cond({cmp, _, '=', Path, {lit, _, V}}, PF) ->
+    {{path, PF(Path), V}, []};
+lower_cond({cmp, _, '!=', Path, {lit, _, V}}, PF) ->
+    {{compare, PF(Path), '=/=', V}, [{full_scan, '!='}]};
+lower_cond({cmp, _, '<', Path, {lit, _, V}}, PF) ->
+    {{compare, PF(Path), '<', V}, []};
+lower_cond({cmp, _, '<=', Path, {lit, _, V}}, PF) ->
+    {{compare, PF(Path), '=<', V}, []};
+lower_cond({cmp, _, '>', Path, {lit, _, V}}, PF) ->
+    {{compare, PF(Path), '>', V}, []};
+lower_cond({cmp, _, '>=', Path, {lit, _, V}}, PF) ->
+    {{compare, PF(Path), '>=', V}, []};
+lower_cond({is_null, _, Path, false}, PF) ->
+    %% PartiQL IS NULL is true for stored null AND absent
+    {{'or', [{path, PF(Path), null}, {missing, PF(Path)}]},
+     [{full_scan, is_null}]};
+lower_cond({is_null, _, Path, true}, PF) ->
+    %% present and not null, in one engine condition
+    {{compare, PF(Path), '=/=', null}, [{full_scan, is_not_null}]};
+lower_cond({is_missing, _, Path, false}, PF) ->
+    {{missing, PF(Path)}, [{full_scan, missing}]};
+lower_cond({is_missing, _, Path, true}, PF) ->
+    {{exists, PF(Path)}, []};
+lower_cond({in, _, Path, Lits, false}, PF) ->
+    {{in, PF(Path), lit_values(Lits)}, [{full_scan, in}]};
+lower_cond({in, _, Path, Lits, true}, PF) ->
+    %% exists guard restores absent => filtered-out under negation
+    {guarded(PF(Path), {in, PF(Path), lit_values(Lits)}),
+     [{full_scan, not_in}]};
+lower_cond({like, _, Path, Pattern, false}, PF) ->
+    case like_prefix(Pattern) of
+        {prefix, Stem} -> {{prefix, PF(Path), Stem}, []};
+        regex ->
+            {{regex, PF(Path), like_regex(Pattern)}, [{full_scan, like}]}
+    end;
+lower_cond({like, _, Path, Pattern, true}, PF) ->
+    Inner = case like_prefix(Pattern) of
+        {prefix, Stem} -> {prefix, PF(Path), Stem};
+        regex -> {regex, PF(Path), like_regex(Pattern)}
+    end,
+    {guarded(PF(Path), Inner), [{full_scan, not_like}]};
+lower_cond({contains, _, Path, {lit, _, V}, false}, PF) ->
+    {{contains, PF(Path), V}, [{full_scan, contains}]};
+lower_cond({contains, _, Path, {lit, _, V}, true}, PF) ->
+    {guarded(PF(Path), {contains, PF(Path), V}),
+     [{full_scan, not_contains}]};
+lower_cond({'or', _, A, B}, PF) ->
+    {CondA, WA} = lower_cond(A, PF),
+    {CondB, WB} = lower_cond(B, PF),
+    {{'or', [CondA, CondB]}, WA ++ WB ++ [{full_scan, 'or'}]};
+lower_cond({'and', _, A, B}, PF) ->
+    {CondA, WA} = lower_cond(A, PF),
+    {CondB, WB} = lower_cond(B, PF),
+    {{'and', [CondA, CondB]}, WA ++ WB}.
+
+guarded(Path, Inner) ->
+    {'and', [{exists, Path}, {'not', Inner}]}.
+
+lit_values(Lits) ->
+    [V || {lit, _, V} <- Lits].
+
+%% LIKE to anchored regex: % => .*, _ => ., everything else literal.
+like_regex(Pattern) ->
+    Chars = unicode:characters_to_list(Pattern),
+    unicode:characters_to_binary(
+        [$^,
+         [case Char of
+              $% -> ".*";
+              $_ -> ".";
+              _ -> escape_re(Char)
+          end || Char <- Chars],
+         $$]).
+
+escape_re(Char) ->
+    case lists:member(Char, ".^$*+?()[]{}|\\") of
+        true -> [$\\, Char];
+        false -> [Char]
+    end.
+
+engine_path({path, _, base, Comps}) -> Comps.
+
+tagged_path({path, _, base, Comps}) -> {b, Comps};
+tagged_path({path, _, unnest, Comps}) -> {u, Comps}.
+
+%%--------------------------------------------------------------------
+%% Projection and order keys
+%%--------------------------------------------------------------------
+
+lower_select(star, _Canon, _Source) ->
+    star;
+lower_select(Projections, Canon, Source) ->
+    [begin
+         #{path := Path} = Projection,
+         {Tag, Key} = project_key_pair(Path, Source),
+         {Tag, Key, projection_name(Projection, Canon)}
+     end || Projection <- Projections].
+
+project_key_pair({path, _, base, [<<"_score">>]}, {table_fn, _, _}) ->
+    {score, <<"_score">>};
+project_key_pair({path, _, base, [<<"_distance">>]},
+                 {table_fn, vector_top_k, _}) ->
+    {score, <<"_distance">>};
+project_key_pair({path, _, base, Comps}, _Source) ->
+    {b, Comps};
+project_key_pair({path, _, unnest, Comps}, _Source) ->
+    {u, Comps}.
 
 %%====================================================================
 %% Helpers

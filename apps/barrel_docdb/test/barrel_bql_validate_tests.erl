@@ -191,6 +191,15 @@ table_fn_arg_errors_test() ->
 %% SUBSCRIBE restrictions
 %%--------------------------------------------------------------------
 
+score_in_where_test() ->
+    %% _score/_distance are SELECT and ORDER BY columns only
+    ?assertEqual({unsupported, score_in_where},
+                 reason("SELECT * FROM vector_top_k('q') AS v "
+                        "WHERE v._score > 0.5")),
+    ?assertEqual({unsupported, score_in_where},
+                 reason("SELECT * FROM vector_top_k('q') AS v "
+                        "WHERE v._distance < 0.1 OR v.lang = 'en'")).
+
 subscribe_restrictions_test() ->
     ?assertEqual({unsupported_with_subscribe, order_by},
                  reason("SELECT * FROM db ORDER BY a SUBSCRIBE")),
