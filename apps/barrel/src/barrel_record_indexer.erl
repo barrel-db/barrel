@@ -178,7 +178,8 @@ classify(Entries, #state{db = DbBin, policy = Policy,
     LiveIds = [Id || #{id := Id} <- Live],
     Docs = case LiveIds of
         [] -> [];
-        _ -> barrel_docdb:get_docs(DbBin, LiveIds)
+        _ -> barrel_docdb:get_docs(DbBin, LiveIds,
+                                   #{include_embedding => true})
     end,
     {ToDelete0, ToIndex, State} = case Docs of
         {error, _} ->
@@ -214,18 +215,23 @@ classify(Entries, #state{db = DbBin, policy = Policy,
     DeletedPairs = [{Id, Hlc} || #{id := Id, hlc := Hlc} <- Deleted],
     {DeletedPairs ++ ToDelete0, lists:reverse(ToIndex), State}.
 
-%% @private How the current document indexes: carried vector, policy
-%% text, or not at all.
+%% @private How the current document indexes: a stored client-supplied
+%% vector is authoritative; computed vectors are derived data, so the
+%% policy re-embeds (text may have changed); no vector and no matching
+%% fields means no index entry.
 doc_plan(Policy, Dim, Doc) ->
     case maps:get(<<"_embedding">>, Doc, undefined) of
-        Vector when is_list(Vector), length(Vector) =:= Dim ->
+        #{<<"vector">> := Vector, <<"source">> := <<"client">>}
+          when is_list(Vector), length(Vector) =:= Dim ->
             {index, {given, barrel_embedding_policy:text(Policy, Doc), Vector}};
-        Vector when is_list(Vector) ->
+        #{<<"vector">> := Vector, <<"source">> := <<"client">>}
+          when is_list(Vector) ->
             {bad_dimension, length(Vector)};
         _ ->
             case barrel_embedding_policy:matches(Policy, Doc) of
                 true ->
-                    {index, {embed, barrel_embedding_policy:text(Policy, Doc)}};
+                    {index, {embed, barrel_embedding_policy:text(Policy, Doc),
+                             maps:get(<<"_rev">>, Doc, undefined)}};
                 false ->
                     deindex
             end
@@ -246,48 +252,76 @@ delete_vectors(Pairs, #state{vstore = VStore} = State) ->
 
 %% @private Index planned documents: carried vectors go straight to the
 %% store; policy texts embed first (batch, with per-item fallback so one
-%% poison document cannot fail the batch).
+%% poison document cannot fail the batch). Computed vectors are written
+%% back into the document's embedding column after indexing, so
+%% _embedding always holds the current vector.
 index_docs([], State) ->
     {[], State};
 index_docs(Items, State0) ->
     {Given, ToEmbed} = lists:partition(
         fun({_Id, _Hlc, {given, _Text, _Vector}}) -> true;
-           ({_Id, _Hlc, {embed, _Text}}) -> false
+           ({_Id, _Hlc, {embed, _Text, _Rev}}) -> false
         end,
         Items),
     GivenEntries = [{Id, Text, Vector}
                     || {Id, _Hlc, {given, Text, Vector}} <- Given],
     GivenHlcs = [Hlc || {_Id, Hlc, _Plan} <- Given],
-    {EmbedEntries, EmbedHlcs, State} = embed_items(ToEmbed, State0),
-    write_index(GivenEntries ++ EmbedEntries, GivenHlcs ++ EmbedHlcs, State).
+    {EmbedEntries, EmbedHlcs, WriteBacks, State} = embed_items(ToEmbed, State0),
+    case write_index(GivenEntries ++ EmbedEntries, GivenHlcs ++ EmbedHlcs,
+                     State) of
+        {[], State1} ->
+            {[], State1};
+        {Acks, State1} ->
+            ok = write_back_embeddings(State1, WriteBacks),
+            {Acks, State1}
+    end.
 
 embed_items([], State) ->
-    {[], [], State};
+    {[], [], [], State};
 embed_items(Items, #state{embed = Embed} = State) ->
-    Texts = [Text || {_Id, _Hlc, {embed, Text}} <- Items],
+    Texts = [Text || {_Id, _Hlc, {embed, Text, _Rev}} <- Items],
     case safe(fun() -> barrel_embed:embed_batch(Texts, Embed) end) of
         {ok, Vectors} when length(Vectors) =:= length(Items) ->
             Entries = [{Id, Text, Vector}
-                       || {{Id, _Hlc, {embed, Text}}, Vector}
+                       || {{Id, _Hlc, {embed, Text, _Rev}}, Vector}
                           <- lists:zip(Items, Vectors)],
-            {Entries, [Hlc || {_Id, Hlc, _Plan} <- Items], State};
+            WriteBacks = [{Id, Rev, Vector}
+                          || {{Id, _Hlc, {embed, _Text, Rev}}, Vector}
+                             <- lists:zip(Items, Vectors)],
+            {Entries, [Hlc || {_Id, Hlc, _Plan} <- Items], WriteBacks, State};
         _BatchFailure ->
             embed_items_one_by_one(Items, State)
     end.
 
 embed_items_one_by_one(Items, #state{embed = Embed} = State0) ->
-    {Entries, Hlcs, State} = lists:foldl(
-        fun({Id, Hlc, {embed, Text}}, {EntAcc, HlcAcc, StAcc}) ->
+    {Entries, Hlcs, WriteBacks, State} = lists:foldl(
+        fun({Id, Hlc, {embed, Text, Rev}}, {EntAcc, HlcAcc, WbAcc, StAcc}) ->
             case safe(fun() -> barrel_embed:embed(Text, Embed) end) of
                 {ok, Vector} ->
-                    {[{Id, Text, Vector} | EntAcc], [Hlc | HlcAcc], StAcc};
+                    {[{Id, Text, Vector} | EntAcc], [Hlc | HlcAcc],
+                     [{Id, Rev, Vector} | WbAcc], StAcc};
                 Failure ->
-                    {EntAcc, HlcAcc, bump_failure(Id, Failure, StAcc)}
+                    {EntAcc, HlcAcc, WbAcc, bump_failure(Id, Failure, StAcc)}
             end
         end,
-        {[], [], State0},
+        {[], [], [], State0},
         Items),
-    {lists:reverse(Entries), lists:reverse(Hlcs), State}.
+    {lists:reverse(Entries), lists:reverse(Hlcs),
+     lists:reverse(WriteBacks), State}.
+
+%% @private Best-effort write-back of computed vectors into the doc
+%% embedding column (CAS on revision). A conflict means a newer write
+%% exists, whose own outbox entry re-drives everything.
+write_back_embeddings(_State, []) ->
+    ok;
+write_back_embeddings(#state{db = DbBin} = State, [{Id, Rev, Vector} | Rest]) ->
+    _ = case Rev of
+        undefined -> ok;
+        _ -> safe(fun() ->
+                 barrel_docdb:set_doc_embedding(DbBin, Id, Rev, Vector)
+             end)
+    end,
+    write_back_embeddings(State, Rest).
 
 %% @private Index embedded entries; success clears poison counters and
 %% acks, vectordb failure leaves everything un-acked for retry.

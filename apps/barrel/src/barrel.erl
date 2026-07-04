@@ -627,12 +627,21 @@ sync_action(#{embedding := Policy, dimensions := Dim}, Doc, Opts) ->
 sync_action(_Db, _Doc, _Opts) ->
     async.
 
-%% @private A client-supplied embedding carried in the document.
+%% @private A client-supplied embedding carried in the document, in
+%% either accepted shape (bare vector, or object with client source;
+%% computed objects are round-tripped derived data, not an override).
 -spec doc_embedding(map() | binary()) -> [number()] | undefined.
 doc_embedding(Doc) when is_map(Doc) ->
     case maps:get(<<"_embedding">>, Doc, undefined) of
-        Vector when is_list(Vector) -> Vector;
-        _ -> undefined
+        Vector when is_list(Vector) ->
+            Vector;
+        #{<<"vector">> := Vector} = Obj when is_list(Vector) ->
+            case maps:get(<<"source">>, Obj, <<"client">>) of
+                <<"computed">> -> undefined;
+                _ -> Vector
+            end;
+        _ ->
+            undefined
     end;
 doc_embedding(_Binary) ->
     undefined.
@@ -665,8 +674,12 @@ put_doc_sync(#{docdb := DbBin, embedding := Policy, embed := Embed,
         {error, _} = Err ->
             Err;
         _ ->
+            %% Inject the vector into the doc so the embedding column
+            %% commits atomically with the write (_embedding always
+            %% holds the document's vector, whoever computed it).
+            Doc2 = inject_embedding(DocMap, Action, ExplicitVector),
             WriteOpts = record_write_opts(Db, Opts#{return_hlc => true}),
-            case barrel_docdb:put_doc(DbBin, Doc, WriteOpts) of
+            case barrel_docdb:put_doc(DbBin, Doc2, WriteOpts) of
                 {ok, Result} ->
                     ok = sync_index(Db, maps:get(<<"id">>, Result), Action,
                                     maps:get(hlc, Result)),
@@ -675,6 +688,30 @@ put_doc_sync(#{docdb := DbBin, embedding := Policy, embed := Embed,
                     Err
             end
     end.
+
+%% @private Carry the resolved vector in the doc for atomic column
+%% storage: client-supplied vectors (opt or already-carried field) keep
+%% client provenance, policy-computed ones are marked computed inside
+%% the _embedding object.
+inject_embedding(DocMap, {index, _Text, Vector}, ExplicitVector) ->
+    case ExplicitVector of
+        undefined ->
+            case doc_embedding(DocMap) of
+                undefined ->
+                    %% Policy-computed, including the case where the doc
+                    %% round-trips a stale computed object: overwrite it
+                    %% with the fresh vector.
+                    DocMap#{<<"_embedding">> => #{<<"vector">> => Vector,
+                                                  <<"source">> => <<"computed">>}};
+                _ClientVector ->
+                    DocMap %% client-carried, already in the doc
+            end;
+        _ ->
+            %% explicit vector option: a client-supplied vector
+            DocMap#{<<"_embedding">> => Vector}
+    end;
+inject_embedding(DocMap, deindex, _ExplicitVector) ->
+    DocMap.
 
 %% @private Synchronous batch put: embed all matching docs in one batch
 %% before writing (any embed failure fails the whole batch, nothing
@@ -686,9 +723,9 @@ put_docs_sync(#{docdb := DbBin, embedding := Policy, embed := Embed} = Db,
     Texts = [Text || {embed, Text} <- Plans],
     case embed_many(Texts, Embed) of
         {ok, Vectors} ->
-            Actions = assign_vectors(Plans, Vectors),
+            {Docs2, Actions} = inject_batch(DocMaps, Plans, Vectors),
             WriteOpts = record_write_opts(Db, Opts#{return_hlc => true}),
-            Results = barrel_docdb:put_docs(DbBin, Docs, WriteOpts),
+            Results = barrel_docdb:put_docs(DbBin, Docs2, WriteOpts),
             ok = sync_index_batch(Db, lists:zip(Results, Actions)),
             [case R of
                  {ok, Result} -> {ok, maps:remove(hlc, Result)};
@@ -712,16 +749,25 @@ plan_for(Policy, DocMap) ->
             {index, barrel_embedding_policy:text(Policy, DocMap), Vector}
     end.
 
-%% @private Pair each embed plan with its vector (order preserved);
-%% carried vectors pass through.
-assign_vectors([], []) ->
-    [];
-assign_vectors([{embed, Text} | Plans], [Vector | Vectors]) ->
-    [{index, Text, Vector} | assign_vectors(Plans, Vectors)];
-assign_vectors([{index, _, _} = Given | Plans], Vectors) ->
-    [Given | assign_vectors(Plans, Vectors)];
-assign_vectors([deindex | Plans], Vectors) ->
-    [deindex | assign_vectors(Plans, Vectors)].
+%% @private Pair each embed plan with its vector and inject computed
+%% vectors into their docs (atomic column storage); carried vectors are
+%% already in the doc.
+inject_batch(DocMaps, Plans, Vectors) ->
+    inject_batch(DocMaps, Plans, Vectors, [], []).
+
+inject_batch([], [], [], DocAcc, ActAcc) ->
+    {lists:reverse(DocAcc), lists:reverse(ActAcc)};
+inject_batch([DocMap | DocMaps], [{embed, Text} | Plans], [Vector | Vectors],
+             DocAcc, ActAcc) ->
+    Doc2 = DocMap#{<<"_embedding">> => #{<<"vector">> => Vector,
+                                         <<"source">> => <<"computed">>}},
+    inject_batch(DocMaps, Plans, Vectors,
+                 [Doc2 | DocAcc], [{index, Text, Vector} | ActAcc]);
+inject_batch([DocMap | DocMaps], [{index, _, _} = Given | Plans], Vectors,
+             DocAcc, ActAcc) ->
+    inject_batch(DocMaps, Plans, Vectors, [DocMap | DocAcc], [Given | ActAcc]);
+inject_batch([DocMap | DocMaps], [deindex | Plans], Vectors, DocAcc, ActAcc) ->
+    inject_batch(DocMaps, Plans, Vectors, [DocMap | DocAcc], [deindex | ActAcc]).
 
 %% @private Which pipeline batch writes use on a record database.
 batch_mode(#{embedding := Policy}) ->

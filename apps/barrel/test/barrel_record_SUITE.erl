@@ -40,7 +40,9 @@
          byo_embedding_async/1,
          byo_embedding_sync_and_precedence/1,
          byo_embedding_dimension_check/1,
-         byo_embedding_not_path_indexed/1]).
+         byo_embedding_not_path_indexed/1,
+         computed_embedding_stored/1,
+         computed_roundtrip_reembeds/1]).
 
 all() ->
     [adapter_get,
@@ -72,7 +74,9 @@ all() ->
      byo_embedding_async,
      byo_embedding_sync_and_precedence,
      byo_embedding_dimension_check,
-     byo_embedding_not_path_indexed].
+     byo_embedding_not_path_indexed,
+     computed_embedding_stored,
+     computed_roundtrip_reembeds].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(barrel),
@@ -126,7 +130,9 @@ meck_cases() ->
      byo_embedding_async,
      byo_embedding_sync_and_precedence,
      byo_embedding_dimension_check,
-     byo_embedding_not_path_indexed].
+     byo_embedding_not_path_indexed,
+     computed_embedding_stored,
+     computed_roundtrip_reembeds].
 
 %% Deterministic 3-dim embedder; texts containing "poison" fail.
 mock_embed() ->
@@ -149,6 +155,10 @@ mock_embed() ->
 mock_vec(Text) ->
     Hash = erlang:phash2(Text, 1000000),
     [Hash / 1000000.0, (Hash rem 1000) / 1000.0, (Hash rem 100) / 100.0].
+
+%% The stored column uses 32-bit floats; compare against the same width.
+mock_vec32(Text) ->
+    barrel_doc:decode_embedding(barrel_doc:encode_embedding(mock_vec(Text))).
 
 %%====================================================================
 %% Test cases
@@ -510,13 +520,17 @@ search_end_to_end(Config) ->
 byo_embedding_async(Config) ->
     %% Fields-less policy: bring-your-own embeddings, no embedder needed.
     {ok, Db} = open_record(byo_async_db, Config, #{}),
-    Vector = [0.1, 0.2, 0.3],
+    Vector = [0.5, 0.25, 0.75],  %% exactly representable in 32-bit floats
     {ok, _} = barrel:put_doc(Db, #{<<"id">> => <<"a">>,
                                    <<"title">> => <<"carried">>,
                                    <<"_embedding">> => Vector}),
-    %% The vector persists in the body and the indexer picks it up
+    %% Stored as an entity column: absent from default reads, returned as
+    %% the object form on request
     {ok, Doc} = barrel:get_doc(Db, <<"a">>),
-    ?assertEqual(Vector, maps:get(<<"_embedding">>, Doc)),
+    ?assertEqual(false, maps:is_key(<<"_embedding">>, Doc)),
+    {ok, Doc2} = barrel:get_doc(Db, <<"a">>, #{include_embedding => true}),
+    ?assertEqual(#{<<"vector">> => Vector, <<"source">> => <<"client">>},
+                 maps:get(<<"_embedding">>, Doc2)),
     ok = wait_until(fun() ->
         case barrel:search_vector(Db, Vector, #{k => 1}) of
             {ok, [#{key := <<"a">>} = Hit]} ->
@@ -529,6 +543,53 @@ byo_embedding_async(Config) ->
     %% The embedder was never called
     ?assertEqual(0, meck:num_calls(barrel_embed, embed, '_')),
     ?assertEqual(0, meck:num_calls(barrel_embed, embed_batch, '_')),
+    ok = barrel:close(Db).
+
+computed_embedding_stored(Config) ->
+    %% Policy-computed vectors are ALSO stored in _embedding: sync mode
+    %% atomically with the write, async via the indexer write-back.
+    {ok, Db} = open_record(computed_sync_db, Config,
+                           #{fields => [<<"title">>], mode => sync}),
+    {ok, _} = barrel:put_doc(Db, #{<<"id">> => <<"a">>,
+                                   <<"title">> => <<"stored sync">>}),
+    {ok, Doc} = barrel:get_doc(Db, <<"a">>, #{include_embedding => true}),
+    #{<<"vector">> := V1, <<"source">> := <<"computed">>} =
+        maps:get(<<"_embedding">>, Doc),
+    ?assertEqual(3, length(V1)),
+    ok = barrel:close(Db),
+    %% Async: the indexer writes the computed vector back
+    {ok, Db2} = open_record(computed_async_db, Config,
+                            #{fields => [<<"title">>]}),
+    {ok, _} = barrel:put_doc(Db2, #{<<"id">> => <<"b">>,
+                                    <<"title">> => <<"stored async">>}),
+    ok = wait_until(fun() ->
+        case barrel:get_doc(Db2, <<"b">>, #{include_embedding => true}) of
+            {ok, #{<<"_embedding">> := #{<<"source">> := <<"computed">>}}} ->
+                true;
+            _ ->
+                false
+        end
+    end),
+    ok = barrel:close(Db2).
+
+computed_roundtrip_reembeds(Config) ->
+    %% A read-modify-write that resends the computed _embedding object
+    %% must NOT freeze the stale vector: provenance travels inside the
+    %% object, so the policy re-embeds the changed text.
+    {ok, Db} = open_record(roundtrip_db, Config,
+                           #{fields => [<<"title">>], mode => sync}),
+    {ok, _} = barrel:put_doc(Db, #{<<"id">> => <<"a">>,
+                                   <<"title">> => <<"first text">>}),
+    {ok, Doc} = barrel:get_doc(Db, <<"a">>, #{include_embedding => true}),
+    %% Change the text, resend the doc INCLUDING the stale computed object
+    {ok, _} = barrel:put_doc(Db, Doc#{<<"title">> => <<"second text">>}),
+    %% The new text's vector wins the search, not the stale one
+    {ok, [#{key := <<"a">>}]} =
+        barrel:search_vector(Db, mock_vec(<<"second text">>), #{k => 1}),
+    {ok, Doc2} = barrel:get_doc(Db, <<"a">>, #{include_embedding => true}),
+    #{<<"vector">> := V2, <<"source">> := <<"computed">>} =
+        maps:get(<<"_embedding">>, Doc2),
+    ?assertEqual(mock_vec32(<<"second text">>), V2),
     ok = barrel:close(Db).
 
 byo_embedding_sync_and_precedence(Config) ->

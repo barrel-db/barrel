@@ -123,7 +123,9 @@ do_get_doc(StoreRef, DbName, DocId, Opts, Snapshot) ->
                                     end,
                                     %% Add conflicts if requested
                                     Result3 = maybe_add_conflicts(Result2, Columns, Opts),
-                                    {ok, Result3}
+                                    %% Attach the embedding column if requested
+                                    Result4 = maybe_add_embedding(Result3, Columns, Opts),
+                                    {ok, Result4}
                             end;
                         not_found ->
                             {error, not_found}
@@ -164,7 +166,8 @@ do_get_docs(StoreRef, DbName, DocIds, Opts, Snapshot) ->
                                 true -> Result#{<<"_deleted">> => true};
                                 false -> Result
                             end,
-                            Map#{DocId => {ok, Result2}}
+                            Result3 = maybe_add_embedding(Result2, Columns, Opts),
+                            Map#{DocId => {ok, Result3}}
                     end;
                 _ -> Map
             end
@@ -174,6 +177,29 @@ do_get_docs(StoreRef, DbName, DocIds, Opts, Snapshot) ->
     ),
     %% Return results in original order
     [maps:get(DocId, DocBodyMap, {error, not_found}) || DocId <- DocIds].
+
+%% @private Attach the embedding column as the <<"_embedding">> object
+%% (vector + source) when include_embedding => true. Off by default, and
+%% the object carries its provenance, so read-modify-write loops that
+%% resend it round-trip a computed vector as computed, never as a client
+%% override.
+maybe_add_embedding(Doc, Columns, Opts) ->
+    case maps:get(include_embedding, Opts, false) of
+        true ->
+            case proplists:get_value(?COL_EMBEDDING, Columns) of
+                undefined -> Doc;
+                <<>> -> Doc;
+                Bin ->
+                    Src = proplists:get_value(?COL_EMBEDDING_SRC, Columns,
+                                              ?EMBEDDING_SRC_CLIENT),
+                    Doc#{<<"_embedding">> => #{
+                        <<"vector">> => barrel_doc:decode_embedding(Bin),
+                        <<"source">> => Src
+                    }}
+            end;
+        false ->
+            Doc
+    end.
 
 %% @private Convert binary back to boolean from wide column storage
 -spec bin_to_deleted(binary()) -> boolean().

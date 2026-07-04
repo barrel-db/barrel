@@ -127,6 +127,11 @@
     outbox_ack/3
 ]).
 
+%% Embedding column (computed vectors written back by an indexer)
+-export([
+    set_doc_embedding/4
+]).
+
 %% Replication primitives
 -export([
     put_rev/4,
@@ -1375,6 +1380,19 @@ outbox_fold(Db, Tag, Fun, Acc, Opts) ->
 outbox_ack(Db, Tag, Hlcs) ->
     with_db(Db, fun(Pid) ->
         barrel_db_server:outbox_ack(Pid, Tag, Hlcs)
+    end).
+
+%% @doc Store a computed embedding as a document's embedding column.
+%%
+%% Embeddings are derived data kept outside the body: this never bumps
+%% the revision or emits a change. CAS on `ExpectedRev': a conflict
+%% means a newer write exists. Read back with the `include_embedding'
+%% option of {@link get_doc/3}.
+-spec set_doc_embedding(binary() | pid(), binary(), binary(), [number()]) ->
+    ok | {error, conflict | not_found | term()}.
+set_doc_embedding(Db, DocId, ExpectedRev, Vector) ->
+    with_db(Db, fun(Pid) ->
+        barrel_db_server:set_doc_embedding(Pid, DocId, ExpectedRev, Vector)
     end).
 
 %%====================================================================

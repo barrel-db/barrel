@@ -72,12 +72,15 @@ before `put_doc` returns, so a search issued right after sees the document.
 An embed failure fails the put with `{error, {embed_failed, Reason}}` and
 nothing is written.
 
-## Bring your own embeddings
+## The _embedding property
 
-Carry the embedding inside the document in the reserved `_embedding` field.
-It persists with the document (so it survives crashes and will travel with
-replication), it is indexed instead of anything the policy would embed, and
-it works over the REST server with no API changes:
+Every indexed document's vector lives in the reserved `_embedding` property,
+whoever computed it. It is stored as derived data alongside the document
+(never in the body, so it does not change the revision), it is never
+path-indexed, and it never appears in search metadata.
+
+Supply your own embedding by carrying it in the document, as a bare vector
+or as an object; it is indexed instead of anything the policy would embed:
 
 ```erlang
 {ok, _} = barrel:put_doc(Db, #{<<"id">> => <<"a">>,
@@ -87,22 +90,34 @@ it works over the REST server with no API changes:
 
 With client-supplied embeddings the policy can be empty: open with
 `embedding => #{dimensions => 768}` (no `fields`) and no embedder is needed
-at all. `_embedding` is never path-indexed and never appears in search
-metadata. The vector length is checked against the database dimension before
+at all. The vector length is checked against the database dimension before
 the write; batches with a wrong-length `_embedding` are rejected whole.
 
-In async mode the indexer picks the carried vector up from the stored
-document; in sync mode it is indexed before the put returns.
+Policy-computed vectors are stored in `_embedding` too: atomically with the
+write in sync mode, via the indexer in async mode. Read the property back
+with `include_embedding`; it always returns the object form, which carries
+its provenance:
 
-For a one-off vector that should NOT be stored in the document, use the put
-option instead; it always indexes synchronously:
+```erlang
+{ok, Doc} = barrel:get_doc(Db, <<"a">>, #{include_embedding => true}),
+#{<<"vector">> := Vector, <<"source">> := Source} = maps:get(<<"_embedding">>, Doc),
+%% Source is <<"client">> or <<"computed">>
+```
+
+Because the source travels inside the object, a read-modify-write that
+resends a computed `_embedding` never freezes a stale vector: the policy
+re-embeds when the text changes. Only vectors marked (or shaped as) client
+input override the policy.
+
+The `vector` put option is shorthand for supplying a client vector on one
+write:
 
 ```erlang
 {ok, _} = barrel:put_doc(Db, Doc, #{vector => Vector}).
 ```
 
-Precedence when several sources are present: the `vector` option, then the
-document's `_embedding`, then the policy's fields.
+Precedence when several sources are present: the `vector` option, then a
+client `_embedding` carried in the document, then the policy's fields.
 
 ## Notes
 

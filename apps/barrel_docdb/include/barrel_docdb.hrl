@@ -140,5 +140,13 @@
 -define(COL_CREATED_AT, <<"created_at">>).
 -define(COL_EXPIRES_AT, <<"expires_at">>).
 -define(COL_TIER, <<"tier">>).
+%% Document embedding: 32-bit float binary + provenance (client-supplied via
+%% the _embedding doc field, or computed by an embedding policy). Derived
+%% data: never part of the body or the revision hash, surfaced as
+%% <<"_embedding">> on reads that ask for it (include_embedding => true).
+-define(COL_EMBEDDING, <<"emb">>).
+-define(COL_EMBEDDING_SRC, <<"embsrc">>).
+-define(EMBEDDING_SRC_CLIENT, <<"client">>).
+-define(EMBEDDING_SRC_COMPUTED, <<"computed">>).
 
 -endif. %% BARREL_DOCDB_HRL

@@ -957,6 +957,9 @@ put_entity(#{ref := Ref}, Key, Columns, Opts) ->
 -define(COL_CREATED_AT, <<"created_at">>).
 -define(COL_EXPIRES_AT, <<"expires_at">>).
 -define(COL_TIER, <<"tier">>).
+%% Embedding columns (added in v3; keep in sync with barrel_docdb.hrl)
+-define(COL_EMBEDDING, <<"emb">>).
+-define(COL_EMBEDDING_SRC, <<"embsrc">>).
 
 %% @doc Encode entity columns to fixed binary format
 %% Format v2 (with TTL/tier extension):
@@ -989,13 +992,28 @@ encode_entity(Columns) ->
         _ -> 0
     end,
 
+    %% Embedding extension (v3): `<<EmbLen:32, Emb/binary, Src:8>>'
+    %% appended only when a vector is stored (src 0=client, 1=computed)
+    EmbExt = case proplists:get_value(?COL_EMBEDDING, Columns, <<>>) of
+        <<>> ->
+            <<>>;
+        EmbBin when is_binary(EmbBin) ->
+            SrcByte = case proplists:get_value(?COL_EMBEDDING_SRC, Columns,
+                                               <<"client">>) of
+                <<"computed">> -> 1;
+                _ -> 0
+            end,
+            <<(byte_size(EmbBin)):32, EmbBin/binary, SrcByte:8>>
+    end,
+
     <<(byte_size(Rev)):16, Rev/binary,
       DelByte:8,
       (byte_size(Hlc)):16, Hlc/binary,
       (byte_size(TreeBin)):32, TreeBin/binary,
       (byte_size(CreatedAt)):16, CreatedAt/binary,
       ExpiresAt:64,
-      TierByte:8>>.
+      TierByte:8,
+      EmbExt/binary>>.
 
 %% @doc Decode entity from fixed binary format
 %% Handles both v1 (without TTL/tier) and v2 (with TTL/tier) formats.
@@ -1008,10 +1026,14 @@ decode_entity(<<RevLen:16, Rev:RevLen/binary,
     Del = case DelByte of 1 -> <<"true">>; 0 -> <<"false">> end,
     BaseColumns = [{?COL_REV, Rev}, {?COL_DELETED, Del}, {?COL_HLC, Hlc}, {?COL_REVTREE, TreeBin}],
     case Rest of
-        <<CreatedAtLen:16, CreatedAt:CreatedAtLen/binary, ExpiresAt:64, TierByte:8>> ->
-            %% V2 format with TTL/tier extension
+        <<CreatedAtLen:16, CreatedAt:CreatedAtLen/binary, ExpiresAt:64, TierByte:8,
+          Ext/binary>> ->
+            %% V2 format with TTL/tier extension (+ optional v3 embedding)
             Tier = case TierByte of 0 -> hot; 1 -> warm; 2 -> cold; _ -> hot end,
-            BaseColumns ++ [{?COL_CREATED_AT, CreatedAt}, {?COL_EXPIRES_AT, ExpiresAt}, {?COL_TIER, Tier}];
+            Columns = BaseColumns ++ [{?COL_CREATED_AT, CreatedAt},
+                                      {?COL_EXPIRES_AT, ExpiresAt},
+                                      {?COL_TIER, Tier}],
+            decode_entity_ext(Ext, Columns);
         <<>> ->
             %% V1 format (no extension) - use defaults
             BaseColumns ++ [{?COL_CREATED_AT, <<>>}, {?COL_EXPIRES_AT, 0}, {?COL_TIER, hot}];
@@ -1019,6 +1041,16 @@ decode_entity(<<RevLen:16, Rev:RevLen/binary,
             %% Unknown extension, ignore and use defaults
             BaseColumns ++ [{?COL_CREATED_AT, <<>>}, {?COL_EXPIRES_AT, 0}, {?COL_TIER, hot}]
     end.
+
+%% @private Decode the optional v3 embedding extension.
+decode_entity_ext(<<>>, Columns) ->
+    Columns;
+decode_entity_ext(<<EmbLen:32, Emb:EmbLen/binary, SrcByte:8>>, Columns) ->
+    Src = case SrcByte of 1 -> <<"computed">>; _ -> <<"client">> end,
+    Columns ++ [{?COL_EMBEDDING, Emb}, {?COL_EMBEDDING_SRC, Src}];
+decode_entity_ext(_Unknown, Columns) ->
+    %% Future extension we do not understand: ignore
+    Columns.
 
 %% @doc Get a wide-column entity from the default column family
 %% Returns {ok, [{Name, Value}]} or not_found

@@ -39,6 +39,9 @@
     doc_without_meta/1
 ]).
 
+%% Embedding column codec (32-bit floats, matching the vector stores)
+-export([encode_embedding/1, decode_embedding/1]).
+
 %% Unique ID generation
 -export([generate_docid/0]).
 
@@ -232,15 +235,14 @@ trim_history(EncodedRevs, Ancestors, Limit) ->
 
 %% @doc Remove metadata fields from document.
 %% `_'-prefixed top-level fields are reserved metadata and are stripped
-%% before storage, with one exception: `<<"_embedding">>' persists in the
-%% body so a client-supplied vector travels with its document (it is
-%% never path-indexed; see barrel_ars).
+%% before storage. `<<"_embedding">>' is extracted separately (see
+%% make_doc_record) and stored as a document entity column, never in the
+%% body, so it does not affect the revision hash.
 -spec doc_without_meta(doc()) -> doc().
 doc_without_meta(Doc) ->
     maps:filter(
         fun
             (<<"_attachments">>, _) -> false;
-            (<<"_embedding">>, _) -> true;
             (<<"_", _/binary>>, _) -> false;
             (_, _) -> true
         end,
@@ -281,7 +283,7 @@ make_doc_record(Doc0) ->
             NewRev = <<(integer_to_binary(Gen + 1))/binary, "-", Hash/binary>>,
             [NewRev, Rev]
     end,
-    #{
+    Record = #{
         id => Id,
         ref => erlang:make_ref(),
         revs => Revs,
@@ -289,7 +291,45 @@ make_doc_record(Doc0) ->
         hash => Hash,
         attachments => Atts,
         doc => Doc1
-    }.
+    },
+    %% A carried embedding is derived data stored as an entity column
+    %% (never in the body, never in the revision hash). Accepted shapes:
+    %% a bare vector (client-supplied shorthand) or an object
+    %% #{<<"vector">> => [...], <<"source">> => <<"client">>|<<"computed">>}
+    %% as returned by reads with include_embedding.
+    case parse_embedding(maps:get(<<"_embedding">>, Doc0, undefined)) of
+        {Vector, Src} ->
+            Record#{embedding => Vector, embedding_src => Src};
+        undefined ->
+            Record
+    end.
+
+%% @private Parse the _embedding property (vector shorthand or object).
+parse_embedding(Vector) when is_list(Vector) ->
+    {Vector, <<"client">>};
+parse_embedding(#{<<"vector">> := Vector} = Obj) when is_list(Vector) ->
+    Src = case maps:get(<<"source">>, Obj, <<"client">>) of
+        <<"computed">> -> <<"computed">>;
+        _ -> <<"client">>
+    end,
+    {Vector, Src};
+parse_embedding(_) ->
+    undefined.
+
+%%====================================================================
+%% Embedding column codec
+%%====================================================================
+
+%% @doc Encode an embedding vector for entity-column storage.
+%% 32-bit little-endian floats, the same width the vector stores use.
+-spec encode_embedding([number()]) -> binary().
+encode_embedding(Vector) when is_list(Vector) ->
+    << <<F:32/float-little>> || F <- Vector >>.
+
+%% @doc Decode an embedding entity column back to a vector.
+-spec decode_embedding(binary()) -> [float()].
+decode_embedding(Binary) when is_binary(Binary) ->
+    [F || <<F:32/float-little>> <= Binary].
 
 %%====================================================================
 %% ID Generation

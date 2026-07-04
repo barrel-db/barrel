@@ -34,6 +34,9 @@
 %% Tagged outbox API (acks are writes, so they go through the server)
 -export([outbox_ack/3]).
 
+%% Embedding column (computed vectors written back by an indexer)
+-export([set_doc_embedding/4]).
+
 %% Replication API
 -export([
     put_rev/4,
@@ -161,6 +164,15 @@ resolve_conflict(Pid, DocId, BaseRev, Resolution) ->
     ok | {error, term()}.
 outbox_ack(Pid, Tag, Hlcs) ->
     gen_server:call(Pid, {outbox_ack, Tag, Hlcs}).
+
+%% @doc Store a computed embedding as the document's embedding column.
+%% CAS on the expected revision: embeddings are derived data, so this
+%% never bumps the revision or emits a change; a conflict means a newer
+%% write exists (which re-drives the computing indexer anyway).
+-spec set_doc_embedding(pid(), binary(), binary(), [number()]) ->
+    ok | {error, conflict | not_found | term()}.
+set_doc_embedding(Pid, DocId, ExpectedRev, Vector) ->
+    gen_server:call(Pid, {set_doc_embedding, DocId, ExpectedRev, Vector}).
 
 %%====================================================================
 %% Replication API functions
@@ -334,6 +346,12 @@ handle_call({fold_docs, Fun, Acc}, _From,
 handle_call({fold_docs, Fun, Acc, Opts}, _From,
             #state{name = DbName, store_ref = StoreRef} = State) ->
     Result = do_fold_docs(StoreRef, DbName, Fun, Acc, Opts),
+    {reply, Result, State};
+
+%% Embedding column write-back
+handle_call({set_doc_embedding, DocId, ExpectedRev, Vector}, _From,
+            #state{name = DbName, store_ref = StoreRef} = State) ->
+    Result = do_set_doc_embedding(StoreRef, DbName, DocId, ExpectedRev, Vector),
     {reply, Result, State};
 
 %% Tagged outbox operations
@@ -530,9 +548,21 @@ do_put_doc(StoreRef, DbName, Doc, Opts) ->
         ok ->
             do_put_doc_apply(StoreRef, DbName, DocId, Revs, NewRev, Deleted,
                              DocBody, OldHlc, OldRev, OldRevTree, OldDocBody,
-                             OldDocBodyCbor, Opts);
+                             OldDocBodyCbor, embedding_columns(DocRecord), Opts);
         {error, conflict} ->
             {error, conflict}
+    end.
+
+%% @doc Embedding entity columns for a write. Present only when the doc
+%% carried an _embedding; absent otherwise, which clears any previous
+%% (now stale) vector column since entity_put replaces the entity.
+embedding_columns(DocRecord) ->
+    case maps:get(embedding, DocRecord, undefined) of
+        undefined ->
+            [];
+        Vector ->
+            [{?COL_EMBEDDING, barrel_doc:encode_embedding(Vector)},
+             {?COL_EMBEDDING_SRC, maps:get(embedding_src, DocRecord, ?EMBEDDING_SRC_CLIENT)}]
     end.
 
 %% @doc MVCC pre-check for the regular (non-replication) put path.
@@ -547,7 +577,8 @@ mvcc_check(OldRev, [_NewRev, ParentRev | _], _DocRecord) when ParentRev =:= OldR
 mvcc_check(_OldRev, _Revs, _DocRecord) -> {error, conflict}.
 
 do_put_doc_apply(StoreRef, DbName, DocId, Revs, NewRev, Deleted, DocBody,
-                 OldHlc, OldRev, OldRevTree, OldDocBody, OldDocBodyCbor, Opts) ->
+                 OldHlc, OldRev, OldRevTree, OldDocBody, OldDocBodyCbor,
+                 EmbeddingCols, Opts) ->
     DocEntityKey = barrel_store_keys:doc_entity(DbName, DocId),
 
     %% Build revision tree (merge with existing)
@@ -593,7 +624,7 @@ do_put_doc_apply(StoreRef, DbName, DocId, Revs, NewRev, Deleted, DocBody,
         {?COL_CREATED_AT, CreatedAt},
         {?COL_EXPIRES_AT, ExistingExpires},
         {?COL_TIER, ExistingTier}
-    ],
+    ] ++ EmbeddingCols,
     DocOps = [{entity_put, DocEntityKey, DocColumns}],
 
     %% Build DocInfo for change tracking (compatible with existing change feed)
@@ -814,7 +845,7 @@ prepare_doc_ops(StoreRef, DbName, Doc, Opts) ->
             {?COL_CREATED_AT, CreatedAt},
             {?COL_EXPIRES_AT, ExpiresAt},
             {?COL_TIER, Tier}
-        ],
+        ] ++ embedding_columns(DocRecord),
         DocOps = [{entity_put, DocEntityKey, DocColumns}],
 
         %% Build DocInfo for change tracking
@@ -887,6 +918,32 @@ prepare_doc_ops(StoreRef, DbName, Doc, Opts) ->
     catch
         _:Reason ->
             {error, Reason}
+    end.
+
+%% @doc Store a computed embedding in the doc entity (CAS on revision).
+%% Read-modify-write of the entity columns is safe here: this runs in
+%% the database writer, which serializes all entity writes.
+do_set_doc_embedding(StoreRef, DbName, DocId, ExpectedRev, Vector) ->
+    DocEntityKey = barrel_store_keys:doc_entity(DbName, DocId),
+    case barrel_store_rocksdb:get_entity(StoreRef, DocEntityKey) of
+        {ok, Columns} ->
+            case proplists:get_value(?COL_REV, Columns) of
+                ExpectedRev ->
+                    Base = [C || {K, _} = C <- Columns,
+                                 K =/= ?COL_EMBEDDING,
+                                 K =/= ?COL_EMBEDDING_SRC],
+                    NewColumns = Base ++
+                        [{?COL_EMBEDDING, barrel_doc:encode_embedding(Vector)},
+                         {?COL_EMBEDDING_SRC, ?EMBEDDING_SRC_COMPUTED}],
+                    barrel_store_rocksdb:put_entity(StoreRef, DocEntityKey,
+                                                    NewColumns);
+                _OtherRev ->
+                    {error, conflict}
+            end;
+        not_found ->
+            {error, not_found};
+        {error, _} = Err ->
+            Err
     end.
 
 %% @doc Get a document by ID. The read implementation lives in
