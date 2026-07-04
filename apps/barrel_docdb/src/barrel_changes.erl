@@ -64,7 +64,9 @@
     style => main_only | all_docs,
     doc_ids => [docid()],
     paths => [binary()],  % MQTT-style path patterns to filter by
-    query => barrel_query:query_spec()  % Query to filter by
+    query => barrel_query:query_spec(),  % Query to filter by
+    channel => binary(),  % Configured channel (write-time feed; not with paths/doc_ids)
+    include_leaves => boolean()  % Surface channel leave rows (left => true)
 }.
 
 -type continuation_info() :: #{
@@ -182,30 +184,83 @@ fold_changes_internal(StoreRef, DbName, Since, Fun, Acc, ScanMode) ->
 %% @doc Get a list of changes since an HLC timestamp
 -spec get_changes(barrel_store_rocksdb:db_ref(), db_name(),
                   barrel_hlc:timestamp() | first, changes_opts()) ->
-    {ok, [change()], barrel_hlc:timestamp()}.
+    {ok, [change()], barrel_hlc:timestamp()} | {error, term()}.
 get_changes(StoreRef, DbName, Since, Opts) ->
     DocIds = maps:get(doc_ids, Opts, undefined),
     PathPatterns = maps:get(paths, Opts, undefined),
     QuerySpec = maps:get(query, Opts, undefined),
+    Channel = maps:get(channel, Opts, undefined),
 
-    %% Determine if we can use path index for more efficient query
-    %% We can use path index if:
-    %% - Path patterns are specified
-    %% - No doc_ids filter (can't combine with path index efficiently)
-    %% - No query filter (path index entries don't include doc body for query matching)
-    case {PathPatterns, DocIds, QuerySpec} of
-        {[SinglePath], undefined, undefined} when is_binary(SinglePath) ->
-            %% Single path pattern, no doc_ids, no query - use path index directly
-            get_changes_with_path_index(StoreRef, DbName, SinglePath, Since, Opts, QuerySpec);
-        {Paths, undefined, undefined} when is_list(Paths), length(Paths) > 1 ->
-            %% Multiple path patterns, no query - merge results from path indexes
-            get_changes_with_multiple_paths(StoreRef, DbName, Paths, Since, Opts, QuerySpec);
+    case Channel of
+        undefined ->
+            %% Determine if we can use path index for more efficient query
+            %% We can use path index if:
+            %% - Path patterns are specified
+            %% - No doc_ids filter (can't combine with path index efficiently)
+            %% - No query filter (path index entries don't include doc body for query matching)
+            case {PathPatterns, DocIds, QuerySpec} of
+                {[SinglePath], undefined, undefined} when is_binary(SinglePath) ->
+                    %% Single path pattern, no doc_ids, no query - use path index directly
+                    get_changes_with_path_index(StoreRef, DbName, SinglePath, Since, Opts, QuerySpec);
+                {Paths, undefined, undefined} when is_list(Paths), length(Paths) > 1 ->
+                    %% Multiple path patterns, no query - merge results from path indexes
+                    get_changes_with_multiple_paths(StoreRef, DbName, Paths, Since, Opts, QuerySpec);
+                _ ->
+                    %% Fall back to full scan with filtering when:
+                    %% - doc_ids is specified (can't use path index)
+                    %% - query is specified (path index entries don't have doc body)
+                    %% - no paths specified
+                    get_changes_full_scan(StoreRef, DbName, Since, Opts)
+            end;
+        _ when PathPatterns =/= undefined; DocIds =/= undefined ->
+            {error, incompatible_filters};
+        _ when is_binary(Channel) ->
+            get_changes_by_channel(StoreRef, DbName, Channel, Since, Opts);
         _ ->
-            %% Fall back to full scan with filtering when:
-            %% - doc_ids is specified (can't use path index)
-            %% - query is specified (path index entries don't have doc body)
-            %% - no paths specified
-            get_changes_full_scan(StoreRef, DbName, Since, Opts)
+            {error, {unknown_channel, Channel}}
+    end.
+
+%% @private One bounded range scan over the channel's write-time feed:
+%% limit pushdown, exclusive since, leave rows hidden by default. A
+%% query filter fetches bodies for the visited rows only.
+get_changes_by_channel(StoreRef, DbName, Channel, Since, Opts) ->
+    case lists:member(Channel, barrel_channel:names(DbName)) of
+        false ->
+            {error, {unknown_channel, Channel}};
+        true ->
+            {ok, Rows, LastHlc} = barrel_channel:fold(
+                StoreRef, DbName, Channel, Since,
+                maps:with([limit, include_leaves], Opts)),
+            IncludeDocs = maps:get(include_docs, Opts, false),
+            CompiledQuery = compile_query(maps:get(query, Opts, undefined)),
+            NeedDocs = IncludeDocs orelse CompiledQuery =/= undefined,
+            Rows1 = case NeedDocs of
+                true ->
+                    batch_fetch_doc_bodies(
+                        StoreRef, DbName,
+                        [{maps:get(id, R), R} || R <- Rows]);
+                false ->
+                    Rows
+            end,
+            Style = maps:get(style, Opts, all_docs),
+            Rows2 = lists:filtermap(
+                fun(Change) ->
+                    case maybe_match_query(CompiledQuery, Change) of
+                        true -> {true, apply_style(Style, Change)};
+                        false -> false
+                    end
+                end,
+                Rows1),
+            Rows3 = case {CompiledQuery, IncludeDocs} of
+                {undefined, _} -> Rows2;
+                {_, true} -> Rows2;
+                {_, false} -> [maps:remove(doc, C) || C <- Rows2]
+            end,
+            Changes = case maps:get(descending, Opts, false) of
+                true -> lists:reverse(Rows3);
+                false -> Rows3
+            end,
+            {ok, Changes, LastHlc}
     end.
 
 %% @doc Get changes with continuation support for pagination.
@@ -809,75 +864,35 @@ check_recent_buckets(_StoreRef, _DbName, _Since, _Bucket, _Count) ->
     %% Bucket < 0, shouldn't happen in practice
     true.
 
-%% @private Batch fetch doc bodies using multi_get for efficiency.
-%% Takes a list of {DocId, Change} pairs and returns changes with doc bodies added.
-%% Uses multi_get: first for doc_current (to get revs), then for doc_body from body store.
+%% @private Batch fetch current doc bodies for changes. The change
+%% entry itself carries the deleted flag, and the current body lives at
+%% the versionless doc_body key, so this is one body-CF multi_get.
+%% (The previous implementation read legacy doc_current keys that
+%% nothing writes anymore, so include_docs and query filtering over
+%% changes silently returned no bodies.)
 -spec batch_fetch_doc_bodies(barrel_store_rocksdb:db_ref(), db_name(),
                               [{docid(), change()}]) -> [change()].
 batch_fetch_doc_bodies(_StoreRef, _DbName, []) ->
     [];
 batch_fetch_doc_bodies(StoreRef, DbName, DocChangePairs) ->
-    %% Step 1: Build keys for doc_current lookup
-    DocIds = [DocId || {DocId, _Change} <- DocChangePairs],
-    CurrentKeys = [barrel_store_keys:doc_current(DbName, DocId) || DocId <- DocIds],
-
-    %% Step 2: Batch fetch doc_current entries
-    CurrentResults = barrel_store_rocksdb:multi_get(StoreRef, CurrentKeys),
-
-    %% Step 3: Parse results and build {DocId, Rev} pairs for non-deleted docs
-    {DocIdRevPairs, DeletedSet} = lists:foldl(
-        fun({DocId, Result}, {Pairs, Deleted}) ->
-            case Result of
-                {ok, CurrentBin} ->
-                    {Rev, IsDeleted, _Hlc} = binary_to_term(CurrentBin),
-                    case IsDeleted of
-                        true ->
-                            {Pairs, sets:add_element(DocId, Deleted)};
-                        false ->
-                            {[{DocId, Rev} | Pairs], Deleted}
-                    end;
-                not_found ->
-                    {Pairs, Deleted};
-                {error, _} ->
-                    {Pairs, Deleted}
-            end
-        end,
-        {[], sets:new()},
-        lists:zip(DocIds, CurrentResults)
-    ),
-
-    %% Step 4: Batch fetch doc bodies from body store (BlobDB)
-    DocBodies = case DocIdRevPairs of
-        [] ->
-            #{};
-        _ ->
-            ReversedPairs = lists:reverse(DocIdRevPairs),
-            BodyResults = barrel_doc_body_store:multi_get_bodies(DbName, ReversedPairs, #{}),
-            lists:foldl(
-                fun({{DocId, _Rev}, Result}, Acc) ->
-                    case Result of
-                        {ok, CborBin} ->
-                            DocBody = barrel_docdb_codec_cbor:decode_any(CborBin),
-                            maps:put(DocId, DocBody, Acc);
-                        _ ->
-                            Acc
-                    end
-                end,
-                #{},
-                lists:zip(ReversedPairs, BodyResults)
-            )
-    end,
-
-    %% Step 5: Merge doc bodies back into changes
-    [case sets:is_element(DocId, DeletedSet) of
-        true ->
-            Change;  %% Deleted doc, no body to add
-        false ->
-            case maps:get(DocId, DocBodies, undefined) of
-                undefined -> Change;
-                DocBody -> Change#{doc => DocBody}
-            end
-    end || {DocId, Change} <- DocChangePairs].
+    LiveIds = [DocId || {DocId, Change} <- DocChangePairs,
+                        not maps:get(deleted, Change, false)],
+    Keys = [barrel_store_keys:doc_body(DbName, DocId) || DocId <- LiveIds],
+    Results = barrel_store_rocksdb:body_multi_get(StoreRef, Keys),
+    BodyMap = maps:from_list(
+        [{DocId, CborBin}
+         || {DocId, {ok, CborBin}} <- lists:zip(LiveIds, Results)]),
+    [case maps:get(deleted, Change, false) of
+         true ->
+             Change;
+         false ->
+             case maps:find(DocId, BodyMap) of
+                 {ok, Cbor} ->
+                     Change#{doc => barrel_docdb_codec_cbor:decode_any(Cbor)};
+                 error ->
+                     Change
+             end
+     end || {DocId, Change} <- DocChangePairs].
 
 %%====================================================================
 %% Internal API - for barrel_db_writer

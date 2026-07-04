@@ -1327,6 +1327,11 @@ get_changes(Db, Since) ->
 %%   <li>`include_docs' - Include full documents in results</li>
 %%   <li>`descending' - Reverse order</li>
 %%   <li>`doc_ids' - Filter to specific document IDs</li>
+%%   <li>`paths' - MQTT-style path patterns (uses the path index)</li>
+%%   <li>`query' - Query spec filter over document bodies</li>
+%%   <li>`channel' - A configured channel: one bounded scan of the
+%%       write-time channel feed (not combinable with paths/doc_ids;
+%%       `include_leaves' surfaces departure rows tagged `left')</li>
 %% </ul>
 %%
 %% @param Db Database name or pid
@@ -1334,7 +1339,7 @@ get_changes(Db, Since) ->
 %% @param Opts Query options
 %% @returns `{ok, [Change], LastHlc}'
 -spec get_changes(binary() | pid(), barrel_hlc:timestamp() | first, map()) ->
-    {ok, [map()], barrel_hlc:timestamp()}.
+    {ok, [map()], barrel_hlc:timestamp()} | {error, term()}.
 get_changes(Db, Since, Opts) ->
     DbName = db_name(Db),
     barrel_trace:with_db_span(changes, DbName, fun() ->

@@ -28,7 +28,8 @@
     topics/1,
     match/2,
     write_ops/6,
-    move_ops/5
+    move_ops/5,
+    fold/5
 ]).
 
 %% Row codec (used by the read side and tests)
@@ -234,6 +235,69 @@ move_ops(Get, DbName, OldHlc, NewHlc, DocInfo) ->
             end
         end,
         names(DbName)).
+
+%%====================================================================
+%% Read side
+%%====================================================================
+
+%% @doc Fold one channel's feed since an HLC (exclusive), returning
+%% change maps in feed order. Leave rows are skipped unless
+%% `include_leaves' is set (they surface tagged `left => true'); the
+%% returned LastHlc is the last VISITED row, so pagination never
+%% re-reads skipped leaves. Options: limit, include_leaves.
+-spec fold(barrel_store_rocksdb:db_ref(), binary(), binary(),
+           barrel_hlc:timestamp() | first, map()) ->
+    {ok, [map()], barrel_hlc:timestamp()}.
+fold(StoreRef, DbName, Channel, Since, Opts) ->
+    {StartHlc, StartKey} = case Since of
+        first ->
+            Min = barrel_hlc:min(),
+            {Min, barrel_store_keys:channel_key(DbName, Channel, Min)};
+        SinceHlc ->
+            {SinceHlc,
+             barrel_store_keys:channel_key(DbName, Channel, SinceHlc)}
+    end,
+    EndKey = barrel_store_keys:channel_end(DbName, Channel),
+    Limit = maps:get(limit, Opts, infinity),
+    IncludeLeaves = maps:get(include_leaves, Opts, false),
+    FoldFun = fun(Key, Value, {LastHlc, Count, Acc}) ->
+        {_Chan, Hlc} = barrel_store_keys:decode_channel_key(DbName, Key),
+        case Since =/= first andalso barrel_hlc:equal(Hlc, Since) of
+            true ->
+                {ok, {LastHlc, Count, Acc}};
+            false ->
+                Row = decode_row(Value),
+                case maps:get(flag, Row) of
+                    leave when not IncludeLeaves ->
+                        {ok, {Hlc, Count, Acc}};
+                    Flag ->
+                        Change = row_to_change(Row, Hlc, Flag),
+                        Count1 = Count + 1,
+                        Acc1 = [Change | Acc],
+                        case is_integer(Limit) andalso Count1 >= Limit of
+                            true -> {stop, {Hlc, Count1, Acc1}};
+                            false -> {ok, {Hlc, Count1, Acc1}}
+                        end
+                end
+        end
+    end,
+    {LastHlc, _N, RevChanges} = barrel_store_rocksdb:fold_range(
+        StoreRef, StartKey, EndKey, FoldFun, {StartHlc, 0, []}),
+    {ok, lists:reverse(RevChanges), LastHlc}.
+
+row_to_change(#{id := Id, rev := Rev, deleted := Deleted,
+                num_conflicts := NumConflicts}, Hlc, Flag) ->
+    Change0 = #{id => Id, hlc => Hlc, rev => Rev,
+                changes => [#{rev => Rev}],
+                num_conflicts => NumConflicts},
+    Change1 = case Deleted of
+        true -> Change0#{deleted => true};
+        false -> Change0
+    end,
+    case Flag of
+        leave -> Change1#{left => true};
+        member -> Change1
+    end.
 
 %%====================================================================
 %% Row codec

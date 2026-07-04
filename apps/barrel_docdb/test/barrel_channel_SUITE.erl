@@ -21,7 +21,15 @@
          replicated_arrival_lands/1,
          loser_arrival_moves_row/1,
          tombstone_winner_row_moves/1,
-         invalid_channels_rejected/1]).
+         invalid_channels_rejected/1,
+         read_members_incremental/1,
+         read_limit_pagination/1,
+         read_leave_visibility/1,
+         read_deleted_visible/1,
+         read_include_docs_and_query/1,
+         read_descending/1,
+         read_errors/1,
+         full_feed_include_docs_regression/1]).
 
 all() ->
     [create_lands_member_rows,
@@ -33,7 +41,15 @@ all() ->
      replicated_arrival_lands,
      loser_arrival_moves_row,
      tombstone_winner_row_moves,
-     invalid_channels_rejected].
+     invalid_channels_rejected,
+     read_members_incremental,
+     read_limit_pagination,
+     read_leave_visibility,
+     read_deleted_visible,
+     read_include_docs_and_query,
+     read_descending,
+     read_errors,
+     full_feed_include_docs_regression].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(barrel_docdb),
@@ -215,3 +231,122 @@ invalid_channels_rejected(Config) ->
             data_dir => ?config(dir, Config),
             channels => #{<<"c">> => [<<"a/#/b">>]}
         })).
+
+%%====================================================================
+%% Read side: get_changes with channel => Name
+%%====================================================================
+
+read_members_incremental(Config) ->
+    Db = ?config(db, Config),
+    {ok, _} = barrel_docdb:put_doc(Db, post_doc(<<"a">>)),
+    {ok, _} = barrel_docdb:put_doc(Db, post_doc(<<"b">>)),
+    {ok, _} = barrel_docdb:put_doc(
+        Db, #{<<"id">> => <<"x">>, <<"type">> => <<"user">>}),
+    {ok, Changes, Last} = barrel_docdb:get_changes(
+        Db, first, #{channel => <<"posts">>}),
+    ?assertEqual([<<"a">>, <<"b">>],
+                 lists:sort([maps:get(id, C) || C <- Changes])),
+    %% incremental read from the returned cursor is empty
+    {ok, [], _} = barrel_docdb:get_changes(
+        Db, Last, #{channel => <<"posts">>}),
+    %% a new member shows up after the cursor
+    {ok, _} = barrel_docdb:put_doc(Db, post_doc(<<"c">>)),
+    {ok, [#{id := <<"c">>}], _} = barrel_docdb:get_changes(
+        Db, Last, #{channel => <<"posts">>}).
+
+read_limit_pagination(Config) ->
+    Db = ?config(db, Config),
+    [begin
+         {ok, _} = barrel_docdb:put_doc(
+             Db, post_doc(<<"doc", (integer_to_binary(I))/binary>>))
+     end || I <- lists:seq(1, 3)],
+    {ok, Page1, Last1} = barrel_docdb:get_changes(
+        Db, first, #{channel => <<"posts">>, limit => 2}),
+    ?assertEqual(2, length(Page1)),
+    {ok, Page2, _} = barrel_docdb:get_changes(
+        Db, Last1, #{channel => <<"posts">>, limit => 2}),
+    ?assertEqual(1, length(Page2)),
+    All = [maps:get(id, C) || C <- Page1 ++ Page2],
+    ?assertEqual(3, length(lists:usort(All))).
+
+read_leave_visibility(Config) ->
+    Db = ?config(db, Config),
+    {ok, #{<<"rev">> := Rev}} = barrel_docdb:put_doc(Db, post_doc(<<"a">>)),
+    {ok, _} = barrel_docdb:put_doc(
+        Db, #{<<"id">> => <<"a">>, <<"type">> => <<"user">>,
+              <<"_rev">> => Rev}),
+    %% hidden by default
+    {ok, [], _} = barrel_docdb:get_changes(
+        Db, first, #{channel => <<"posts">>}),
+    %% surfaced on demand
+    {ok, [Leave], _} = barrel_docdb:get_changes(
+        Db, first, #{channel => <<"posts">>, include_leaves => true}),
+    ?assertMatch(#{id := <<"a">>, left := true}, Leave).
+
+read_deleted_visible(Config) ->
+    Db = ?config(db, Config),
+    {ok, #{<<"rev">> := Rev}} = barrel_docdb:put_doc(Db, post_doc(<<"a">>)),
+    {ok, _} = barrel_docdb:delete_doc(Db, <<"a">>, #{rev => Rev}),
+    {ok, [Change], _} = barrel_docdb:get_changes(
+        Db, first, #{channel => <<"posts">>}),
+    ?assertMatch(#{id := <<"a">>, deleted := true}, Change).
+
+read_include_docs_and_query(Config) ->
+    Db = ?config(db, Config),
+    {ok, _} = barrel_docdb:put_doc(
+        Db, (post_doc(<<"a">>))#{<<"rank">> => 5}),
+    {ok, _} = barrel_docdb:put_doc(
+        Db, (post_doc(<<"b">>))#{<<"rank">> => 1}),
+    {ok, [C1 | _], _} = barrel_docdb:get_changes(
+        Db, first, #{channel => <<"posts">>, include_docs => true}),
+    ?assertEqual(<<"post">>,
+                 maps:get(<<"type">>, maps:get(doc, C1))),
+    %% query filter over channel members
+    {ok, Filtered, _} = barrel_docdb:get_changes(
+        Db, first, #{channel => <<"posts">>,
+                     query => #{where => [{compare, [<<"rank">>], '>', 2}]}}),
+    ?assertEqual([<<"a">>], [maps:get(id, C) || C <- Filtered]),
+    %% query without include_docs strips the fetched bodies
+    ?assertNot(maps:is_key(doc, hd(Filtered))).
+
+read_descending(Config) ->
+    Db = ?config(db, Config),
+    {ok, _} = barrel_docdb:put_doc(Db, post_doc(<<"a">>)),
+    {ok, _} = barrel_docdb:put_doc(Db, post_doc(<<"b">>)),
+    {ok, Asc, _} = barrel_docdb:get_changes(
+        Db, first, #{channel => <<"posts">>}),
+    {ok, Desc, _} = barrel_docdb:get_changes(
+        Db, first, #{channel => <<"posts">>, descending => true}),
+    ?assertEqual([maps:get(id, C) || C <- lists:reverse(Asc)],
+                 [maps:get(id, C) || C <- Desc]).
+
+read_errors(Config) ->
+    Db = ?config(db, Config),
+    ?assertEqual({error, {unknown_channel, <<"nope">>}},
+                 barrel_docdb:get_changes(Db, first,
+                                          #{channel => <<"nope">>})),
+    ?assertEqual({error, incompatible_filters},
+                 barrel_docdb:get_changes(
+                     Db, first, #{channel => <<"posts">>,
+                                  paths => [<<"type/post">>]})),
+    ?assertEqual({error, incompatible_filters},
+                 barrel_docdb:get_changes(
+                     Db, first, #{channel => <<"posts">>,
+                                  doc_ids => [<<"a">>]})).
+
+%% Regression: the full-feed include_docs path read legacy doc_current
+%% keys that nothing writes, so bodies were silently missing.
+full_feed_include_docs_regression(Config) ->
+    Db = ?config(db, Config),
+    {ok, _} = barrel_docdb:put_doc(
+        Db, #{<<"id">> => <<"a">>, <<"type">> => <<"post">>,
+              <<"title">> => <<"body please">>}),
+    {ok, [Change], _} = barrel_docdb:get_changes(
+        Db, first, #{include_docs => true}),
+    ?assertEqual(<<"body please">>,
+                 maps:get(<<"title">>, maps:get(doc, Change))),
+    %% query filtering over the full feed works again too
+    {ok, Hits, _} = barrel_docdb:get_changes(
+        Db, first, #{query => #{where => [{path, [<<"type">>],
+                                           <<"post">>}]}}),
+    ?assertEqual([<<"a">>], [maps:get(id, C) || C <- Hits]).
