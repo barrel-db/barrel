@@ -36,3 +36,10 @@ priv/*.dylib
 # Editors / OS
 .DS_Store
 *~
+
+# leex/yecc output (generated from src/*.xrl and src/*.yrl)
+apps/*/src/barrel_bql_lexer.erl
+apps/*/src/barrel_bql_parser.erl
+
+# per-app lock files (umbrella root rebar.lock is authoritative)
+apps/*/rebar.lock
