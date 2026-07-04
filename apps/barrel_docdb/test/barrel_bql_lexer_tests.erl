@@ -138,16 +138,4 @@ lex_error_location_test() ->
         barrel_bql_lexer:string("a ; b"),
     ?assertEqual({1, 3}, Loc2).
 
-%%--------------------------------------------------------------------
-%% Parser probe round trip (step-1 grammar, replaced in step 3)
-%%--------------------------------------------------------------------
-
-parser_round_trip_test() ->
-    {ok, Tokens, _} = barrel_bql_lexer:string("SELECT a FROM b"),
-    ?assertEqual({ok, {probe, <<"a">>, <<"b">>}},
-                 barrel_bql_parser:parse(Tokens)).
-
-parser_error_location_test() ->
-    {ok, Tokens, _} = barrel_bql_lexer:string("SELECT a SELECT"),
-    {error, {Loc, barrel_bql_parser, _Msg}} = barrel_bql_parser:parse(Tokens),
-    ?assertEqual({1, 10}, Loc).
+%% Parser round trips live in barrel_bql_parser_tests.
