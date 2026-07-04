@@ -1242,11 +1242,15 @@ do_put_version(StoreRef, DbName, Config, Doc, Version, RemoteVV, Deleted) ->
         error -> erlang:error({missing_id, DocMap})
     end,
     DocBody = barrel_doc:doc_without_meta(DocMap),
+    %% Generic tags appended to replication-applied writes (the facade
+    %% sets [<<"embed">>] on record-mode databases so replicated docs
+    %% reach the indexer; docdb stays ignorant of why).
+    Tags = maps:get(outbox_tags_on_replication, Config, []),
     case read_current(StoreRef, DbName, DocId) of
         undefined ->
             apply_remote_current(StoreRef, DbName, DocId, DocBody, Version,
                                  barrel_vv:bump(RemoteVV, Version), Deleted,
-                                 undefined, 0, []);
+                                 undefined, 0, [], Tags);
         #{version := LocalV, vv := LocalVV} = Old ->
             case barrel_vv:contains(LocalVV, Version) of
                 true ->
@@ -1264,7 +1268,7 @@ do_put_version(StoreRef, DbName, Config, Doc, Version, RemoteVV, Deleted) ->
                                                  DocBody, Version, MergedVV,
                                                  Deleted, Old,
                                                  maps:get(num_conflicts, Old),
-                                                 Chain);
+                                                 Chain, Tags);
                         _Concurrent ->
                             handle_concurrent(StoreRef, DbName, Config, DocId,
                                               DocBody, Version, RemoteVV,
@@ -1278,10 +1282,11 @@ do_put_version(StoreRef, DbName, Config, Doc, Version, RemoteVV, Deleted) ->
 %% tombstone) the deterministic LWW conflict path applies.
 handle_concurrent(StoreRef, DbName, Config, DocId, DocBody, Version, RemoteVV,
                   Deleted, #{version := LocalV} = Old, MergedVV) ->
+    Tags = maps:get(outbox_tags_on_replication, Config, []),
     case try_merge(Config, DocId, Old, DocBody, Deleted) of
         {merge, MergedBody} ->
             apply_merged(StoreRef, DbName, DocId, MergedBody, DocBody,
-                         Version, RemoteVV, Deleted, Old, MergedVV);
+                         Version, RemoteVV, Deleted, Old, MergedVV, Tags);
         conflict ->
             NConflicts0 = maps:get(num_conflicts, Old) + 1,
             Max = maps:get(max_conflict_versions, Config,
@@ -1295,7 +1300,7 @@ handle_concurrent(StoreRef, DbName, Config, DocId, DocBody, Version, RemoteVV,
                     Chain = [chain_op(DbName, DocId, LocalV, conflict, Old)],
                     apply_remote_current(StoreRef, DbName, DocId, DocBody,
                                          Version, MergedVV, Deleted, Old,
-                                         NConflicts, Chain ++ DropOps);
+                                         NConflicts, Chain ++ DropOps, Tags);
                 _LocalWins ->
                     {DropOps, NConflicts} = enforce_conflict_bound(
                         StoreRef, DbName, DocId, Version, NConflicts0, Max),
@@ -1338,7 +1343,7 @@ call_merger(Fun, DocId, LocalBody, RemoteBody) when is_function(Fun, 3) ->
 %% and a new local resolving write whose vector covers both sides
 %% becomes current. The resolving write replicates like any other.
 apply_merged(StoreRef, DbName, DocId, MergedBody, RemoteBody, Version,
-             RemoteVV, RemoteDeleted, Old, MergedVV) ->
+             RemoteVV, RemoteDeleted, Old, MergedVV, Tags) ->
     %% The remote arrival: superseded chain row, archived body, history
     RemoteChangeHlc = barrel_hlc:new_hlc(),
     VersionEnc = barrel_version:encode(Version),
@@ -1357,9 +1362,11 @@ apply_merged(StoreRef, DbName, DocId, MergedBody, RemoteBody, Version,
     DocRecord0 = barrel_doc:make_doc_record(MergedBody#{<<"id">> => DocId}),
     DocRecord = DocRecord0#{expected_version => undefined},
     Old2 = Old#{vv := MergedVV},
+    %% The resolving write is a new current body: tag it so the outbox
+    %% consumer (e.g. the record indexer) re-processes the merged text.
     {WriteOps, {DocId, NewToken, NextHlc, Deleted, NotifyBody}} =
         build_write_ops(StoreRef, DbName, DocRecord, Old2,
-                        #{history_cause => resolve}),
+                        #{history_cause => resolve, outbox => Tags}),
     ok = barrel_store_rocksdb:write_batch(StoreRef, RemoteOps ++ WriteOps, #{}),
     notify_subscribers(DbName, DocId, NewToken, NextHlc, Deleted, NotifyBody),
     {ok, DocId, NewToken}.
@@ -1395,7 +1402,7 @@ chain_op(DbName, DocId, Version, Flag, Old) ->
 
 %% @private The remote version becomes the current winner.
 apply_remote_current(StoreRef, DbName, DocId, DocBody, Version, VV, Deleted,
-                     Old, NConflicts, ChainOps) ->
+                     Old, NConflicts, ChainOps, Tags) ->
     ChangeHlc = barrel_hlc:new_hlc(),
     Token = barrel_version:to_token(Version),
     {OldHlc, OldDocBody, OldDocBodyCbor, CreatedAt, ExpiresAt, Tier} =
@@ -1465,10 +1472,12 @@ apply_remote_current(StoreRef, DbName, DocId, DocBody, Version, VV, Deleted,
     end,
     HistoryOps = barrel_history:write_ops(
         DbName, ChangeHlc, DocId, Version, Deleted, replicated, VV),
+    OutboxOps = barrel_outbox:write_ops(DbName, Tags, ChangeHlc, OldHlc,
+                                        DocId, Token, Deleted),
     CborBody = barrel_docdb_codec_cbor:encode_cbor(DocBody),
     BodyOp = {body_put, barrel_store_keys:doc_body(DbName, DocId), CborBody},
     AllOps = DocOps ++ HlcDeleteOps ++ PathIndexOps ++ ChangeOps ++ PathHlcOps
-        ++ ArchiveOps ++ ChainOps ++ HistoryOps ++ [BodyOp],
+        ++ ArchiveOps ++ ChainOps ++ OutboxOps ++ HistoryOps ++ [BodyOp],
     ok = barrel_store_rocksdb:write_batch(StoreRef, AllOps, #{}),
     notify_subscribers(DbName, DocId, Token, ChangeHlc, Deleted, DocBody),
     {ok, DocId, Token}.

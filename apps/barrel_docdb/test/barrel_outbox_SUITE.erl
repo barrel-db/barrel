@@ -24,7 +24,13 @@
          multi_tag_writes/1,
          batch_put_docs_tagged/1,
          fold_limit/1,
-         entry_codec_roundtrip/1]).
+         entry_codec_roundtrip/1,
+         replication_create_tagged/1,
+         replication_update_replaces_entry/1,
+         replication_delete_tagged/1,
+         replication_loser_untagged/1,
+         replication_merge_tagged/1,
+         replication_untagged_without_config/1]).
 
 -define(TAG, <<"embed">>).
 
@@ -38,7 +44,13 @@ all() ->
      multi_tag_writes,
      batch_put_docs_tagged,
      fold_limit,
-     entry_codec_roundtrip].
+     entry_codec_roundtrip,
+     replication_create_tagged,
+     replication_update_replaces_entry,
+     replication_delete_tagged,
+     replication_loser_untagged,
+     replication_merge_tagged,
+     replication_untagged_without_config].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(barrel_docdb),
@@ -189,6 +201,84 @@ entry_codec_roundtrip(_Config) ->
                  barrel_outbox:decode_entry(Bin2)).
 
 %%====================================================================
+%% Replication tagging (outbox_tags_on_replication db config)
+%%====================================================================
+
+%% A replicated create on a tagged db produces a pending entry.
+replication_create_tagged(Config) ->
+    Db = tagged_db(Config),
+    {V1, VV1} = remote_version(<<"peer_a">>),
+    {ok, _, _} = barrel_docdb:put_version(
+        Db, #{<<"id">> => <<"a">>, <<"v">> => 1}, V1, VV1, false),
+    [Entry] = pending(Db, ?TAG),
+    ?assertEqual(<<"a">>, maps:get(id, Entry)),
+    ?assertEqual(V1, maps:get(rev, Entry)),
+    ?assertEqual(false, maps:get(deleted, Entry)).
+
+%% A dominating replicated update replaces the pending entry: exactly
+%% one entry per doc, pointing at the newest arrival.
+replication_update_replaces_entry(Config) ->
+    Db = tagged_db(Config),
+    {V1, VV1Bin, VV1} = remote_chain_start(<<"peer_a">>),
+    {ok, _, _} = barrel_docdb:put_version(
+        Db, #{<<"id">> => <<"a">>, <<"v">> => 1}, V1, VV1Bin, false),
+    {V2, VV2Bin} = remote_chain_next(<<"peer_a">>, VV1),
+    {ok, _, _} = barrel_docdb:put_version(
+        Db, #{<<"id">> => <<"a">>, <<"v">> => 2}, V2, VV2Bin, false),
+    [Entry] = pending(Db, ?TAG),
+    ?assertEqual(V2, maps:get(rev, Entry)),
+    ?assertEqual(false, maps:get(deleted, Entry)).
+
+%% A replicated delete lands a deleted entry.
+replication_delete_tagged(Config) ->
+    Db = tagged_db(Config),
+    {V1, VV1Bin, VV1} = remote_chain_start(<<"peer_a">>),
+    {ok, _, _} = barrel_docdb:put_version(
+        Db, #{<<"id">> => <<"a">>, <<"v">> => 1}, V1, VV1Bin, false),
+    {V2, VV2Bin} = remote_chain_next(<<"peer_a">>, VV1),
+    {ok, _, _} = barrel_docdb:put_version(
+        Db, #{<<"id">> => <<"a">>}, V2, VV2Bin, true),
+    [Entry] = pending(Db, ?TAG),
+    ?assertEqual(V2, maps:get(rev, Entry)),
+    ?assertEqual(true, maps:get(deleted, Entry)).
+
+%% A concurrent loser arrival keeps the local winner: the current body
+%% did not change, so no entry is written (re-embedding identical text
+%% would be wasted compute).
+replication_loser_untagged(Config) ->
+    Db = tagged_db(Config),
+    %% remote version issued BEFORE the local write = concurrent loser
+    {VLoser, VVLoser} = remote_version(<<"peer_a">>),
+    {ok, _} = barrel_docdb:put_doc(Db, #{<<"id">> => <<"a">>, <<"v">> => 1}),
+    {ok, _, Winner} = barrel_docdb:put_version(
+        Db, #{<<"id">> => <<"a">>, <<"v">> => 0}, VLoser, VVLoser, false),
+    ?assertNotEqual(VLoser, Winner),
+    ?assertEqual([], pending(Db, ?TAG)).
+
+%% A merger resolution is a new current body: the resolving write is
+%% tagged (the superseded remote arrival is not).
+replication_merge_tagged(Config) ->
+    Db = tagged_db(Config, #{
+        conflict_merger =>
+            fun(_Id, Local, Remote) -> {merge, maps:merge(Remote, Local)} end
+    }),
+    {VLoser, VVLoser} = remote_version(<<"peer_a">>),
+    {ok, _} = barrel_docdb:put_doc(Db, #{<<"id">> => <<"a">>, <<"v">> => 1}),
+    {ok, _, ResolvedToken} = barrel_docdb:put_version(
+        Db, #{<<"id">> => <<"a">>, <<"w">> => 2}, VLoser, VVLoser, false),
+    [Entry] = pending(Db, ?TAG),
+    ?assertEqual(ResolvedToken, maps:get(rev, Entry)),
+    ?assertEqual(false, maps:get(deleted, Entry)).
+
+%% Without the config key, replicated writes stay untagged.
+replication_untagged_without_config(Config) ->
+    Db = ?config(db, Config),
+    {V1, VV1} = remote_version(<<"peer_a">>),
+    {ok, _, _} = barrel_docdb:put_version(
+        Db, #{<<"id">> => <<"a">>, <<"v">> => 1}, V1, VV1, false),
+    ?assertEqual([], pending(Db, ?TAG)).
+
+%%====================================================================
 %% Helpers
 %%====================================================================
 
@@ -196,3 +286,36 @@ entry_codec_roundtrip(_Config) ->
 pending(Db, Tag) ->
     lists:reverse(
         barrel_docdb:outbox_fold(Db, Tag, fun(E, Acc) -> {ok, [E | Acc]} end, [])).
+
+%% Recreate the per-case db configured to tag replication-applied
+%% writes (so end_per_testcase cleans it up normally).
+tagged_db(Config) ->
+    tagged_db(Config, #{}).
+
+tagged_db(Config, Extra) ->
+    Db = ?config(db, Config),
+    ok = barrel_docdb:delete_db(Db),
+    DbConfig = Extra#{data_dir => ?config(dir, Config),
+                      outbox_tags_on_replication => [?TAG]},
+    {ok, _} = barrel_docdb:create_db(Db, DbConfig),
+    Db.
+
+%% A fabricated remote version + its vector, as a network peer ships it.
+remote_version(Author) ->
+    V = barrel_version:new(barrel_hlc:new_hlc(), Author),
+    VV = barrel_vv:bump(barrel_vv:new(), V),
+    {barrel_version:to_token(V), barrel_vv:encode(VV)}.
+
+%% First link of a remote chain: also returns the decoded VV so a later
+%% version by the same author can dominate it.
+remote_chain_start(Author) ->
+    V = barrel_version:new(barrel_hlc:new_hlc(), Author),
+    VV = barrel_vv:bump(barrel_vv:new(), V),
+    {barrel_version:to_token(V), barrel_vv:encode(VV), VV}.
+
+%% Next link: a newer version whose vector contains the previous one,
+%% so it dominates (fast-forward on arrival).
+remote_chain_next(Author, PrevVV) ->
+    V = barrel_version:new(barrel_hlc:new_hlc(), Author),
+    VV = barrel_vv:bump(PrevVV, V),
+    {barrel_version:to_token(V), barrel_vv:encode(VV)}.
