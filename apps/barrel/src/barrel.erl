@@ -39,6 +39,15 @@
     find/3
 ]).
 
+%% BQL (documents + table functions over the vector store)
+-export([
+    query/2,
+    query/3,
+    query_fold/5,
+    explain_query/2,
+    explain_query/3
+]).
+
 %% Attachments / blobs (barrel_docdb; backend pluggable per database)
 -export([
     put_attachment/4,
@@ -355,6 +364,65 @@ find(#{docdb := DbBin}, Query) ->
 -spec find(db(), map(), map()) -> {ok, [map()], map()} | {error, term()}.
 find(#{docdb := DbBin}, Query, Opts) ->
     barrel_docdb:find(DbBin, Query, Opts).
+
+%%====================================================================
+%% BQL
+%%====================================================================
+
+%% @doc Run a BQL query (see barrel_bql). Unlike
+%% barrel_docdb:query/2, table-function sources (vector_top_k,
+%% bm25_top_k, hybrid_top_k) execute here, joined back to their
+%% documents. SUBSCRIBE queries need subscribe_query (live queries).
+-spec 'query'(db(), binary() | string()) ->
+    {ok, [map()], map()} | {error, term()}.
+'query'(Db, Bql) ->
+    'query'(Db, Bql, #{}).
+
+%% @doc Run a BQL query with options: params (a map for $name
+%% placeholders), chunk_size / continuation (streamable queries), and
+%% overfetch (table functions, default 3).
+-spec 'query'(db(), binary() | string(), map()) ->
+    {ok, [map()], map()} | {error, term()}.
+'query'(Db, Bql, Opts) ->
+    case compile_bql(Bql, Opts) of
+        {ok, Plan} ->
+            barrel_bql_query:run(Db, Plan, maps:remove(params, Opts));
+        {error, _} = Error ->
+            Error
+    end.
+
+%% @doc Fold BQL rows without materializing the full result.
+%% Fun(Row, Acc) -> {ok, Acc} | {stop, Acc}.
+-spec query_fold(db(), binary() | string(), map(),
+                 fun((map(), term()) -> {ok, term()} | {stop, term()}),
+                 term()) ->
+    {ok, term(), map()} | {error, term()}.
+query_fold(Db, Bql, Opts, Fun, Acc) ->
+    case compile_bql(Bql, Opts) of
+        {ok, Plan} ->
+            barrel_bql_query:fold(Db, Plan, maps:remove(params, Opts),
+                                  Fun, Acc);
+        {error, _} = Error ->
+            Error
+    end.
+
+%% @doc Explain a BQL query: source, streamability, warnings, and the
+%% engine's index strategy for collection queries.
+-spec explain_query(db(), binary() | string()) ->
+    {ok, map()} | {error, term()}.
+explain_query(Db, Bql) ->
+    explain_query(Db, Bql, #{}).
+
+-spec explain_query(db(), binary() | string(), map()) ->
+    {ok, map()} | {error, term()}.
+explain_query(Db, Bql, Opts) ->
+    case compile_bql(Bql, Opts) of
+        {ok, Plan} -> barrel_bql_query:explain(Db, Plan);
+        {error, _} = Error -> Error
+    end.
+
+compile_bql(Bql, Opts) ->
+    barrel_bql:compile(Bql, #{params => maps:get(params, Opts, #{})}).
 
 %%====================================================================
 %% Attachments / blobs (barrel_docdb)
