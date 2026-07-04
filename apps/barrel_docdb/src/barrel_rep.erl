@@ -69,7 +69,8 @@
 %% Types
 -type filter_opts() :: #{
     paths => [binary()],           % MQTT-style path patterns
-    query => barrel_query:query_spec()  % Query to filter by
+    query => barrel_query:query_spec(),  % Query to filter by
+    channel => binary()            % Configured channel (write-time feed)
 }.
 
 -type rep_config() :: #{
@@ -200,8 +201,9 @@ replicate_one_shot(Config, Opts) ->
         target_transport := TargetTransport
     } = Config,
 
-    %% Generate replication ID
-    RepId = generate_rep_id(Source, Target),
+    %% Generate replication ID (a filtered replication is a different
+    %% stream: it must not share the full replication's checkpoint)
+    RepId = generate_rep_id(Source, Target, maps:get(filter, Opts, #{})),
 
     %% Create checkpoint state
     CheckpointConfig = Config#{
@@ -309,11 +311,16 @@ do_replicate(Source, Target, SourceTransport, TargetTransport, Since,
             {error, Reason}
     end.
 
-%% @private Generate deterministic replication ID based on source and target.
-%% The same source/target pair always produces the same replication ID,
-%% allowing checkpoints to be reused across replication sessions.
-generate_rep_id(Source, Target) ->
+%% @private Generate deterministic replication ID based on source and
+%% target (and the filter when one is set: filtered streams keep their
+%% own checkpoints). The unfiltered form hashes the legacy 2-tuple so
+%% existing checkpoints stay valid.
+generate_rep_id(Source, Target, Filter) when map_size(Filter) =:= 0 ->
     Data = term_to_binary({Source, Target}),
+    Hash = crypto:hash(md5, Data),
+    binary:encode_hex(Hash, lowercase);
+generate_rep_id(Source, Target, Filter) ->
+    Data = term_to_binary({Source, Target, Filter}),
     Hash = crypto:hash(md5, Data),
     binary:encode_hex(Hash, lowercase).
 
@@ -360,7 +367,11 @@ build_changes_opts(BatchSize, Filter) ->
         undefined -> BaseOpts;
         Paths when is_list(Paths) -> BaseOpts#{paths => Paths}
     end,
-    case maps:get(query, Filter, undefined) of
+    Opts2 = case maps:get(query, Filter, undefined) of
         undefined -> Opts1;
         Query when is_map(Query) -> Opts1#{query => Query}
+    end,
+    case maps:get(channel, Filter, undefined) of
+        undefined -> Opts2;
+        Channel when is_binary(Channel) -> Opts2#{channel => Channel}
     end.

@@ -32,7 +32,8 @@ groups() ->
             sweep_keeps_live_conflicts,
             sweep_respects_window,
             info_exposes_retention,
-            checkpoint_below_floor_forces_resync
+            checkpoint_below_floor_forces_resync,
+            sweep_channels
         ]}
     ].
 
@@ -248,4 +249,43 @@ checkpoint_below_floor_forces_resync(Config) ->
     after
         barrel_docdb:delete_db(Target)
     end,
+    ok.
+
+%% Channel rows follow the retention story: member rows are live state
+%% and survive sweeps, leave rows age out, and a forgotten tombstone
+%% takes its channel row with it.
+sweep_channels(Config) ->
+    Db = ?config(db, Config),
+    ok = barrel_docdb:delete_db(Db),
+    {ok, _} = barrel_docdb:create_db(Db, #{
+        data_dir => ?config(data_dir, Config),
+        retention_period => 1,
+        channels => #{<<"posts">> => [<<"type/post">>]}
+    }),
+    Post = fun(Id) -> #{<<"id">> => Id, <<"type">> => <<"post">>} end,
+    %% a: stays a live member
+    {ok, _} = barrel_docdb:put_doc(Db, Post(<<"a">>)),
+    %% b: leaves the channel (leave row)
+    {ok, #{<<"rev">> := RevB}} = barrel_docdb:put_doc(Db, Post(<<"b">>)),
+    {ok, _} = barrel_docdb:put_doc(
+        Db, #{<<"id">> => <<"b">>, <<"type">> => <<"user">>,
+              <<"_rev">> => RevB}),
+    %% c: deleted (tombstone member row, doc forgotten after the window)
+    {ok, #{<<"rev">> := RevC}} = barrel_docdb:put_doc(Db, Post(<<"c">>)),
+    {ok, _} = barrel_docdb:delete_doc(Db, <<"c">>, #{rev => RevC}),
+
+    %% before the sweep: member a, leave b, tombstone c
+    {ok, Before, _} = barrel_docdb:get_changes(
+        Db, first, #{channel => <<"posts">>, include_leaves => true}),
+    ?assertEqual(3, length(Before)),
+
+    age_past_window(),
+    {ok, Stats} = barrel_docdb:sweep_retention(Db),
+    ?assert(maps:get(channel_leaves_swept, Stats) >= 1),
+    ?assert(maps:get(docs_forgotten, Stats) >= 1),
+
+    {ok, After, _} = barrel_docdb:get_changes(
+        Db, first, #{channel => <<"posts">>, include_leaves => true}),
+    ?assertMatch([#{id := <<"a">>}], After),
+    ?assertNot(maps:is_key(left, hd(After))),
     ok.

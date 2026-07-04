@@ -29,7 +29,8 @@
          read_include_docs_and_query/1,
          read_descending/1,
          read_errors/1,
-         full_feed_include_docs_regression/1]).
+         full_feed_include_docs_regression/1,
+         channel_replication/1]).
 
 all() ->
     [create_lands_member_rows,
@@ -49,7 +50,8 @@ all() ->
      read_include_docs_and_query,
      read_descending,
      read_errors,
-     full_feed_include_docs_regression].
+     full_feed_include_docs_regression,
+     channel_replication].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(barrel_docdb),
@@ -350,3 +352,59 @@ full_feed_include_docs_regression(Config) ->
         Db, first, #{query => #{where => [{path, [<<"type">>],
                                            <<"post">>}]}}),
     ?assertEqual([<<"a">>], [maps:get(id, C) || C <- Hits]).
+
+%%====================================================================
+%% Replication with a channel filter
+%%====================================================================
+
+channel_replication(Config) ->
+    Src = ?config(db, Config),
+    Tgt = <<"chan_rep_target">>,
+    {ok, _} = barrel_docdb:create_db(
+        Tgt, #{data_dir => ?config(dir, Config)}),
+    try
+        {ok, _} = barrel_docdb:put_doc(Src, post_doc(<<"a">>)),
+        {ok, _} = barrel_docdb:put_doc(Src, post_doc(<<"b">>)),
+        {ok, _} = barrel_docdb:put_doc(
+            Src, #{<<"id">> => <<"x">>, <<"type">> => <<"user">>}),
+        Filter = #{channel => <<"posts">>},
+
+        %% only channel members replicate
+        {ok, _} = barrel_rep:replicate(Src, Tgt, #{filter => Filter}),
+        {ok, _} = barrel_docdb:get_doc(Tgt, <<"a">>),
+        {ok, _} = barrel_docdb:get_doc(Tgt, <<"b">>),
+        ?assertEqual({error, not_found}, barrel_docdb:get_doc(Tgt, <<"x">>)),
+
+        %% member update propagates (checkpointed: only the delta ships)
+        {ok, SrcA} = barrel_docdb:get_doc(Src, <<"a">>),
+        {ok, _} = barrel_docdb:put_doc(Src, SrcA#{<<"title">> => <<"t2">>}),
+        {ok, #{docs_written := W2}} =
+            barrel_rep:replicate(Src, Tgt, #{filter => Filter}),
+        ?assertEqual(1, W2),
+        {ok, #{<<"title">> := <<"t2">>}} = barrel_docdb:get_doc(Tgt, <<"a">>),
+
+        %% member delete propagates as a tombstone
+        {ok, #{<<"_rev">> := RevB}} = barrel_docdb:get_doc(Src, <<"b">>),
+        {ok, _} = barrel_docdb:delete_doc(Src, <<"b">>, #{rev => RevB}),
+        {ok, _} = barrel_rep:replicate(Src, Tgt, #{filter => Filter}),
+        ?assertEqual({error, not_found}, barrel_docdb:get_doc(Tgt, <<"b">>)),
+
+        %% a departed doc is not copied and NOT deleted on the target
+        {ok, SrcA2} = barrel_docdb:get_doc(Src, <<"a">>),
+        {ok, _} = barrel_docdb:put_doc(
+            Src, SrcA2#{<<"type">> => <<"user">>}),
+        {ok, #{docs_written := W4}} =
+            barrel_rep:replicate(Src, Tgt, #{filter => Filter}),
+        ?assertEqual(0, W4),
+        {ok, TgtA} = barrel_docdb:get_doc(Tgt, <<"a">>),
+        ?assertEqual(<<"post">>, maps:get(<<"type">>, TgtA)),
+
+        %% an unfiltered replication keeps its own checkpoint: it still
+        %% ships everything the channel stream skipped
+        {ok, _} = barrel_rep:replicate(Src, Tgt),
+        {ok, _} = barrel_docdb:get_doc(Tgt, <<"x">>),
+        {ok, TgtA2} = barrel_docdb:get_doc(Tgt, <<"a">>),
+        ?assertEqual(<<"user">>, maps:get(<<"type">>, TgtA2))
+    after
+        _ = barrel_docdb:delete_db(Tgt)
+    end.

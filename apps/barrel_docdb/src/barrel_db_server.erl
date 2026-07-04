@@ -642,10 +642,36 @@ do_retention_sweep(StoreRef, DbName, RetentionPeriod) ->
         end,
         {[], Zero},
         #{to => Cutoff}),
+    %% Channel leave rows are events, not state: age them out
+    {LeaveOps, LeavesSwept} = sweep_channel_leaves(StoreRef, DbName, Cutoff),
     FloorOp = {put, barrel_store_keys:db_meta(DbName, <<"history_floor">>),
                barrel_hlc:encode(Cutoff)},
-    ok = barrel_store_rocksdb:write_batch(StoreRef, [FloorOp | Ops], #{}),
-    {ok, Stats#{floor => Cutoff}}.
+    ok = barrel_store_rocksdb:write_batch(
+        StoreRef, [FloorOp | Ops ++ LeaveOps], #{}),
+    {ok, Stats#{floor => Cutoff, channel_leaves_swept => LeavesSwept}}.
+
+%% @private Delete leave rows older than the cutoff in every configured
+%% channel (member rows are live state and are never age-swept).
+sweep_channel_leaves(StoreRef, DbName, Cutoff) ->
+    lists:foldl(
+        fun(Channel, {OpsAcc, CountAcc}) ->
+            Start = barrel_store_keys:channel_prefix(DbName, Channel),
+            End = barrel_store_keys:channel_key(DbName, Channel, Cutoff),
+            barrel_store_rocksdb:fold_range(
+                StoreRef, Start, End,
+                fun(Key, Value, {InnerOps, InnerCount}) ->
+                    case barrel_channel:decode_row(Value) of
+                        #{flag := leave} ->
+                            {ok, {[{delete, Key} | InnerOps],
+                                  InnerCount + 1}};
+                        _ ->
+                            {ok, {InnerOps, InnerCount}}
+                    end
+                end,
+                {OpsAcc, CountAcc})
+        end,
+        {[], 0},
+        barrel_channel:names(DbName)).
 
 %% @private Ops for one expired history entry.
 sweep_entry_ops(StoreRef, DbName,
@@ -712,10 +738,15 @@ forget_doc_ops(StoreRef, DbName, DocId, Columns) ->
                   | Acc]}
         end,
         []),
+    %% Channel rows live exactly at the doc's current change HLC (the
+    %% writer invariant), so the forget covers them too
+    ChannelDels = [{delete,
+                    barrel_store_keys:channel_key(DbName, C, ChangeHlc)}
+                   || C <- barrel_channel:names(DbName)],
     [{entity_delete, barrel_store_keys:doc_entity(DbName, DocId)},
      {body_delete, barrel_store_keys:doc_body(DbName, DocId)},
      {delete, barrel_store_keys:doc_hlc(DbName, ChangeHlc)}
-     | ChainOps].
+     | ChannelDels ++ ChainOps].
 
 inc_sweep(Key, Stats) ->
     maps:update_with(Key, fun(N) -> N + 1 end, Stats).
