@@ -8,6 +8,7 @@ Start here.
 
 - [Embed barrel in an Erlang app](guides/embedding.md): the `barrel` facade.
 - [Record mode](guides/record-mode.md): policy-driven vector indexing over documents.
+- [Query with BQL](guides/query-bql.md): one query language over documents, vectors, and keyword search.
 - [Run the REST server](guides/rest-server.md): `barrel_server` over HTTP.
 - [Synchronization](guides/synchronization.md): replication between databases.
 - [Distribute the umbrella apps](guides/distributing-apps.md): Hex packages, git mirrors, and consuming an app elsewhere.

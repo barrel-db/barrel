@@ -159,6 +159,6 @@ Migration path (staged, adapter-first):
 |---|----------|--------|-----------|
 | 1 | Sync core | HLC version vectors, not rev-trees | Rev-tree wounds (tombstones, arbitrary winners, metadata in read path); CBL 4.0 precedent |
 | 2 | Doc+vector atomicity | Outbox marker in one WriteBatch, changes-feed indexing; storage unification later | Atomic now without blocking vectordb's standalone life. SHIPPED as record mode (phase 2): tagged outbox + supervised indexer + sync mode + read-through docstore |
-| 3 | Query dialect | PartiQL semantics | JSON-first SQL semantics already specified; nothing to invent |
+| 3 | Query dialect | PartiQL semantics | JSON-first SQL semantics already specified; nothing to invent. SHIPPED as BQL v1 (phase 4): leex/yecc parser lowering onto the query engine, vector_top_k/bm25_top_k/hybrid_top_k table functions, UNNEST, SUBSCRIBE live queries, streaming REST endpoint |
 | 4 | barrel_memory | Standalone policy product on barrel primitives | Memory layer is commoditizing; substrate is the durable value; migration staged |
 | 5 | Branching | Timeline subsystem: checkpoint + retained HLC log; branch, PITR, merge-as-sync; linear lineage v1 | Merge is the leapfrog over Turso/Neon; PITR parity required |
