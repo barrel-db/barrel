@@ -506,7 +506,7 @@ do_check_compaction(StoreRef, Threshold, State) ->
 %%====================================================================
 
 %% Wide column names for the document entity are shared with the caller-side
-%% reader; they live in barrel_docdb.hrl (?COL_REV, ?COL_DELETED, ...).
+%% reader; they live in barrel_docdb.hrl (?COL_VERSION, ?COL_VV, ...).
 
 %% @doc Put a document (create or update)
 %% Accepts: Erlang map, indexed CBOR binary, or plain CBOR binary
@@ -515,40 +515,26 @@ do_check_compaction(StoreRef, Threshold, State) ->
 do_put_doc(StoreRef, DbName, Doc, Opts) ->
     %% Normalize input: map, indexed binary, or plain CBOR -> map for processing
     DocMap = barrel_doc:to_map(Doc),
-    %% Build document record from input
     DocRecord = barrel_doc:make_doc_record(DocMap),
-    #{id := DocId, revs := Revs, deleted := Deleted, doc := DocBody} = DocRecord,
-    [NewRev | _] = Revs,
-
-    %% Check for existing document (wide column entity)
-    DocEntityKey = barrel_store_keys:doc_entity(DbName, DocId),
-    {OldHlc, OldRev, OldRevTree, OldDocBody, OldDocBodyCbor} = case barrel_store_rocksdb:get_entity(StoreRef, DocEntityKey) of
-        {ok, Columns} ->
-            ExistingRev = proplists:get_value(?COL_REV, Columns),
-            ExistingHlc = barrel_hlc:decode(proplists:get_value(?COL_HLC, Columns)),
-            OldTree = decode_revtree(proplists:get_value(?COL_REVTREE, Columns)),
-            %% Get old doc body for path index diff from body CF (current body, no rev in key)
-            %% Keep both raw CBOR (for archiving) and decoded map (for path indexing)
-            {OldBody, OldBodyCbor} = case barrel_store_rocksdb:body_get(StoreRef,
-                            barrel_store_keys:doc_body(DbName, DocId)) of
-                {ok, OldCborBin} -> {barrel_docdb_codec_cbor:decode_any(OldCborBin), OldCborBin};
-                not_found -> {undefined, undefined}
-            end,
-            {ExistingHlc, ExistingRev, OldTree, OldBody, OldBodyCbor};
-        not_found ->
-            {undefined, undefined, #{}, undefined, undefined}
-    end,
-
-    %% MVCC check: the client must supply the current winning revision
-    %% when updating an existing document via the regular put_doc API.
-    %% The replication path (bulk_docs with explicit `history`) carries
-    %% no `hash` field on the doc record and is exempt here; conflict
-    %% detection happens in the revtree merge.
-    case mvcc_check(OldRev, Revs, DocRecord) of
+    Old = read_current(StoreRef, DbName, maps:get(id, DocRecord)),
+    case cas_check(Old, maps:get(expected_version, DocRecord)) of
         ok ->
-            do_put_doc_apply(StoreRef, DbName, DocId, Revs, NewRev, Deleted,
-                             DocBody, OldHlc, OldRev, OldRevTree, OldDocBody,
-                             OldDocBodyCbor, embedding_columns(DocRecord), Opts);
+            {AllOps, {DocId, NewToken, NextHlc, Deleted, DocBody}} =
+                build_write_ops(StoreRef, DbName, DocRecord, Old, Opts),
+            Sync = maps:get(sync, Opts, false),
+            ok = barrel_store_rocksdb:write_batch(StoreRef, AllOps, #{sync => Sync}),
+            notify_subscribers(DbName, DocId, NewToken, NextHlc, Deleted, DocBody),
+            %% return_hlc => true adds the write's change HLC (internal atom
+            %% key), used by callers that ack outbox entries.
+            Result = #{
+                <<"id">> => DocId,
+                <<"ok">> => true,
+                <<"rev">> => NewToken
+            },
+            case maps:get(return_hlc, Opts, false) of
+                true -> {ok, Result#{hlc => NextHlc}};
+                false -> {ok, Result}
+            end;
         {error, conflict} ->
             {error, conflict}
     end.
@@ -565,78 +551,117 @@ embedding_columns(DocRecord) ->
              {?COL_EMBEDDING_SRC, maps:get(embedding_src, DocRecord, ?EMBEDDING_SRC_CLIENT)}]
     end.
 
-%% @doc MVCC pre-check for the regular (non-replication) put path.
-%% - DocRecord without a `hash` key came through the bulk `history`
-%%   constructor (replication / put_rev). Skip the check.
-%% - No existing doc: accept regardless.
-%% - Existing doc + supplied parent rev matches winner: accept.
-%% - Otherwise: conflict.
-mvcc_check(_OldRev, _Revs, DocRecord) when not is_map_key(hash, DocRecord) -> ok;
-mvcc_check(undefined, _Revs, _DocRecord) -> ok;
-mvcc_check(OldRev, [_NewRev, ParentRev | _], _DocRecord) when ParentRev =:= OldRev -> ok;
-mvcc_check(_OldRev, _Revs, _DocRecord) -> {error, conflict}.
+%% @doc Read a document's current version state (undefined when absent).
+read_current(StoreRef, DbName, DocId) ->
+    DocEntityKey = barrel_store_keys:doc_entity(DbName, DocId),
+    case barrel_store_rocksdb:get_entity(StoreRef, DocEntityKey) of
+        {ok, Columns} ->
+            VV = case proplists:get_value(?COL_VV, Columns, <<>>) of
+                <<>> -> barrel_vv:new();
+                VVBin -> barrel_vv:decode(VVBin)
+            end,
+            {Body, BodyCbor} = case barrel_store_rocksdb:body_get(StoreRef,
+                            barrel_store_keys:doc_body(DbName, DocId)) of
+                {ok, OldCborBin} ->
+                    {barrel_docdb_codec_cbor:decode_any(OldCborBin), OldCborBin};
+                not_found ->
+                    {undefined, undefined}
+            end,
+            #{
+                version => barrel_version:decode(
+                               proplists:get_value(?COL_VERSION, Columns)),
+                hlc => barrel_hlc:decode(proplists:get_value(?COL_HLC, Columns)),
+                vv => VV,
+                deleted => bin_to_deleted(
+                               proplists:get_value(?COL_DELETED, Columns, <<"false">>)),
+                num_conflicts => proplists:get_value(?COL_NCONFLICTS, Columns, 0),
+                created_at => proplists:get_value(?COL_CREATED_AT, Columns, <<>>),
+                expires_at => proplists:get_value(?COL_EXPIRES_AT, Columns, 0),
+                tier => proplists:get_value(?COL_TIER, Columns, 0),
+                body => Body,
+                body_cbor => BodyCbor
+            };
+        not_found ->
+            undefined
+    end.
 
-do_put_doc_apply(StoreRef, DbName, DocId, Revs, NewRev, Deleted, DocBody,
-                 OldHlc, OldRev, OldRevTree, OldDocBody, OldDocBodyCbor,
-                 EmbeddingCols, Opts) ->
+%% @doc CAS check for local writes: the caller must supply the current
+%% winner's version token when updating a live document. Creating a new
+%% document, or recreating over a tombstone, needs no token.
+cas_check(undefined, _Expected) ->
+    ok;
+cas_check(#{deleted := true}, undefined) ->
+    ok;
+cas_check(_Old, undefined) ->
+    {error, conflict};
+cas_check(#{version := Current}, ExpectedToken) ->
+    case barrel_version:to_token(Current) =:= ExpectedToken of
+        true -> ok;
+        false -> {error, conflict}
+    end.
+
+%% @doc Sibling entry stored in the per-doc version chain (0x1D):
+%% `<<Flag:8, Deleted:8, VV/binary>>' where Flag 0 = superseded (covered
+%% by the current winner) and 1 = conflict (a live concurrent sibling).
+sibling_entry(Flag, Deleted, VV) ->
+    FlagByte = case Flag of superseded -> 0; conflict -> 1 end,
+    DelByte = case Deleted of true -> 1; false -> 0 end,
+    <<FlagByte:8, DelByte:8, (barrel_vv:encode(VV))/binary>>.
+
+decode_sibling_entry(<<FlagByte:8, DelByte:8, VVBin/binary>>) ->
+    Flag = case FlagByte of 1 -> conflict; _ -> superseded end,
+    #{flag => Flag, deleted => DelByte =:= 1, vv => barrel_vv:decode(VVBin)}.
+
+%% @doc Build the atomic op list for a local write (create or update).
+%% Issues the version: for local writes the version HLC and the change
+%% sequence HLC are the same fresh HLC. The superseded old winner goes to
+%% the version chain and its body to the version-keyed archive.
+%% Returns {AllOps, NotifyInfo} with NotifyInfo =
+%% {DocId, NewToken, NextHlc, Deleted, DocBody}.
+build_write_ops(StoreRef, DbName, DocRecord, Old, Opts) ->
+    #{id := DocId, deleted := Deleted, doc := DocBody} = DocRecord,
     DocEntityKey = barrel_store_keys:doc_entity(DbName, DocId),
 
-    %% Build revision tree (merge with existing)
-    RevTree = case length(Revs) of
-        1 ->
-            %% New document
-            OldRevTree#{NewRev => #{id => NewRev, parent => undefined, deleted => Deleted}};
-        _ ->
-            %% Update - build tree with history
-            [CurRev, ParentRev | _] = Revs,
-            OldRevTree#{
-                ParentRev => #{id => ParentRev, parent => undefined, deleted => false},
-                CurRev => #{id => CurRev, parent => ParentRev, deleted => Deleted}
-            }
-    end,
-
-    %% Generate new HLC timestamp for this change
     NextHlc = barrel_hlc:new_hlc(),
+    NewVersion = barrel_version:new(NextHlc),
+    NewToken = barrel_version:to_token(NewVersion),
 
-    %% Prepare entity columns for wide-column storage.
-    %% created_at/expires_at/tier are reserved columns (preserved across
-    %% writes); the built-in tiering engine was removed.
-    {CreatedAt, ExistingTier, ExistingExpires} = case OldHlc of
-        undefined ->
-            %% New document - set created_at to now, tier to hot (0)
-            {barrel_hlc:encode(NextHlc), 0, 0};
-        _ ->
-            %% Update - preserve existing tier metadata
-            case barrel_store_rocksdb:get_entity(StoreRef, DocEntityKey) of
-                {ok, OldColumns} ->
-                    {proplists:get_value(?COL_CREATED_AT, OldColumns, barrel_hlc:encode(OldHlc)),
-                     proplists:get_value(?COL_TIER, OldColumns, 0),
-                     proplists:get_value(?COL_EXPIRES_AT, OldColumns, 0)};
-                _ ->
-                    {barrel_hlc:encode(OldHlc), 0, 0}
-            end
-    end,
+    {OldVersion, OldHlc, OldVV, OldDeleted, OldDocBody, OldDocBodyCbor,
+     NConflicts, CreatedAt, ExpiresAt, Tier} =
+        case Old of
+            undefined ->
+                {undefined, undefined, barrel_vv:new(), false, undefined,
+                 undefined, 0, barrel_hlc:encode(NextHlc), 0, 0};
+            #{version := OV, hlc := OH, vv := OVV, deleted := OD,
+              body := OB, body_cbor := OBC, num_conflicts := ONC,
+              created_at := OCA, expires_at := OEA, tier := OT} ->
+                {OV, OH, OVV, OD, OB, OBC, ONC, OCA, OEA, OT}
+        end,
+
+    NewVV = barrel_vv:bump(OldVV, NewVersion),
+
     DocColumns = [
-        {?COL_REV, NewRev},
+        {?COL_VERSION, barrel_version:encode(NewVersion)},
         {?COL_DELETED, deleted_to_bin(Deleted)},
         {?COL_HLC, barrel_hlc:encode(NextHlc)},
-        {?COL_REVTREE, encode_revtree(RevTree)},
+        {?COL_VV, barrel_vv:encode(NewVV)},
+        {?COL_NCONFLICTS, NConflicts},
         {?COL_CREATED_AT, CreatedAt},
-        {?COL_EXPIRES_AT, ExistingExpires},
-        {?COL_TIER, ExistingTier}
-    ] ++ EmbeddingCols,
+        {?COL_EXPIRES_AT, ExpiresAt},
+        {?COL_TIER, Tier}
+    ] ++ embedding_columns(DocRecord),
     DocOps = [{entity_put, DocEntityKey, DocColumns}],
 
-    %% Build DocInfo for change tracking (compatible with existing change feed)
+    %% Change tracking info (rev carries the opaque version token)
     DocInfo = #{
         id => DocId,
-        rev => NewRev,
+        rev => NewToken,
         deleted => Deleted,
-        revtree => RevTree,
+        num_conflicts => NConflicts,
         hlc => NextHlc
     },
 
-    %% Delete old HLC entry if exists
+    %% Supersede the live-feed row of the previous write
     HlcDeleteOps = case OldHlc of
         undefined -> [];
         _ -> [{delete, barrel_store_keys:doc_hlc(DbName, OldHlc)}]
@@ -645,26 +670,22 @@ do_put_doc_apply(StoreRef, DbName, DocId, Revs, NewRev, Deleted, DocBody,
     %% Path index operations (if not deleted)
     PathIndexOps = case Deleted of
         true when OldDocBody =/= undefined ->
-            %% Deleting a document - remove all paths
             case barrel_ars_index:get_doc_paths(StoreRef, DbName, DocId) of
                 {ok, OldPaths} -> barrel_ars_index:remove_doc_ops(DbName, DocId, OldPaths);
                 not_found -> []
             end;
         true ->
-            %% New doc being created as deleted (edge case) - no paths to index
             [];
         false when OldDocBody =:= undefined ->
-            %% New document - index all paths
             barrel_ars_index:index_doc_ops(DbName, DocId, DocBody);
         false ->
-            case was_tombstone(OldRev, OldRevTree) of
+            case OldDeleted of
                 true ->
                     %% Re-creating a deleted document. Delete only removed the
                     %% path index, not the body CF, so a body diff would see no
                     %% change and never re-add the paths. Index from scratch.
                     barrel_ars_index:index_doc_ops(DbName, DocId, DocBody);
                 false ->
-                    %% Update document - compute diff and update paths
                     barrel_ars_index:update_doc_ops(DbName, DocId, OldDocBody, DocBody)
             end
     end,
@@ -676,54 +697,44 @@ do_put_doc_apply(StoreRef, DbName, DocId, Revs, NewRev, Deleted, DocBody,
     %% Path-indexed change operations (for efficient filtered queries)
     PathHlcOps = case OldHlc of
         undefined ->
-            %% New document - create path index entries
             barrel_changes:write_path_index_ops(DbName, NextHlc, ChangeInfo);
         _ ->
-            %% Update - remove old path entries, add new ones
             barrel_changes:update_path_index_ops(DbName, NextHlc, ChangeInfo,
                                                   OldHlc, OldDocBody)
     end,
 
-    %% Write batch atomically (metadata + indexes + body)
     CborBody = barrel_docdb_codec_cbor:encode_cbor(DocBody),
 
-    %% Archive old body to revision-keyed location if updating
-    ArchiveOps = case {OldRev, OldDocBodyCbor} of
-        {undefined, _} -> [];  %% New document, no archive needed
-        {_, undefined} -> [];  %% No old body to archive
-        {_, OldCbor} ->
-            %% Move old body to revision-keyed location
-            OldBodyKey = barrel_store_keys:doc_body_rev(DbName, DocId, OldRev),
-            [{body_put, OldBodyKey, OldCbor}]
+    %% The old winner is superseded: archive its body under its version
+    %% and record it in the per-doc version chain
+    {ArchiveOps, ChainOps} = case OldVersion of
+        undefined ->
+            {[], []};
+        _ ->
+            OldVersionEnc = barrel_version:encode(OldVersion),
+            Archive = case OldDocBodyCbor of
+                undefined -> [];
+                OldCbor ->
+                    [{body_put,
+                      barrel_store_keys:doc_body_rev(DbName, DocId, OldVersionEnc),
+                      OldCbor}]
+            end,
+            Chain = [{put,
+                      barrel_store_keys:doc_version(DbName, DocId, OldVersionEnc),
+                      sibling_entry(superseded, OldDeleted, OldVV)}],
+            {Archive, Chain}
     end,
 
     %% Tagged outbox entries (generic durable work queue; see barrel_outbox)
     OutboxOps = barrel_outbox:write_ops(DbName, maps:get(outbox, Opts, []),
-                                        NextHlc, OldHlc, DocId, NewRev, Deleted),
+                                        NextHlc, OldHlc, DocId, NewToken, Deleted),
 
-    %% Write new body to current location (no revision in key)
+    %% Write new body to current location (no version in key)
     BodyKey = barrel_store_keys:doc_body(DbName, DocId),
     BodyOp = {body_put, BodyKey, CborBody},
     AllOps = DocOps ++ HlcDeleteOps ++ PathIndexOps ++ ChangeOps ++ PathHlcOps
-        ++ ArchiveOps ++ OutboxOps ++ [BodyOp],
-    Sync = maps:get(sync, Opts, false),
-    WriteOpts = #{sync => Sync},
-    ok = barrel_store_rocksdb:write_batch(StoreRef, AllOps, WriteOpts),
-
-    %% Notify path subscribers
-    notify_subscribers(DbName, DocId, NewRev, NextHlc, Deleted, DocBody),
-
-    %% Return result. return_hlc => true adds the write's change HLC
-    %% (internal atom key), used by callers that ack outbox entries.
-    Result = #{
-        <<"id">> => DocId,
-        <<"ok">> => true,
-        <<"rev">> => NewRev
-    },
-    case maps:get(return_hlc, Opts, false) of
-        true -> {ok, Result#{hlc => NextHlc}};
-        false -> {ok, Result}
-    end.
+        ++ ArchiveOps ++ ChainOps ++ OutboxOps ++ [BodyOp],
+    {AllOps, {DocId, NewToken, NextHlc, Deleted, DocBody}}.
 
 %% @doc Put multiple documents in a single batch (batch write)
 %% Options:
@@ -758,9 +769,9 @@ do_put_docs(StoreRef, DbName, Docs, Opts) ->
     Results = lists:map(
         fun({error, Err}) ->
             Err;
-           ({DocId, NewRev, NextHlc, Deleted, DocBody}) ->
-            notify_subscribers(DbName, DocId, NewRev, NextHlc, Deleted, DocBody),
-            Result = #{<<"id">> => DocId, <<"ok">> => true, <<"rev">> => NewRev},
+           ({DocId, NewToken, NextHlc, Deleted, DocBody}) ->
+            notify_subscribers(DbName, DocId, NewToken, NextHlc, Deleted, DocBody),
+            Result = #{<<"id">> => DocId, <<"ok">> => true, <<"rev">> => NewToken},
             case ReturnHlc of
                 true -> {ok, Result#{hlc => NextHlc}};
                 false -> {ok, Result}
@@ -770,150 +781,20 @@ do_put_docs(StoreRef, DbName, Docs, Opts) ->
     ),
     Results.
 
-%% @doc Prepare document operations without writing (using wide column entity)
-%% Accepts: Erlang map, indexed CBOR binary, or plain CBOR binary
+%% @doc Prepare document operations without writing.
 %% Batch-level Opts carry the outbox tags applied to every doc in the batch.
 %% Returns {ok, Ops, NotifyInfo} or {error, Reason}
 prepare_doc_ops(StoreRef, DbName, Doc, Opts) ->
     try
-        %% Normalize input: map, indexed binary, or plain CBOR -> map for processing
         DocMap = barrel_doc:to_map(Doc),
-        %% Build document record from input
         DocRecord = barrel_doc:make_doc_record(DocMap),
-        #{id := DocId, revs := Revs, deleted := Deleted, doc := DocBody} = DocRecord,
-        [NewRev | _] = Revs,
-
-        %% Check for existing document (wide column entity)
-        DocEntityKey = barrel_store_keys:doc_entity(DbName, DocId),
-        {OldHlc, OldRev, OldRevTree, OldDocBody, OldCborBody, OldTierMeta} = case barrel_store_rocksdb:get_entity(StoreRef, DocEntityKey) of
-            {ok, Columns} ->
-                ExistingRev = proplists:get_value(?COL_REV, Columns),
-                ExistingHlc = barrel_hlc:decode(proplists:get_value(?COL_HLC, Columns)),
-                OldTree = decode_revtree(proplists:get_value(?COL_REVTREE, Columns)),
-                %% Extract tier metadata
-                TierMeta = {
-                    proplists:get_value(?COL_CREATED_AT, Columns, <<>>),
-                    proplists:get_value(?COL_EXPIRES_AT, Columns, 0),
-                    proplists:get_value(?COL_TIER, Columns, 0)
-                },
-                %% Get old doc body from body CF (current body, no rev in key)
-                {OldBody, OldCbor} = case barrel_store_rocksdb:body_get(StoreRef,
-                                barrel_store_keys:doc_body(DbName, DocId)) of
-                    {ok, OldCborBin} -> {barrel_docdb_codec_cbor:decode_any(OldCborBin), OldCborBin};
-                    not_found -> {#{}, undefined}
-                end,
-                {ExistingHlc, ExistingRev, OldTree, OldBody, OldCbor, TierMeta};
-            not_found ->
-                {undefined, undefined, #{}, undefined, undefined, {<<>>, 0, 0}}
-        end,
-
-        %% MVCC check: bulk_docs without explicit `history` is treated
-        %% as the regular update path and must supply the current winning
-        %% _rev when overwriting an existing document. Bulk entries that
-        %% carry `history` (replication) are exempt — DocRecord lacks the
-        %% `hash` key in that case.
-        case mvcc_check(OldRev, Revs, DocRecord) of
+        Old = read_current(StoreRef, DbName, maps:get(id, DocRecord)),
+        case cas_check(Old, maps:get(expected_version, DocRecord)) of
             ok -> ok;
             {error, conflict} -> throw(conflict)
         end,
-
-        %% Build revision tree (merge with existing)
-        RevTree = case length(Revs) of
-            1 ->
-                OldRevTree#{NewRev => #{id => NewRev, parent => undefined, deleted => Deleted}};
-            _ ->
-                [CurRev, ParentRev | _] = Revs,
-                OldRevTree#{
-                    ParentRev => #{id => ParentRev, parent => undefined, deleted => false},
-                    CurRev => #{id => CurRev, parent => ParentRev, deleted => Deleted}
-                }
-        end,
-
-        %% Generate new HLC timestamp
-        NextHlc = barrel_hlc:new_hlc(),
-
-        %% Prepare entity columns for wide-column storage (with tier metadata)
-        {CreatedAt, ExpiresAt, Tier} = case OldHlc of
-            undefined -> {barrel_hlc:encode(NextHlc), 0, 0};  %% New doc
-            _ -> OldTierMeta  %% Preserve existing tier metadata
-        end,
-        DocColumns = [
-            {?COL_REV, NewRev},
-            {?COL_DELETED, deleted_to_bin(Deleted)},
-            {?COL_HLC, barrel_hlc:encode(NextHlc)},
-            {?COL_REVTREE, encode_revtree(RevTree)},
-            {?COL_CREATED_AT, CreatedAt},
-            {?COL_EXPIRES_AT, ExpiresAt},
-            {?COL_TIER, Tier}
-        ] ++ embedding_columns(DocRecord),
-        DocOps = [{entity_put, DocEntityKey, DocColumns}],
-
-        %% Build DocInfo for change tracking
-        DocInfo = #{
-            id => DocId,
-            rev => NewRev,
-            deleted => Deleted,
-            revtree => RevTree,
-            hlc => NextHlc
-        },
-
-        HlcDeleteOps = case OldHlc of
-            undefined -> [];
-            _ -> [{delete, barrel_store_keys:doc_hlc(DbName, OldHlc)}]
-        end,
-
-        PathIndexOps = case Deleted of
-            true when OldDocBody =/= undefined ->
-                case barrel_ars_index:get_doc_paths(StoreRef, DbName, DocId) of
-                    {ok, OldPaths} -> barrel_ars_index:remove_doc_ops(DbName, DocId, OldPaths);
-                    not_found -> []
-                end;
-            true -> [];
-            false when OldDocBody =:= undefined ->
-                barrel_ars_index:index_doc_ops(DbName, DocId, DocBody);
-            false ->
-                case was_tombstone(OldRev, OldRevTree) of
-                    true ->
-                        %% Re-creating a deleted document: delete removed the
-                        %% path index but not the body CF, so index from scratch.
-                        barrel_ars_index:index_doc_ops(DbName, DocId, DocBody);
-                    false ->
-                        barrel_ars_index:update_doc_ops(DbName, DocId, OldDocBody, DocBody)
-                end
-        end,
-
-        ChangeInfo = DocInfo#{doc => DocBody},
-        ChangeOps = barrel_changes:write_change_ops(DbName, NextHlc, ChangeInfo),
-
-        PathHlcOps = case OldHlc of
-            undefined ->
-                barrel_changes:write_path_index_ops(DbName, NextHlc, ChangeInfo);
-            _ ->
-                barrel_changes:update_path_index_ops(DbName, NextHlc, ChangeInfo,
-                                                      OldHlc, OldDocBody)
-        end,
-
-        CborBody = barrel_docdb_codec_cbor:encode_cbor(DocBody),
-
-        %% Archive old body to revision-keyed location if updating
-        ArchiveOps = case {OldRev, OldCborBody} of
-            {undefined, _} -> [];
-            {_, undefined} -> [];
-            _ ->
-                OldBodyKey = barrel_store_keys:doc_body_rev(DbName, DocId, OldRev),
-                [{body_put, OldBodyKey, OldCborBody}]
-        end,
-
-        %% Tagged outbox entries (batch-level tags apply to every doc)
-        OutboxOps = barrel_outbox:write_ops(DbName, maps:get(outbox, Opts, []),
-                                            NextHlc, OldHlc, DocId, NewRev, Deleted),
-
-        %% Write new body to current location (no revision in key)
-        BodyKey = barrel_store_keys:doc_body(DbName, DocId),
-        BodyOp = {body_put, BodyKey, CborBody},
-        AllOps = DocOps ++ HlcDeleteOps ++ PathIndexOps ++ ChangeOps ++ PathHlcOps
-            ++ ArchiveOps ++ OutboxOps ++ [BodyOp],
-        NotifyInfo = {DocId, NewRev, NextHlc, Deleted, DocBody},
+        {AllOps, NotifyInfo} =
+            build_write_ops(StoreRef, DbName, DocRecord, Old, Opts),
         {ok, AllOps, NotifyInfo}
     catch
         _:Reason ->
@@ -927,7 +808,10 @@ do_set_doc_embedding(StoreRef, DbName, DocId, ExpectedRev, Vector) ->
     DocEntityKey = barrel_store_keys:doc_entity(DbName, DocId),
     case barrel_store_rocksdb:get_entity(StoreRef, DocEntityKey) of
         {ok, Columns} ->
-            case proplists:get_value(?COL_REV, Columns) of
+            CurrentToken = barrel_version:to_token(
+                barrel_version:decode(
+                    proplists:get_value(?COL_VERSION, Columns))),
+            case CurrentToken of
                 ExpectedRev ->
                     Base = [C || {K, _} = C <- Columns,
                                  K =/= ?COL_EMBEDDING,
@@ -957,48 +841,44 @@ do_get_doc(StoreRef, DbName, DocId, Opts) ->
 do_get_docs(StoreRef, DbName, DocIds, Opts) ->
     barrel_docdb_reader:get_docs(StoreRef, DbName, DocIds, Opts).
 
-%% @doc Delete a document (using wide column entity)
+%% @doc Delete a document: a versioned tombstone write.
 %% Options:
-%%   - rev: binary() - expected revision (optional, for conflict detection)
+%%   - rev: binary() - expected version token (optional, for conflict detection)
 %%   - sync: boolean() - if true, sync to disk before returning (default: false)
 do_delete_doc(StoreRef, DbName, DocId, Opts) ->
-    %% Get current state (wide column entity)
-    DocEntityKey = barrel_store_keys:doc_entity(DbName, DocId),
-    case barrel_store_rocksdb:get_entity(StoreRef, DocEntityKey) of
-        {ok, Columns} ->
-            CurrentRev = proplists:get_value(?COL_REV, Columns),
-            OldHlc = barrel_hlc:decode(proplists:get_value(?COL_HLC, Columns)),
-            RevTree = decode_revtree(proplists:get_value(?COL_REVTREE, Columns)),
-
-            %% Verify revision if provided
-            ExpectedRev = maps:get(rev, Opts, undefined),
-            case ExpectedRev of
+    case read_current(StoreRef, DbName, DocId) of
+        undefined ->
+            {error, not_found};
+        #{version := OldVersion, hlc := OldHlc, vv := OldVV,
+          deleted := OldDeleted, num_conflicts := NConflicts,
+          created_at := CreatedAt, expires_at := ExpiresAt, tier := Tier,
+          body := OldDocBody, body_cbor := OldDocBodyCbor} ->
+            CurrentToken = barrel_version:to_token(OldVersion),
+            case maps:get(rev, Opts, undefined) of
                 undefined -> ok;
-                CurrentRev -> ok;
-                _ -> throw({error, {conflict, CurrentRev}})
+                CurrentToken -> ok;
+                _Other -> throw({error, {conflict, CurrentToken}})
             end,
 
-            %% Create delete revision
-            {Gen, _Hash} = barrel_doc:parse_revision(CurrentRev),
-            DeleteHash = barrel_doc:revision_hash(#{}, CurrentRev, true),
-            NewRev = barrel_doc:make_revision(Gen + 1, DeleteHash),
-
-            %% Generate new HLC
             NextHlc = barrel_hlc:new_hlc(),
+            NewVersion = barrel_version:new(NextHlc),
+            NewToken = barrel_version:to_token(NewVersion),
+            NewVV = barrel_vv:bump(OldVV, NewVersion),
+            DocEntityKey = barrel_store_keys:doc_entity(DbName, DocId),
 
-            %% Update revision tree
-            NewRevTree = RevTree#{NewRev => #{id => NewRev, parent => CurrentRev, deleted => true}},
-
-            %% Prepare entity columns for wide-column storage
             DocColumns = [
-                {?COL_REV, NewRev},
+                {?COL_VERSION, barrel_version:encode(NewVersion)},
                 {?COL_DELETED, <<"true">>},
                 {?COL_HLC, barrel_hlc:encode(NextHlc)},
-                {?COL_REVTREE, encode_revtree(NewRevTree)}
+                {?COL_VV, barrel_vv:encode(NewVV)},
+                {?COL_NCONFLICTS, NConflicts},
+                {?COL_CREATED_AT, CreatedAt},
+                {?COL_EXPIRES_AT, ExpiresAt},
+                {?COL_TIER, Tier}
             ],
             DocOps = [{entity_put, DocEntityKey, DocColumns}],
 
-            %% Delete old HLC index entry (HLC always exists for valid documents)
+            %% Supersede the live-feed row of the previous write
             HlcDeleteOps = [{delete, barrel_store_keys:doc_hlc(DbName, OldHlc)}],
 
             %% Path index removal operations
@@ -1010,9 +890,9 @@ do_delete_doc(StoreRef, DbName, DocId, Opts) ->
             %% Build DocInfo for change tracking
             NewDocInfo = #{
                 id => DocId,
-                rev => NewRev,
+                rev => NewToken,
                 deleted => true,
-                revtree => NewRevTree,
+                num_conflicts => NConflicts,
                 hlc => NextHlc
             },
 
@@ -1020,37 +900,41 @@ do_delete_doc(StoreRef, DbName, DocId, Opts) ->
             ChangeOps = barrel_changes:write_change_ops(DbName, NextHlc, NewDocInfo),
 
             %% Path-indexed change operations for delete
-            %% Get old doc body from body CF (current body, no rev in key)
-            OldDocBody = case barrel_store_rocksdb:body_get(StoreRef,
-                                barrel_store_keys:doc_body(DbName, DocId)) of
-                {ok, OldCborBin} -> barrel_docdb_codec_cbor:decode_any(OldCborBin);
-                not_found -> undefined
-            end,
             PathHlcOps = barrel_changes:update_path_index_ops(DbName, NextHlc, NewDocInfo,
                                                                OldHlc, OldDocBody),
 
+            %% The superseded winner joins the version chain, body archived
+            OldVersionEnc = barrel_version:encode(OldVersion),
+            ArchiveOps = case OldDocBodyCbor of
+                undefined -> [];
+                OldCbor ->
+                    [{body_put,
+                      barrel_store_keys:doc_body_rev(DbName, DocId, OldVersionEnc),
+                      OldCbor}]
+            end,
+            ChainOps = [{put,
+                         barrel_store_keys:doc_version(DbName, DocId, OldVersionEnc),
+                         sibling_entry(superseded, OldDeleted, OldVV)}],
+
             %% Tagged outbox entries (deletes replace the pending entry too)
             OutboxOps = barrel_outbox:write_ops(DbName, maps:get(outbox, Opts, []),
-                                                NextHlc, OldHlc, DocId, NewRev, true),
+                                                NextHlc, OldHlc, DocId, NewToken, true),
 
             %% Write batch atomically
             AllOps = DocOps ++ HlcDeleteOps ++ PathIndexOps ++ ChangeOps ++ PathHlcOps
-                ++ OutboxOps,
+                ++ ArchiveOps ++ ChainOps ++ OutboxOps,
             WriteOpts = #{sync => maps:get(sync, Opts, false)},
             ok = barrel_store_rocksdb:write_batch(StoreRef, AllOps, WriteOpts),
 
             %% Notify path subscribers
-            notify_subscribers(DbName, DocId, NewRev, NextHlc, true, #{}),
+            notify_subscribers(DbName, DocId, NewToken, NextHlc, true, #{}),
 
             DeleteResult = #{<<"id">> => DocId, <<"ok">> => true,
-                             <<"rev">> => NewRev},
+                             <<"rev">> => NewToken},
             case maps:get(return_hlc, Opts, false) of
                 true -> {ok, DeleteResult#{hlc => NextHlc}};
                 false -> {ok, DeleteResult}
-            end;
-
-        not_found ->
-            {error, not_found}
+            end
     end.
 
 %% @doc Fold over all documents (using wide column entity)
@@ -1069,7 +953,9 @@ do_fold_docs(StoreRef, DbName, Fun, Acc, Opts) ->
         %% Get entity to access columns
         case barrel_store_rocksdb:get_entity(StoreRef, Key) of
             {ok, Columns} ->
-                Rev = proplists:get_value(?COL_REV, Columns),
+                Rev = barrel_version:to_token(
+                    barrel_version:decode(
+                        proplists:get_value(?COL_VERSION, Columns))),
                 Deleted = bin_to_deleted(proplists:get_value(?COL_DELETED, Columns, <<"false">>)),
                 case {Deleted, IncludeDeleted} of
                     {true, false} ->
@@ -1104,204 +990,17 @@ do_fold_docs(StoreRef, DbName, Fun, Acc, Opts) ->
 %% Replication Operations
 %%====================================================================
 
-%% @doc Put a document with explicit revision history (for replication, using wide column entity)
-do_put_rev(StoreRef, DbName, Doc, History, Deleted) ->
-    DocId = maps:get(<<"id">>, Doc),
-    DocBody = barrel_doc:doc_without_meta(Doc),
-    [NewRev | _] = History,
+%% Rev-tree replication primitives are gone. The version-vector
+%% protocol (put_version + diff_versions) lands with the transport
+%% rework; until then these return a distinct error.
+do_put_rev(_StoreRef, _DbName, _Doc, _History, _Deleted) ->
+    {error, revtree_removed}.
 
-    %% Check for existing document (wide column entity)
-    DocEntityKey = barrel_store_keys:doc_entity(DbName, DocId),
-    {ExistingRevTree, OldRev, OldHlc, OldDocBody, OldCborBody} = case barrel_store_rocksdb:get_entity(StoreRef, DocEntityKey) of
-        {ok, Columns} ->
-            ExistingRev = proplists:get_value(?COL_REV, Columns),
-            ExistingHlc = barrel_hlc:decode(proplists:get_value(?COL_HLC, Columns)),
-            OldTree = decode_revtree(proplists:get_value(?COL_REVTREE, Columns)),
-            %% Get old doc body from body CF (current body, no rev in key)
-            {OldBody, OldCbor} = case barrel_store_rocksdb:body_get(StoreRef,
-                            barrel_store_keys:doc_body(DbName, DocId)) of
-                {ok, OldCborBin} -> {barrel_docdb_codec_cbor:decode_any(OldCborBin), OldCborBin};
-                not_found -> {#{}, undefined}
-            end,
-            {OldTree, ExistingRev, ExistingHlc, OldBody, OldCbor};
-        not_found ->
-            {#{}, undefined, undefined, undefined, undefined}
-    end,
-    OldRevTree = ExistingRevTree,
+do_revsdiff(_StoreRef, _DbName, _DocId, _RevIds) ->
+    {error, revtree_removed}.
 
-    %% Build revision tree from history
-    NewRevTree = build_revtree_from_history(History, Deleted, ExistingRevTree),
-
-    %% Generate new HLC timestamp for this change
-    NextHlc = barrel_hlc:new_hlc(),
-
-    %% Prepare entity columns for wide-column storage
-    DocColumns = [
-        {?COL_REV, NewRev},
-        {?COL_DELETED, deleted_to_bin(Deleted)},
-        {?COL_HLC, barrel_hlc:encode(NextHlc)},
-        {?COL_REVTREE, encode_revtree(NewRevTree)}
-    ],
-    DocOps = [{entity_put, DocEntityKey, DocColumns}],
-
-    %% Build DocInfo for change tracking
-    DocInfo = #{
-        id => DocId,
-        rev => NewRev,
-        deleted => Deleted,
-        revtree => NewRevTree,
-        hlc => NextHlc
-    },
-
-    %% Delete old HLC entry if exists
-    HlcDeleteOps = case OldHlc of
-        undefined -> [];
-        _ -> [{delete, barrel_store_keys:doc_hlc(DbName, OldHlc)}]
-    end,
-
-    %% Path index operations
-    PathIndexOps = case Deleted of
-        true when OldDocBody =/= undefined ->
-            %% Deleting a document - remove all paths
-            case barrel_ars_index:get_doc_paths(StoreRef, DbName, DocId) of
-                {ok, OldPaths} -> barrel_ars_index:remove_doc_ops(DbName, DocId, OldPaths);
-                not_found -> []
-            end;
-        true ->
-            %% New doc being created as deleted - no paths to index
-            [];
-        false when OldDocBody =:= undefined ->
-            %% New document - index all paths
-            barrel_ars_index:index_doc_ops(DbName, DocId, DocBody);
-        false ->
-            case was_tombstone(OldRev, OldRevTree) of
-                true ->
-                    %% Re-creating a deleted document. Delete only removed the
-                    %% path index, not the body CF, so a body diff would see no
-                    %% change and never re-add the paths. Index from scratch.
-                    barrel_ars_index:index_doc_ops(DbName, DocId, DocBody);
-                false ->
-                    %% Update document - compute diff and update paths
-                    barrel_ars_index:update_doc_ops(DbName, DocId, OldDocBody, DocBody)
-            end
-    end,
-
-    %% Change entry operations
-    ChangeInfo = DocInfo#{doc => DocBody},
-    ChangeOps = barrel_changes:write_change_ops(DbName, NextHlc, ChangeInfo),
-
-    %% Path-indexed change operations (for efficient filtered queries)
-    PathHlcOps = case OldHlc of
-        undefined ->
-            %% New document - create path index entries
-            barrel_changes:write_path_index_ops(DbName, NextHlc, ChangeInfo);
-        _ ->
-            %% Update - remove old path entries, add new ones
-            barrel_changes:update_path_index_ops(DbName, NextHlc, ChangeInfo,
-                                                  OldHlc, OldDocBody)
-    end,
-
-    %% Write batch atomically (metadata + indexes + body)
-    CborBody = barrel_docdb_codec_cbor:encode_cbor(DocBody),
-
-    %% Archive old body to revision-keyed location if updating
-    ArchiveOps = case {OldRev, OldCborBody} of
-        {undefined, _} -> [];
-        {_, undefined} -> [];
-        _ ->
-            OldBodyKey = barrel_store_keys:doc_body_rev(DbName, DocId, OldRev),
-            [{body_put, OldBodyKey, OldCborBody}]
-    end,
-
-    %% Write new body to current location (no revision in key)
-    BodyKey = barrel_store_keys:doc_body(DbName, DocId),
-    BodyOp = {body_put, BodyKey, CborBody},
-    AllOps = DocOps ++ HlcDeleteOps ++ PathIndexOps ++ ChangeOps ++ PathHlcOps ++ ArchiveOps ++ [BodyOp],
-    ok = barrel_store_rocksdb:write_batch(StoreRef, AllOps),
-
-    %% Notify path subscribers
-    notify_subscribers(DbName, DocId, NewRev, NextHlc, Deleted, DocBody),
-
-    {ok, DocId, NewRev}.
-
-%% @doc Build revision tree from history
-build_revtree_from_history(History, Deleted, ExistingTree) ->
-    build_revtree_from_history(lists:reverse(History), Deleted, ExistingTree, undefined).
-
-build_revtree_from_history([], _Deleted, Tree, _Parent) ->
-    Tree;
-build_revtree_from_history([Rev], Deleted, Tree, Parent) ->
-    %% Last revision (the newest one)
-    Tree#{Rev => #{id => Rev, parent => Parent, deleted => Deleted}};
-build_revtree_from_history([Rev | Rest], Deleted, Tree, Parent) ->
-    %% Intermediate revisions (not deleted)
-    NewTree = Tree#{Rev => #{id => Rev, parent => Parent, deleted => false}},
-    build_revtree_from_history(Rest, Deleted, NewTree, Rev).
-
-%% @doc Get revisions difference (using wide column entity)
-do_revsdiff(StoreRef, DbName, DocId, RevIds) ->
-    DocEntityKey = barrel_store_keys:doc_entity(DbName, DocId),
-    case barrel_store_rocksdb:get_entity(StoreRef, DocEntityKey) of
-        {ok, Columns} ->
-            RevTree = decode_revtree(proplists:get_value(?COL_REVTREE, Columns)),
-
-            %% Find missing revisions and possible ancestors
-            {Missing, PossibleAncestors} = lists:foldl(
-                fun(RevId, {M, A} = Acc) ->
-                    case maps:is_key(RevId, RevTree) of
-                        true ->
-                            %% Revision exists, not missing
-                            Acc;
-                        false ->
-                            %% Revision is missing
-                            M2 = [RevId | M],
-                            %% Find possible ancestors in our tree
-                            {Gen, _} = barrel_doc:parse_revision(RevId),
-                            A2 = maps:fold(
-                                fun(LocalRev, _RevInfo, AccA) ->
-                                    {LocalGen, _} = barrel_doc:parse_revision(LocalRev),
-                                    case LocalGen < Gen of
-                                        true -> [LocalRev | AccA];
-                                        false -> AccA
-                                    end
-                                end,
-                                A,
-                                RevTree
-                            ),
-                            {M2, A2}
-                    end
-                end,
-                {[], []},
-                RevIds
-            ),
-            {ok, lists:reverse(Missing), lists:usort(PossibleAncestors)};
-
-        not_found ->
-            %% Document doesn't exist - all revisions are missing
-            {ok, RevIds, []}
-    end.
-
-%% @doc Get revisions difference for multiple documents (batch)
-%% Returns {ok, ResultMap} where ResultMap is DocId => #{missing => [...], possible_ancestors => [...]}
-do_revsdiff_batch(StoreRef, DbName, RevsMap) ->
-    Result = maps:fold(
-        fun(DocId, RevIds, Acc) ->
-            {ok, Missing, PossibleAncestors} =  do_revsdiff(StoreRef, DbName, DocId, RevIds),
-            maps:put(DocId, #{
-                    missing => Missing,
-                    possible_ancestors => PossibleAncestors
-            }, Acc)
-        end,
-        #{},
-        RevsMap
-    ),
-    {ok, Result}.
-
-%%====================================================================
-%% Local Document Operations
-%%====================================================================
-%% Local documents are stored in the dedicated local_cf column family.
-%% They use a simple key format: DbName + 0 + DocId (no prefix needed).
+do_revsdiff_batch(_StoreRef, _DbName, _RevsMap) ->
+    {error, revtree_removed}.
 
 %% @doc Put a local document (per-database)
 do_put_local_doc(StoreRef, DbName, DocId, Doc) ->
@@ -1402,36 +1101,12 @@ notify_subscribers(DbName, DocId, Rev, Hlc, Deleted, DocBody) ->
 deleted_to_bin(true) -> <<"true">>;
 deleted_to_bin(false) -> <<"false">>.
 
-%% @doc Whether the prior winning revision was a tombstone (deleted). Used
-%% on the live put path to decide between a body diff and a full re-index
-%% when re-creating a previously deleted document.
--spec was_tombstone(binary() | undefined, map()) -> boolean().
-was_tombstone(undefined, _RevTree) -> false;
-was_tombstone(OldRev, RevTree) ->
-    case maps:find(OldRev, RevTree) of
-        {ok, #{deleted := Deleted}} -> Deleted =:= true;
-        _ -> false
-    end.
-
 %% @doc Convert binary back to boolean from wide column storage
 -spec bin_to_deleted(binary()) -> boolean().
 bin_to_deleted(<<"true">>) -> true;
 bin_to_deleted(<<"false">>) -> false;
 bin_to_deleted(_) -> false.
 
-%% @doc Encode revision tree to compact binary format
--spec encode_revtree(map()) -> binary().
-encode_revtree(RevTree) when is_map(RevTree) ->
-    RT = barrel_revtree_bin:from_map(RevTree),
-    barrel_revtree_bin:encode(RT).
-
-%% @doc Decode revision tree from compact binary format
--spec decode_revtree(binary() | undefined) -> map().
-decode_revtree(undefined) -> #{};
-decode_revtree(<<>>) -> #{};
-decode_revtree(Bin) ->
-    RT = barrel_revtree_bin:decode(Bin),
-    barrel_revtree_bin:to_map(RT).
 
 %% Conflict decoration for reads (maybe_add_conflicts*) moved to
 %% barrel_docdb_reader with the read paths.
@@ -1440,206 +1115,124 @@ decode_revtree(Bin) ->
 %% Conflict Operations
 %%====================================================================
 
-%% @doc Get list of conflicting revisions for a document
+%% @doc Get list of conflicting version tokens for a document.
+%% Fast path: the entity carries the live sibling count, so conflict-free
+%% documents never scan the version chain.
 do_get_conflicts(StoreRef, DbName, DocId) ->
-    DocEntityKey = barrel_store_keys:doc_entity(DbName, DocId),
-    case barrel_store_rocksdb:get_entity(StoreRef, DocEntityKey) of
-        {ok, Columns} ->
-            RevTreeBin = proplists:get_value(?COL_REVTREE, Columns),
-            case RevTreeBin of
-                undefined -> {ok, []};
-                <<>> -> {ok, []};
-                _ ->
-                    #{conflicts := Conflicts} = barrel_revtree_bin:decode_winner_leaves(RevTreeBin),
-                    {ok, Conflicts}
-            end;
-        not_found ->
-            {error, not_found}
+    case read_current(StoreRef, DbName, DocId) of
+        undefined ->
+            {error, not_found};
+        #{num_conflicts := 0} ->
+            {ok, []};
+        #{} ->
+            {ok, [barrel_version:to_token(V)
+                  || {V, _Entry} <- conflict_siblings(StoreRef, DbName, DocId)]}
     end.
 
-%% @doc Resolve a conflict
-%% Resolution types:
-%%   {choose, Rev} - Mark the chosen rev as winner, delete all other leaf branches
-%%   {merge, Doc} - Create a new revision that supersedes all conflicting branches
-do_resolve_conflict(StoreRef, DbName, DocId, BaseRev, Resolution) ->
-    DocEntityKey = barrel_store_keys:doc_entity(DbName, DocId),
-    case barrel_store_rocksdb:get_entity(StoreRef, DocEntityKey) of
-        {ok, Columns} ->
-            CurrentRev = proplists:get_value(?COL_REV, Columns),
-            RevTreeBin = proplists:get_value(?COL_REVTREE, Columns),
-            case RevTreeBin of
-                undefined ->
-                    {error, no_conflicts};
-                <<>> ->
-                    {error, no_conflicts};
-                _ ->
-                    RevTree = decode_revtree(RevTreeBin),
-                    #{winner := Winner, conflicts := Conflicts} =
-                        barrel_revtree_bin:decode_winner_leaves(RevTreeBin),
-                    case Conflicts of
-                        [] ->
-                            {error, no_conflicts};
-                        _ ->
-                            %% Verify base rev matches current winner
-                            case BaseRev =:= Winner of
-                                false ->
-                                    {error, {conflict, CurrentRev}};
-                                true ->
-                                    do_apply_resolution(StoreRef, DbName, DocId,
-                                                       DocEntityKey, Columns,
-                                                       RevTree, Winner, Conflicts,
-                                                       Resolution)
-                            end
-                    end
-            end;
-        not_found ->
-            {error, not_found}
-    end.
-
-%% Apply the resolution to the document
-do_apply_resolution(StoreRef, DbName, DocId, DocEntityKey, Columns,
-                    RevTree, Winner, Conflicts, {choose, ChosenRev}) ->
-    %% Verify chosen rev is either the winner or one of the conflicts
-    AllLeaves = [Winner | Conflicts],
-    case lists:member(ChosenRev, AllLeaves) of
-        false ->
-            {error, {invalid_rev, ChosenRev}};
-        true ->
-            %% Delete all other branches by marking them as deleted
-            RevsToDelete = [R || R <- AllLeaves, R =/= ChosenRev],
-            NewRevTree0 = lists:foldl(
-                fun(Rev, Tree) ->
-                    case maps:get(Rev, Tree, undefined) of
-                        undefined -> Tree;
-                        Info -> Tree#{Rev => Info#{deleted => true}}
-                    end
-                end,
-                RevTree,
-                RevsToDelete
-            ),
-            %% Delete bodies of resolved conflicting revisions
-            DeleteOps = [
-                {body_delete, barrel_store_keys:doc_body_rev(DbName, DocId, Rev)}
-                || Rev <- RevsToDelete
-            ],
-            %% If chosen rev is not the current winner, we need to create a new
-            %% revision as child of chosen (to make it the deterministic winner)
-            case ChosenRev =:= Winner of
-                true ->
-                    %% Just update the revtree + delete loser bodies
-                    UpdatedColumns = lists:keyreplace(?COL_REVTREE, 1, Columns,
-                                                      {?COL_REVTREE, encode_revtree(NewRevTree0)}),
-                    AllOps = [{entity_put, DocEntityKey, UpdatedColumns} | DeleteOps],
-                    case barrel_store_rocksdb:write_batch(StoreRef, AllOps) of
-                        ok ->
-                            {ok, #{id => DocId, rev => Winner, conflicts_resolved => length(RevsToDelete)}};
-                        {error, _} = Err ->
-                            Err
-                    end;
-                false ->
-                    %% Create a new rev as child of chosen to make it the winner
-                    ChosenGen = case binary:split(ChosenRev, <<"-">>) of
-                        [GenBin, _] -> binary_to_integer(GenBin);
-                        _ -> 1
-                    end,
-                    NewGen = ChosenGen + 1,
-                    %% Generate a hash that will be higher than any competing branch
-                    Hash = crypto:hash(md5, term_to_binary({DocId, ChosenRev, erlang:system_time()})),
-                    HashHex = string:lowercase(binary:encode_hex(Hash)),
-                    NewRev = <<(integer_to_binary(NewGen))/binary, "-", HashHex/binary>>,
-
-                    %% Add new rev as child of chosen
-                    NewRevTree = NewRevTree0#{
-                        NewRev => #{id => NewRev, parent => ChosenRev, deleted => false}
-                    },
-
-                    UpdatedColumns = lists:keyreplace(?COL_REVTREE, 1, Columns,
-                                                      {?COL_REVTREE, encode_revtree(NewRevTree)}),
-                    UpdatedColumns2 = lists:keyreplace(?COL_REV, 1, UpdatedColumns,
-                                                       {?COL_REV, NewRev}),
-                    AllOps = [{entity_put, DocEntityKey, UpdatedColumns2} | DeleteOps],
-                    case barrel_store_rocksdb:write_batch(StoreRef, AllOps) of
-                        ok ->
-                            {ok, #{id => DocId, rev => NewRev, conflicts_resolved => length(RevsToDelete)}};
-                        {error, _} = Err ->
-                            Err
-                    end
-            end
-    end;
-
-do_apply_resolution(StoreRef, DbName, DocId, DocEntityKey, Columns,
-                    RevTree, Winner, Conflicts, {merge, MergedDoc}) ->
-    %% Create a new revision that has all conflicting branches as parents
-    %% This effectively merges all branches into one
-    AllLeaves = [Winner | Conflicts],
-
-    %% Generate new revision - use winner's generation + 1
-    WinnerGen = case binary:split(Winner, <<"-">>) of
-        [GenBin, _] -> binary_to_integer(GenBin);
-        _ -> 1
+%% @doc Scan the version chain for live conflict siblings.
+%% Returns [{version(), sibling_entry_map()}].
+conflict_siblings(StoreRef, DbName, DocId) ->
+    Start = barrel_store_keys:doc_version_prefix(DbName, DocId),
+    End = barrel_store_keys:doc_version_end(DbName, DocId),
+    Fold = fun(Key, Value, Acc) ->
+        Entry = decode_sibling_entry(Value),
+        case maps:get(flag, Entry) of
+            conflict ->
+                VersionEnc = barrel_store_keys:decode_doc_version_key(
+                                 DbName, DocId, Key),
+                {ok, [{barrel_version:decode(VersionEnc), Entry} | Acc]};
+            superseded ->
+                {ok, Acc}
+        end
     end,
-    NewGen = WinnerGen + 1,
+    lists:reverse(barrel_store_rocksdb:fold_range(StoreRef, Start, End, Fold, [])).
 
-    %% Create new rev hash from merged content
-    DocWithoutMeta = maps:without([<<"id">>, <<"_id">>, <<"_rev">>, <<"_deleted">>], MergedDoc),
-    Hash = crypto:hash(md5, term_to_binary({DocWithoutMeta, AllLeaves})),
-    HashHex = string:lowercase(binary:encode_hex(Hash)),
-    NewRev = <<(integer_to_binary(NewGen))/binary, "-", HashHex/binary>>,
-
-    %% Build new revtree: add new rev as child of winner, mark all conflicts as deleted
-    NewRevTree0 = lists:foldl(
-        fun(Rev, Tree) ->
-            case maps:get(Rev, Tree, undefined) of
-                undefined -> Tree;
-                Info -> Tree#{Rev => Info#{deleted => true}}
+%% @doc Resolve a conflict with a resolving local write.
+%% Resolution types:
+%%   {choose, Token} - the chosen sibling's body becomes the new current
+%%   {merge, Doc}    - the supplied body becomes the new current
+%% Either way ONE new version is written whose version vector covers the
+%% winner and every conflict sibling, and all siblings flip to
+%% superseded: the resolution is an ordinary write that replicates.
+do_resolve_conflict(StoreRef, DbName, DocId, BaseRev, Resolution) ->
+    case read_current(StoreRef, DbName, DocId) of
+        undefined ->
+            {error, not_found};
+        #{num_conflicts := 0} ->
+            {error, no_conflicts};
+        #{version := Current, vv := CurrentVV} = Old ->
+            CurrentToken = barrel_version:to_token(Current),
+            case BaseRev of
+                CurrentToken ->
+                    Siblings = conflict_siblings(StoreRef, DbName, DocId),
+                    apply_resolution(StoreRef, DbName, DocId, Old, CurrentVV,
+                                     Siblings, Resolution);
+                _ ->
+                    {error, {conflict, CurrentToken}}
             end
-        end,
-        RevTree,
-        Conflicts
-    ),
-    %% Add the merged revision as child of winner
-    NewRevTree = NewRevTree0#{
-        NewRev => #{id => NewRev, parent => Winner, deleted => false}
-    },
+    end.
 
-    %% Generate new HLC timestamp
-    NextHlc = barrel_hlc:new_hlc(),
-
-    %% Preserve existing tier metadata
-    CreatedAt = proplists:get_value(?COL_CREATED_AT, Columns, barrel_hlc:encode(NextHlc)),
-    ExistingTier = proplists:get_value(?COL_TIER, Columns, 0),
-    ExistingExpires = proplists:get_value(?COL_EXPIRES_AT, Columns, 0),
-
-    %% Update entity columns with new rev and revtree
-    NewColumns = [
-        {?COL_REV, NewRev},
-        {?COL_DELETED, <<"false">>},
-        {?COL_HLC, barrel_hlc:encode(NextHlc)},
-        {?COL_REVTREE, encode_revtree(NewRevTree)},
-        {?COL_CREATED_AT, CreatedAt},
-        {?COL_EXPIRES_AT, ExistingExpires},
-        {?COL_TIER, ExistingTier}
-    ],
-
-    %% Encode the merged document body
-    CborBin = barrel_docdb_codec_cbor:encode(DocWithoutMeta),
-    BodyKey = barrel_store_keys:doc_body(DbName, DocId),
-
-    %% Delete bodies of resolved conflict revisions
-    DeleteOps = [
-        {body_delete, barrel_store_keys:doc_body_rev(DbName, DocId, Rev)}
-        || Rev <- Conflicts
-    ],
-
-    %% Build batch operations
-    EntityOp = {entity_put, DocEntityKey, NewColumns},
-    BodyOp = {body_put, BodyKey, CborBin},
-
-    %% Write batch (entity + new body + delete conflict bodies)
-    case barrel_store_rocksdb:write_batch(StoreRef, [EntityOp, BodyOp | DeleteOps]) of
-        ok ->
-            {ok, #{id => DocId, rev => NewRev, conflicts_resolved => length(Conflicts)}};
+%% @private Apply a conflict resolution as a superseding write.
+apply_resolution(StoreRef, DbName, DocId, Old, CurrentVV, Siblings, Resolution) ->
+    ResolvedBody = case Resolution of
+        {merge, Doc} when is_map(Doc) ->
+            {ok, barrel_doc:doc_without_meta(Doc)};
+        {choose, Token} ->
+            CurrentToken = barrel_version:to_token(maps:get(version, Old)),
+            case Token of
+                CurrentToken ->
+                    {ok, maps:get(body, Old, #{})};
+                _ ->
+                    case lists:filter(
+                             fun({V, _E}) ->
+                                 barrel_version:to_token(V) =:= Token
+                             end, Siblings) of
+                        [{ChosenVersion, _Entry}] ->
+                            read_version_body(StoreRef, DbName, DocId,
+                                              ChosenVersion);
+                        [] ->
+                            {error, {unknown_version, Token}}
+                    end
+            end;
+        _ ->
+            {error, {invalid_resolution, Resolution}}
+    end,
+    case ResolvedBody of
+        {ok, Body} ->
+            %% Version vector of the resolving write covers everything
+            MergedVV = lists:foldl(
+                fun({_V, #{vv := SibVV}}, Acc) -> barrel_vv:merge(Acc, SibVV) end,
+                CurrentVV,
+                Siblings),
+            DocRecord0 = barrel_doc:make_doc_record(Body#{<<"id">> => DocId}),
+            DocRecord = DocRecord0#{expected_version => undefined},
+            %% Reuse the ordinary write pipeline with the merged VV and
+            %% conflict flips added on top
+            Old2 = Old#{vv := MergedVV, num_conflicts := 0},
+            {AllOps0, {DocId, NewToken, NextHlc, Deleted, DocBody}} =
+                build_write_ops(StoreRef, DbName, DocRecord, Old2, #{}),
+            %% Flip every conflict sibling to superseded
+            FlipOps = [{put,
+                        barrel_store_keys:doc_version(
+                            DbName, DocId, barrel_version:encode(V)),
+                        sibling_entry(superseded, maps:get(deleted, E),
+                                      maps:get(vv, E))}
+                       || {V, E} <- Siblings],
+            ok = barrel_store_rocksdb:write_batch(
+                     StoreRef, AllOps0 ++ FlipOps, #{}),
+            notify_subscribers(DbName, DocId, NewToken, NextHlc, Deleted, DocBody),
+            {ok, #{id => DocId, rev => NewToken,
+                   conflicts_resolved => length(Siblings)}};
         {error, _} = Err ->
             Err
     end.
 
+%% @private Read the archived body of a non-current version.
+read_version_body(StoreRef, DbName, DocId, Version) ->
+    Key = barrel_store_keys:doc_body_rev(DbName, DocId,
+                                         barrel_version:encode(Version)),
+    case barrel_store_rocksdb:body_get(StoreRef, Key) of
+        {ok, CborBin} -> {ok, barrel_docdb_codec_cbor:decode_any(CborBin)};
+        not_found -> {error, {version_body_missing, barrel_version:to_token(Version)}};
+        {error, _} = Err -> Err
+    end.

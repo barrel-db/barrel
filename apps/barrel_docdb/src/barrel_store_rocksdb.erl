@@ -948,32 +948,34 @@ put_entity(DbRef, Key, Columns) ->
 put_entity(#{ref := Ref}, Key, Columns, Opts) ->
     rocksdb:put(Ref, Key, encode_entity(Columns), Opts).
 
-%% Entity column names (matching barrel_db_server)
--define(COL_REV, <<"rev">>).
+%% Entity column names (keep in sync with barrel_docdb.hrl; kept local
+%% because this module's own types clash with the hrl)
+-define(COL_VERSION, <<"ver">>).
 -define(COL_DELETED, <<"del">>).
 -define(COL_HLC, <<"hlc">>).
--define(COL_REVTREE, <<"revtree">>).
-%% TTL/Tier columns (added in v2)
+-define(COL_VV, <<"vv">>).
+-define(COL_NCONFLICTS, <<"nconf">>).
 -define(COL_CREATED_AT, <<"created_at">>).
 -define(COL_EXPIRES_AT, <<"expires_at">>).
 -define(COL_TIER, <<"tier">>).
-%% Embedding columns (added in v3; keep in sync with barrel_docdb.hrl)
 -define(COL_EMBEDDING, <<"emb">>).
 -define(COL_EMBEDDING_SRC, <<"embsrc">>).
 
-%% @doc Encode entity columns to fixed binary format
-%% Format v2 (with TTL/tier extension):
-%%   `&lt;&lt;RevLen:16, Rev/binary, Deleted:8, HlcLen:16, Hlc/binary, TreeLen:32, Tree/binary,
-%%     CreatedAtLen:16, CreatedAt/binary, ExpiresAt:64, Tier:8&gt;&gt;'
-%% Backward compatible: old data without extension uses defaults.
+%% @doc Encode entity columns to fixed binary format.
+%% Format v4 (version vectors; the rev-tree formats are gone, pre-1.0
+%% format break):
+%%   `<<VerLen:16, Version/binary, Deleted:8, HlcLen:16, Hlc/binary,
+%%     VVLen:32, VV/binary, CreatedAtLen:16, CreatedAt/binary,
+%%     ExpiresAt:64, Tier:8, NConflicts:16, EmbExt/binary>>'
+%% The embedding extension `<<EmbLen:32, Emb/binary, EmbSrc:8>>' is
+%% appended only when a vector is stored (src 0 = client, 1 = computed).
 -spec encode_entity([{binary(), term()}]) -> binary().
 encode_entity(Columns) ->
-    Rev = proplists:get_value(?COL_REV, Columns, <<>>),
+    Version = proplists:get_value(?COL_VERSION, Columns, <<>>),
     Del = proplists:get_value(?COL_DELETED, Columns, <<"false">>),
     Hlc = proplists:get_value(?COL_HLC, Columns, <<>>),
-    %% Tree is already term_to_binary'd by barrel_db_server
-    TreeBin = proplists:get_value(?COL_REVTREE, Columns, <<>>),
-    %% TTL/Tier fields (v2)
+    VV = proplists:get_value(?COL_VV, Columns, <<>>),
+    NConflicts = proplists:get_value(?COL_NCONFLICTS, Columns, 0),
     CreatedAt = proplists:get_value(?COL_CREATED_AT, Columns, <<>>),
     ExpiresAt = proplists:get_value(?COL_EXPIRES_AT, Columns, 0),
     Tier = proplists:get_value(?COL_TIER, Columns, 0),
@@ -992,7 +994,7 @@ encode_entity(Columns) ->
         _ -> 0
     end,
 
-    %% Embedding extension (v3): `<<EmbLen:32, Emb/binary, Src:8>>'
+    %% Embedding extension: `<<EmbLen:32, Emb/binary, Src:8>>'
     %% appended only when a vector is stored (src 0=client, 1=computed)
     EmbExt = case proplists:get_value(?COL_EMBEDDING, Columns, <<>>) of
         <<>> ->
@@ -1006,43 +1008,36 @@ encode_entity(Columns) ->
             <<(byte_size(EmbBin)):32, EmbBin/binary, SrcByte:8>>
     end,
 
-    <<(byte_size(Rev)):16, Rev/binary,
+    <<(byte_size(Version)):16, Version/binary,
       DelByte:8,
       (byte_size(Hlc)):16, Hlc/binary,
-      (byte_size(TreeBin)):32, TreeBin/binary,
+      (byte_size(VV)):32, VV/binary,
       (byte_size(CreatedAt)):16, CreatedAt/binary,
       ExpiresAt:64,
       TierByte:8,
+      NConflicts:16,
       EmbExt/binary>>.
 
-%% @doc Decode entity from fixed binary format
-%% Handles both v1 (without TTL/tier) and v2 (with TTL/tier) formats.
+%% @doc Decode entity from fixed binary format (v4).
 -spec decode_entity(binary()) -> [{binary(), term()}].
-decode_entity(<<RevLen:16, Rev:RevLen/binary,
+decode_entity(<<VerLen:16, Version:VerLen/binary,
                 DelByte:8,
                 HlcLen:16, Hlc:HlcLen/binary,
-                TreeLen:32, TreeBin:TreeLen/binary,
-                Rest/binary>>) ->
+                VVLen:32, VV:VVLen/binary,
+                CreatedAtLen:16, CreatedAt:CreatedAtLen/binary,
+                ExpiresAt:64,
+                TierByte:8,
+                NConflicts:16,
+                Ext/binary>>) ->
     Del = case DelByte of 1 -> <<"true">>; 0 -> <<"false">> end,
-    BaseColumns = [{?COL_REV, Rev}, {?COL_DELETED, Del}, {?COL_HLC, Hlc}, {?COL_REVTREE, TreeBin}],
-    case Rest of
-        <<CreatedAtLen:16, CreatedAt:CreatedAtLen/binary, ExpiresAt:64, TierByte:8,
-          Ext/binary>> ->
-            %% V2 format with TTL/tier extension (+ optional v3 embedding)
-            Tier = case TierByte of 0 -> hot; 1 -> warm; 2 -> cold; _ -> hot end,
-            Columns = BaseColumns ++ [{?COL_CREATED_AT, CreatedAt},
-                                      {?COL_EXPIRES_AT, ExpiresAt},
-                                      {?COL_TIER, Tier}],
-            decode_entity_ext(Ext, Columns);
-        <<>> ->
-            %% V1 format (no extension) - use defaults
-            BaseColumns ++ [{?COL_CREATED_AT, <<>>}, {?COL_EXPIRES_AT, 0}, {?COL_TIER, hot}];
-        _ ->
-            %% Unknown extension, ignore and use defaults
-            BaseColumns ++ [{?COL_CREATED_AT, <<>>}, {?COL_EXPIRES_AT, 0}, {?COL_TIER, hot}]
-    end.
+    Tier = case TierByte of 0 -> hot; 1 -> warm; 2 -> cold; _ -> hot end,
+    Columns = [{?COL_VERSION, Version}, {?COL_DELETED, Del}, {?COL_HLC, Hlc},
+               {?COL_VV, VV}, {?COL_NCONFLICTS, NConflicts},
+               {?COL_CREATED_AT, CreatedAt}, {?COL_EXPIRES_AT, ExpiresAt},
+               {?COL_TIER, Tier}],
+    decode_entity_ext(Ext, Columns).
 
-%% @private Decode the optional v3 embedding extension.
+%% @private Decode the optional embedding extension.
 decode_entity_ext(<<>>, Columns) ->
     Columns;
 decode_entity_ext(<<EmbLen:32, Emb:EmbLen/binary, SrcByte:8>>, Columns) ->

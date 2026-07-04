@@ -130,10 +130,15 @@
 %% Wide column names for the document entity (PREFIX_DOC_ENTITY).
 %% On-disk format constants shared by the writer (barrel_db_server) and the
 %% caller-side reader (barrel_docdb_reader); keep them in sync.
--define(COL_REV, <<"rev">>).
+%% COL_VERSION holds the storage-encoded winning barrel_version; COL_VV the
+%% encoded barrel_vv version vector; COL_HLC the change-sequence HLC of the
+%% doc's live-feed row (equals the version HLC for local writes, not for
+%% replicated ones); COL_NCONFLICTS the live conflict-sibling count.
+-define(COL_VERSION, <<"ver">>).
 -define(COL_DELETED, <<"del">>).
 -define(COL_HLC, <<"hlc">>).
--define(COL_REVTREE, <<"revtree">>).
+-define(COL_VV, <<"vv">>).
+-define(COL_NCONFLICTS, <<"nconf">>).
 %% Reserved entity columns (default 0, preserved across writes). The built-in
 %% tiering engine was removed; these are kept as on-disk format-stable seams
 %% for an external tiering layer to use.

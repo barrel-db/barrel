@@ -288,19 +288,15 @@ make_doc_record(_Config) ->
     ?assertEqual(#{<<"id">> => <<"doc1">>, <<"name">> => <<"test">>}, maps:get(doc, Record1)),
     ?assert(is_reference(maps:get(ref, Record1))),
 
-    %% First revision
-    [Rev1] = maps:get(revs, Record1),
-    {Gen, _Hash} = barrel_doc:parse_revision(Rev1),
-    ?assertEqual(1, Gen),
+    %% New documents carry no expected version (the writer issues the
+    %% version; _rev is only the CAS input)
+    ?assertEqual(undefined, maps:get(expected_version, Record1)),
 
-    %% Update with existing rev
-    Doc2 = #{<<"id">> => <<"doc1">>, <<"_rev">> => <<"1-abc">>, <<"name">> => <<"updated">>},
+    %% Update with existing rev: the token is carried verbatim
+    Doc2 = #{<<"id">> => <<"doc1">>, <<"_rev">> => <<"sometoken@node">>,
+             <<"name">> => <<"updated">>},
     Record2 = barrel_doc:make_doc_record(Doc2),
-
-    [NewRev, OldRev] = maps:get(revs, Record2),
-    ?assertEqual(<<"1-abc">>, OldRev),
-    {Gen2, _} = barrel_doc:parse_revision(NewRev),
-    ?assertEqual(2, Gen2),
+    ?assertEqual(<<"sometoken@node">>, maps:get(expected_version, Record2)),
 
     ok.
 

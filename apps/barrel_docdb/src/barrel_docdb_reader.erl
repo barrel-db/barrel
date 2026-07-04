@@ -73,20 +73,10 @@ do_get_doc(StoreRef, DbName, DocId, Opts, Snapshot) ->
     DocEntityKey = barrel_store_keys:doc_entity(DbName, DocId),
     case barrel_store_rocksdb:get_entity_with_snapshot(StoreRef, DocEntityKey, Snapshot) of
         {ok, Columns} ->
-            %% Get the deterministic winner from revtree (not just stored rev)
-            RevTreeBin = proplists:get_value(?COL_REVTREE, Columns),
-            Rev = case RevTreeBin of
-                undefined ->
-                    proplists:get_value(?COL_REV, Columns);
-                <<>> ->
-                    proplists:get_value(?COL_REV, Columns);
-                _ ->
-                    #{winner := Winner} = barrel_revtree_bin:decode_winner_leaves(RevTreeBin),
-                    case Winner of
-                        undefined -> proplists:get_value(?COL_REV, Columns);
-                        _ -> Winner
-                    end
-            end,
+            %% The winner is stored at write time; its token is the API rev
+            Rev = barrel_version:to_token(
+                barrel_version:decode(
+                    proplists:get_value(?COL_VERSION, Columns))),
             Deleted = bin_to_deleted(proplists:get_value(?COL_DELETED, Columns, <<"false">>)),
             IncludeDeleted = maps:get(include_deleted, Opts, false),
 
@@ -107,7 +97,9 @@ do_get_doc(StoreRef, DbName, DocId, Opts, Snapshot) ->
                                         rev => Rev,
                                         deleted => Deleted
                                     },
-                                    Meta2 = maybe_add_conflicts_to_meta(Meta, Columns, Opts),
+                                    Meta2 = maybe_add_conflicts_to_meta(
+                                        Meta, Columns, Opts,
+                                        {StoreRef, DbName, DocId, Snapshot}),
                                     {ok, CborBin, Meta2};
                                 false ->
                                     %% Decode CBOR to get document body
@@ -122,7 +114,9 @@ do_get_doc(StoreRef, DbName, DocId, Opts, Snapshot) ->
                                         false -> Result
                                     end,
                                     %% Add conflicts if requested
-                                    Result3 = maybe_add_conflicts(Result2, Columns, Opts),
+                                    Result3 = maybe_add_conflicts(
+                                        Result2, Columns, Opts,
+                                        {StoreRef, DbName, DocId, Snapshot}),
                                     %% Attach the embedding column if requested
                                     Result4 = maybe_add_embedding(Result3, Columns, Opts),
                                     {ok, Result4}
@@ -154,7 +148,9 @@ do_get_docs(StoreRef, DbName, DocIds, Opts, Snapshot) ->
         fun({DocId, EntityResult, BodyResult}, Map) ->
             case {EntityResult, BodyResult} of
                 {{ok, Columns}, {ok, CborBin}} ->
-                    Rev = proplists:get_value(?COL_REV, Columns),
+                    Rev = barrel_version:to_token(
+                        barrel_version:decode(
+                            proplists:get_value(?COL_VERSION, Columns))),
                     Deleted = bin_to_deleted(proplists:get_value(?COL_DELETED, Columns, <<"false">>)),
                     case {Deleted, IncludeDeleted} of
                         {true, false} ->
@@ -207,41 +203,51 @@ bin_to_deleted(<<"true">>) -> true;
 bin_to_deleted(<<"false">>) -> false;
 bin_to_deleted(_) -> false.
 
-%% @private Add conflicts to document if requested and conflicts exist
-maybe_add_conflicts(Doc, Columns, Opts) ->
+%% @private Add conflicts to document if requested and conflicts exist.
+%% The entity carries the live sibling count; only conflicted documents
+%% scan the version chain (under the read snapshot).
+maybe_add_conflicts(Doc, Columns, Opts, ReadCtx) ->
     case maps:get(conflicts, Opts, false) of
         true ->
-            RevTreeBin = proplists:get_value(?COL_REVTREE, Columns),
-            case RevTreeBin of
-                undefined -> Doc;
-                <<>> -> Doc;
-                _ ->
-                    %% Use fast path to get conflicts directly from binary
-                    #{conflicts := Conflicts} = barrel_revtree_bin:decode_winner_leaves(RevTreeBin),
-                    case Conflicts of
-                        [] -> Doc;
-                        _ -> Doc#{<<"_conflicts">> => Conflicts}
-                    end
+            case conflict_tokens(Columns, ReadCtx) of
+                [] -> Doc;
+                Tokens -> Doc#{<<"_conflicts">> => Tokens}
             end;
         false ->
             Doc
     end.
 
 %% @private Add conflicts to metadata map (for raw_body responses)
-maybe_add_conflicts_to_meta(Meta, Columns, Opts) ->
+maybe_add_conflicts_to_meta(Meta, Columns, Opts, ReadCtx) ->
     case maps:get(conflicts, Opts, false) of
         true ->
-            RevTreeBin = proplists:get_value(?COL_REVTREE, Columns),
-            case RevTreeBin of
-                undefined -> Meta;
-                <<>> -> Meta;
-                _ ->
-                    #{conflicts := Conflicts} = barrel_revtree_bin:decode_winner_leaves(RevTreeBin),
-                    case Conflicts of
-                        [] -> Meta;
-                        _ -> Meta#{conflicts => Conflicts}
-                    end
+            case conflict_tokens(Columns, ReadCtx) of
+                [] -> Meta;
+                Tokens -> Meta#{conflicts => Tokens}
             end;
         false ->
             Meta
+    end.
+
+conflict_tokens(Columns, {StoreRef, DbName, DocId, Snapshot}) ->
+    case proplists:get_value(?COL_NCONFLICTS, Columns, 0) of
+        0 ->
+            [];
+        _ ->
+            Start = barrel_store_keys:doc_version_prefix(DbName, DocId),
+            End = barrel_store_keys:doc_version_end(DbName, DocId),
+            Fold = fun(Key, Value, Acc) ->
+                case Value of
+                    <<1:8, _/binary>> -> %% conflict flag
+                        VersionEnc = barrel_store_keys:decode_doc_version_key(
+                                         DbName, DocId, Key),
+                        {ok, [barrel_version:to_token(
+                                  barrel_version:decode(VersionEnc)) | Acc]};
+                    _ ->
+                        {ok, Acc}
+                end
+            end,
+            lists:reverse(
+                barrel_store_rocksdb:fold_range_with_snapshot(
+                    StoreRef, Start, End, Fold, [], Snapshot))
     end.

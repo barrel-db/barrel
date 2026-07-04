@@ -177,58 +177,11 @@ process_doc_entity(DocId, EntityBin, State) ->
             do_process_doc_entity(DbRef, DbName, DocId, EntityBin, Depth, State)
     end.
 
-%% @private Actually process the document entity
-do_process_doc_entity(DbRef, DbName, DocId, EntityBin, Depth, State) ->
-    %% Decode entity columns
-    Columns = barrel_store_rocksdb:decode_entity(EntityBin),
-
-    %% Find revtree column
-    case find_column(<<"revtree">>, Columns) of
-        {ok, RevTreeBin} ->
-            %% Decode revtree
-            RevTree = barrel_revtree_bin:decode(RevTreeBin),
-
-            %% Prune revtree
-            {PrunedRT, PrunedRevIds} = barrel_revtree_bin:prune(RevTree, Depth),
-
-            case PrunedRevIds of
-                [] ->
-                    %% Nothing to prune
-                    NewState = State#state{
-                        entities_processed = State#state.entities_processed + 1
-                    },
-                    {keep, NewState};
-                _ ->
-                    %% Delete body entries for pruned revisions
-                    DeleteOps = [{body_delete,
-                        barrel_store_keys:doc_body_rev(DbName, DocId, Rev)}
-                        || Rev <- PrunedRevIds],
-                    ok = barrel_store_rocksdb:write_batch(DbRef, DeleteOps),
-
-                    %% Encode updated entity
-                    NewRevTreeBin = barrel_revtree_bin:encode(PrunedRT),
-                    UpdatedColumns = update_column(<<"revtree">>, NewRevTreeBin, Columns),
-                    UpdatedEntityBin = barrel_store_rocksdb:encode_entity(UpdatedColumns),
-
-                    %% Update stats
-                    NewState = State#state{
-                        entities_processed = State#state.entities_processed + 1,
-                        revisions_pruned = State#state.revisions_pruned + length(PrunedRevIds)
-                    },
-                    {{change_value, UpdatedEntityBin}, NewState}
-            end;
-        not_found ->
-            %% No revtree column, keep as-is
-            {keep, State}
-    end.
-
-%% @private Find a column by name
-find_column(Name, Columns) ->
-    case lists:keyfind(Name, 1, Columns) of
-        {Name, Value} -> {ok, Value};
-        false -> not_found
-    end.
-
-%% @private Update a column value
-update_column(Name, NewValue, Columns) ->
-    lists:keyreplace(Name, 1, Columns, {Name, NewValue}).
+%% @private Rev-tree pruning is gone (version-vector storage keeps
+%% per-doc chains in their own keyspace; the retention sweeper owns
+%% their lifecycle). The filter is kept as a pass-through seam.
+do_process_doc_entity(_DbRef, _DbName, _DocId, _EntityBin, _Depth, State) ->
+    NewState = State#state{
+        entities_processed = State#state.entities_processed + 1
+    },
+    {keep, NewState}.

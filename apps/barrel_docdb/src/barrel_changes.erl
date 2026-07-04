@@ -968,8 +968,8 @@ encode_change(DocInfo) ->
             <<Base/binary, 0:8>>
     end.
 
-count_conflicts(#{revtree := RevTree}) when is_map(RevTree) ->
-    length(barrel_revtree_bin:conflicts_from_map(RevTree));
+count_conflicts(#{num_conflicts := N}) when is_integer(N) ->
+    N;
 count_conflicts(_) ->
     0.
 

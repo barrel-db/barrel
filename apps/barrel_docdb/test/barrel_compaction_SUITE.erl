@@ -232,59 +232,10 @@ many_revisions_get_pruned(Config) ->
 
     ok.
 
-pruning_deletes_bodies(Config) ->
-    DbName = proplists:get_value(db_name, Config),
-    DocId = <<"prune_body_doc">>,
-
-    %% Create document with larger body
-    LargeValue = binary:copy(<<"x">>, 5000),  %% 5KB to ensure body is stored
-    Doc0 = #{<<"id">> => DocId, <<"data">> => LargeValue, <<"version">> => 0},
-    {ok, #{<<"rev">> := Rev0}} = barrel_docdb:put_doc(DbName, Doc0),
-
-    %% Get store ref for direct body access
-    {ok, Pid} = barrel_docdb:db_pid(DbName),
-    {ok, StoreRef} = barrel_db_server:get_store_ref(Pid),
-
-    %% Note: The current body is stored at doc_body(DbName, DocId),
-    %% only when updated does the old body move to doc_body_rev(DbName, DocId, Rev)
-
-    %% Verify current body exists
-    CurrentBodyKey = barrel_store_keys:doc_body(DbName, DocId),
-    {ok, _Body0} = barrel_store_rocksdb:body_get(StoreRef, CurrentBodyKey),
-    ct:pal("Body for rev ~s exists at current location", [Rev0]),
-
-    %% Update 5 times (more than prune depth of 3)
-    %% After each update, the previous body is moved to doc_body_rev location
-    {FinalRev, AllRevs} = lists:foldl(
-        fun(N, {PrevRev, AccRevs}) ->
-            DocN = #{<<"id">> => DocId, <<"_rev">> => PrevRev,
-                     <<"data">> => LargeValue, <<"version">> => N},
-            {ok, #{<<"rev">> := NewRev}} = barrel_docdb:put_doc(DbName, DocN),
-            {NewRev, [NewRev | AccRevs]}
-        end,
-        {Rev0, [Rev0]},
-        lists:seq(1, 5)
-    ),
-
-    ct:pal("Created ~p revisions, final: ~s", [length(AllRevs), FinalRev]),
-
-    %% Verify Rev0 body was moved to revision-keyed location
-    Rev0BodyKey = barrel_store_keys:doc_body_rev(DbName, DocId, Rev0),
-    {ok, _BodyRev0} = barrel_store_rocksdb:body_get(StoreRef, Rev0BodyKey),
-    ct:pal("Rev0 body exists at revision location"),
-
-    %% Trigger compaction
-    ok = barrel_store_rocksdb:compact_default_cf(StoreRef),
-
-    %% Latest body should still exist at current location
-    {ok, _BodyFinal} = barrel_store_rocksdb:body_get(StoreRef, CurrentBodyKey),
-    ct:pal("Final body still exists at current location"),
-
-    %% Old bodies may be deleted (deleted in compaction, cleaned up in next compaction)
-    %% Note: The actual deletion happens via write_batch during compaction filter,
-    %% and the keys are cleaned up in subsequent compaction cycles
-
-    ok.
+pruning_deletes_bodies(_Config) ->
+    %% Rev-tree pruning is gone; archived version bodies are owned
+    %% by the retention sweeper (phase 3 step 5), with its own tests.
+    {skip, revtree_removed}.
 
 pruning_preserves_winner(Config) ->
     DbName = proplists:get_value(db_name, Config),

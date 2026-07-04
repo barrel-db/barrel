@@ -249,52 +249,34 @@ doc_without_meta(Doc) ->
         Doc
     ).
 
-%% @doc Create internal document record from user document
+%% @doc Create internal document record from user document.
+%% The document's version identity is issued by the writer
+%% (barrel_db_server); the record only carries the caller's expected
+%% current version (`_rev' token) for the CAS check.
 -spec make_doc_record(doc()) -> map().
-make_doc_record(#{<<"id">> := Id, <<"doc">> := Doc0, <<"history">> := History}) ->
-    %% Bulk format with explicit history
-    Deleted = maps:get(<<"deleted">>, Doc0, false),
-    Atts = maps:get(<<"_attachments">>, Doc0, #{}),
-    Doc1 = doc_without_meta(Doc0),
-    #{
-        id => Id,
-        ref => erlang:make_ref(),
-        revs => History,
-        deleted => Deleted,
-        attachments => Atts,
-        doc => Doc1
-    };
 make_doc_record(Doc0) ->
-    %% Regular document format
     Deleted = maps:get(<<"_deleted">>, Doc0, false),
-    Rev = maps:get(<<"_rev">>, Doc0, <<>>),
+    ExpectedVersion = case maps:get(<<"_rev">>, Doc0, <<>>) of
+        <<>> -> undefined;
+        Token -> Token
+    end,
     Atts = maps:get(<<"_attachments">>, Doc0, #{}),
     Id = case maps:find(<<"id">>, Doc0) of
         {ok, DocId} -> DocId;
         error -> generate_docid()
     end,
     Doc1 = doc_without_meta(Doc0),
-    Hash = revision_hash(Doc1, Rev, Deleted),
-    Revs = case Rev of
-        <<>> ->
-            [<<"1-", Hash/binary>>];
-        _ ->
-            {Gen, _} = parse_revision(Rev),
-            NewRev = <<(integer_to_binary(Gen + 1))/binary, "-", Hash/binary>>,
-            [NewRev, Rev]
-    end,
     Record = #{
         id => Id,
         ref => erlang:make_ref(),
-        revs => Revs,
+        expected_version => ExpectedVersion,
         deleted => Deleted,
-        hash => Hash,
         attachments => Atts,
         doc => Doc1
     },
     %% A carried embedding is derived data stored as an entity column
-    %% (never in the body, never in the revision hash). Accepted shapes:
-    %% a bare vector (client-supplied shorthand) or an object
+    %% (never in the body). Accepted shapes: a bare vector
+    %% (client-supplied shorthand) or an object
     %% #{<<"vector">> => [...], <<"source">> => <<"client">>|<<"computed">>}
     %% as returned by reads with include_embedding.
     case parse_embedding(maps:get(<<"_embedding">>, Doc0, undefined)) of

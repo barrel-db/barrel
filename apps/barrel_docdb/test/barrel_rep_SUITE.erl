@@ -70,9 +70,11 @@ groups() ->
         ]}
     ].
 
-init_per_suite(Config) ->
-    {ok, _} = application:ensure_all_started(barrel_docdb),
-    Config.
+init_per_suite(_Config) ->
+    %% Rev-tree replication primitives were removed with the version
+    %% vector pivot; the VV protocol (put_version + diff_versions) and a
+    %% rewritten suite land with the transport rework (phase 3 step 3).
+    {skip, revtree_removed}.
 
 end_per_suite(_Config) ->
     ok = application:stop(barrel_docdb),

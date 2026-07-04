@@ -84,6 +84,10 @@
 %% Tagged outbox keys (durable work queue written with the doc batch)
 -export([outbox_key/3, outbox_prefix/2, outbox_end/2, decode_outbox_key/2]).
 
+%% Per-doc version chains (superseded and conflict siblings)
+-export([doc_version/3, doc_version_prefix/2, doc_version_end/2,
+         decode_doc_version_key/3]).
+
 
 %% HLC encoding/decoding
 -export([encode_hlc/1, decode_hlc/1, decode_hlc_key/2]).
@@ -119,6 +123,7 @@
 -define(PREFIX_DOC_ENTITY, 16#18).    %% Wide-column doc entity: DbName + DocId → entity with columns
 -define(PREFIX_OUTBOX, 16#1A).        %% Tagged outbox: DbName + tag (null-terminated) + HLC → entry
 -define(PREFIX_CHANGES, 16#1B).       %% Prefix changes posting: prefix + bucket → [HLC:12, change, ...]
+-define(PREFIX_DOC_VERSION, 16#1D).   %% Version chain: DbName + DocId + ':' + version → sibling entry
 
 %% Value prefix max length for value-first index (128 bytes)
 -define(VALUE_PREFIX_MAX_LEN, 128).
@@ -302,6 +307,37 @@ decode_outbox_key(DbName, Key) ->
     <<_:PrefixLen/binary, Rest/binary>> = Key,
     {Tag, HlcBin} = split_on_null(Rest),
     {Tag, decode_hlc(HlcBin)}.
+
+%%====================================================================
+%% Per-Doc Version Chain Keys (superseded and conflict siblings)
+%%====================================================================
+
+%% @doc Key for one non-current version of a document.
+%% Key format: prefix | db_name | doc_id | ':' | version (storage encoding,
+%% HLC-first, so the chain scans in causal order).
+-spec doc_version(db_name(), docid(), binary()) -> binary().
+doc_version(DbName, DocId, VersionEnc) ->
+    <<?PREFIX_DOC_VERSION, (encode_name(DbName))/binary,
+      DocId/binary, $:, VersionEnc/binary>>.
+
+%% @doc Start key for scanning a document's version chain.
+-spec doc_version_prefix(db_name(), docid()) -> binary().
+doc_version_prefix(DbName, DocId) ->
+    <<?PREFIX_DOC_VERSION, (encode_name(DbName))/binary, DocId/binary, $:>>.
+
+%% @doc End marker for a version chain scan.
+-spec doc_version_end(db_name(), docid()) -> binary().
+doc_version_end(DbName, DocId) ->
+    <<?PREFIX_DOC_VERSION, (encode_name(DbName))/binary, DocId/binary, $:,
+      16#FF, 16#FF, 16#FF, 16#FF, 16#FF, 16#FF, 16#FF, 16#FF,
+      16#FF, 16#FF, 16#FF, 16#FF, 16#FF>>.
+
+%% @doc Extract the encoded version from a version-chain key.
+-spec decode_doc_version_key(db_name(), docid(), binary()) -> binary().
+decode_doc_version_key(DbName, DocId, Key) ->
+    PrefixLen = 1 + 2 + byte_size(DbName) + byte_size(DocId) + 1,
+    <<_:PrefixLen/binary, VersionEnc/binary>> = Key,
+    VersionEnc.
 
 %% @doc Decode path_hlc key to extract topic and HLC.
 %% Returns {Topic, Hlc} tuple.

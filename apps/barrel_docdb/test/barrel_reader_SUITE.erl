@@ -151,8 +151,9 @@ changes_by_name(Config) ->
     ?assertEqual(<<"ch1">>, maps:get(id, Change)).
 
 %% Caller-side reads must never observe a torn entity/body pair while a
-%% writer is updating the same document. The writer stores the revision
-%% generation in the body; a torn read shows generation(_rev) =/= n.
+%% writer is updating the same document. Version tokens sort causally,
+%% so across successive reads (Rev, N) must advance together: a torn
+%% read shows a newer token with a stale body counter (or vice versa).
 snapshot_consistency(Config) ->
     Db = ?config(db, Config),
     N = 200,
@@ -182,21 +183,29 @@ write_loop(Db, I, N, PrevRev) ->
     write_loop(Db, I + 1, N, Rev).
 
 read_until_done(Db, Writer) ->
+    read_until_done(Db, Writer, {<<>>, 0}).
+
+read_until_done(Db, Writer, {LastRev, LastN} = Last) ->
     receive
         writer_done -> ok
     after 0 ->
-        case barrel_docdb:get_doc(Db, <<"snap">>) of
+        Next = case barrel_docdb:get_doc(Db, <<"snap">>) of
             {error, not_found} ->
-                ok; %% writer has not created the doc yet
+                Last; %% writer has not created the doc yet
             {ok, Doc} ->
                 Rev = maps:get(<<"_rev">>, Doc),
-                [GenBin | _] = binary:split(Rev, <<"-">>),
-                Gen = binary_to_integer(GenBin),
                 BodyN = maps:get(<<"n">>, Doc),
-                ?assertEqual(Gen, BodyN)
+                %% monotone together: same rev -> same body; newer body
+                %% -> newer rev (tokens sort causally). A torn pair
+                %% breaks one of these.
+                case BodyN of
+                    LastN -> ?assertEqual(LastRev, Rev);
+                    _ -> ?assert(BodyN > LastN andalso Rev > LastRev)
+                end,
+                {Rev, BodyN}
         end,
         case is_process_alive(Writer) of
-            true -> read_until_done(Db, Writer);
+            true -> read_until_done(Db, Writer, Next);
             false ->
                 %% drain the done message if it raced the alive check
                 receive writer_done -> ok after 1000 -> ok end
