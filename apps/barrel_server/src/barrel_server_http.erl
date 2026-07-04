@@ -47,11 +47,20 @@ start_link() ->
     livery:start_service(#{
         http => #{port => Port},
         router => Router,
-        middleware => [
-            {livery_request_id, undefined},
-            {livery_access_log, #{}}
-        ]
+        middleware => middleware()
     }).
+
+%% Auth runs after the access log so 401s get logged; unconfigured
+%% auth env means an open server (no middleware installed).
+middleware() ->
+    Base = [
+        {livery_request_id, undefined},
+        {livery_access_log, #{}}
+    ],
+    case barrel_server_auth:state_from_env() of
+        undefined -> Base;
+        AuthState -> Base ++ [{barrel_server_auth, AuthState}]
+    end.
 
 routes() ->
     [

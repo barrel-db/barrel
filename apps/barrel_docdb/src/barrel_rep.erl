@@ -307,33 +307,48 @@ do_replicate(Source, Target, SourceTransport, TargetTransport, Since,
 
         {ok, Changes, LastSeq} ->
             %% Replicate this batch
-            {ok, BatchStats} = barrel_rep_alg:replicate(
-                Source, Target, SourceTransport, TargetTransport, Changes
-            ),
+            case barrel_rep_alg:replicate(
+                     Source, Target, SourceTransport, TargetTransport,
+                     Changes) of
+                {ok, BatchStats} ->
+                    do_replicate_batch_done(
+                        Source, Target, SourceTransport, TargetTransport,
+                        BatchSize, CheckpointSize, Checkpoint, Filter,
+                        AccStats, DocsProcessed, Changes, LastSeq,
+                        BatchStats);
+                {error, _} = BatchError ->
+                    %% a target-side batch failure (network, auth) aborts
+                    %% the run with the error instead of crashing it
+                    BatchError
+            end;
 
-            %% Merge stats
-            MergedStats = merge_stats(AccStats, BatchStats),
-
-            %% Update checkpoint
-            Checkpoint2 = barrel_rep_checkpoint:set_last_seq(LastSeq, Checkpoint),
-            NewDocsProcessed = DocsProcessed + length(Changes),
-
-            %% Maybe write checkpoint
-            Checkpoint3 = case NewDocsProcessed >= CheckpointSize of
-                true ->
-                    barrel_rep_checkpoint:maybe_write_checkpoint(Checkpoint2);
-                false ->
-                    Checkpoint2
-            end,
-
-            %% Continue with next batch
-            do_replicate(Source, Target, SourceTransport, TargetTransport, LastSeq,
-                         BatchSize, CheckpointSize, Checkpoint3, Filter, MergedStats,
-                         NewDocsProcessed rem CheckpointSize);
-
-        {error, Reason} ->
-            {error, Reason}
+        {error, _} = Error ->
+            Error
     end.
+
+do_replicate_batch_done(Source, Target, SourceTransport, TargetTransport,
+                        BatchSize, CheckpointSize, Checkpoint, Filter,
+                        AccStats, DocsProcessed, Changes, LastSeq,
+                        BatchStats) ->
+    %% Merge stats
+    MergedStats = merge_stats(AccStats, BatchStats),
+
+    %% Update checkpoint
+    Checkpoint2 = barrel_rep_checkpoint:set_last_seq(LastSeq, Checkpoint),
+    NewDocsProcessed = DocsProcessed + length(Changes),
+
+    %% Maybe write checkpoint
+    Checkpoint3 = case NewDocsProcessed >= CheckpointSize of
+        true ->
+            barrel_rep_checkpoint:maybe_write_checkpoint(Checkpoint2);
+        false ->
+            Checkpoint2
+    end,
+
+    %% Continue with next batch
+    do_replicate(Source, Target, SourceTransport, TargetTransport, LastSeq,
+                 BatchSize, CheckpointSize, Checkpoint3, Filter, MergedStats,
+                 NewDocsProcessed rem CheckpointSize).
 
 %% @doc Deterministic replication ID. Each endpoint contributes its
 %% rep_id_term/1 when its transport exports one (network transports:

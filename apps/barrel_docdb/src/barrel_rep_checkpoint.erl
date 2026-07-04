@@ -211,12 +211,18 @@ read_last_seq(Db, Transport, RepId) ->
                     decode_seq(maps:get(<<"source_last_seq">>, LastHistory))
             end;
         {error, not_found} ->
+            first;
+        {error, Reason} ->
+            %% an unreadable checkpoint (network/auth failure) must not
+            %% crash: start from first and let the replication surface
+            %% the real error on its first transport call
+            logger:warning("checkpoint ~s unreadable: ~p", [RepId, Reason]),
             first
     end.
 
 %% @doc Read checkpoint document
 -spec read_checkpoint_doc(term(), module(), binary()) ->
-    {ok, map()} | {error, not_found}.
+    {ok, map()} | {error, term()}.
 read_checkpoint_doc(Db, Transport, RepId) ->
     Transport:get_local_doc(Db, checkpoint_docid(RepId)).
 
