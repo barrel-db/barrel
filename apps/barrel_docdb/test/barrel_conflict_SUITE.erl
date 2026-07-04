@@ -18,6 +18,7 @@ all() ->
     [
         {group, conflict_detection},
         {group, conflict_resolution},
+        {group, merger_and_bounds},
         {group, mvcc}
     ].
 
@@ -35,6 +36,13 @@ groups() ->
             resolve_conflict_merge,
             resolve_conflict_no_conflicts_error,
             resolve_conflict_invalid_rev_error
+        ]},
+        {merger_and_bounds, [sequence], [
+            merger_resolves_concurrent_writes,
+            merger_declining_falls_back_to_conflict,
+            merger_crash_falls_back_to_conflict,
+            merger_skips_tombstones,
+            conflict_sibling_bound
         ]},
         {mvcc, [sequence], [
             mvcc_first_write_no_rev,
@@ -268,6 +276,154 @@ resolve_conflict_invalid_rev_error(_Config) ->
     ?assertEqual([RemoteTok], Conflicts),
 
     ok.
+
+%%====================================================================
+%% Merger Hook and Sibling Bound Tests
+%%====================================================================
+
+%% Deterministic body merge used as the conflict_merger hook ({M, F}
+%% form; module-qualified so it survives config round-trips).
+merge_bodies(_DocId, LocalBody, RemoteBody) ->
+    Merged = maps:merge(LocalBody, RemoteBody),
+    {merge, Merged#{<<"merged">> => true}}.
+
+decline_merge(_DocId, _LocalBody, _RemoteBody) ->
+    keep.
+
+crash_merge(_DocId, _LocalBody, _RemoteBody) ->
+    error(merger_boom).
+
+with_db(Name, Opts, Fun) ->
+    DataDir = "/tmp/barrel_test_conflict_" ++ binary_to_list(Name),
+    os:cmd("rm -rf " ++ DataDir),
+    {ok, _} = barrel_docdb:create_db(Name, Opts#{data_dir => DataDir}),
+    try
+        Fun(Name)
+    after
+        barrel_docdb:delete_db(Name),
+        os:cmd("rm -rf " ++ DataDir)
+    end.
+
+merger_resolves_concurrent_writes(_Config) ->
+    with_db(<<"merger_db">>,
+            #{conflict_merger => {?MODULE, merge_bodies}},
+            fun(Db) ->
+        DocId = <<"merged_doc">>,
+        {RemoteTok, RemoteVV} = remote_version(<<"peer_a">>),
+        {ok, _} = barrel_docdb:put_doc(
+            Db, #{<<"id">> => DocId, <<"local">> => 1}),
+        {ok, DocId, NewTok} = barrel_docdb:put_version(
+            Db, #{<<"id">> => DocId, <<"remote">> => 2},
+            RemoteTok, RemoteVV, false),
+
+        %% No conflict recorded: the merged body is the new current
+        {ok, Doc} = barrel_docdb:get_doc(Db, DocId),
+        ?assertEqual(NewTok, maps:get(<<"_rev">>, Doc)),
+        ?assertEqual(1, maps:get(<<"local">>, Doc)),
+        ?assertEqual(2, maps:get(<<"remote">>, Doc)),
+        ?assertEqual(true, maps:get(<<"merged">>, Doc)),
+        {ok, []} = barrel_docdb:get_conflicts(Db, DocId),
+
+        %% The merged write's vector covers the remote version:
+        %% redelivery is a no-op
+        {ok, DocId, NewTok} = barrel_docdb:put_version(
+            Db, #{<<"id">> => DocId, <<"remote">> => 2},
+            RemoteTok, RemoteVV, false),
+
+        %% History tells the full story: local write, remote arrival,
+        %% resolving merge
+        {ok, Entries0} = barrel_docdb:fold_history(
+            Db, fun(E, Acc) -> {ok, [E | Acc]} end, []),
+        Entries = [E || E <- lists:reverse(Entries0),
+                        maps:get(id, E) =:= DocId],
+        ?assertEqual([local, replicated, resolve],
+                     [maps:get(cause, E) || E <- Entries]),
+
+        %% The remote body stays queryable as a superseded version
+        {ok, RemoteBody} = barrel_docdb:get_version_body(Db, DocId, RemoteTok),
+        ?assertEqual(2, maps:get(<<"remote">>, RemoteBody))
+    end).
+
+merger_declining_falls_back_to_conflict(_Config) ->
+    with_db(<<"merger_decline_db">>,
+            #{conflict_merger => {?MODULE, decline_merge}},
+            fun(Db) ->
+        DocId = <<"declined_doc">>,
+        {RemoteTok, RemoteVV} = remote_version(<<"peer_a">>),
+        {ok, #{<<"rev">> := LocalRev}} = barrel_docdb:put_doc(
+            Db, #{<<"id">> => DocId, <<"v">> => <<"local">>}),
+        {ok, DocId, LocalRev} = barrel_docdb:put_version(
+            Db, #{<<"id">> => DocId, <<"v">> => <<"remote">>},
+            RemoteTok, RemoteVV, false),
+        {ok, Conflicts} = barrel_docdb:get_conflicts(Db, DocId),
+        ?assertEqual([RemoteTok], Conflicts)
+    end).
+
+merger_crash_falls_back_to_conflict(_Config) ->
+    with_db(<<"merger_crash_db">>,
+            #{conflict_merger => {?MODULE, crash_merge}},
+            fun(Db) ->
+        DocId = <<"crashed_doc">>,
+        {RemoteTok, RemoteVV} = remote_version(<<"peer_a">>),
+        {ok, #{<<"rev">> := LocalRev}} = barrel_docdb:put_doc(
+            Db, #{<<"id">> => DocId, <<"v">> => <<"local">>}),
+        {ok, DocId, LocalRev} = barrel_docdb:put_version(
+            Db, #{<<"id">> => DocId, <<"v">> => <<"remote">>},
+            RemoteTok, RemoteVV, false),
+        {ok, Conflicts} = barrel_docdb:get_conflicts(Db, DocId),
+        ?assertEqual([RemoteTok], Conflicts)
+    end).
+
+merger_skips_tombstones(_Config) ->
+    with_db(<<"merger_tombstone_db">>,
+            #{conflict_merger => {?MODULE, merge_bodies}},
+            fun(Db) ->
+        DocId = <<"tombstone_doc">>,
+        %% A concurrent remote DELETE: body merge is meaningless, the
+        %% conflict path applies
+        {RemoteTok, RemoteVV} = remote_version(<<"peer_a">>),
+        {ok, #{<<"rev">> := LocalRev}} = barrel_docdb:put_doc(
+            Db, #{<<"id">> => DocId, <<"v">> => <<"local">>}),
+        {ok, DocId, LocalRev} = barrel_docdb:put_version(
+            Db, #{<<"id">> => DocId}, RemoteTok, RemoteVV, true),
+        {ok, Conflicts} = barrel_docdb:get_conflicts(Db, DocId),
+        ?assertEqual([RemoteTok], Conflicts),
+        %% The winner is still the live local doc
+        {ok, Doc} = barrel_docdb:get_doc(Db, DocId),
+        ?assertEqual(<<"local">>, maps:get(<<"v">>, Doc))
+    end).
+
+conflict_sibling_bound(_Config) ->
+    with_db(<<"bound_db">>,
+            #{max_conflict_versions => 2},
+            fun(Db) ->
+        DocId = <<"bounded_doc">>,
+        %% Three concurrent losing siblings against one local winner;
+        %% versions order peer HLCs by issue time (a < b < c)
+        {TokA, VVA} = remote_version(<<"peer_a">>),
+        {TokB, VVB} = remote_version(<<"peer_b">>),
+        {TokC, VVC} = remote_version(<<"peer_c">>),
+        {ok, #{<<"rev">> := LocalRev}} = barrel_docdb:put_doc(
+            Db, #{<<"id">> => DocId, <<"v">> => <<"local">>}),
+        {ok, DocId, LocalRev} = barrel_docdb:put_version(
+            Db, #{<<"id">> => DocId, <<"v">> => <<"a">>}, TokA, VVA, false),
+        {ok, DocId, LocalRev} = barrel_docdb:put_version(
+            Db, #{<<"id">> => DocId, <<"v">> => <<"b">>}, TokB, VVB, false),
+        {ok, DocId, LocalRev} = barrel_docdb:put_version(
+            Db, #{<<"id">> => DocId, <<"v">> => <<"c">>}, TokC, VVC, false),
+
+        %% Bound 2: the lowest version (peer_a) was dropped
+        {ok, Conflicts} = barrel_docdb:get_conflicts(Db, DocId),
+        ?assertEqual(lists:sort([TokB, TokC]), lists:sort(Conflicts)),
+        ?assertEqual({error, not_found},
+                     barrel_docdb:get_version_body(Db, DocId, TokA)),
+        {ok, _} = barrel_docdb:get_version_body(Db, DocId, TokB),
+
+        %% Resolution clears the bounded set
+        {ok, #{conflicts_resolved := 2}} = barrel_docdb:resolve_conflict(
+            Db, DocId, LocalRev, {merge, #{<<"v">> => <<"done">>}}),
+        {ok, []} = barrel_docdb:get_conflicts(Db, DocId)
+    end).
 
 %%====================================================================
 %% MVCC strict _rev tests

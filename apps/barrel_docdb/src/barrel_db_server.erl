@@ -82,6 +82,10 @@
 -define(DEFAULT_RETENTION_PERIOD, 2592000).  %% 30 days in seconds
 -define(DEFAULT_RETENTION_INTERVAL, 600000).  %% 10 minutes in ms
 
+%% Live conflict siblings per document are bounded; beyond the bound
+%% the lowest versions are dropped deterministically.
+-define(DEFAULT_MAX_CONFLICT_VERSIONS, 8).
+
 %%====================================================================
 %% API functions
 %%====================================================================
@@ -420,9 +424,10 @@ handle_call({resolve_conflict, DocId, BaseRev, Resolution}, _From,
 
 %% Replication operations
 handle_call({put_version, Doc, VersionToken, VVBin, Deleted}, _From,
-            #state{name = DbName, store_ref = StoreRef} = State) ->
+            #state{name = DbName, store_ref = StoreRef,
+                   config = Config} = State) ->
     Result = try
-        do_put_version(StoreRef, DbName, Doc,
+        do_put_version(StoreRef, DbName, Config, Doc,
                        barrel_version:from_token(VersionToken),
                        barrel_vv:decode(VVBin), Deleted)
     catch
@@ -1198,9 +1203,11 @@ do_fold_docs(StoreRef, DbName, Fun, Acc, Opts) ->
 %% sequence HLC is issued locally. Outcomes:
 %% - already contained: idempotent no-op
 %% - remote VV dominates: fast-forward, old winner superseded
-%% - concurrent: LWW by version; the loser stays live as a conflict
-%%   sibling and the vectors merge
-do_put_version(StoreRef, DbName, Doc, Version, RemoteVV, Deleted) ->
+%% - concurrent: the per-db conflict_merger may resolve it with a
+%%   merged body; otherwise LWW by version, the loser stays live as a
+%%   conflict sibling (bounded by max_conflict_versions) and the
+%%   vectors merge
+do_put_version(StoreRef, DbName, Config, Doc, Version, RemoteVV, Deleted) ->
     %% Advance the local clock past the remote write so subsequent local
     %% change HLCs stay strictly increasing
     _ = barrel_hlc:sync_hlc(barrel_version:hlc(Version)),
@@ -1234,29 +1241,126 @@ do_put_version(StoreRef, DbName, Doc, Version, RemoteVV, Deleted) ->
                                                  maps:get(num_conflicts, Old),
                                                  Chain);
                         _Concurrent ->
-                            NConflicts = maps:get(num_conflicts, Old) + 1,
-                            case barrel_version:max(LocalV, Version) of
-                                Version ->
-                                    %% Remote wins; local winner stays live
-                                    %% as a conflict sibling
-                                    Chain = [chain_op(DbName, DocId, LocalV,
-                                                      conflict, Old)],
-                                    apply_remote_current(StoreRef, DbName,
-                                                         DocId, DocBody,
-                                                         Version, MergedVV,
-                                                         Deleted, Old,
-                                                         NConflicts, Chain);
-                                _LocalWins ->
-                                    keep_local_add_conflict(StoreRef, DbName,
-                                                            DocId, DocBody,
-                                                            Version, RemoteVV,
-                                                            Deleted, Old,
-                                                            MergedVV,
-                                                            NConflicts)
-                            end
+                            handle_concurrent(StoreRef, DbName, Config, DocId,
+                                              DocBody, Version, RemoteVV,
+                                              Deleted, Old, MergedVV)
                     end
             end
     end.
+
+%% @private A concurrent remote version: the merger hook gets the first
+%% say; without one (or when it declines, crashes, or a side is a
+%% tombstone) the deterministic LWW conflict path applies.
+handle_concurrent(StoreRef, DbName, Config, DocId, DocBody, Version, RemoteVV,
+                  Deleted, #{version := LocalV} = Old, MergedVV) ->
+    case try_merge(Config, DocId, Old, DocBody, Deleted) of
+        {merge, MergedBody} ->
+            apply_merged(StoreRef, DbName, DocId, MergedBody, DocBody,
+                         Version, RemoteVV, Deleted, Old, MergedVV);
+        conflict ->
+            NConflicts0 = maps:get(num_conflicts, Old) + 1,
+            Max = maps:get(max_conflict_versions, Config,
+                           ?DEFAULT_MAX_CONFLICT_VERSIONS),
+            case barrel_version:max(LocalV, Version) of
+                Version ->
+                    %% Remote wins; local winner stays live as a
+                    %% conflict sibling
+                    {DropOps, NConflicts} = enforce_conflict_bound(
+                        StoreRef, DbName, DocId, LocalV, NConflicts0, Max),
+                    Chain = [chain_op(DbName, DocId, LocalV, conflict, Old)],
+                    apply_remote_current(StoreRef, DbName, DocId, DocBody,
+                                         Version, MergedVV, Deleted, Old,
+                                         NConflicts, Chain ++ DropOps);
+                _LocalWins ->
+                    {DropOps, NConflicts} = enforce_conflict_bound(
+                        StoreRef, DbName, DocId, Version, NConflicts0, Max),
+                    keep_local_add_conflict(StoreRef, DbName, DocId, DocBody,
+                                            Version, RemoteVV, Deleted, Old,
+                                            MergedVV, NConflicts, DropOps)
+            end
+    end.
+
+%% @private Ask the configured merger to resolve a concurrent write.
+%% Only meaningful when both sides are live documents. Any non-merge
+%% answer or a crash falls back to the conflict path.
+try_merge(Config, DocId, #{deleted := LocalDeleted, body := LocalBody},
+          RemoteBody, RemoteDeleted) ->
+    case maps:get(conflict_merger, Config, undefined) of
+        undefined ->
+            conflict;
+        _ when LocalDeleted; RemoteDeleted ->
+            conflict;
+        Merger ->
+            try call_merger(Merger, DocId, LocalBody, RemoteBody) of
+                {merge, Merged} when is_map(Merged) -> {merge, Merged};
+                _ -> conflict
+            catch
+                Class:Reason ->
+                    logger:warning(
+                        "conflict_merger failed for ~p: ~p:~p, "
+                        "falling back to conflict", [DocId, Class, Reason]),
+                    conflict
+            end
+    end.
+
+call_merger({M, F}, DocId, LocalBody, RemoteBody) ->
+    M:F(DocId, LocalBody, RemoteBody);
+call_merger(Fun, DocId, LocalBody, RemoteBody) when is_function(Fun, 3) ->
+    Fun(DocId, LocalBody, RemoteBody).
+
+%% @private Apply a merger resolution in one batch: the remote version
+%% is archived as superseded (with its own replicated history entry),
+%% and a new local resolving write whose vector covers both sides
+%% becomes current. The resolving write replicates like any other.
+apply_merged(StoreRef, DbName, DocId, MergedBody, RemoteBody, Version,
+             RemoteVV, RemoteDeleted, Old, MergedVV) ->
+    %% The remote arrival: superseded chain row, archived body, history
+    RemoteChangeHlc = barrel_hlc:new_hlc(),
+    VersionEnc = barrel_version:encode(Version),
+    SiblingVV = barrel_vv:bump(RemoteVV, Version),
+    RemoteOps = [
+        {put, barrel_store_keys:doc_version(DbName, DocId, VersionEnc),
+         sibling_entry(superseded, RemoteDeleted, SiblingVV)},
+        {body_put, barrel_store_keys:doc_body_rev(DbName, DocId, VersionEnc),
+         barrel_docdb_codec_cbor:encode_cbor(RemoteBody)}
+    ] ++ barrel_history:write_ops(DbName, RemoteChangeHlc, DocId, Version,
+                                  RemoteDeleted, replicated, SiblingVV),
+
+    %% The resolving write goes through the ordinary local pipeline
+    %% with the merged vector as its base (its bump then covers both
+    %% sides); the old local winner is archived by build_write_ops
+    DocRecord0 = barrel_doc:make_doc_record(MergedBody#{<<"id">> => DocId}),
+    DocRecord = DocRecord0#{expected_version => undefined},
+    Old2 = Old#{vv := MergedVV},
+    {WriteOps, {DocId, NewToken, NextHlc, Deleted, NotifyBody}} =
+        build_write_ops(StoreRef, DbName, DocRecord, Old2,
+                        #{history_cause => resolve}),
+    ok = barrel_store_rocksdb:write_batch(StoreRef, RemoteOps ++ WriteOps, #{}),
+    notify_subscribers(DbName, DocId, NewToken, NextHlc, Deleted, NotifyBody),
+    {ok, DocId, NewToken}.
+
+%% @private Deterministically bound the live conflict siblings: when a
+%% new sibling would push the count past Max, the lowest versions (the
+%% new one included) are dropped with their archived bodies. Every
+%% replica seeing the same sibling set drops the same versions.
+enforce_conflict_bound(_StoreRef, _DbName, _DocId, _NewSibling, NConflicts,
+                       Max) when NConflicts =< Max ->
+    {[], NConflicts};
+enforce_conflict_bound(StoreRef, DbName, DocId, NewSibling, NConflicts, Max) ->
+    Existing = [V || {V, _Entry} <- conflict_siblings(StoreRef, DbName, DocId)],
+    Sorted = lists:sort(
+        fun(A, B) -> barrel_version:compare(A, B) =:= lt end,
+        [NewSibling | Existing]),
+    Victims = lists:sublist(Sorted, NConflicts - Max),
+    Ops = lists:flatmap(
+        fun(V) ->
+            VEnc = barrel_version:encode(V),
+            [{delete, barrel_store_keys:doc_version(DbName, DocId, VEnc)},
+             {body_delete,
+              barrel_store_keys:doc_body_rev(DbName, DocId, VEnc)}]
+        end,
+        Victims),
+    {Ops, Max}.
 
 %% @private Chain-row op for a version that is no longer current.
 chain_op(DbName, DocId, Version, Flag, Old) ->
@@ -1347,8 +1451,9 @@ apply_remote_current(StoreRef, DbName, DocId, DocBody, Version, VV, Deleted,
 %% @private The local winner stays; the remote version is recorded as a
 %% live conflict sibling (its body archived, queryable). The doc's state
 %% changed (vector, conflict count), so a change event still fires.
+%% ExtraOps carry sibling-bound drops, applied after the sibling puts.
 keep_local_add_conflict(StoreRef, DbName, DocId, RemoteBody, Version, RemoteVV,
-                        RemoteDeleted, Old, MergedVV, NConflicts) ->
+                        RemoteDeleted, Old, MergedVV, NConflicts, ExtraOps) ->
     #{version := LocalV, hlc := OldHlc, deleted := LocalDeleted,
       body := LocalBody, created_at := CreatedAt, expires_at := ExpiresAt,
       tier := Tier} = Old,
@@ -1390,7 +1495,7 @@ keep_local_add_conflict(StoreRef, DbName, DocId, RemoteBody, Version, RemoteVV,
         DbName, ChangeHlc, DocId, Version, RemoteDeleted, replicated,
         SiblingVV),
     AllOps = DocOps ++ HlcDeleteOps ++ ChangeOps ++ PathHlcOps
-        ++ ChainOps ++ ArchiveOps ++ HistoryOps,
+        ++ ChainOps ++ ArchiveOps ++ HistoryOps ++ ExtraOps,
     ok = barrel_store_rocksdb:write_batch(StoreRef, AllOps, #{}),
     notify_subscribers(DbName, DocId, LocalToken, ChangeHlc, LocalDeleted,
                        LocalBody),
