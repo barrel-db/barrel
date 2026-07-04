@@ -17,12 +17,6 @@
     doc_id/1,
     doc_rev/1,
     doc_deleted/1,
-    parse_revision/1,
-    make_revision/1,
-    revision_hash/1,
-    compare_revisions/1,
-    encode_revisions/1,
-    parse_revisions/1,
     doc_without_meta/1,
     make_doc_record/1,
     generate_docid/1
@@ -73,12 +67,6 @@ groups() ->
             doc_id,
             doc_rev,
             doc_deleted,
-            parse_revision,
-            make_revision,
-            revision_hash,
-            compare_revisions,
-            encode_revisions,
-            parse_revisions,
             doc_without_meta,
             make_doc_record,
             generate_docid
@@ -156,103 +144,6 @@ doc_deleted(_Config) ->
     %% No deleted flag
     Doc3 = #{<<"id">> => <<"doc1">>},
     ?assertEqual(false, barrel_doc:deleted(Doc3)),
-
-    ok.
-
-parse_revision(_Config) ->
-    %% Normal revision
-    ?assertEqual({10, <<"abc123">>}, barrel_doc:parse_revision(<<"10-abc123">>)),
-
-    %% First generation
-    ?assertEqual({1, <<"xyz">>}, barrel_doc:parse_revision(<<"1-xyz">>)),
-
-    %% Empty revision
-    ?assertEqual({0, <<>>}, barrel_doc:parse_revision(<<>>)),
-
-    %% String revision
-    ?assertEqual({5, <<"def">>}, barrel_doc:parse_revision("5-def")),
-
-    ok.
-
-make_revision(_Config) ->
-    Rev = barrel_doc:make_revision(3, <<"abc123">>),
-    ?assertEqual(<<"3-abc123">>, Rev),
-
-    Rev2 = barrel_doc:make_revision(1, <<"xyz">>),
-    ?assertEqual(<<"1-xyz">>, Rev2),
-
-    ok.
-
-revision_hash(_Config) ->
-    Doc = #{<<"name">> => <<"test">>},
-
-    %% Hash is deterministic
-    Hash1 = barrel_doc:revision_hash(Doc, <<>>, false),
-    Hash2 = barrel_doc:revision_hash(Doc, <<>>, false),
-    ?assertEqual(Hash1, Hash2),
-
-    %% Different content produces different hash
-    Doc2 = #{<<"name">> => <<"other">>},
-    Hash3 = barrel_doc:revision_hash(Doc2, <<>>, false),
-    ?assertNotEqual(Hash1, Hash3),
-
-    %% Deleted flag affects hash
-    Hash4 = barrel_doc:revision_hash(Doc, <<>>, true),
-    ?assertNotEqual(Hash1, Hash4),
-
-    %% Hash is hex encoded
-    ?assert(is_binary(Hash1)),
-    ?assertEqual(64, byte_size(Hash1)),  % SHA-256 = 32 bytes = 64 hex chars
-
-    ok.
-
-compare_revisions(_Config) ->
-    %% Higher generation wins
-    ?assertEqual(1, barrel_doc:compare_revisions(<<"2-abc">>, <<"1-abc">>)),
-    ?assertEqual(-1, barrel_doc:compare_revisions(<<"1-abc">>, <<"2-abc">>)),
-
-    %% Same generation, compare hash
-    ?assertEqual(1, barrel_doc:compare_revisions(<<"2-xyz">>, <<"2-abc">>)),
-    ?assertEqual(-1, barrel_doc:compare_revisions(<<"2-abc">>, <<"2-xyz">>)),
-
-    %% Equal
-    ?assertEqual(0, barrel_doc:compare_revisions(<<"1-abc">>, <<"1-abc">>)),
-
-    ok.
-
-encode_revisions(_Config) ->
-    Revs = [<<"3-ccc">>, <<"2-bbb">>, <<"1-aaa">>],
-    Encoded = barrel_doc:encode_revisions(Revs),
-
-    ?assertEqual(3, maps:get(<<"start">>, Encoded)),
-    ?assertEqual([<<"ccc">>, <<"bbb">>, <<"aaa">>], maps:get(<<"ids">>, Encoded)),
-
-    %% Empty list
-    Empty = barrel_doc:encode_revisions([]),
-    ?assertEqual(0, maps:get(<<"start">>, Empty)),
-    ?assertEqual([], maps:get(<<"ids">>, Empty)),
-
-    ok.
-
-parse_revisions(_Config) ->
-    %% With revisions format
-    Doc1 = #{
-        <<"revisions">> => #{
-            <<"start">> => 3,
-            <<"ids">> => [<<"ccc">>, <<"bbb">>, <<"aaa">>]
-        }
-    },
-    Revs1 = barrel_doc:parse_revisions(Doc1),
-    ?assertEqual([<<"3-ccc">>, <<"2-bbb">>, <<"1-aaa">>], Revs1),
-
-    %% With just _rev
-    Doc2 = #{<<"_rev">> => <<"2-xyz">>},
-    Revs2 = barrel_doc:parse_revisions(Doc2),
-    ?assertEqual([<<"2-xyz">>], Revs2),
-
-    %% Empty
-    Revs3 = barrel_doc:parse_revisions(#{}),
-    ?assertEqual([], Revs3),
 
     ok.
 

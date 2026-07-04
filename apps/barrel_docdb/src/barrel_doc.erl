@@ -1,8 +1,8 @@
 %%%-------------------------------------------------------------------
 %%% @doc Document utilities for barrel_docdb
 %%%
-%%% Provides functions for document manipulation, revision handling,
-%%% document hashing, and CBOR document content access.
+%%% Provides functions for document manipulation and CBOR document
+%%% content access.
 %%%
 %%% The module supports two document representations:
 %%% - Indexed binary: CBOR with structural index for O(1) path access
@@ -17,21 +17,6 @@
 
 %% Document accessors (metadata)
 -export([id/1, rev/1, id_rev/1, deleted/1]).
-
-%% Revision operations
--export([
-    parse_revision/1,
-    make_revision/2,
-    revision_hash/3,
-    compare_revisions/2
-]).
-
-%% Revision history
--export([
-    encode_revisions/1,
-    parse_revisions/1,
-    trim_history/3
-]).
 
 %% Document processing
 -export([
@@ -122,112 +107,9 @@ id_rev(_) -> erlang:error(bad_doc).
 deleted(#{<<"_deleted">> := Del}) when is_boolean(Del) -> Del;
 deleted(_) -> false.
 
-%%====================================================================
-%% Revision Operations
-%%====================================================================
-
-%% @doc Parse a revision ID into {Generation, Hash}
--spec parse_revision(revid()) -> {non_neg_integer(), binary()}.
-parse_revision(<<>>) -> {0, <<>>};
-parse_revision(Rev) when is_binary(Rev) ->
-    case binary:split(Rev, <<"-">>) of
-        [BinPos, Hash] -> {binary_to_integer(BinPos), Hash};
-        _ -> exit({bad_rev, bad_format})
-    end;
-parse_revision(Rev) when is_list(Rev) ->
-    parse_revision(list_to_binary(Rev));
-parse_revision(_Rev) ->
-    exit({bad_rev, bad_format}).
-
-%% @doc Create a revision ID from generation and hash
--spec make_revision(non_neg_integer(), binary()) -> revid().
-make_revision(Gen, Hash) when is_integer(Gen), is_binary(Hash) ->
-    <<(integer_to_binary(Gen))/binary, "-", Hash/binary>>.
-
-%% @doc Generate a revision hash for a document
--spec revision_hash(doc(), revid(), boolean()) -> binary().
-revision_hash(Doc, Rev, Deleted) ->
-    %% Use SHA-256 for content hashing
-    Data = term_to_binary({Doc, Rev, Deleted}),
-    Digest = crypto:hash(sha256, Data),
-    to_hex(Digest).
-
-%% @doc Compare two revisions.
-%% Returns 1 if RevA is greater, -1 if RevA is less, 0 if equal.
--spec compare_revisions(revid(), revid()) -> -1 | 0 | 1.
-compare_revisions(RevA, RevB) ->
-    TupleA = parse_revision(RevA),
-    TupleB = parse_revision(RevB),
-    if
-        TupleA > TupleB -> 1;
-        TupleA < TupleB -> -1;
-        true -> 0
-    end.
-
-%%====================================================================
-%% Revision History
-%%====================================================================
-
-%% @doc Encode revision list to compact format
--spec encode_revisions([revid()]) -> map().
-encode_revisions([]) ->
-    #{<<"start">> => 0, <<"ids">> => []};
-encode_revisions(Revs) ->
-    [Oldest | _] = Revs,
-    {Start, _} = parse_revision(Oldest),
-    Digests = lists:foldl(
-        fun(Rev, Acc) ->
-            {_, Digest} = parse_revision(Rev),
-            [Digest | Acc]
-        end,
-        [],
-        Revs
-    ),
-    #{<<"start">> => Start, <<"ids">> => lists:reverse(Digests)}.
-
-%% @doc Parse revision history from document
--spec parse_revisions(doc()) -> [revid()].
-parse_revisions(#{<<"revisions">> := Revisions}) ->
-    case Revisions of
-        #{<<"start">> := Start, <<"ids">> := Ids} ->
-            {Revs, _} = lists:foldl(
-                fun(Id, {Acc, I}) ->
-                    Rev = <<(integer_to_binary(I))/binary, "-", Id/binary>>,
-                    {[Rev | Acc], I - 1}
-                end,
-                {[], Start},
-                Ids
-            ),
-            lists:reverse(Revs);
-        _ ->
-            []
-    end;
-parse_revisions(#{<<"_rev">> := Rev}) ->
-    [Rev];
-parse_revisions(_) ->
-    [].
-
-%% @doc Trim revision history based on ancestors and limit
--spec trim_history(map(), [revid()], non_neg_integer()) -> map().
-trim_history(EncodedRevs, Ancestors, Limit) ->
-    #{<<"start">> := Start, <<"ids">> := Digests} = EncodedRevs,
-    ADigests = array:from_list(Digests),
-    {_, Limit2} = lists:foldl(
-        fun(Ancestor, {Matched, Unmatched}) ->
-            {Gen, Digest} = parse_revision(Ancestor),
-            Idx = Start - Gen,
-            IsDigest = array:get(Idx, ADigests) =:= Digest,
-            if
-                Idx >= 0, Idx < Matched, IsDigest =:= true ->
-                    {Idx, Idx + 1};
-                true ->
-                    {Matched, Unmatched}
-            end
-        end,
-        {length(Digests), Limit},
-        Ancestors
-    ),
-    EncodedRevs#{<<"ids">> => lists:sublist(Digests, Limit2)}.
+%% Rev-tree revision helpers ("Gen-Hash" parsing, revision hashing,
+%% history codecs) were removed with the version-vector pivot: `_rev'
+%% is an opaque barrel_version token now.
 
 %%====================================================================
 %% Document Processing

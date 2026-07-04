@@ -254,6 +254,11 @@ init([Name, Config]) ->
     DataDir = maps:get(data_dir, Config, DefaultDataDir),
     DbPath = filename:join([DataDir, binary_to_list(Name)]),
 
+    %% A previous instance that crashed without terminate leaves its
+    %% store handle in persistent_term: the RocksDB LOCK stays held and
+    %% the database cannot reopen. Release it when its owner is gone.
+    ok = release_stale_refs(Name),
+
     %% Start compaction filter handler BEFORE opening RocksDB
     %% (handler pid is passed to CF options)
     PruneDepth = maps:get(prune_depth, Config, 1000),
@@ -487,12 +492,7 @@ handle_info(compaction_check, #state{store_ref = StoreRef,
 handle_info(retention_sweep, #state{name = DbName, store_ref = StoreRef,
                                     retention_period = RetentionPeriod,
                                     retention_interval = Interval} = State) ->
-    case do_retention_sweep(StoreRef, DbName, RetentionPeriod) of
-        {ok, _Stats} -> ok;
-        {error, Reason} ->
-            logger:warning("Database ~s retention sweep failed: ~p",
-                           [DbName, Reason])
-    end,
+    {ok, _Stats} = do_retention_sweep(StoreRef, DbName, RetentionPeriod),
     TimerRef = erlang:send_after(Interval, self(), retention_sweep),
     {noreply, State#state{retention_timer = TimerRef}};
 
@@ -574,6 +574,31 @@ do_check_compaction(StoreRef, Threshold, State) ->
         {error, Reason} ->
             logger:warning("Failed to get database ~s size: ~p", [Name, Reason]),
             State
+    end.
+
+%% @private Release the store handle and registrations leaked by a
+%% crashed instance. A live owner keeps everything (the open below then
+%% fails on the RocksDB lock, which is the correct answer for a
+%% double open).
+release_stale_refs(Name) ->
+    Owner = persistent_term:get({barrel_db, Name}, undefined),
+    OwnerAlive = is_pid(Owner) andalso is_process_alive(Owner),
+    case persistent_term:get({barrel_store, Name}, undefined) of
+        undefined ->
+            ok;
+        _StoreRef when OwnerAlive ->
+            ok;
+        StoreRef ->
+            logger:warning(
+                "Database ~s: releasing store handle leaked by a crashed "
+                "instance", [Name]),
+            _ = try barrel_store_rocksdb:close(StoreRef)
+                catch _:_ -> ok
+                end,
+            persistent_term:erase({barrel_store, Name}),
+            persistent_term:erase({barrel_db, Name}),
+            persistent_term:erase({barrel_source, Name}),
+            ok
     end.
 
 %%====================================================================

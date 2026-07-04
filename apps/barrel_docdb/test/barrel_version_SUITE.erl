@@ -17,7 +17,7 @@
          token_order_is_causal_order/1,
          compare_total_order/1,
          winner_rule_is_commutative/1,
-         local_versions_and_node_id/1]).
+         construction_and_accessors/1]).
 
 all() ->
     [codec_roundtrip,
@@ -25,7 +25,7 @@ all() ->
      token_order_is_causal_order,
      compare_total_order,
      winner_rule_is_commutative,
-     local_versions_and_node_id].
+     construction_and_accessors].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(barrel_docdb),
@@ -125,22 +125,14 @@ winner_rule_is_commutative(_Config) ->
         end,
         lists:seq(1, 100)).
 
-local_versions_and_node_id(_Config) ->
-    NodeId = barrel_version:node_id(),
-    ?assert(is_binary(NodeId)),
-    ?assert(byte_size(NodeId) > 0),
-    %% cached: stable across calls
-    ?assertEqual(NodeId, barrel_version:node_id()),
-    %% node ids never contain the token separator
-    ?assertEqual(nomatch, binary:match(NodeId, <<"@">>)),
-    {_Hlc, Node} = V = barrel_version:new(),
-    ?assertEqual(NodeId, Node),
-    ?assertEqual(NodeId, barrel_version:node(V)),
-    %% new/1 pins the HLC
+construction_and_accessors(_Config) ->
+    Author = <<"f1e061a70714abcd">>,
     Hlc = barrel_hlc:new_hlc(),
-    ?assertEqual(Hlc, barrel_version:hlc(barrel_version:new(Hlc))),
-    %% fresh local versions are strictly increasing
-    V2 = barrel_version:new(),
+    V = barrel_version:new(Hlc, Author),
+    ?assertEqual(Hlc, barrel_version:hlc(V)),
+    ?assertEqual(Author, barrel_version:author(V)),
+    %% same author, later HLC: strictly increasing
+    V2 = barrel_version:new(barrel_hlc:new_hlc(), Author),
     ?assertEqual(lt, barrel_version:compare(V, V2)).
 
 %%====================================================================
