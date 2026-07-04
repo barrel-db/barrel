@@ -71,3 +71,30 @@
     {ok, binary(), map()} | eof | {error, term()}.
 
 -callback close_stream(Stream :: map()) -> ok.
+
+%%====================================================================
+%% Optional: sync support (the attachment change feed)
+%%====================================================================
+%% Backends without these degrade gracefully: attachment sync reports
+%% att_sync => skipped for them.
+
+-callback delete(AttRef :: map(), DbName :: binary(), DocId :: binary(),
+                 AttName :: binary(), Opts :: map()) ->
+    ok | {error, term()}.
+
+-callback att_changes(AttRef :: map(), DbName :: binary(),
+                      Since :: term(), Opts :: map()) ->
+    {ok, [map()], LastSeq :: term()} | {error, term()}.
+
+-callback att_floor(AttRef :: map(), DbName :: binary()) ->
+    term() | undefined.
+
+-callback sweep_att_feed(AttRef :: map(), DbName :: binary(),
+                         Cutoff :: term()) ->
+    {ok, map()} | {error, term()}.
+
+-callback rebuild_feed(AttRef :: map(), DbName :: binary()) ->
+    {ok, map()} | {error, term()}.
+
+-optional_callbacks([delete/5, att_changes/4, att_floor/2,
+                     sweep_att_feed/3, rebuild_feed/2]).

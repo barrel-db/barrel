@@ -347,15 +347,20 @@ init(Name, Config, CompiledChannels) ->
 
 %% @doc Handle synchronous calls
 handle_call(info, _From, #state{name = Name, config = Config, db_path = DbPath,
-                                store_ref = StoreRef,
+                                store_ref = StoreRef, att_ref = AttRef,
                                 retention_period = RetentionPeriod} = State) ->
+    AttFloor = case barrel_att_store:supports_sync(AttRef) of
+        true -> barrel_att_store:att_floor(AttRef, Name);
+        false -> undefined
+    end,
     Info = #{
         name => Name,
         config => Config,
         db_path => DbPath,
         pid => self(),
         retention_period => RetentionPeriod,
-        history_floor => barrel_history:history_floor(StoreRef, Name)
+        history_floor => barrel_history:history_floor(StoreRef, Name),
+        att_floor => AttFloor
     },
     {reply, {ok, Info}, State};
 
@@ -409,11 +414,11 @@ handle_call({set_doc_embedding, DocId, ExpectedRev, Vector}, _From,
 
 %% Retention sweep (manual trigger; also runs on the timer)
 handle_call(sweep_retention, _From,
-            #state{name = DbName, store_ref = StoreRef,
+            #state{name = DbName, store_ref = StoreRef, att_ref = AttRef,
                    retention_period = RetentionPeriod} = State) ->
     Result = case RetentionPeriod of
         0 -> {ok, #{retention => infinite}};
-        _ -> do_retention_sweep(StoreRef, DbName, RetentionPeriod)
+        _ -> do_retention_sweep(StoreRef, AttRef, DbName, RetentionPeriod)
     end,
     {reply, Result, State};
 
@@ -501,9 +506,11 @@ handle_info(compaction_check, #state{store_ref = StoreRef,
     {noreply, NewState#state{compaction_timer = TimerRef}};
 
 handle_info(retention_sweep, #state{name = DbName, store_ref = StoreRef,
+                                    att_ref = AttRef,
                                     retention_period = RetentionPeriod,
                                     retention_interval = Interval} = State) ->
-    {ok, _Stats} = do_retention_sweep(StoreRef, DbName, RetentionPeriod),
+    {ok, _Stats} = do_retention_sweep(StoreRef, AttRef, DbName,
+                                      RetentionPeriod),
     TimerRef = erlang:send_after(Interval, self(), retention_sweep),
     {noreply, State#state{retention_timer = TimerRef}};
 
@@ -628,9 +635,19 @@ release_stale_refs(Name) ->
 %%   row)
 %% All deletes and the floor advance commit in one batch; re-running a
 %% sweep is a no-op (deletes of missing keys do nothing).
-do_retention_sweep(StoreRef, DbName, RetentionPeriod) ->
+do_retention_sweep(StoreRef, AttRef, DbName, RetentionPeriod) ->
     CutoffMs = erlang:system_time(millisecond) - RetentionPeriod * 1000,
     Cutoff = barrel_hlc:from_wall_time(CutoffMs),
+    %% Attachment feed tombstones follow the same window (separate
+    %% RocksDB; the two floors are independent)
+    AttSwept = case barrel_att_store:supports_sync(AttRef) of
+        true ->
+            {ok, #{tombstones_swept := N}} =
+                barrel_att_store:sweep_att_feed(AttRef, DbName, Cutoff),
+            N;
+        false ->
+            0
+    end,
     Zero = #{history_swept => 0, superseded_removed => 0,
              docs_forgotten => 0},
     {Ops, Stats} = barrel_history:fold(
@@ -648,7 +665,8 @@ do_retention_sweep(StoreRef, DbName, RetentionPeriod) ->
                barrel_hlc:encode(Cutoff)},
     ok = barrel_store_rocksdb:write_batch(
         StoreRef, [FloorOp | Ops ++ LeaveOps], #{}),
-    {ok, Stats#{floor => Cutoff, channel_leaves_swept => LeavesSwept}}.
+    {ok, Stats#{floor => Cutoff, channel_leaves_swept => LeavesSwept,
+                att_tombstones_swept => AttSwept}}.
 
 %% @private Delete leave rows older than the cutoff in every configured
 %% channel (member rows are live state and are never age-swept).

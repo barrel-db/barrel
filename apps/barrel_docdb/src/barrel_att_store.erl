@@ -26,6 +26,10 @@
 -export([get_stream/4, read_chunk/1, close_stream/1]).
 -export([get_info/4]).
 
+%% Sync support (optional backend callbacks; see barrel_att_backend)
+-export([delete/5, att_changes/4, att_floor/2, sweep_att_feed/3,
+         rebuild_feed/2, supports_sync/1]).
+
 -export_type([att_ref/0, att_stream/0]).
 
 -define(DEFAULT_BACKEND, barrel_att_store_blob).
@@ -139,6 +143,43 @@ close_stream(Stream) ->
 %%====================================================================
 %% Internal
 %%====================================================================
+
+%% @doc Delete with options (origin_hlc for replicated deletes).
+-spec delete(att_ref(), binary(), binary(), binary(), map()) ->
+    ok | {error, term()}.
+delete(AttRef, DbName, DocId, AttName, Opts) ->
+    B = backend(AttRef),
+    B:delete(AttRef, DbName, DocId, AttName, Opts).
+
+%% @doc Attachment feed entries since an HLC (exclusive).
+-spec att_changes(att_ref(), binary(), term(), map()) ->
+    {ok, [map()], term()} | {error, term()}.
+att_changes(AttRef, DbName, Since, Opts) ->
+    B = backend(AttRef),
+    B:att_changes(AttRef, DbName, Since, Opts).
+
+-spec att_floor(att_ref(), binary()) -> term() | undefined.
+att_floor(AttRef, DbName) ->
+    B = backend(AttRef),
+    B:att_floor(AttRef, DbName).
+
+-spec sweep_att_feed(att_ref(), binary(), term()) ->
+    {ok, map()} | {error, term()}.
+sweep_att_feed(AttRef, DbName, Cutoff) ->
+    B = backend(AttRef),
+    B:sweep_att_feed(AttRef, DbName, Cutoff).
+
+-spec rebuild_feed(att_ref(), binary()) -> {ok, map()} | {error, term()}.
+rebuild_feed(AttRef, DbName) ->
+    B = backend(AttRef),
+    B:rebuild_feed(AttRef, DbName).
+
+%% @doc Whether this database's backend supports attachment sync.
+-spec supports_sync(att_ref()) -> boolean().
+supports_sync(AttRef) ->
+    B = backend(AttRef),
+    _ = code:ensure_loaded(B),
+    erlang:function_exported(B, att_changes, 4).
 
 backend(#{backend := B}) -> B;
 backend(_) -> ?DEFAULT_BACKEND.

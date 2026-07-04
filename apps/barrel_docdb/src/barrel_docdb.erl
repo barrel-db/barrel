@@ -88,8 +88,10 @@
 %% Attachments
 -export([
     put_attachment/4,
+    put_attachment/5,
     get_attachment/3,
     delete_attachment/3,
+    delete_attachment/4,
     list_attachments/2,
     get_attachment_info/3
 ]).
@@ -97,9 +99,15 @@
 %% Attachment Streaming API
 -export([
     open_attachment_stream/3,
+    att_changes/2,
+    att_changes/3,
+    att_floor/1,
+    diff_attachments/2,
+    rebuild_attachment_feed/1,
     read_attachment_chunk/1,
     close_attachment_stream/1,
     open_attachment_writer/4,
+    open_attachment_writer/5,
     write_attachment_chunk/2,
     finish_attachment_writer/1,
     abort_attachment_writer/1
@@ -856,11 +864,17 @@ resolve_conflict(Db, DocId, BaseRev, Resolution) ->
 -spec put_attachment(binary() | pid(), binary(), binary(), binary()) ->
     {ok, map()} | {error, term()}.
 put_attachment(Db, DocId, AttName, Data) ->
-    with_db(Db, fun(Pid) ->
-        {ok, AttRef} = barrel_db_server:get_att_ref(Pid),
-        {ok, Info} = barrel_db_server:info(Pid),
-        DbName = maps:get(name, Info),
-        barrel_att:put_attachment(AttRef, DbName, DocId, AttName, Data)
+    put_attachment(Db, DocId, AttName, Data, #{}).
+
+%% @doc Store an attachment with options: sync, content_type,
+%% origin_hlc (replicated writes; the last-write-wins guard may answer
+%% {ok, ignored}) and expected_digest (verified before commit).
+-spec put_attachment(binary() | pid(), binary(), binary(), binary(),
+                     map()) ->
+    {ok, map()} | {ok, ignored} | {error, term()}.
+put_attachment(Db, DocId, AttName, Data, Opts) ->
+    with_att(Db, fun(AttRef, DbName) ->
+        barrel_att:put_attachment(AttRef, DbName, DocId, AttName, Data, Opts)
     end).
 
 %% @doc Retrieve an attachment.
@@ -902,6 +916,15 @@ delete_attachment(Db, DocId, AttName) ->
         {ok, Info} = barrel_db_server:info(Pid),
         DbName = maps:get(name, Info),
         barrel_att:delete_attachment(AttRef, DbName, DocId, AttName)
+    end).
+
+%% @doc Delete an attachment with options (origin_hlc for replicated
+%% deletes: last-write-wins guarded, lands a tombstone).
+-spec delete_attachment(binary() | pid(), binary(), binary(), map()) ->
+    ok | {error, term()}.
+delete_attachment(Db, DocId, AttName, Opts) ->
+    with_att(Db, fun(AttRef, DbName) ->
+        barrel_att_store:delete(AttRef, DbName, DocId, AttName, Opts)
     end).
 
 %% @doc List all attachments for a document.
@@ -947,6 +970,68 @@ get_attachment_info(Db, DocId, AttName) ->
 %%====================================================================
 %% Attachment Streaming API
 %%====================================================================
+
+%% @doc Attachment feed entries since an HLC (exclusive), in write
+%% order. One entry per attachment: op put or delete, digest, length,
+%% content_type, seq (feed HLC) and origin (the LWW timestamp).
+%% Options: limit.
+-spec att_changes(binary() | pid(), barrel_hlc:timestamp() | first) ->
+    {ok, [map()], barrel_hlc:timestamp() | first} | {error, term()}.
+att_changes(Db, Since) ->
+    att_changes(Db, Since, #{}).
+
+-spec att_changes(binary() | pid(), barrel_hlc:timestamp() | first,
+                  map()) ->
+    {ok, [map()], barrel_hlc:timestamp() | first} | {error, term()}.
+att_changes(Db, Since, Opts) ->
+    with_att(Db, fun(AttRef, DbName) ->
+        case barrel_att_store:supports_sync(AttRef) of
+            true -> barrel_att_store:att_changes(AttRef, DbName, Since, Opts);
+            false -> {error, att_sync_unsupported}
+        end
+    end).
+
+%% @doc Oldest HLC the attachment feed is complete from (undefined
+%% when never swept or when the backend has no feed).
+-spec att_floor(binary() | pid()) ->
+    barrel_hlc:timestamp() | undefined | {error, term()}.
+att_floor(Db) ->
+    with_att(Db, fun(AttRef, DbName) ->
+        case barrel_att_store:supports_sync(AttRef) of
+            true -> barrel_att_store:att_floor(AttRef, DbName);
+            false -> undefined
+        end
+    end).
+
+%% @doc Digest diff: which of the offered attachments does this
+%% database already hold with the same content?
+-spec diff_attachments(binary() | pid(),
+                       [#{id := binary(), name := binary(),
+                          digest := binary()}]) ->
+    {ok, [#{id := binary(), name := binary(),
+            status := have | missing}]} | {error, term()}.
+diff_attachments(Db, Entries) ->
+    with_att(Db, fun(AttRef, DbName) ->
+        {ok, [begin
+                  #{id := Id, name := Name, digest := Digest} = Entry,
+                  Status = case barrel_att_store:get_info(
+                                    AttRef, DbName, Id, Name) of
+                      {ok, #{digest := Digest}} -> have;
+                      _ -> missing
+                  end,
+                  #{id => Id, name => Name, status => Status}
+              end || Entry <- Entries]}
+    end).
+
+%% @doc Maintenance: synthesize feed rows for attachments written
+%% before the feed existed (they do not sync otherwise). Rebuilt rows
+%% carry the minimum origin, so any real write wins over them.
+-spec rebuild_attachment_feed(binary() | pid()) ->
+    {ok, map()} | {error, term()}.
+rebuild_attachment_feed(Db) ->
+    with_att(Db, fun(AttRef, DbName) ->
+        barrel_att_store:rebuild_feed(AttRef, DbName)
+    end).
 
 %% @doc Open a stream for reading an attachment in chunks.
 %%
@@ -1020,11 +1105,17 @@ close_attachment_stream(Stream) ->
 -spec open_attachment_writer(binary() | pid(), binary(), binary(), binary()) ->
     {ok, map()} | {error, term()}.
 open_attachment_writer(Db, DocId, AttName, ContentType) ->
-    with_db(Db, fun(Pid) ->
-        {ok, AttRef} = barrel_db_server:get_att_ref(Pid),
-        {ok, Info} = barrel_db_server:info(Pid),
-        DbName = maps:get(name, Info),
-        barrel_att_store:put_stream(AttRef, DbName, DocId, AttName, ContentType)
+    open_attachment_writer(Db, DocId, AttName, ContentType, #{}).
+
+%% @doc Open an attachment writer with options (origin_hlc,
+%% expected_digest: both checked at finish before anything commits).
+-spec open_attachment_writer(binary() | pid(), binary(), binary(),
+                             binary(), map()) ->
+    {ok, map()} | {error, term()}.
+open_attachment_writer(Db, DocId, AttName, ContentType, Opts) ->
+    with_att(Db, fun(AttRef, DbName) ->
+        barrel_att_store:put_stream(AttRef, DbName, DocId, AttName,
+                                    ContentType, Opts)
     end).
 
 %% @doc Write a chunk of data to an attachment writer.
@@ -1985,6 +2076,15 @@ with_db(Name, Fun) when is_binary(Name) ->
         {error, _} = Error ->
             Error
     end.
+
+%% @private Resolve the attachment store ref + db name for a handler.
+with_att(Db, Fun) ->
+    with_db(Db, fun(Pid) ->
+        {ok, AttRef} = barrel_db_server:get_att_ref(Pid),
+        {ok, Info} = barrel_db_server:info(Pid),
+        DbName = maps:get(name, Info),
+        Fun(AttRef, DbName)
+    end).
 
 %% @private Resolve the store ref for caller-side reads when Db is a name.
 %%

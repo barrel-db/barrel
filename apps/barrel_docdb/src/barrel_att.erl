@@ -12,6 +12,7 @@
 %% API
 -export([
     put_attachment/5,
+    put_attachment/6,
     get_attachment/4,
     delete_attachment/4,
     delete_doc_attachments/3,
@@ -33,9 +34,17 @@
 -spec put_attachment(barrel_att_store:att_ref(), db_name(), docid(), binary(), binary()) ->
     {ok, att_info()} | {error, term()}.
 put_attachment(AttRef, DbName, DocId, AttName, Data) ->
+    put_attachment(AttRef, DbName, DocId, AttName, Data, #{}).
+
+%% @doc Store an attachment with options (sync, content_type,
+%% origin_hlc, expected_digest; see the blob backend).
+-spec put_attachment(barrel_att_store:att_ref(), db_name(), docid(),
+                     binary(), binary(), map()) ->
+    {ok, att_info()} | {ok, ignored} | {error, term()}.
+put_attachment(AttRef, DbName, DocId, AttName, Data, Opts) ->
     case validate_att_name(AttName) of
         ok ->
-            barrel_att_store:put(AttRef, DbName, DocId, AttName, Data);
+            barrel_att_store:put(AttRef, DbName, DocId, AttName, Data, Opts);
         {error, _} = Error ->
             Error
     end.

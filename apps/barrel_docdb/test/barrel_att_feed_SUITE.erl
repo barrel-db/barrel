@@ -25,7 +25,8 @@
          chunk_transitions_leave_nothing/1,
          fold_skips_chunk_keys/1,
          sweep_ages_tombstones/1,
-         rebuild_feed/1]).
+         rebuild_feed/1,
+         docdb_api_level/1]).
 
 -define(DB, <<"attdb">>).
 
@@ -42,7 +43,8 @@ all() ->
      chunk_transitions_leave_nothing,
      fold_skips_chunk_keys,
      sweep_ages_tombstones,
-     rebuild_feed].
+     rebuild_feed,
+     docdb_api_level].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(barrel_docdb),
@@ -304,6 +306,57 @@ rebuild_feed(Config) ->
     {ok, <<"fresh">>} = barrel_att_store_blob:get(Ref, ?DB, <<"d1">>, <<"a">>),
     %% idempotent
     {ok, #{rows := 2}} = barrel_att_store_blob:rebuild_feed(Ref, ?DB).
+
+%% The docdb-level plumbing: att API with options, feed reads, digest
+%% diff, db_info att_floor and the retention-driven sweep.
+docdb_api_level(Config) ->
+    Db = <<"att_api_db">>,
+    {ok, _} = barrel_docdb:create_db(Db, #{
+        data_dir => ?config(dir, Config),
+        retention_period => 1
+    }),
+    try
+        {ok, Info} = barrel_docdb:put_attachment(
+            Db, <<"doc1">>, <<"f.bin">>, <<"payload">>,
+            #{content_type => <<"application/x-custom">>}),
+        ?assertEqual(<<"application/x-custom">>,
+                     maps:get(content_type, Info)),
+        {ok, [Entry], _} = barrel_docdb:att_changes(Db, first),
+        ?assertMatch(#{op := put, id := <<"doc1">>, name := <<"f.bin">>},
+                     Entry),
+        %% digest diff
+        {ok, Diff} = barrel_docdb:diff_attachments(Db, [
+            #{id => <<"doc1">>, name => <<"f.bin">>,
+              digest => maps:get(digest, Entry)},
+            #{id => <<"doc1">>, name => <<"f.bin">>,
+              digest => <<"sha256-other">>},
+            #{id => <<"nope">>, name => <<"x">>, digest => <<"d">>}
+        ]),
+        ?assertEqual([have, missing, missing],
+                     [maps:get(status, D) || D <- Diff]),
+        %% replicated-style put with the entry's own origin: redelivery
+        {ok, ignored} = barrel_docdb:put_attachment(
+            Db, <<"doc1">>, <<"f.bin">>, <<"payload">>,
+            #{origin_hlc => maps:get(origin, Entry)}),
+        %% db_info carries the (not yet set) att floor
+        {ok, DbInfo} = barrel_docdb:db_info(Db),
+        ?assertEqual(undefined, maps:get(att_floor, DbInfo)),
+        %% delete with origin lands a tombstone
+        ok = barrel_docdb:delete_attachment(
+            Db, <<"doc1">>, <<"f.bin">>,
+            #{origin_hlc => barrel_hlc:new_hlc()}),
+        {ok, [#{op := delete}], _} = barrel_docdb:att_changes(Db, first),
+        %% the retention sweep ages it out and advances the floor
+        timer:sleep(1200),
+        {ok, Stats} = barrel_docdb:sweep_retention(Db),
+        ?assertEqual(1, maps:get(att_tombstones_swept, Stats)),
+        {ok, [], _} = barrel_docdb:att_changes(Db, first),
+        ?assertNotEqual(undefined, barrel_docdb:att_floor(Db)),
+        %% rebuild is exposed for maintenance
+        {ok, #{rows := 0}} = barrel_docdb:rebuild_attachment_feed(Db)
+    after
+        _ = barrel_docdb:delete_db(Db)
+    end.
 
 %%====================================================================
 %% Raw inspection
