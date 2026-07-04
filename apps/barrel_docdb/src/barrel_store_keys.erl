@@ -88,6 +88,10 @@
 -export([doc_version/3, doc_version_prefix/2, doc_version_end/2,
          decode_doc_version_key/3]).
 
+%% Retained history log (append-only, HLC-ordered, written with the batch)
+-export([history_key/2, history_prefix/1, history_end/1,
+         decode_history_key/2]).
+
 
 %% HLC encoding/decoding
 -export([encode_hlc/1, decode_hlc/1, decode_hlc_key/2]).
@@ -123,6 +127,7 @@
 -define(PREFIX_DOC_ENTITY, 16#18).    %% Wide-column doc entity: DbName + DocId → entity with columns
 -define(PREFIX_OUTBOX, 16#1A).        %% Tagged outbox: DbName + tag (null-terminated) + HLC → entry
 -define(PREFIX_CHANGES, 16#1B).       %% Prefix changes posting: prefix + bucket → [HLC:12, change, ...]
+-define(PREFIX_HISTORY, 16#1C).       %% Retained history log: DbName + change HLC → history entry
 -define(PREFIX_DOC_VERSION, 16#1D).   %% Version chain: DbName + DocId + ':' + version → sibling entry
 
 %% Value prefix max length for value-first index (128 bytes)
@@ -338,6 +343,36 @@ decode_doc_version_key(DbName, DocId, Key) ->
     PrefixLen = 1 + 2 + byte_size(DbName) + byte_size(DocId) + 1,
     <<_:PrefixLen/binary, VersionEnc/binary>> = Key,
     VersionEnc.
+
+%%====================================================================
+%% Retained History Log Keys (append-only, ordered by change HLC)
+%%====================================================================
+
+%% @doc Key for one history entry. The change-sequence HLC is issued
+%% locally and strictly increasing per database, so keys never collide
+%% and scan in write order.
+-spec history_key(db_name(), barrel_hlc:timestamp()) -> binary().
+history_key(DbName, HlcTS) ->
+    <<?PREFIX_HISTORY, (encode_name(DbName))/binary, (encode_hlc(HlcTS))/binary>>.
+
+%% @doc Start key for scanning a database's history.
+-spec history_prefix(db_name()) -> binary().
+history_prefix(DbName) ->
+    <<?PREFIX_HISTORY, (encode_name(DbName))/binary>>.
+
+%% @doc End marker for a history range scan.
+-spec history_end(db_name()) -> binary().
+history_end(DbName) ->
+    <<?PREFIX_HISTORY, (encode_name(DbName))/binary,
+      16#FF, 16#FF, 16#FF, 16#FF, 16#FF, 16#FF, 16#FF, 16#FF,
+      16#FF, 16#FF, 16#FF, 16#FF>>.
+
+%% @doc Extract the change HLC from a history key.
+-spec decode_history_key(db_name(), binary()) -> barrel_hlc:timestamp().
+decode_history_key(DbName, Key) ->
+    PrefixLen = 1 + 2 + byte_size(DbName),
+    <<_:PrefixLen/binary, HlcBin:12/binary>> = Key,
+    decode_hlc(HlcBin).
 
 %% @doc Decode path_hlc key to extract topic and HLC.
 %% Returns {Topic, Hlc} tuple.

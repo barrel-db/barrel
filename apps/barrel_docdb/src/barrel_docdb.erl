@@ -139,6 +139,15 @@
     get_doc_for_replication/2
 ]).
 
+%% Retained history log (every applied write, within the retention window)
+-export([
+    fold_history/3,
+    fold_history/4,
+    get_doc_versions/2,
+    get_version_body/3,
+    history_floor/1
+]).
+
 %% Local documents (for checkpoints, not replicated)
 -export([
     put_local_doc/3,
@@ -1441,6 +1450,66 @@ get_doc_for_replication(Db, DocId) ->
     case reader_store(Db) of
         {ok, StoreRef} ->
             barrel_docdb_reader:get_replication_doc(StoreRef, Db, DocId);
+        undefined ->
+            {error, not_found}
+    end.
+
+%%====================================================================
+%% Retained History
+%%====================================================================
+
+%% @doc Fold over the retained history log in HLC order. Runs in the
+%% caller's process. See barrel_history for the entry shape.
+-spec fold_history(binary(), fun((barrel_history:entry(), term()) ->
+                                 {ok, term()} | {stop, term()}), term()) ->
+    {ok, term()} | {error, term()}.
+fold_history(Db, Fun, Acc) ->
+    fold_history(Db, Fun, Acc, #{}).
+
+%% @doc Fold over the retained history log with options
+%% (`from', `to', `limit').
+-spec fold_history(binary(), fun((barrel_history:entry(), term()) ->
+                                 {ok, term()} | {stop, term()}), term(),
+                   map()) -> {ok, term()} | {error, term()}.
+fold_history(Db, Fun, Acc, Opts) ->
+    case reader_store(Db) of
+        {ok, StoreRef} ->
+            {ok, barrel_history:fold(StoreRef, Db, Fun, Acc, Opts)};
+        undefined ->
+            {error, not_found}
+    end.
+
+%% @doc Every version of a document still resolvable: the current
+%% winner plus conflict and superseded siblings.
+-spec get_doc_versions(binary(), binary()) ->
+    {ok, [map()]} | {error, term()}.
+get_doc_versions(Db, DocId) ->
+    case reader_store(Db) of
+        {ok, StoreRef} ->
+            barrel_history:get_doc_versions(StoreRef, Db, DocId);
+        undefined ->
+            {error, not_found}
+    end.
+
+%% @doc The body of one version of a document (current or archived).
+-spec get_version_body(binary(), binary(), binary()) ->
+    {ok, map()} | {error, term()}.
+get_version_body(Db, DocId, VersionToken) ->
+    case reader_store(Db) of
+        {ok, StoreRef} ->
+            barrel_history:get_version_body(StoreRef, Db, DocId, VersionToken);
+        undefined ->
+            {error, not_found}
+    end.
+
+%% @doc The oldest HLC the history is complete from (`undefined' means
+%% complete since database creation).
+-spec history_floor(binary()) ->
+    barrel_hlc:timestamp() | undefined | {error, term()}.
+history_floor(Db) ->
+    case reader_store(Db) of
+        {ok, StoreRef} ->
+            barrel_history:history_floor(StoreRef, Db);
         undefined ->
             {error, not_found}
     end.

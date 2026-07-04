@@ -750,11 +750,16 @@ build_write_ops(StoreRef, DbName, DocRecord, Old, Opts) ->
     OutboxOps = barrel_outbox:write_ops(DbName, maps:get(outbox, Opts, []),
                                         NextHlc, OldHlc, DocId, NewToken, Deleted),
 
+    %% Retained history entry (resolutions pass cause `resolve')
+    HistoryOps = barrel_history:write_ops(
+        DbName, NextHlc, DocId, NewVersion, Deleted,
+        maps:get(history_cause, Opts, local), NewVV),
+
     %% Write new body to current location (no version in key)
     BodyKey = barrel_store_keys:doc_body(DbName, DocId),
     BodyOp = {body_put, BodyKey, CborBody},
     AllOps = DocOps ++ HlcDeleteOps ++ PathIndexOps ++ ChangeOps ++ PathHlcOps
-        ++ ArchiveOps ++ ChainOps ++ OutboxOps ++ [BodyOp],
+        ++ ArchiveOps ++ ChainOps ++ OutboxOps ++ HistoryOps ++ [BodyOp],
     {AllOps, {DocId, NewToken, NextHlc, Deleted, DocBody}}.
 
 %% @doc Put multiple documents in a single batch (batch write)
@@ -941,9 +946,13 @@ do_delete_doc(StoreRef, DbName, DocId, Opts) ->
             OutboxOps = barrel_outbox:write_ops(DbName, maps:get(outbox, Opts, []),
                                                 NextHlc, OldHlc, DocId, NewToken, true),
 
+            %% Retained history entry for the tombstone
+            HistoryOps = barrel_history:write_ops(
+                DbName, NextHlc, DocId, NewVersion, true, local, NewVV),
+
             %% Write batch atomically
             AllOps = DocOps ++ HlcDeleteOps ++ PathIndexOps ++ ChangeOps ++ PathHlcOps
-                ++ ArchiveOps ++ ChainOps ++ OutboxOps,
+                ++ ArchiveOps ++ ChainOps ++ OutboxOps ++ HistoryOps,
             WriteOpts = #{sync => maps:get(sync, Opts, false)},
             ok = barrel_store_rocksdb:write_batch(StoreRef, AllOps, WriteOpts),
 
@@ -1152,10 +1161,12 @@ apply_remote_current(StoreRef, DbName, DocId, DocBody, Version, VV, Deleted,
                   DbName, DocId, barrel_version:encode(OldVersion)),
               OldCbor}]
     end,
+    HistoryOps = barrel_history:write_ops(
+        DbName, ChangeHlc, DocId, Version, Deleted, replicated, VV),
     CborBody = barrel_docdb_codec_cbor:encode_cbor(DocBody),
     BodyOp = {body_put, barrel_store_keys:doc_body(DbName, DocId), CborBody},
     AllOps = DocOps ++ HlcDeleteOps ++ PathIndexOps ++ ChangeOps ++ PathHlcOps
-        ++ ArchiveOps ++ ChainOps ++ [BodyOp],
+        ++ ArchiveOps ++ ChainOps ++ HistoryOps ++ [BodyOp],
     ok = barrel_store_rocksdb:write_batch(StoreRef, AllOps, #{}),
     notify_subscribers(DbName, DocId, Token, ChangeHlc, Deleted, DocBody),
     {ok, DocId, Token}.
@@ -1192,16 +1203,21 @@ keep_local_add_conflict(StoreRef, DbName, DocId, RemoteBody, Version, RemoteVV,
                                                       LocalBody),
     %% The remote loser: conflict chain row + archived body
     VersionEnc = barrel_version:encode(Version),
+    SiblingVV = barrel_vv:bump(RemoteVV, Version),
     SiblingEntry = <<1:8, %% conflict
                      (case RemoteDeleted of true -> 1; false -> 0 end):8,
-                     (barrel_vv:encode(barrel_vv:bump(RemoteVV, Version)))/binary>>,
+                     (barrel_vv:encode(SiblingVV))/binary>>,
     ChainOps = [{put, barrel_store_keys:doc_version(DbName, DocId, VersionEnc),
                  SiblingEntry}],
     ArchiveOps = [{body_put,
                    barrel_store_keys:doc_body_rev(DbName, DocId, VersionEnc),
                    barrel_docdb_codec_cbor:encode_cbor(RemoteBody)}],
+    %% History records the arrival of the losing sibling
+    HistoryOps = barrel_history:write_ops(
+        DbName, ChangeHlc, DocId, Version, RemoteDeleted, replicated,
+        SiblingVV),
     AllOps = DocOps ++ HlcDeleteOps ++ ChangeOps ++ PathHlcOps
-        ++ ChainOps ++ ArchiveOps,
+        ++ ChainOps ++ ArchiveOps ++ HistoryOps,
     ok = barrel_store_rocksdb:write_batch(StoreRef, AllOps, #{}),
     notify_subscribers(DbName, DocId, LocalToken, ChangeHlc, LocalDeleted,
                        LocalBody),
@@ -1435,7 +1451,8 @@ apply_resolution(StoreRef, DbName, DocId, Old, CurrentVV, Siblings, Resolution) 
             %% conflict flips added on top
             Old2 = Old#{vv := MergedVV, num_conflicts := 0},
             {AllOps0, {DocId, NewToken, NextHlc, Deleted, DocBody}} =
-                build_write_ops(StoreRef, DbName, DocRecord, Old2, #{}),
+                build_write_ops(StoreRef, DbName, DocRecord, Old2,
+                                #{history_cause => resolve}),
             %% Flip every conflict sibling to superseded
             FlipOps = [{put,
                         barrel_store_keys:doc_version(
