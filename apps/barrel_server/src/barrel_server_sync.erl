@@ -305,10 +305,11 @@ pump_att_out(Stream, Emit) ->
 
 %% Raw octets in, streamed into an attachment writer chunk by chunk:
 %% a blob never sits in memory whole and read_all's 16 MiB cap does
-%% not apply. The effective per-request ceiling is the listener's
-%% max_body (and today the h1 engine's own 8 MiB parser cap, which
-%% neither h1 nor livery expose yet). Digest and origin ride in
-%% headers; both are checked at the writer's commit point.
+%% not apply. The per-request ceiling is the listener's max_body
+%% (barrel_server env, default 1 GiB); past it the read errors with
+%% body_too_large and the writer aborts with nothing committed.
+%% Digest and origin ride in headers; both are checked at the
+%% writer's commit point.
 put_att(Req) ->
     with_sync_db(Req, fun(DbBin) ->
         DocId = binding(<<"id">>, Req),
@@ -382,6 +383,9 @@ finish_att(Writer, Req) ->
             error_resp(Req, Reason)
     end.
 
+abort_att(Writer, Req, body_too_large) ->
+    _ = barrel_docdb:abort_attachment_writer(Writer),
+    json_resp(Req, 413, #{error => <<"too_large">>});
 abort_att(Writer, Req, Reason) ->
     _ = barrel_docdb:abort_attachment_writer(Writer),
     error_resp(Req, Reason).

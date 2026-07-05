@@ -40,19 +40,13 @@
 %% Service
 %%====================================================================
 
-%% livery_service's listener_opts() type omits max_body even though
-%% livery_h1 documents and consumes it; silence the false contract
-%% break until livery's type catches up.
--dialyzer({nowarn_function, start_link/0}).
 -spec start_link() -> {ok, pid()} | {error, term()}.
 start_link() ->
     Port = application:get_env(barrel_server, http_port, 8080),
-    %% listener-level request body ceiling; must clear the largest
-    %% attachment expected over _sync (JSON handlers stay bounded by
-    %% livery_body:read_all's own 16 MiB cap). NOTE: the h1 engine
-    %% additionally caps request bodies at 8 MiB and neither h1 nor
-    %% livery forward max_body_size to its parser yet; until they do,
-    %% that is the binding bound for attachment uploads.
+    %% Request body ceiling (livery >= 0.5.1: one authoritative knob,
+    %% graceful abort past it); must clear the largest attachment
+    %% expected over _sync. JSON handlers stay bounded by
+    %% livery_body:read_all's own 16 MiB cap.
     MaxBody = application:get_env(barrel_server, max_body,
                                   1024 * 1024 * 1024),
     Router = livery_router:compile(routes()),

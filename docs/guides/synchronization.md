@@ -142,9 +142,10 @@ converge last-write-wins on their origin HLC. The result lands under
 Notes:
 
 - Blobs stream in chunks both directions over HTTP; nothing buffers a blob
-  whole. Pulls have no size ceiling. Pushes are currently capped at 8 MiB per
-  blob by the HTTP engine's request parser; a larger push fails for that
-  attachment only and the run reports it in `att_write_failures`.
+  whole. Pulls have no size ceiling. Pushes are bounded by the server's
+  `{barrel_server, max_body, Bytes}` env (default 1 GiB, `infinity`
+  accepted); a larger push gets a 413, fails for that attachment only, and
+  the run reports it in `att_write_failures`.
 - There is no ordering between documents and their attachments: a doc can
   arrive before its blob (reads 404 until the attachment phase lands).
 - Attachments written before this feature do not sync until rewritten, or

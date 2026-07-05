@@ -3,12 +3,12 @@
 %%% through /db/:db/_sync/att/*, digest-verified at the commit point,
 %%% LWW-converged on origin HLC.
 %%%
-%%% Size bounds: neither side ever buffers a blob whole, and response
-%%% bodies are unbounded (the 20 MiB pull case proves it). Request
-%%% bodies are currently capped at 8 MiB by the h1 engine's parser
-%%% (h1 and livery do not yet forward max_body_size to it), so a
-%%% larger PUSH fails per attachment and the rep carries on; the
-%%% oversized case pins that degradation.
+%%% Size bounds: neither side ever buffers a blob whole, response
+%%% bodies are unbounded, and uploads are bounded only by the
+%%% server's max_body knob (this suite runs with 32 MiB): the 20 MiB
+%%% cases prove both directions clear the old engine and read_all
+%%% caps, and the oversized case pins the graceful per-attachment
+%%% failure past the knob.
 %%% @end
 %%%-------------------------------------------------------------------
 -module(barrel_server_att_SUITE).
@@ -17,7 +17,7 @@
          init_per_testcase/2, end_per_testcase/2]).
 -export([
     t_pull_large_blob/1,
-    t_push_streamed_blob/1,
+    t_push_large_blob/1,
     t_oversized_push_degrades/1,
     t_pull_attachments/1,
     t_digest_reject/1,
@@ -33,7 +33,7 @@
 -define(MIB, binary:copy(<<"0123456789abcdef">>, 65536)).
 
 all() ->
-    [t_pull_large_blob, t_push_streamed_blob, t_oversized_push_degrades,
+    [t_pull_large_blob, t_push_large_blob, t_oversized_push_degrades,
      t_pull_attachments, t_digest_reject, t_delete_propagation,
      t_lww_convergence, t_att_wire_shapes].
 
@@ -41,6 +41,8 @@ init_per_suite(Config) ->
     application:load(barrel_server),
     application:set_env(barrel_server, data_dir, ?config(priv_dir, Config)),
     application:set_env(barrel_server, http_port, 0),
+    %% a small ceiling so the oversized case stays cheap
+    application:set_env(barrel_server, max_body, 32 * 1024 * 1024),
     {ok, _} = application:ensure_all_started(barrel_server),
     {ok, _} = application:ensure_all_started(hackney),
     Children = supervisor:which_children(barrel_server_sup),
@@ -51,6 +53,7 @@ init_per_suite(Config) ->
 
 end_per_suite(_Config) ->
     application:stop(barrel_server),
+    application:unset_env(barrel_server, max_body),
     ok.
 
 init_per_testcase(TC, Config) ->
@@ -78,8 +81,8 @@ pull_opts() ->
 %% Cases
 %%====================================================================
 
-%% The GET leg has no size ceiling: 20 MiB (past both the 16 MiB
-%% read_all cap and the engine's 8 MiB request cap) pulls fine.
+%% The GET leg has no size ceiling: 20 MiB (past the 16 MiB read_all
+%% cap) pulls fine.
 t_pull_large_blob(Config) ->
     Local = ?config(local, Config),
     Served = ?config(served, Config),
@@ -104,13 +107,16 @@ t_pull_large_blob(Config) ->
     ?assertEqual(Digest, <<"sha256-", Hex/binary>>),
     ok.
 
-%% The PUT leg streams chunk by chunk under the engine's request cap.
-t_push_streamed_blob(Config) ->
+%% The PUT leg streams chunk by chunk: 20 MiB clears the old 8 MiB
+%% engine cap (lifted with livery 0.5.1 / h1 0.7.1) and the 16 MiB
+%% read_all cap.
+t_push_large_blob(Config) ->
     Local = ?config(local, Config),
     Served = ?config(served, Config),
     Endpoint = ?config(endpoint, Config),
     {ok, _} = barrel_docdb:put_doc(Local, #{<<"id">> => <<"mid">>}),
-    {Digest, Length} = write_chunked(Local, <<"mid">>, <<"blob.bin">>, 6),
+    {Digest, Length} = write_chunked(Local, <<"mid">>, <<"blob.bin">>,
+                                     20),
     {ok, R} = barrel_rep:replicate(Local, Endpoint, push_opts()),
     ?assertMatch(#{atts_written := 1, att_bytes_written := Length},
                  maps:get(att_sync, R)),
@@ -119,15 +125,15 @@ t_push_streamed_blob(Config) ->
                                          <<"blob.bin">>),
     ok.
 
-%% A push past the engine's 8 MiB request cap fails for that
-%% attachment only: the rep completes, smaller blobs still transfer,
-%% and nothing partial lands on the target.
+%% A push past the server's max_body fails for that attachment only
+%% (413 on the wire): the rep completes, smaller blobs still
+%% transfer, and nothing partial lands on the target.
 t_oversized_push_degrades(Config) ->
     Local = ?config(local, Config),
     Served = ?config(served, Config),
     Endpoint = ?config(endpoint, Config),
     {ok, _} = barrel_docdb:put_doc(Local, #{<<"id">> => <<"o">>}),
-    {_BigDigest, _} = write_chunked(Local, <<"o">>, <<"too-big">>, 9),
+    {_BigDigest, _} = write_chunked(Local, <<"o">>, <<"too-big">>, 40),
     {ok, _} = barrel_docdb:put_attachment(Local, <<"o">>, <<"small">>,
                                           <<"fits">>),
     {ok, R} = barrel_rep:replicate(Local, Endpoint, push_opts()),

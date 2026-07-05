@@ -502,5 +502,6 @@ change_from_wire(Change) ->
 error_of({ok, 404, _}) -> {error, not_found};
 error_of({ok, 401, _}) -> {error, unauthorized};
 error_of({ok, 409, _}) -> {error, clock_skew};
+error_of({ok, 413, _}) -> {error, too_large};
 error_of({ok, Status, Body}) -> {error, {http, Status, Body}};
 error_of({error, _} = Error) -> Error.
