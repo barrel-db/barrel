@@ -22,11 +22,19 @@
     put_version/1,
     get_local/1,
     put_local/1,
-    delete_local/1
+    delete_local/1,
+    att_changes/1,
+    att_diff/1,
+    get_att/1,
+    put_att/1,
+    delete_att/1
 ]).
 
 -define(JSON_CT, {<<"content-type">>, <<"application/json">>}).
 -define(HLC_HEADER, <<"x-barrel-hlc">>).
+-define(DIGEST_HEADER, <<"x-barrel-digest">>).
+-define(ORIGIN_HEADER, <<"x-barrel-att-origin">>).
+-define(BODY_READ_TIMEOUT, 30000).
 
 %%====================================================================
 %% Handlers
@@ -182,6 +190,220 @@ delete_local(Req) ->
     end).
 
 %%====================================================================
+%% Attachment sync
+%%====================================================================
+
+att_changes(Req) ->
+    with_sync_db(Req, fun(DbBin) ->
+        case att_changes_params(Req) of
+            {ok, Since, Limit} ->
+                case barrel_docdb:att_changes(DbBin, Since,
+                                              #{limit => Limit}) of
+                    {ok, Entries, LastSeq} ->
+                        json_resp(Req, 200, #{
+                            changes =>
+                                [att_entry_to_wire(E) || E <- Entries],
+                            last_seq => seq_to_wire(LastSeq)
+                        });
+                    {error, att_sync_unsupported} ->
+                        json_resp(Req, 501,
+                                  #{error => <<"att_sync_unsupported">>});
+                    {error, Reason} ->
+                        error_resp(Req, Reason)
+                end;
+            error ->
+                json_resp(Req, 400, #{error => <<"bad_since">>})
+        end
+    end).
+
+att_diff(Req) ->
+    with_sync_db(Req, fun(DbBin) ->
+        with_json(Req, fun(Body) ->
+            case att_diff_input(maps:get(<<"attachments">>, Body,
+                                         undefined)) of
+                {ok, Entries} ->
+                    case barrel_docdb:diff_attachments(DbBin, Entries) of
+                        {ok, Diff} ->
+                            json_resp(Req, 200, #{diff =>
+                                [#{id => Id, name => Name,
+                                   status => atom_to_binary(St, utf8)}
+                                 || #{id := Id, name := Name,
+                                      status := St} <- Diff]});
+                        {error, Reason} ->
+                            error_resp(Req, Reason)
+                    end;
+                error ->
+                    json_resp(Req, 400, #{error => <<"bad_json">>})
+            end
+        end)
+    end).
+
+%% Raw octets out, chunk by chunk; the status is decided before the
+%% first byte, so a missing attachment is a clean 404.
+get_att(Req) ->
+    livery_resp:stream_deferred(fun() -> get_att_decision(Req) end).
+
+get_att_decision(Req) ->
+    ok = barrel_hlc:maybe_sync_from_header(
+        livery_req:header(?HLC_HEADER, Req, undefined)),
+    case barrel_server_dbs:ensure(livery_req:binding(<<"db">>, Req)) of
+        {ok, Handle} ->
+            DbBin = maps:get(docdb, Handle),
+            DocId = binding(<<"id">>, Req),
+            AttName = binding(<<"name">>, Req),
+            case barrel_docdb:get_attachment_info(DbBin, DocId, AttName) of
+                {ok, Info} ->
+                    case barrel_docdb:open_attachment_stream(
+                             DbBin, DocId, AttName) of
+                        {ok, Stream} ->
+                            {stream, 200, att_resp_headers(Info),
+                             fun(Emit) -> pump_att_out(Stream, Emit) end};
+                        {error, Reason} ->
+                            att_error_decision(Reason)
+                    end;
+                {error, Reason} ->
+                    att_error_decision(Reason)
+            end;
+        {error, invalid_name} ->
+            {full, 400, att_json_headers(),
+             json:encode(#{error => <<"invalid_name">>})};
+        {error, Reason} ->
+            att_error_decision(Reason)
+    end.
+
+att_resp_headers(Info) ->
+    [{<<"content-type">>,
+      maps:get(content_type, Info, <<"application/octet-stream">>)},
+     {?DIGEST_HEADER, maps:get(digest, Info, <<>>)},
+     %% not content-length: the body goes out chunked
+     {<<"x-barrel-att-length">>,
+      integer_to_binary(maps:get(length, Info, 0))},
+     {?HLC_HEADER, hlc_to_wire(barrel_hlc:get_hlc())}].
+
+att_json_headers() ->
+    [?JSON_CT, {?HLC_HEADER, hlc_to_wire(barrel_hlc:get_hlc())}].
+
+att_error_decision(not_found) ->
+    {full, 404, att_json_headers(),
+     json:encode(#{error => <<"not_found">>})};
+att_error_decision(Reason) ->
+    {full, 500, att_json_headers(),
+     json:encode(#{error => err_bin(Reason)})}.
+
+pump_att_out(Stream, Emit) ->
+    case barrel_docdb:read_attachment_chunk(Stream) of
+        {ok, Chunk, Stream2} ->
+            case Emit(Chunk) of
+                ok -> pump_att_out(Stream2, Emit);
+                {error, _} = Error -> Error
+            end;
+        eof ->
+            ok;
+        {error, _} = Error ->
+            Error
+    end.
+
+%% Raw octets in, streamed into an attachment writer chunk by chunk:
+%% a blob never sits in memory whole and read_all's 16 MiB cap does
+%% not apply. The effective per-request ceiling is the listener's
+%% max_body (and today the h1 engine's own 8 MiB parser cap, which
+%% neither h1 nor livery expose yet). Digest and origin ride in
+%% headers; both are checked at the writer's commit point.
+put_att(Req) ->
+    with_sync_db(Req, fun(DbBin) ->
+        DocId = binding(<<"id">>, Req),
+        AttName = binding(<<"name">>, Req),
+        ContentType = livery_req:header(<<"content-type">>, Req,
+                                        <<"application/octet-stream">>),
+        case att_write_opts(Req) of
+            {ok, Opts} ->
+                case barrel_docdb:open_attachment_writer(
+                         DbBin, DocId, AttName, ContentType, Opts) of
+                    {ok, Writer} ->
+                        pump_att_in(livery_req:body(Req), Writer, Req);
+                    {error, Reason} ->
+                        error_resp(Req, Reason)
+                end;
+            error ->
+                json_resp(Req, 400, #{error => <<"bad_origin">>})
+        end
+    end).
+
+att_write_opts(Req) ->
+    Opts0 = case livery_req:header(?DIGEST_HEADER, Req, undefined) of
+        undefined -> #{};
+        Digest -> #{expected_digest => Digest}
+    end,
+    case livery_req:header(?ORIGIN_HEADER, Req, undefined) of
+        undefined ->
+            {ok, Opts0};
+        OriginB64 ->
+            try
+                {ok, Opts0#{origin_hlc =>
+                                barrel_hlc:decode(base64:decode(OriginB64))}}
+            catch
+                _:_ -> error
+            end
+    end.
+
+pump_att_in(empty, Writer, Req) ->
+    finish_att(Writer, Req);
+pump_att_in({buffered, Io}, Writer, Req) ->
+    case barrel_docdb:write_attachment_chunk(Writer,
+                                             iolist_to_binary(Io)) of
+        {ok, Writer2} -> finish_att(Writer2, Req);
+        {error, Reason} -> abort_att(Writer, Req, Reason)
+    end;
+pump_att_in({stream, Reader}, Writer, Req) ->
+    case livery_body:read(Reader, ?BODY_READ_TIMEOUT) of
+        {ok, Chunk, Reader2} ->
+            case barrel_docdb:write_attachment_chunk(
+                     Writer, iolist_to_binary(Chunk)) of
+                {ok, Writer2} ->
+                    pump_att_in({stream, Reader2}, Writer2, Req);
+                {error, Reason} ->
+                    abort_att(Writer, Req, Reason)
+            end;
+        {done, _Reader2} ->
+            finish_att(Writer, Req);
+        {error, Reason, _Reader2} ->
+            abort_att(Writer, Req, Reason)
+    end.
+
+finish_att(Writer, Req) ->
+    case barrel_docdb:finish_attachment_writer(Writer) of
+        {ok, ignored} ->
+            json_resp(Req, 200, #{ok => <<"ignored">>});
+        {ok, _Info} ->
+            json_resp(Req, 200, #{ok => true});
+        {error, digest_mismatch} ->
+            json_resp(Req, 422, #{error => <<"digest_mismatch">>});
+        {error, Reason} ->
+            error_resp(Req, Reason)
+    end.
+
+abort_att(Writer, Req, Reason) ->
+    _ = barrel_docdb:abort_attachment_writer(Writer),
+    error_resp(Req, Reason).
+
+delete_att(Req) ->
+    with_sync_db(Req, fun(DbBin) ->
+        DocId = binding(<<"id">>, Req),
+        AttName = binding(<<"name">>, Req),
+        case att_write_opts(Req) of
+            {ok, Opts} ->
+                case barrel_docdb:delete_attachment(
+                         DbBin, DocId, AttName,
+                         maps:with([origin_hlc], Opts)) of
+                    ok -> json_resp(Req, 200, #{ok => true});
+                    {error, Reason} -> error_resp(Req, Reason)
+                end;
+            error ->
+                json_resp(Req, 400, #{error => <<"bad_origin">>})
+        end
+    end).
+
+%%====================================================================
 %% Wire codecs
 %%====================================================================
 
@@ -252,6 +474,53 @@ put_version_fields(#{<<"doc">> := Doc, <<"version">> := Token,
         _:_ -> error
     end;
 put_version_fields(_) ->
+    error.
+
+att_entry_to_wire(#{seq := Seq, origin := Origin, op := Op, id := Id,
+                    name := Name, digest := Digest, length := Length,
+                    content_type := ContentType}) ->
+    #{seq => hlc_to_wire(Seq),
+      origin => hlc_to_wire(Origin),
+      op => atom_to_binary(Op, utf8),
+      id => Id,
+      name => Name,
+      digest => Digest,
+      length => Length,
+      content_type => ContentType}.
+
+att_changes_params(Req) ->
+    Params = query_params(Req),
+    Limit = case lists:keyfind(<<"limit">>, 1, Params) of
+        {_, LBin} ->
+            try binary_to_integer(LBin) catch _:_ -> 100 end;
+        false ->
+            100
+    end,
+    SinceWire = case lists:keyfind(<<"since">>, 1, Params) of
+        {_, S} -> S;
+        false -> <<"first">>
+    end,
+    case seq_from_wire(SinceWire) of
+        {ok, Since} -> {ok, Since, Limit};
+        error -> error
+    end.
+
+query_params(Req) ->
+    case uri_string:dissect_query(livery_req:query(Req)) of
+        {error, _, _} -> [];
+        Pairs -> Pairs
+    end.
+
+att_diff_input(List) when is_list(List) ->
+    Decoded = [#{id => Id, name => Name, digest => Digest}
+               || #{<<"id">> := Id, <<"name">> := Name,
+                    <<"digest">> := Digest} <- List,
+                  is_binary(Id), is_binary(Name), is_binary(Digest)],
+    case length(Decoded) =:= length(List) of
+        true -> {ok, Decoded};
+        false -> error
+    end;
+att_diff_input(_) ->
     error.
 
 %%====================================================================

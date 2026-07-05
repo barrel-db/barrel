@@ -31,6 +31,11 @@
     rep_id_term/1
 ]).
 
+%% Attachment sync (optional callbacks): raw octets streamed both
+%% directions, digest and origin HLC in headers.
+-export([att_changes/3, diff_attachments/2, get_attachment_stream/3,
+         put_attachment/5, delete_attachment/4]).
+
 -export_type([endpoint/0]).
 
 -type endpoint() :: #{
@@ -43,6 +48,8 @@
 }.
 
 -define(HLC_HEADER, <<"x-barrel-hlc">>).
+-define(DIGEST_HEADER, <<"x-barrel-digest">>).
+-define(ORIGIN_HEADER, <<"x-barrel-att-origin">>).
 
 %%====================================================================
 %% Endpoint
@@ -214,25 +221,205 @@ sync_hlc(Endpoint, Hlc) ->
     end.
 
 %%====================================================================
+%% Attachment sync
+%%====================================================================
+
+att_changes(Endpoint, Since, Opts) ->
+    Limit = maps:get(limit, Opts, 100),
+    Path = [<<"/att_changes?since=">>, quote(seq_to_wire(Since)),
+            <<"&limit=">>, integer_to_binary(Limit)],
+    case req(Endpoint, get, Path, undefined) of
+        {ok, 200, #{<<"changes">> := Changes,
+                    <<"last_seq">> := LastSeqWire}} ->
+            case seq_from_wire(LastSeqWire) of
+                {ok, LastSeq} ->
+                    {ok, [att_entry_from_wire(E) || E <- Changes],
+                     LastSeq};
+                error ->
+                    {error, {bad_response, last_seq}}
+            end;
+        {ok, 501, _} ->
+            %% the server speaks the protocol but its attachment
+            %% backend has no feed: the rep degrades to skipped
+            {error, att_sync_unsupported};
+        Other ->
+            error_of(Other)
+    end.
+
+diff_attachments(Endpoint, Entries) ->
+    case req(Endpoint, post, <<"/att_diff">>,
+             #{attachments => Entries}) of
+        {ok, 200, #{<<"diff">> := Wire}} ->
+            {ok, [#{id => maps:get(<<"id">>, D),
+                    name => maps:get(<<"name">>, D),
+                    status => case maps:get(<<"status">>, D) of
+                                  <<"have">> -> have;
+                                  <<"missing">> -> missing
+                              end} || D <- Wire]};
+        Other ->
+            error_of(Other)
+    end.
+
+%% hackney's sync request/5 always buffers the response body, so the
+%% streamed read goes through connect + send_request, which leaves the
+%% body on the connection for stream_body/1.
+get_attachment_stream(Endpoint, DocId, Name) ->
+    Url = att_url(Endpoint, DocId, Name),
+    case hackney:connect(Url, stream_opts(Endpoint)) of
+        {ok, ConnPid} ->
+            case hackney:send_request(
+                     ConnPid,
+                     {get, url_path(Url), base_headers(Endpoint), <<>>}) of
+                {ok, 200, RespHeaders, ConnPid2} ->
+                    ok = barrel_hlc:maybe_sync_from_header(
+                        header_value(?HLC_HEADER, RespHeaders)),
+                    Info = #{content_type =>
+                                 header_value(<<"content-type">>,
+                                              RespHeaders),
+                             digest =>
+                                 header_value(?DIGEST_HEADER,
+                                              RespHeaders)},
+                    {ok, Info, att_read_fun(ConnPid2)};
+                {ok, Status, _RespHeaders, ConnPid2} ->
+                    %% drain so the pooled connection is reusable
+                    Body = case hackney:body(ConnPid2) of
+                        {ok, B} -> decode_body(B);
+                        _ -> #{}
+                    end,
+                    error_of({ok, Status, Body});
+                {error, Reason} ->
+                    _ = hackney:close(ConnPid),
+                    {error, {transport, Reason}}
+            end;
+        {error, Reason} ->
+            {error, {transport, Reason}}
+    end.
+
+url_path(Url) ->
+    #{path := Path} = uri_string:parse(Url),
+    Path.
+
+att_read_fun(ClientRef) ->
+    fun() ->
+        case hackney:stream_body(ClientRef) of
+            {ok, Chunk} -> {ok, Chunk, att_read_fun(ClientRef)};
+            done -> eof;
+            {error, Reason} -> {error, {transport, Reason}}
+        end
+    end.
+
+put_attachment(Endpoint, DocId, Name, Meta, ReadFun) ->
+    #{content_type := ContentType, digest := Digest,
+      origin_hlc := Origin} = Meta,
+    Headers = [{<<"content-type">>, att_content_type(ContentType)},
+               {?DIGEST_HEADER, Digest},
+               {?ORIGIN_HEADER,
+                base64:encode(barrel_hlc:encode(Origin))}
+               | base_headers(Endpoint)],
+    case hackney:request(put, att_url(Endpoint, DocId, Name), Headers,
+                         stream, stream_opts(Endpoint)) of
+        {ok, ClientRef} ->
+            att_send_loop(ReadFun, ClientRef);
+        {error, Reason} ->
+            {error, {transport, Reason}}
+    end.
+
+att_content_type(<<>>) -> <<"application/octet-stream">>;
+att_content_type(ContentType) -> ContentType.
+
+att_send_loop(ReadFun, ClientRef) ->
+    case ReadFun() of
+        {ok, Chunk, NextReadFun} ->
+            case hackney:send_body(ClientRef, Chunk) of
+                ok ->
+                    att_send_loop(NextReadFun, ClientRef);
+                {error, Reason} ->
+                    _ = hackney:close(ClientRef),
+                    {error, {transport, Reason}}
+            end;
+        eof ->
+            case hackney:finish_send_body(ClientRef) of
+                ok ->
+                    att_put_response(ClientRef);
+                {error, Reason} ->
+                    _ = hackney:close(ClientRef),
+                    {error, {transport, Reason}}
+            end;
+        {error, _} = Error ->
+            _ = hackney:close(ClientRef),
+            Error
+    end.
+
+att_put_response(ClientRef) ->
+    case hackney:start_response(ClientRef) of
+        {ok, Status, RespHeaders, ClientRef2} ->
+            ok = barrel_hlc:maybe_sync_from_header(
+                header_value(?HLC_HEADER, RespHeaders)),
+            Body = case hackney:body(ClientRef2) of
+                {ok, B} -> decode_body(B);
+                _ -> #{}
+            end,
+            case {Status, Body} of
+                {200, #{<<"ok">> := <<"ignored">>}} -> {ok, ignored};
+                {200, _} -> {ok, written};
+                {422, _} -> {error, digest_mismatch};
+                _ -> error_of({ok, Status, Body})
+            end;
+        {error, Reason} ->
+            {error, {transport, Reason}}
+    end.
+
+delete_attachment(Endpoint, DocId, Name, Meta) ->
+    Extra = case Meta of
+        #{origin_hlc := Origin} ->
+            [{?ORIGIN_HEADER, base64:encode(barrel_hlc:encode(Origin))}];
+        _ ->
+            []
+    end,
+    case req(Endpoint, delete,
+             [<<"/att/">>, quote(DocId), <<"/">>, quote(Name)],
+             undefined, Extra) of
+        {ok, 200, _} -> ok;
+        Other -> error_of(Other)
+    end.
+
+att_url(#{url := BaseUrl}, DocId, Name) ->
+    iolist_to_binary([BaseUrl, <<"/_sync/att/">>, quote(DocId),
+                      <<"/">>, quote(Name)]).
+
+att_entry_from_wire(#{<<"id">> := Id, <<"name">> := Name} = E) ->
+    #{seq => hlc_from_wire(maps:get(<<"seq">>, E)),
+      origin => hlc_from_wire(maps:get(<<"origin">>, E)),
+      op => case maps:get(<<"op">>, E) of
+                <<"put">> -> put;
+                <<"delete">> -> delete
+            end,
+      id => Id,
+      name => Name,
+      digest => maps:get(<<"digest">>, E, <<>>),
+      length => maps:get(<<"length">>, E, 0),
+      content_type => maps:get(<<"content_type">>, E, <<>>)}.
+
+hlc_from_wire(B64) ->
+    barrel_hlc:decode(base64:decode(B64)).
+
+%%====================================================================
 %% HTTP plumbing
 %%====================================================================
 
-req(#{url := BaseUrl} = Endpoint, Method, PathSuffix, BodyTerm) ->
+req(Endpoint, Method, PathSuffix, BodyTerm) ->
+    req(Endpoint, Method, PathSuffix, BodyTerm, []).
+
+req(#{url := BaseUrl} = Endpoint, Method, PathSuffix, BodyTerm,
+    ExtraHeaders) ->
     Url = iolist_to_binary([BaseUrl, <<"/_sync">>, PathSuffix]),
-    Headers = [{<<"content-type">>, <<"application/json">>},
-               {?HLC_HEADER,
-                base64:encode(barrel_hlc:encode(barrel_hlc:get_hlc()))}]
-              ++ auth_headers(Endpoint)
-              ++ maps:get(headers, Endpoint, []),
+    Headers = [{<<"content-type">>, <<"application/json">>}
+               | ExtraHeaders] ++ base_headers(Endpoint),
     Body = case BodyTerm of
         undefined -> <<>>;
         _ -> iolist_to_binary(json:encode(BodyTerm))
     end,
-    HttpOpts = [with_body,
-                {pool, maps:get(pool, Endpoint, barrel_rep)},
-                {connect_timeout,
-                 maps:get(connect_timeout, Endpoint, 5000)},
-                {recv_timeout, maps:get(recv_timeout, Endpoint, 30000)}],
+    HttpOpts = [with_body | stream_opts(Endpoint)],
     case hackney:request(Method, Url, Headers, Body, HttpOpts) of
         {ok, Status, RespHeaders, RespBody} ->
             ok = barrel_hlc:maybe_sync_from_header(
@@ -241,6 +428,17 @@ req(#{url := BaseUrl} = Endpoint, Method, PathSuffix, BodyTerm) ->
         {error, Reason} ->
             {error, {transport, Reason}}
     end.
+
+base_headers(Endpoint) ->
+    [{?HLC_HEADER,
+      base64:encode(barrel_hlc:encode(barrel_hlc:get_hlc()))}]
+    ++ auth_headers(Endpoint)
+    ++ maps:get(headers, Endpoint, []).
+
+stream_opts(Endpoint) ->
+    [{pool, maps:get(pool, Endpoint, barrel_rep)},
+     {connect_timeout, maps:get(connect_timeout, Endpoint, 5000)},
+     {recv_timeout, maps:get(recv_timeout, Endpoint, 30000)}].
 
 auth_headers(#{auth := #{token := Token}}) ->
     [{<<"authorization">>, <<"Bearer ", Token/binary>>}];

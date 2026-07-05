@@ -1130,8 +1130,10 @@ write_attachment_chunk(Writer, Data) ->
 %% @doc Finish writing an attachment and store metadata.
 %%
 %% @param Writer The writer to finish
-%% @returns `{ok, AttInfo}'
--spec finish_attachment_writer(map()) -> {ok, map()} | {error, term()}.
+%% @returns `{ok, AttInfo}', or `{ok, ignored}' when the write lost
+%% the last-write-wins race against a newer origin
+-spec finish_attachment_writer(map()) ->
+    {ok, map()} | {ok, ignored} | {error, term()}.
 finish_attachment_writer(Writer) ->
     barrel_att_store:finish_stream(Writer).
 

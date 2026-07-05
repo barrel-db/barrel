@@ -40,12 +40,24 @@
 %% Service
 %%====================================================================
 
+%% livery_service's listener_opts() type omits max_body even though
+%% livery_h1 documents and consumes it; silence the false contract
+%% break until livery's type catches up.
+-dialyzer({nowarn_function, start_link/0}).
 -spec start_link() -> {ok, pid()} | {error, term()}.
 start_link() ->
     Port = application:get_env(barrel_server, http_port, 8080),
+    %% listener-level request body ceiling; must clear the largest
+    %% attachment expected over _sync (JSON handlers stay bounded by
+    %% livery_body:read_all's own 16 MiB cap). NOTE: the h1 engine
+    %% additionally caps request bodies at 8 MiB and neither h1 nor
+    %% livery forward max_body_size to its parser yet; until they do,
+    %% that is the binding bound for attachment uploads.
+    MaxBody = application:get_env(barrel_server, max_body,
+                                  1024 * 1024 * 1024),
     Router = livery_router:compile(routes()),
     livery:start_service(#{
-        http => #{port => Port},
+        http => #{port => Port, max_body => MaxBody},
         router => Router,
         middleware => middleware()
     }).
@@ -92,6 +104,11 @@ routes() ->
         {<<"GET">>,    <<"/db/:db/_sync/local/:id">>,    {barrel_server_sync, get_local}},
         {<<"PUT">>,    <<"/db/:db/_sync/local/:id">>,    {barrel_server_sync, put_local}},
         {<<"DELETE">>, <<"/db/:db/_sync/local/:id">>,    {barrel_server_sync, delete_local}},
+        {<<"GET">>,    <<"/db/:db/_sync/att_changes">>,  {barrel_server_sync, att_changes}},
+        {<<"POST">>,   <<"/db/:db/_sync/att_diff">>,     {barrel_server_sync, att_diff}},
+        {<<"GET">>,    <<"/db/:db/_sync/att/:id/:name">>,    {barrel_server_sync, get_att}},
+        {<<"PUT">>,    <<"/db/:db/_sync/att/:id/:name">>,    {barrel_server_sync, put_att}},
+        {<<"DELETE">>, <<"/db/:db/_sync/att/:id/:name">>,    {barrel_server_sync, delete_att}},
 
         {<<"PUT">>,    <<"/db/:db/doc/:id/att/:name">>,  {?MODULE, put_att}},
         {<<"GET">>,    <<"/db/:db/doc/:id/att/:name">>,  {?MODULE, get_att}},

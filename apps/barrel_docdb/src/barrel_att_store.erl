@@ -114,7 +114,8 @@ write_chunk(Stream, Data) ->
     B = stream_backend(Stream),
     B:write_chunk(Stream, Data).
 
--spec finish_stream(att_stream()) -> {ok, map()} | {error, term()}.
+-spec finish_stream(att_stream()) ->
+    {ok, map()} | {ok, ignored} | {error, term()}.
 finish_stream(Stream) ->
     B = stream_backend(Stream),
     B:finish_stream(Stream).

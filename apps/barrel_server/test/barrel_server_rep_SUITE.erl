@@ -1,8 +1,8 @@
 %%%-------------------------------------------------------------------
 %%% @doc Replication over the wire: local databases replicating with
 %%% served ones through barrel_rep_transport_http, in both directions,
-%%% with filters, checkpoints, and graceful attachment degradation
-%%% (the HTTP attachment leg lands in a later step).
+%%% with filters, checkpoints, and the attachment phase riding along
+%%% (attachment depth is covered by barrel_server_att_SUITE).
 %%%
 %%% Harness note: barrel_server is a registered singleton, so the
 %%% "remote" databases live in the same VM behind a real HTTP
@@ -19,7 +19,7 @@
     t_bidirectional_convergence/1,
     t_filtered_pull/1,
     t_checkpoint_reuse/1,
-    t_att_sync_degrades/1
+    t_att_sync_rides_along/1
 ]).
 
 -include_lib("common_test/include/ct.hrl").
@@ -27,7 +27,7 @@
 
 all() ->
     [t_push_over_http, t_pull_over_http, t_bidirectional_convergence,
-     t_filtered_pull, t_checkpoint_reuse, t_att_sync_degrades].
+     t_filtered_pull, t_checkpoint_reuse, t_att_sync_rides_along].
 
 init_per_suite(Config) ->
     application:load(barrel_server),
@@ -168,14 +168,16 @@ t_checkpoint_reuse(Config) ->
         barrel_rep:replicate(Local, Endpoint, push_opts()),
     ok.
 
-t_att_sync_degrades(Config) ->
+t_att_sync_rides_along(Config) ->
     Local = ?config(local, Config),
+    Served = ?config(served, Config),
     Endpoint = ?config(endpoint, Config),
     {ok, _} = barrel_docdb:put_doc(Local, #{<<"id">> => <<"d">>}),
     {ok, _} = barrel_docdb:put_attachment(Local, <<"d">>, <<"f">>,
                                           <<"blob">>),
-    %% the HTTP transport has no attachment callbacks yet: the phase
-    %% must degrade to skipped, not fail
+    %% the attachment phase runs over the wire as part of the rep
     {ok, R} = barrel_rep:replicate(Local, Endpoint, push_opts()),
-    ?assertEqual(skipped, maps:get(att_sync, R)),
+    ?assertMatch(#{atts_written := 1}, maps:get(att_sync, R)),
+    {ok, <<"blob">>} = barrel_docdb:get_attachment(Served, <<"d">>,
+                                                   <<"f">>),
     ok.
