@@ -81,7 +81,8 @@ fold(StoreRef, DbName, Fun, Acc) ->
 -spec fold(barrel_store_rocksdb:db_ref(), db_name(),
            fun((entry(), term()) -> {ok, term()} | {stop, term()}), term(),
            map()) -> term().
-fold(StoreRef, DbName, Fun, Acc, Opts) ->
+fold(StoreRef, DbName0, Fun, Acc, Opts) ->
+    DbName = barrel_keyspace:resolve(DbName0),
     Start = case maps:get(from, Opts, undefined) of
         undefined -> barrel_store_keys:history_prefix(DbName);
         From -> barrel_store_keys:history_key(DbName, From)
@@ -112,7 +113,8 @@ fold(StoreRef, DbName, Fun, Acc, Opts) ->
 %% `#{version, status (current | conflict | superseded), deleted, vv}'.
 -spec get_doc_versions(barrel_store_rocksdb:db_ref(), db_name(), docid()) ->
     {ok, [map()]} | {error, not_found}.
-get_doc_versions(StoreRef, DbName, DocId) ->
+get_doc_versions(StoreRef, DbName0, DocId) ->
+    DbName = barrel_keyspace:resolve(DbName0),
     EntityKey = barrel_store_keys:doc_entity(DbName, DocId),
     case barrel_store_rocksdb:get_entity(StoreRef, EntityKey) of
         {ok, Columns} ->
@@ -137,7 +139,8 @@ get_doc_versions(StoreRef, DbName, DocId) ->
 %% of swept versions are gone (`{error, not_found}').
 -spec get_version_body(barrel_store_rocksdb:db_ref(), db_name(), docid(),
                        binary()) -> {ok, map()} | {error, not_found}.
-get_version_body(StoreRef, DbName, DocId, VersionToken) ->
+get_version_body(StoreRef, DbName0, DocId, VersionToken) ->
+    DbName = barrel_keyspace:resolve(DbName0),
     Version = barrel_version:from_token(VersionToken),
     EntityKey = barrel_store_keys:doc_entity(DbName, DocId),
     BodyKey = case barrel_store_rocksdb:get_entity(StoreRef, EntityKey) of
@@ -168,7 +171,8 @@ get_version_body(StoreRef, DbName, DocId, VersionToken) ->
 %% since database creation).
 -spec history_floor(barrel_store_rocksdb:db_ref(), db_name()) ->
     barrel_hlc:timestamp() | undefined.
-history_floor(StoreRef, DbName) ->
+history_floor(StoreRef, DbName0) ->
+    DbName = barrel_keyspace:resolve(DbName0),
     Key = barrel_store_keys:db_meta(DbName, ?HISTORY_FLOOR_META),
     case barrel_store_rocksdb:get(StoreRef, Key) of
         {ok, HlcBin} -> barrel_hlc:decode(HlcBin);

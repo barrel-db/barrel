@@ -9,7 +9,9 @@
 %%% backend.
 %%%
 %%% Callers (barrel_att, barrel_docdb, barrel_db_server) keep using this module;
-%%% the backend split is transparent to them.
+%%% the backend split is transparent to them. This dispatcher is also the
+%%% single keyspace choke point: every DbName resolves here, so backends
+%%% always build blob and att-feed keys with the keyspace.
 %%% @end
 %%%-------------------------------------------------------------------
 -module(barrel_att_store).
@@ -58,40 +60,41 @@ close(AttRef) ->
     {ok, map()} | {error, term()}.
 put(AttRef, DbName, DocId, AttName, Data) ->
     B = backend(AttRef),
-    B:put(AttRef, DbName, DocId, AttName, Data).
+    B:put(AttRef, barrel_keyspace:resolve(DbName), DocId, AttName, Data).
 
 -spec put(att_ref(), binary(), binary(), binary(), binary(), map()) ->
     {ok, map()} | {error, term()}.
 put(AttRef, DbName, DocId, AttName, Data, Opts) ->
     B = backend(AttRef),
-    B:put(AttRef, DbName, DocId, AttName, Data, Opts).
+    B:put(AttRef, barrel_keyspace:resolve(DbName), DocId, AttName, Data,
+          Opts).
 
 -spec get(att_ref(), binary(), binary(), binary()) ->
     {ok, binary()} | not_found | {error, term()}.
 get(AttRef, DbName, DocId, AttName) ->
     B = backend(AttRef),
-    B:get(AttRef, DbName, DocId, AttName).
+    B:get(AttRef, barrel_keyspace:resolve(DbName), DocId, AttName).
 
 -spec delete(att_ref(), binary(), binary(), binary()) -> ok | {error, term()}.
 delete(AttRef, DbName, DocId, AttName) ->
     B = backend(AttRef),
-    B:delete(AttRef, DbName, DocId, AttName).
+    B:delete(AttRef, barrel_keyspace:resolve(DbName), DocId, AttName).
 
 -spec delete_all(att_ref(), binary(), binary()) -> ok | {error, term()}.
 delete_all(AttRef, DbName, DocId) ->
     B = backend(AttRef),
-    B:delete_all(AttRef, DbName, DocId).
+    B:delete_all(AttRef, barrel_keyspace:resolve(DbName), DocId).
 
 -spec fold(att_ref(), binary(), binary(), fun(), term()) -> term().
 fold(AttRef, DbName, DocId, Fun, Acc) ->
     B = backend(AttRef),
-    B:fold(AttRef, DbName, DocId, Fun, Acc).
+    B:fold(AttRef, barrel_keyspace:resolve(DbName), DocId, Fun, Acc).
 
 -spec get_info(att_ref(), binary(), binary(), binary()) ->
     {ok, map()} | {error, term()}.
 get_info(AttRef, DbName, DocId, AttName) ->
     B = backend(AttRef),
-    B:get_info(AttRef, DbName, DocId, AttName).
+    B:get_info(AttRef, barrel_keyspace:resolve(DbName), DocId, AttName).
 
 %%====================================================================
 %% Streaming API
@@ -101,13 +104,15 @@ get_info(AttRef, DbName, DocId, AttName) ->
     {ok, att_stream()} | {error, term()}.
 put_stream(AttRef, DbName, DocId, AttName, ContentType) ->
     B = backend(AttRef),
-    B:put_stream(AttRef, DbName, DocId, AttName, ContentType).
+    B:put_stream(AttRef, barrel_keyspace:resolve(DbName), DocId, AttName,
+                 ContentType).
 
 -spec put_stream(att_ref(), binary(), binary(), binary(), binary(), map()) ->
     {ok, att_stream()} | {error, term()}.
 put_stream(AttRef, DbName, DocId, AttName, ContentType, Opts) ->
     B = backend(AttRef),
-    B:put_stream(AttRef, DbName, DocId, AttName, ContentType, Opts).
+    B:put_stream(AttRef, barrel_keyspace:resolve(DbName), DocId, AttName,
+                 ContentType, Opts).
 
 -spec write_chunk(att_stream(), binary()) -> {ok, att_stream()} | {error, term()}.
 write_chunk(Stream, Data) ->
@@ -129,7 +134,8 @@ abort_stream(Stream) ->
     {ok, att_stream()} | {error, term()}.
 get_stream(AttRef, DbName, DocId, AttName) ->
     B = backend(AttRef),
-    B:get_stream(AttRef, DbName, DocId, AttName).
+    B:get_stream(AttRef, barrel_keyspace:resolve(DbName), DocId,
+                 AttName).
 
 -spec read_chunk(att_stream()) -> {ok, binary(), att_stream()} | eof | {error, term()}.
 read_chunk(Stream) ->
@@ -150,30 +156,31 @@ close_stream(Stream) ->
     ok | {error, term()}.
 delete(AttRef, DbName, DocId, AttName, Opts) ->
     B = backend(AttRef),
-    B:delete(AttRef, DbName, DocId, AttName, Opts).
+    B:delete(AttRef, barrel_keyspace:resolve(DbName), DocId, AttName,
+             Opts).
 
 %% @doc Attachment feed entries since an HLC (exclusive).
 -spec att_changes(att_ref(), binary(), term(), map()) ->
     {ok, [map()], term()} | {error, term()}.
 att_changes(AttRef, DbName, Since, Opts) ->
     B = backend(AttRef),
-    B:att_changes(AttRef, DbName, Since, Opts).
+    B:att_changes(AttRef, barrel_keyspace:resolve(DbName), Since, Opts).
 
 -spec att_floor(att_ref(), binary()) -> term() | undefined.
 att_floor(AttRef, DbName) ->
     B = backend(AttRef),
-    B:att_floor(AttRef, DbName).
+    B:att_floor(AttRef, barrel_keyspace:resolve(DbName)).
 
 -spec sweep_att_feed(att_ref(), binary(), term()) ->
     {ok, map()} | {error, term()}.
 sweep_att_feed(AttRef, DbName, Cutoff) ->
     B = backend(AttRef),
-    B:sweep_att_feed(AttRef, DbName, Cutoff).
+    B:sweep_att_feed(AttRef, barrel_keyspace:resolve(DbName), Cutoff).
 
 -spec rebuild_feed(att_ref(), binary()) -> {ok, map()} | {error, term()}.
 rebuild_feed(AttRef, DbName) ->
     B = backend(AttRef),
-    B:rebuild_feed(AttRef, DbName).
+    B:rebuild_feed(AttRef, barrel_keyspace:resolve(DbName)).
 
 %% @doc Whether this database's backend supports attachment sync.
 -spec supports_sync(att_ref()) -> boolean().

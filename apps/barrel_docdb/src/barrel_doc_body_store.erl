@@ -34,7 +34,8 @@ get_current_body(DbName, DocId) ->
         undefined ->
             {error, store_not_found};
         StoreRef ->
-            Key = barrel_store_keys:doc_body(DbName, DocId),
+            Ks = barrel_keyspace:resolve(DbName),
+            Key = barrel_store_keys:doc_body(Ks, DocId),
             barrel_store_rocksdb:body_get(StoreRef, Key)
     end.
 
@@ -58,7 +59,8 @@ multi_get_current_bodies(DbName, DocIds, Profile) ->
         undefined ->
             [{error, store_not_found} || _ <- DocIds];
         StoreRef ->
-            Keys = [barrel_store_keys:doc_body(DbName, DocId) || DocId <- DocIds],
+            Ks = barrel_keyspace:resolve(DbName),
+            Keys = [barrel_store_keys:doc_body(Ks, DocId) || DocId <- DocIds],
             barrel_store_rocksdb:body_multi_get(StoreRef, Keys, Profile)
     end.
 
@@ -78,7 +80,8 @@ multi_get_current_bodies_with_snapshot(DbName, DocIds, Snapshot, Profile) ->
         undefined ->
             [{error, store_not_found} || _ <- DocIds];
         StoreRef ->
-            Keys = [barrel_store_keys:doc_body(DbName, DocId) || DocId <- DocIds],
+            Ks = barrel_keyspace:resolve(DbName),
+            Keys = [barrel_store_keys:doc_body(Ks, DocId) || DocId <- DocIds],
             barrel_store_rocksdb:body_multi_get_with_snapshot(StoreRef, Keys, Snapshot, Profile)
     end.
 
@@ -94,7 +97,8 @@ get_body(DbName, DocId, RevId) ->
         undefined ->
             {error, store_not_found};
         StoreRef ->
-            Key = barrel_store_keys:doc_body_rev(DbName, DocId, RevId),
+            Ks = barrel_keyspace:resolve(DbName),
+            Key = barrel_store_keys:doc_body_rev(Ks, DocId, RevId),
             barrel_store_rocksdb:body_get(StoreRef, Key)
     end.
 
@@ -107,7 +111,8 @@ multi_get_bodies(DbName, DocIdRevPairs, _Opts) ->
         undefined ->
             [{error, store_not_found} || _ <- DocIdRevPairs];
         StoreRef ->
-            Keys = [barrel_store_keys:doc_body_rev(DbName, DocId, RevId)
+            Ks = barrel_keyspace:resolve(DbName),
+            Keys = [barrel_store_keys:doc_body_rev(Ks, DocId, RevId)
                     || {DocId, RevId} <- DocIdRevPairs],
             barrel_store_rocksdb:body_multi_get(StoreRef, Keys)
     end.

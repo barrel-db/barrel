@@ -189,7 +189,8 @@ make_value_index_remove_ops(DbName, DocId, [{Path, _Type} | Rest]) ->
 %% Returns {ok, Paths} or not_found.
 -spec get_doc_paths(store_ref(), db_name(), docid()) ->
     {ok, [{[term()], term()}]} | not_found | {error, term()}.
-get_doc_paths(StoreRef, DbName, DocId) ->
+get_doc_paths(StoreRef, DbName0, DocId) ->
+    DbName = barrel_keyspace:resolve(DbName0),
     ReverseKey = barrel_store_keys:doc_paths_key(DbName, DocId),
     case barrel_store_rocksdb:get(StoreRef, ReverseKey) of
         {ok, PathsBin} ->
@@ -205,7 +206,8 @@ get_doc_paths(StoreRef, DbName, DocId) ->
 %% Uses counter stored in path_stats_key (O(1) lookup).
 -spec get_path_cardinality(store_ref(), db_name(), [term()]) ->
     {ok, non_neg_integer()} | {error, term()}.
-get_path_cardinality(StoreRef, DbName, Path) ->
+get_path_cardinality(StoreRef, DbName0, Path) ->
+    DbName = barrel_keyspace:resolve(DbName0),
     Key = barrel_store_keys:path_stats_key(DbName, Path),
     case barrel_store_rocksdb:get(StoreRef, Key) of
         {ok, CountBin} ->
@@ -222,7 +224,8 @@ get_path_cardinality(StoreRef, DbName, Path) ->
 %% More accurate than counter (no drift), but requires reading posting list.
 -spec get_posting_cardinality(store_ref(), db_name(), [term()]) ->
     {ok, non_neg_integer()} | not_found | {error, term()}.
-get_posting_cardinality(StoreRef, DbName, Path) ->
+get_posting_cardinality(StoreRef, DbName0, Path) ->
+    DbName = barrel_keyspace:resolve(DbName0),
     case get_posting_list_binary(StoreRef, DbName, Path) of
         {ok, Binary} ->
             {ok, Postings} = barrel_postings:open(Binary),
@@ -237,7 +240,8 @@ get_posting_cardinality(StoreRef, DbName, Path) ->
 %% Uses the value-first index for O(1) verification instead of collecting
 %% the entire posting list. Uses key_exists which doesn't load the value.
 -spec docid_has_value(store_ref(), db_name(), [term()], term(), docid()) -> boolean().
-docid_has_value(StoreRef, DbName, Path, Value, DocId) ->
+docid_has_value(StoreRef, DbName0, Path, Value, DocId) ->
+    DbName = barrel_keyspace:resolve(DbName0),
     Key = barrel_store_keys:value_index_key(DbName, Value, Path, DocId),
     barrel_store_rocksdb:key_exists(StoreRef, Key).
 
@@ -246,7 +250,8 @@ docid_has_value(StoreRef, DbName, Path, Value, DocId) ->
 %% Returns {ok, Value} if found, not_found if path doesn't exist.
 -spec docid_get_value(store_ref(), db_name(), docid(), [term()]) ->
     {ok, term()} | not_found | {error, term()}.
-docid_get_value(StoreRef, DbName, DocId, Path) ->
+docid_get_value(StoreRef, DbName0, DocId, Path) ->
+    DbName = barrel_keyspace:resolve(DbName0),
     case get_doc_paths(StoreRef, DbName, DocId) of
         {ok, PathValues} ->
             %% Stored entries are {FieldPath ++ [Value], <<>>} (the analyzer
@@ -277,7 +282,8 @@ find_path_value(Path, [_ | Rest]) ->
 %% Returns true if the condition is satisfied, false otherwise.
 -spec docid_satisfies_compare(store_ref(), db_name(), docid(), [term()], atom(), term()) ->
     boolean().
-docid_satisfies_compare(StoreRef, DbName, DocId, Path, Op, CompareValue) ->
+docid_satisfies_compare(StoreRef, DbName0, DocId, Path, Op, CompareValue) ->
+    DbName = barrel_keyspace:resolve(DbName0),
     case docid_get_value(StoreRef, DbName, DocId, Path) of
         {ok, DocValue} ->
             compare_values(DocValue, Op, CompareValue);
@@ -299,7 +305,8 @@ compare_values(A, '==', B) -> A == B.
 -spec filter_docids_by_value(store_ref(), db_name(), [term()], term(), [docid()]) -> [docid()].
 filter_docids_by_value(_StoreRef, _DbName, _Path, _Value, []) ->
     [];
-filter_docids_by_value(StoreRef, DbName, Path, Value, DocIds) ->
+filter_docids_by_value(StoreRef, DbName0, Path, Value, DocIds) ->
+    DbName = barrel_keyspace:resolve(DbName0),
     %% Build keys for batch lookup
     Keys = [barrel_store_keys:value_index_key(DbName, Value, Path, DocId)
             || DocId <- DocIds],
@@ -326,7 +333,8 @@ fold_path(StoreRef, DbName, PathPrefix, Fun, Acc0) ->
 %% @doc Fold over path index entries with explicit read profile.
 %% Uses posting lists: iterates posting keys and expands each to {Path, DocId} tuples.
 -spec fold_path(store_ref(), db_name(), [term()], fun(), term(), read_profile()) -> term().
-fold_path(StoreRef, DbName, PathPrefix, Fun, Acc0, _Profile) ->
+fold_path(StoreRef, DbName0, PathPrefix, Fun, Acc0, _Profile) ->
+    DbName = barrel_keyspace:resolve(DbName0),
     StartKey = barrel_store_keys:path_posting_prefix(DbName, PathPrefix),
     EndKey = barrel_store_keys:path_posting_end(DbName, PathPrefix),
     %% Fold over posting lists and expand each to {Path, DocId} tuples
@@ -359,7 +367,8 @@ fold_path_reverse(StoreRef, DbName, PathPrefix, Fun, Acc0) ->
 %% @doc Fold over path index entries in reverse order with explicit read profile.
 %% Uses posting lists: iterates in reverse and expands to {Path, DocId} tuples.
 -spec fold_path_reverse(store_ref(), db_name(), [term()], fun(), term(), read_profile()) -> term().
-fold_path_reverse(StoreRef, DbName, PathPrefix, Fun, Acc0, _Profile) ->
+fold_path_reverse(StoreRef, DbName0, PathPrefix, Fun, Acc0, _Profile) ->
+    DbName = barrel_keyspace:resolve(DbName0),
     StartKey = barrel_store_keys:path_posting_prefix(DbName, PathPrefix),
     EndKey = barrel_store_keys:path_posting_end(DbName, PathPrefix),
     FoldFun = fun(Key, DocIds, Acc) ->
@@ -400,7 +409,8 @@ fold_path_chunked(StoreRef, DbName, PathPrefix, InitialChunkSize, Fun, Acc0) ->
 -spec fold_path_chunked(store_ref(), db_name(), [term()], pos_integer(),
                         fun(([docid()], Acc) -> {ok, Acc} | {ok, Acc, pos_integer()} | {stop, Acc}), Acc, read_profile()) -> Acc
     when Acc :: term().
-fold_path_chunked(StoreRef, DbName, PathPrefix, InitialChunkSize, Fun, Acc0, _Profile) ->
+fold_path_chunked(StoreRef, DbName0, PathPrefix, InitialChunkSize, Fun, Acc0, _Profile) ->
+    DbName = barrel_keyspace:resolve(DbName0),
     StartKey = barrel_store_keys:path_posting_prefix(DbName, PathPrefix),
     EndKey = barrel_store_keys:path_posting_end(DbName, PathPrefix),
 
@@ -484,7 +494,8 @@ fold_path_values(StoreRef, DbName, PathPrefix, Fun, Acc0) ->
 %% @doc Fold over all values for a path in ascending order with explicit read profile.
 %% Uses posting lists: iterates posting keys and expands to {Path, DocId} tuples.
 -spec fold_path_values(store_ref(), db_name(), [term()], fun(), term(), read_profile()) -> term().
-fold_path_values(StoreRef, DbName, PathPrefix, Fun, Acc0, _Profile) ->
+fold_path_values(StoreRef, DbName0, PathPrefix, Fun, Acc0, _Profile) ->
+    DbName = barrel_keyspace:resolve(DbName0),
     StartKey = barrel_store_keys:path_posting_prefix(DbName, PathPrefix),
     EndKey = barrel_store_keys:path_posting_end(DbName, PathPrefix),
     FoldFun = fun(Key, DocIds, Acc) ->
@@ -516,7 +527,8 @@ fold_path_values_reverse(StoreRef, DbName, PathPrefix, Fun, Acc0) ->
 %% @doc Fold over all values for a path in descending order with explicit read profile.
 %% Uses posting lists: iterates in reverse and expands to {Path, DocId} tuples.
 -spec fold_path_values_reverse(store_ref(), db_name(), [term()], fun(), term(), read_profile()) -> term().
-fold_path_values_reverse(StoreRef, DbName, PathPrefix, Fun, Acc0, _Profile) ->
+fold_path_values_reverse(StoreRef, DbName0, PathPrefix, Fun, Acc0, _Profile) ->
+    DbName = barrel_keyspace:resolve(DbName0),
     StartKey = barrel_store_keys:path_posting_prefix(DbName, PathPrefix),
     EndKey = barrel_store_keys:path_posting_end(DbName, PathPrefix),
     FoldFun = fun(Key, DocIds, Acc) ->
@@ -544,7 +556,8 @@ fold_path_values_reverse(StoreRef, DbName, PathPrefix, Fun, Acc0, _Profile) ->
 %%   finds all docs where age &gt; 50
 -spec fold_path_values_compare(store_ref(), db_name(), [term()],
                                 '>' | '<' | '>=' | '=<', term(), fun(), term()) -> term().
-fold_path_values_compare(StoreRef, DbName, Path, Op, Value, Fun, Acc0) ->
+fold_path_values_compare(StoreRef, DbName0, Path, Op, Value, Fun, Acc0) ->
+    DbName = barrel_keyspace:resolve(DbName0),
     %% Compute start/end keys based on operator
     {StartKey, EndKey} = compare_range_keys(DbName, Path, Op, Value),
     FoldFun = fun(Key, DocIds, Acc) ->
@@ -650,7 +663,8 @@ fold_prefix(StoreRef, DbName, Path, Prefix, Fun, Acc0) when is_binary(Prefix) ->
 %% @doc Fold over path index entries matching a value prefix with explicit read profile.
 %% Uses posting lists: iterates posting keys and expands to {Path, DocId} tuples.
 -spec fold_prefix(store_ref(), db_name(), [term()], binary(), fun(), term(), read_profile()) -> term().
-fold_prefix(StoreRef, DbName, Path, Prefix, Fun, Acc0, _Profile) when is_binary(Prefix) ->
+fold_prefix(StoreRef, DbName0, Path, Prefix, Fun, Acc0, _Profile) when is_binary(Prefix) ->
+    DbName = barrel_keyspace:resolve(DbName0),
     %% Start key: path + prefix value
     StartPath = Path ++ [Prefix],
     StartKey = barrel_store_keys:path_posting_prefix(DbName, StartPath),
@@ -737,7 +751,8 @@ fold_posting(StoreRef, DbName, PathPrefix, Fun, Acc0, _Profile) ->
 %% This is O(1) lookup - no iteration needed.
 %% Returns list of DocIds or empty list if path not found.
 -spec get_posting_list(store_ref(), db_name(), [term()]) -> [binary()].
-get_posting_list(StoreRef, DbName, FullPath) ->
+get_posting_list(StoreRef, DbName0, FullPath) ->
+    DbName = barrel_keyspace:resolve(DbName0),
     Key = barrel_store_keys:path_posting_key(DbName, FullPath),
     case barrel_store_rocksdb:posting_get(StoreRef, Key) of
         {ok, DocIds} -> DocIds;
@@ -790,7 +805,8 @@ get_bucketed_posting_list(StoreRef, DbName, Value, FieldPath) ->
 %% Use with barrel_postings:open/1 for repeated lookups.
 -spec get_posting_list_binary(store_ref(), db_name(), [term()]) ->
     {ok, binary()} | not_found | {error, term()}.
-get_posting_list_binary(StoreRef, DbName, FullPath) ->
+get_posting_list_binary(StoreRef, DbName0, FullPath) ->
+    DbName = barrel_keyspace:resolve(DbName0),
     Key = barrel_store_keys:path_posting_key(DbName, FullPath),
     barrel_store_rocksdb:posting_get_binary(StoreRef, Key).
 

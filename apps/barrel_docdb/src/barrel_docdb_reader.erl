@@ -29,7 +29,8 @@
 %% close race maps to the same result as a missing database).
 -spec get_doc(barrel_store_rocksdb:db_ref(), db_name(), docid(), map()) ->
     {ok, map()} | {ok, binary(), map()} | {error, term()}.
-get_doc(StoreRef, DbName, DocId, Opts) ->
+get_doc(StoreRef, DbName0, DocId, Opts) ->
+    DbName = barrel_keyspace:resolve(DbName0),
     with_snapshot(StoreRef, fun(Snapshot) ->
         do_get_doc(StoreRef, DbName, DocId, Opts, Snapshot)
     end).
@@ -40,7 +41,8 @@ get_doc(StoreRef, DbName, DocId, Opts) ->
 %% input id, in order.
 -spec get_docs(barrel_store_rocksdb:db_ref(), db_name(), [docid()], map()) ->
     [{ok, map()} | {error, term()}].
-get_docs(StoreRef, DbName, DocIds, Opts) ->
+get_docs(StoreRef, DbName0, DocIds, Opts) ->
+    DbName = barrel_keyspace:resolve(DbName0),
     case with_snapshot(StoreRef, fun(Snapshot) ->
         do_get_docs(StoreRef, DbName, DocIds, Opts, Snapshot)
     end) of
@@ -54,7 +56,8 @@ get_docs(StoreRef, DbName, DocIds, Opts) ->
 -spec get_replication_doc(barrel_store_rocksdb:db_ref(), db_name(), docid()) ->
     {ok, #{doc := map(), version := binary(), vv := binary(),
            deleted := boolean()}} | {error, term()}.
-get_replication_doc(StoreRef, DbName, DocId) ->
+get_replication_doc(StoreRef, DbName0, DocId) ->
+    DbName = barrel_keyspace:resolve(DbName0),
     with_snapshot(StoreRef, fun(Snapshot) ->
         DocEntityKey = barrel_store_keys:doc_entity(DbName, DocId),
         case barrel_store_rocksdb:get_entity_with_snapshot(StoreRef, DocEntityKey, Snapshot) of

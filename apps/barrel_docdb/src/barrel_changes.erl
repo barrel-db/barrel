@@ -107,7 +107,8 @@ fold_changes_long_scan(StoreRef, DbName, Since, Fun, Acc) ->
 -spec fold_changes_compact(barrel_store_rocksdb:db_ref(), db_name(),
                            barrel_hlc:timestamp() | first, compact_fold_fun(), term()) ->
     {ok, term(), barrel_hlc:timestamp()}.
-fold_changes_compact(StoreRef, DbName, Since, Fun, Acc) ->
+fold_changes_compact(StoreRef, DbName0, Since, Fun, Acc) ->
+    DbName = barrel_keyspace:resolve(DbName0),
     {StartHlc, StartKey} = case Since of
         first ->
             Min = barrel_hlc:min(),
@@ -140,7 +141,8 @@ fold_changes_compact(StoreRef, DbName, Since, Fun, Acc) ->
     {ok, FinalAcc, LastHlc}.
 
 %% @private Internal fold with scan mode selection
-fold_changes_internal(StoreRef, DbName, Since, Fun, Acc, ScanMode) ->
+fold_changes_internal(StoreRef, DbName0, Since, Fun, Acc, ScanMode) ->
+    DbName = barrel_keyspace:resolve(DbName0),
     {StartHlc, StartKey} = case Since of
         first ->
             %% Start from the very beginning
@@ -186,6 +188,9 @@ fold_changes_internal(StoreRef, DbName, Since, Fun, Acc, ScanMode) ->
                   barrel_hlc:timestamp() | first, changes_opts()) ->
     {ok, [change()], barrel_hlc:timestamp()} | {error, term()}.
 get_changes(StoreRef, DbName, Since, Opts) ->
+    %% Storage keys build with the keyspace; the channel branch also
+    %% needs the LOGICAL name for the channel config registry.
+    Ks = barrel_keyspace:resolve(DbName),
     DocIds = maps:get(doc_ids, Opts, undefined),
     PathPatterns = maps:get(paths, Opts, undefined),
     QuerySpec = maps:get(query, Opts, undefined),
@@ -201,21 +206,21 @@ get_changes(StoreRef, DbName, Since, Opts) ->
             case {PathPatterns, DocIds, QuerySpec} of
                 {[SinglePath], undefined, undefined} when is_binary(SinglePath) ->
                     %% Single path pattern, no doc_ids, no query - use path index directly
-                    get_changes_with_path_index(StoreRef, DbName, SinglePath, Since, Opts, QuerySpec);
+                    get_changes_with_path_index(StoreRef, Ks, SinglePath, Since, Opts, QuerySpec);
                 {Paths, undefined, undefined} when is_list(Paths), length(Paths) > 1 ->
                     %% Multiple path patterns, no query - merge results from path indexes
-                    get_changes_with_multiple_paths(StoreRef, DbName, Paths, Since, Opts, QuerySpec);
+                    get_changes_with_multiple_paths(StoreRef, Ks, Paths, Since, Opts, QuerySpec);
                 _ ->
                     %% Fall back to full scan with filtering when:
                     %% - doc_ids is specified (can't use path index)
                     %% - query is specified (path index entries don't have doc body)
                     %% - no paths specified
-                    get_changes_full_scan(StoreRef, DbName, Since, Opts)
+                    get_changes_full_scan(StoreRef, Ks, Since, Opts)
             end;
         _ when PathPatterns =/= undefined; DocIds =/= undefined ->
             {error, incompatible_filters};
         _ when is_binary(Channel) ->
-            get_changes_by_channel(StoreRef, DbName, Channel, Since, Opts);
+            get_changes_by_channel(StoreRef, DbName, Ks, Channel, Since, Opts);
         _ ->
             {error, {unknown_channel, Channel}}
     end.
@@ -223,7 +228,7 @@ get_changes(StoreRef, DbName, Since, Opts) ->
 %% @private One bounded range scan over the channel's write-time feed:
 %% limit pushdown, exclusive since, leave rows hidden by default. A
 %% query filter fetches bodies for the visited rows only.
-get_changes_by_channel(StoreRef, DbName, Channel, Since, Opts) ->
+get_changes_by_channel(StoreRef, DbName, Ks, Channel, Since, Opts) ->
     case lists:member(Channel, barrel_channel:names(DbName)) of
         false ->
             {error, {unknown_channel, Channel}};
@@ -237,7 +242,7 @@ get_changes_by_channel(StoreRef, DbName, Channel, Since, Opts) ->
             Rows1 = case NeedDocs of
                 true ->
                     batch_fetch_doc_bodies(
-                        StoreRef, DbName,
+                        StoreRef, Ks,
                         [{maps:get(id, R), R} || R <- Rows]);
                 false ->
                     Rows
@@ -777,7 +782,8 @@ get_last_seq(StoreRef, DbName) ->
 %% @doc Get the last HLC timestamp for a database
 %% First tries the fast path (metadata key), falls back to reverse iteration
 -spec get_last_hlc(barrel_store_rocksdb:db_ref(), db_name()) -> barrel_hlc:timestamp().
-get_last_hlc(StoreRef, DbName) ->
+get_last_hlc(StoreRef, DbName0) ->
+    DbName = barrel_keyspace:resolve(DbName0),
     %% Try fast path: read from metadata key (O(1))
     LastHlcKey = barrel_store_keys:db_last_hlc(DbName),
     case barrel_store_rocksdb:get(StoreRef, LastHlcKey) of

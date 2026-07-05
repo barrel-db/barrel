@@ -437,13 +437,13 @@ execute_pure_equality_chunked(StoreRef, DbName, Path, Value, Plan, ChunkSize, St
     %% Determine start key for iteration
     ActualStartKey = case StartKey of
         undefined ->
-            barrel_store_keys:value_index_prefix(DbName, Value, Path);
+            barrel_store_keys:value_index_prefix(barrel_keyspace:resolve(DbName), Value, Path);
         Key ->
             %% Resume after the last key
             <<Key/binary, 0>>
     end,
-    EndKey = barrel_store_keys:value_index_end(DbName, Value, Path),
-    PrefixLen = byte_size(barrel_store_keys:value_index_prefix(DbName, Value, Path)),
+    EndKey = barrel_store_keys:value_index_end(barrel_keyspace:resolve(DbName), Value, Path),
+    PrefixLen = byte_size(barrel_store_keys:value_index_prefix(barrel_keyspace:resolve(DbName), Value, Path)),
 
     %% Collect ChunkSize + 1 to detect if there are more results
     %% Track the last key of the ChunkSize-th result separately
@@ -510,11 +510,11 @@ execute_pure_exists_chunked(StoreRef, DbName, Path, Plan, ChunkSize, StartKey, S
     %% Determine start key for iteration
     ActualStartKey = case StartKey of
         undefined ->
-            barrel_store_keys:path_posting_prefix(DbName, Path);
+            barrel_store_keys:path_posting_prefix(barrel_keyspace:resolve(DbName), Path);
         Key ->
             <<Key/binary, 0>>
     end,
-    EndKey = barrel_store_keys:path_posting_end(DbName, Path),
+    EndKey = barrel_store_keys:path_posting_end(barrel_keyspace:resolve(DbName), Path),
 
     %% Collect ChunkSize + 1 to detect if there are more
     MaxCollect = ChunkSize + 1,
@@ -568,7 +568,7 @@ execute_pure_prefix_chunked(StoreRef, DbName, Path, Prefix, Plan, ChunkSize, Sta
     FullPath = Path ++ [Prefix],
     ActualStartKey = case StartKey of
         undefined ->
-            barrel_store_keys:path_posting_prefix(DbName, FullPath);
+            barrel_store_keys:path_posting_prefix(barrel_keyspace:resolve(DbName), FullPath);
         Key ->
             <<Key/binary, 0>>
     end,
@@ -580,7 +580,7 @@ execute_pure_prefix_chunked(StoreRef, DbName, Path, Prefix, Plan, ChunkSize, Sta
     %% after the terminator and wrongly exclude longer values like
     %% "Hello World" (see fold_prefix/6).
     EndKey = barrel_store_keys:path_posting_prefix(
-               DbName, Path ++ [<<Prefix/binary, 16#FF>>]),
+               barrel_keyspace:resolve(DbName), Path ++ [<<Prefix/binary, 16#FF>>]),
 
     MaxCollect = ChunkSize + 1,
 
@@ -629,7 +629,7 @@ execute_pure_prefix_chunked(StoreRef, DbName, Path, Prefix, Plan, ChunkSize, Sta
 %% cursor continuation. O(matches in range), ordered by id.
 execute_id_scan_chunked(StoreRef, DbName, IdScan, Plan, ChunkSize, StartKey, Snapshot) ->
     #query_plan{offset = Offset, include_docs = IncludeDocs, decoder_fun = DecoderFun} = Plan,
-    EntityPrefix = barrel_store_keys:doc_entity_prefix(DbName),
+    EntityPrefix = barrel_store_keys:doc_entity_prefix(barrel_keyspace:resolve(DbName)),
     PrefixLen = byte_size(EntityPrefix),
     {RangeStart, RangeEnd} = id_scan_range(DbName, IdScan),
     ActualStartKey = case StartKey of
@@ -671,7 +671,7 @@ execute_id_scan_chunked(StoreRef, DbName, IdScan, Plan, ChunkSize, StartKey, Sna
     case HasMore andalso ReturnedDocIds =/= [] of
         true ->
             LastDocId = lists:last(ReturnedDocIds),
-            LastKey = barrel_store_keys:doc_entity(DbName, LastDocId),
+            LastKey = barrel_store_keys:doc_entity(barrel_keyspace:resolve(DbName), LastDocId),
             Token = barrel_query_cursor:create(StoreRef, DbName, id_scan, LastKey, ActualSnapshot),
             {ok, FinalResults, #{last_seq => LastSeq, has_more => true, continuation => Token}};
         false ->
@@ -681,21 +681,21 @@ execute_id_scan_chunked(StoreRef, DbName, IdScan, Plan, ChunkSize, StartKey, Sna
 
 %% @private Compute the entity-keyspace [Start, End) range for an id_scan.
 id_scan_range(DbName, {prefix, P}) ->
-    Prefix = barrel_store_keys:doc_entity_prefix(DbName),
+    Prefix = barrel_store_keys:doc_entity_prefix(barrel_keyspace:resolve(DbName)),
     Start = <<Prefix/binary, P/binary>>,
     End = case bin_increment(P) of
-        overflow -> barrel_store_keys:doc_entity_end(DbName);
+        overflow -> barrel_store_keys:doc_entity_end(barrel_keyspace:resolve(DbName));
         NextP -> <<Prefix/binary, NextP/binary>>
     end,
     {Start, End};
 id_scan_range(DbName, {range, StartId, EndId}) ->
-    Prefix = barrel_store_keys:doc_entity_prefix(DbName),
+    Prefix = barrel_store_keys:doc_entity_prefix(barrel_keyspace:resolve(DbName)),
     Start = case StartId of
         undefined -> Prefix;
         _ -> <<Prefix/binary, StartId/binary>>
     end,
     End = case EndId of
-        undefined -> barrel_store_keys:doc_entity_end(DbName);
+        undefined -> barrel_store_keys:doc_entity_end(barrel_keyspace:resolve(DbName));
         _ -> <<Prefix/binary, EndId/binary>>
     end,
     {Start, End}.
@@ -819,23 +819,23 @@ execute_pure_compare_chunked(StoreRef, DbName, Path, Op, Value, Plan, ChunkSize,
 %% @private Compute range keys for compare operators
 compare_range_keys(DbName, Path, '>', Value) ->
     %% > Value: start AFTER value, end at path end
-    StartKey = barrel_store_keys:path_posting_end(DbName, Path ++ [Value]),
-    EndKey = barrel_store_keys:path_posting_end(DbName, Path),
+    StartKey = barrel_store_keys:path_posting_end(barrel_keyspace:resolve(DbName), Path ++ [Value]),
+    EndKey = barrel_store_keys:path_posting_end(barrel_keyspace:resolve(DbName), Path),
     {StartKey, EndKey};
 compare_range_keys(DbName, Path, '>=', Value) ->
     %% >= Value: start AT value, end at path end
-    StartKey = barrel_store_keys:path_posting_prefix(DbName, Path ++ [Value]),
-    EndKey = barrel_store_keys:path_posting_end(DbName, Path),
+    StartKey = barrel_store_keys:path_posting_prefix(barrel_keyspace:resolve(DbName), Path ++ [Value]),
+    EndKey = barrel_store_keys:path_posting_end(barrel_keyspace:resolve(DbName), Path),
     {StartKey, EndKey};
 compare_range_keys(DbName, Path, '<', Value) ->
     %% < Value: start at path start, end BEFORE value
-    StartKey = barrel_store_keys:path_posting_prefix(DbName, Path),
-    EndKey = barrel_store_keys:path_posting_prefix(DbName, Path ++ [Value]),
+    StartKey = barrel_store_keys:path_posting_prefix(barrel_keyspace:resolve(DbName), Path),
+    EndKey = barrel_store_keys:path_posting_prefix(barrel_keyspace:resolve(DbName), Path ++ [Value]),
     {StartKey, EndKey};
 compare_range_keys(DbName, Path, '=<', Value) ->
     %% =< Value: start at path start, end AFTER value
-    StartKey = barrel_store_keys:path_posting_prefix(DbName, Path),
-    EndKey = barrel_store_keys:path_posting_end(DbName, Path ++ [Value]),
+    StartKey = barrel_store_keys:path_posting_prefix(barrel_keyspace:resolve(DbName), Path),
+    EndKey = barrel_store_keys:path_posting_end(barrel_keyspace:resolve(DbName), Path ++ [Value]),
     {StartKey, EndKey}.
 
 %% @private Process DocIds for chunked compare query
@@ -2626,10 +2626,10 @@ collect_all_docids(StoreRef, DbName, infinity) ->
     %% Use long_scan profile for full table scans (prefetch, avoid cache pollution)
     barrel_store_rocksdb:fold_range(
         StoreRef,
-        barrel_store_keys:doc_info_prefix(DbName),
-        barrel_store_keys:doc_info_end(DbName),
+        barrel_store_keys:doc_info_prefix(barrel_keyspace:resolve(DbName)),
+        barrel_store_keys:doc_info_end(barrel_keyspace:resolve(DbName)),
         fun(Key, _Value, Acc) ->
-            DocId = barrel_store_keys:decode_doc_info_key(DbName, Key),
+            DocId = barrel_store_keys:decode_doc_info_key(barrel_keyspace:resolve(DbName), Key),
             {ok, [DocId | Acc]}
         end,
         [],
@@ -2640,13 +2640,13 @@ collect_all_docids(StoreRef, DbName, MaxCount) when is_integer(MaxCount) ->
     Profile = select_read_profile(MaxCount),
     {_, DocIds} = barrel_store_rocksdb:fold_range(
         StoreRef,
-        barrel_store_keys:doc_info_prefix(DbName),
-        barrel_store_keys:doc_info_end(DbName),
+        barrel_store_keys:doc_info_prefix(barrel_keyspace:resolve(DbName)),
+        barrel_store_keys:doc_info_end(barrel_keyspace:resolve(DbName)),
         fun(Key, _Value, {Count, Acc}) ->
             case Count >= MaxCount of
                 true -> {stop, {Count, Acc}};
                 false ->
-                    DocId = barrel_store_keys:decode_doc_info_key(DbName, Key),
+                    DocId = barrel_store_keys:decode_doc_info_key(barrel_keyspace:resolve(DbName), Key),
                     {ok, {Count + 1, [DocId | Acc]}}
             end
         end,
@@ -2945,7 +2945,7 @@ lazy_verify_all(_StoreRef, _DbName, _DocId, [_ | _]) ->
 %% Returns empty list if any condition has 0 cardinality (short-circuit).
 order_by_cardinality(StoreRef, DbName, Conditions) ->
     %% Build keys for all conditions
-    Keys = [barrel_store_keys:path_stats_key(DbName, Path ++ [Value])
+    Keys = [barrel_store_keys:path_stats_key(barrel_keyspace:resolve(DbName), Path ++ [Value])
             || {path, Path, Value} <- Conditions],
 
     %% Batch fetch all cardinalities with multi_get
@@ -2977,8 +2977,8 @@ order_by_cardinality(StoreRef, DbName, Conditions) ->
 execute_full_scan(StoreRef, DbName, Plan, Snapshot) ->
     %% Collect all doc IDs by scanning doc_entity keys
     %% Use long_scan profile for full table scans (prefetch, avoid cache pollution)
-    StartKey = barrel_store_keys:doc_entity_prefix(DbName),
-    EndKey = barrel_store_keys:doc_entity_end(DbName),
+    StartKey = barrel_store_keys:doc_entity_prefix(barrel_keyspace:resolve(DbName)),
+    EndKey = barrel_store_keys:doc_entity_end(barrel_keyspace:resolve(DbName)),
     PrefixLen = byte_size(StartKey),
     DocIds = barrel_store_rocksdb:fold_range(
         StoreRef,

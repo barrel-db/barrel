@@ -85,7 +85,8 @@ fold(StoreRef, DbName, Tag, Fun, Acc) ->
 %% @doc Fold over the pending entries of a tag with options.
 -spec fold(barrel_store_rocksdb:db_ref(), db_name(), tag(),
            fun((entry(), term()) -> {ok, term()} | {stop, term()}), term(), map()) -> term().
-fold(StoreRef, DbName, Tag, Fun, Acc, Opts) ->
+fold(StoreRef, DbName0, Tag, Fun, Acc, Opts) ->
+    DbName = barrel_keyspace:resolve(DbName0),
     Start = barrel_store_keys:outbox_prefix(DbName, Tag),
     End = barrel_store_keys:outbox_end(DbName, Tag),
     Limit = maps:get(limit, Opts, infinity),

@@ -171,14 +171,16 @@ segments_match(_, _) ->
                 [binary()], barrel_hlc:timestamp() | undefined,
                 [binary()]) -> [term()].
 write_ops(DbName, NewHlc, DocInfo, NewTopics, OldHlc, OldTopics) ->
+    %% config by the LOGICAL name, keys by the keyspace
     case channels(DbName) of
         Compiled when map_size(Compiled) =:= 0 ->
             [];
         Compiled ->
+            Ks = barrel_keyspace:resolve(DbName),
             DeleteOps = case OldHlc of
                 undefined -> [];
                 _ -> [{delete,
-                       barrel_store_keys:channel_key(DbName, C, OldHlc)}
+                       barrel_store_keys:channel_key(Ks, C, OldHlc)}
                       || C <- maps:keys(Compiled)]
             end,
             Deleted = maps:get(deleted, DocInfo, false),
@@ -186,19 +188,19 @@ write_ops(DbName, NewHlc, DocInfo, NewTopics, OldHlc, OldTopics) ->
                 true ->
                     %% the tombstone lands where the doc was
                     [{put,
-                      barrel_store_keys:channel_key(DbName, C, NewHlc),
+                      barrel_store_keys:channel_key(Ks, C, NewHlc),
                       encode_row(member, DocInfo)}
                      || C <- match(Compiled, OldTopics)];
                 false ->
                     InNew = match(Compiled, NewTopics),
                     InOld = match(Compiled, OldTopics),
                     [{put,
-                      barrel_store_keys:channel_key(DbName, C, NewHlc),
+                      barrel_store_keys:channel_key(Ks, C, NewHlc),
                       encode_row(member, DocInfo)}
                      || C <- InNew]
                     ++
                     [{put,
-                      barrel_store_keys:channel_key(DbName, C, NewHlc),
+                      barrel_store_keys:channel_key(Ks, C, NewHlc),
                       encode_row(leave, DocInfo)}
                      || C <- InOld -- InNew]
             end,
@@ -217,9 +219,11 @@ write_ops(DbName, NewHlc, DocInfo, NewTopics, OldHlc, OldTopics) ->
                binary(), barrel_hlc:timestamp(), barrel_hlc:timestamp(),
                map()) -> [term()].
 move_ops(Get, DbName, OldHlc, NewHlc, DocInfo) ->
+    %% config by the LOGICAL name, keys by the keyspace
+    Ks = barrel_keyspace:resolve(DbName),
     lists:flatmap(
         fun(Channel) ->
-            OldKey = barrel_store_keys:channel_key(DbName, Channel, OldHlc),
+            OldKey = barrel_store_keys:channel_key(Ks, Channel, OldHlc),
             case Get(OldKey) of
                 {ok, Value} ->
                     NewValue = case decode_row(Value) of
@@ -228,7 +232,7 @@ move_ops(Get, DbName, OldHlc, NewHlc, DocInfo) ->
                     end,
                     [{delete, OldKey},
                      {put,
-                      barrel_store_keys:channel_key(DbName, Channel, NewHlc),
+                      barrel_store_keys:channel_key(Ks, Channel, NewHlc),
                       NewValue}];
                 _ ->
                     []
@@ -248,7 +252,8 @@ move_ops(Get, DbName, OldHlc, NewHlc, DocInfo) ->
 -spec fold(barrel_store_rocksdb:db_ref(), binary(), binary(),
            barrel_hlc:timestamp() | first, map()) ->
     {ok, [map()], barrel_hlc:timestamp()}.
-fold(StoreRef, DbName, Channel, Since, Opts) ->
+fold(StoreRef, DbName0, Channel, Since, Opts) ->
+    DbName = barrel_keyspace:resolve(DbName0),
     {StartHlc, StartKey} = case Since of
         first ->
             Min = barrel_hlc:min(),
