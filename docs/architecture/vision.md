@@ -157,7 +157,7 @@ Migration path (staged, adapter-first):
 
 | # | Decision | Choice | Rationale |
 |---|----------|--------|-----------|
-| 1 | Sync core | HLC version vectors, not rev-trees | Rev-tree wounds (tombstones, arbitrary winners, metadata in read path); CBL 4.0 precedent |
+| 1 | Sync core | HLC version vectors, not rev-trees | Rev-tree wounds (tombstones, arbitrary winners, metadata in read path); CBL 4.0 precedent. SHIPPED as phases 3+5: VV protocol + retained history (phase 3); network transport over HTTP (JSON + base64 wire, /db/:db/_sync/*), static bearer auth, write-time channels (0x1E feed) for partial sync, content-addressed attachment sync (feed in the blob store, LWW on origin HLC, streamed wire), event-driven continuous tasks (changes-stream wake, adaptive remote polling, error backoff). Quantized vector sync deferred to phase 9 |
 | 2 | Doc+vector atomicity | Outbox marker in one WriteBatch, changes-feed indexing; storage unification later | Atomic now without blocking vectordb's standalone life. SHIPPED as record mode (phase 2): tagged outbox + supervised indexer + sync mode + read-through docstore |
 | 3 | Query dialect | PartiQL semantics | JSON-first SQL semantics already specified; nothing to invent. SHIPPED as BQL v1 (phase 4): leex/yecc parser lowering onto the query engine, vector_top_k/bm25_top_k/hybrid_top_k table functions, UNNEST, SUBSCRIBE live queries, streaming REST endpoint |
 | 4 | barrel_memory | Standalone policy product on barrel primitives | Memory layer is commoditizing; substrate is the durable value; migration staged |
