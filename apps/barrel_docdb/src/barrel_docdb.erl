@@ -163,7 +163,8 @@
 -export([
     put_local_doc/3,
     get_local_doc/2,
-    delete_local_doc/2
+    delete_local_doc/2,
+    fold_local_docs/4
 ]).
 
 %% System documents (global, not replicated, stored in _barrel_system db)
@@ -1711,6 +1712,23 @@ get_local_doc(Db, DocId) ->
 delete_local_doc(Db, DocId) ->
     with_db(Db, fun(Pid) ->
         barrel_db_server:delete_local_doc(Pid, DocId)
+    end).
+
+%% @doc Fold local documents whose id starts with a prefix. Local
+%% docs bypass the path index, so this is the only way to enumerate
+%% them (find/2 cannot see them).
+%%
+%% @param Db Database name or pid
+%% @param Prefix Document ID prefix to filter by
+%% @param Fun Callback function(DocId, Doc, Acc) -> NewAcc
+%% @param Acc0 Initial accumulator
+%% @returns `{ok, FinalAcc}'
+-spec fold_local_docs(binary() | pid(), binary(),
+                      fun((binary(), map(), term()) -> term()), term()) ->
+    {ok, term()} | {error, term()}.
+fold_local_docs(Db, Prefix, Fun, Acc0) ->
+    with_db(Db, fun(Pid) ->
+        barrel_db_server:fold_local_docs(Pid, Prefix, Fun, Acc0)
     end).
 
 %%====================================================================

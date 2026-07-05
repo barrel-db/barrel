@@ -60,6 +60,14 @@
 %% Default batch size for continuous replication
 -define(DEFAULT_BATCH_SIZE, 100).
 
+%% Remote-source idle polling: doubles on empty, resets on data
+-define(POLL_MIN, 500).
+-define(POLL_MAX, 15000).
+
+%% Continuous-task error backoff: doubles on error, resets on success
+-define(BACKOFF_MIN, 1000).
+-define(BACKOFF_MAX, 60000).
+
 %%====================================================================
 %% Types
 %%====================================================================
@@ -240,9 +248,16 @@ handle_cast({task_progress, TaskId, LastSeq}, State) ->
     {noreply, State};
 
 handle_cast({task_error, TaskId, Reason}, State) ->
-    _ = update_task_status(TaskId, failed, #{error => format_reason(Reason)}),
+    _ = update_task_status(TaskId, failed,
+                           #{<<"error">> => format_reason(Reason)}),
     NewRunning = maps:remove(TaskId, State#state.running),
     {noreply, State#state{running = NewRunning}};
+
+handle_cast({task_last_error, TaskId, Reason}, State) ->
+    %% continuous task riding out a transient error: record it
+    %% without a status change, the task stays running
+    _ = update_task_last_error(TaskId, Reason),
+    {noreply, State};
 
 handle_cast(_Msg, State) ->
     {noreply, State}.
@@ -356,10 +371,12 @@ do_get_task(TaskId) ->
     end.
 
 do_list_tasks(Filter, State) ->
-    %% Get all tasks from database
-    case barrel_docdb:find(?TASKS_DB, #{where => [{prefix, [<<"_type">>], <<"rep_task">>}]}) of
-        {ok, Docs, _Cont} ->
-            Tasks = lists:map(fun doc_to_task/1, Docs),
+    %% Task docs are LOCAL docs: they bypass the path index, so they
+    %% must be enumerated with a local-doc fold (find/2 cannot see
+    %% them, which used to make list_tasks and restore return nothing)
+    case barrel_docdb:fold_local_docs(?TASKS_DB, <<"rep_task:">>,
+             fun(_DocId, Doc, Acc) -> [doc_to_task(Doc) | Acc] end, []) of
+        {ok, Tasks} ->
             %% Apply filter
             Filtered = filter_tasks(Tasks, Filter),
             %% Add running status from state
@@ -406,13 +423,22 @@ start_task_process(#{id := TaskId, config := Config} = Task, State) ->
     {ok, State#state{running = NewRunning}}.
 
 run_task(Parent, TaskId, Config, SourceTransport, TargetTransport, StartSeq) ->
-    Source = maps:get(source, Config),
-    Target = maps:get(target, Config),
+    %% Endpoints resolve once at task start (normalized URL, auth from
+    %% the sync_auth env), so the same term flows everywhere.
+    Source = resolve_endpoint(maps:get(source, Config)),
+    Target = resolve_endpoint(maps:get(target, Config)),
     Direction = maps:get(direction, Config, push),
     Mode = maps:get(mode, Config, one_shot),
-    BatchSize = maps:get(batch_size, Config, ?DEFAULT_BATCH_SIZE),
-    Filter = maps:get(filter, Config, #{}),
-    WaitFor = maps:get(wait_for, Config, []),
+
+    Ctx0 = #{
+        parent => Parent,
+        task_id => TaskId,
+        mode => Mode,
+        batch_size => maps:get(batch_size, Config, ?DEFAULT_BATCH_SIZE),
+        filter => maps:get(filter, Config, #{}),
+        wait_for => [resolve_endpoint(W)
+                     || W <- maps:get(wait_for, Config, [])]
+    },
 
     ExtraAttrs = #{
         <<"replication.task_id">> => TaskId,
@@ -425,65 +451,131 @@ run_task(Parent, TaskId, Config, SourceTransport, TargetTransport, StartSeq) ->
         case Direction of
             push ->
                 %% Source -> Target (read from source, write to target)
-                run_task_loop(Parent, TaskId, Source, Target, SourceTransport, TargetTransport,
-                              StartSeq, BatchSize, Filter, Mode, WaitFor);
+                run_direction(Ctx0, Source, Target, SourceTransport,
+                              TargetTransport, StartSeq);
             pull ->
                 %% Target -> Source (read from target, write to source)
-                %% Swap the read/write roles
-                run_task_loop(Parent, TaskId, Target, Source, TargetTransport, SourceTransport,
-                              StartSeq, BatchSize, Filter, Mode, WaitFor);
+                run_direction(Ctx0, Target, Source, TargetTransport,
+                              SourceTransport, StartSeq);
             both ->
                 %% Bidirectional: run both push and pull concurrently
                 %% This is simplified - for production we'd want separate checkpoints
                 Self = self(),
                 spawn_link(fun() ->
-                    run_task_loop(Self, TaskId, Source, Target, SourceTransport, TargetTransport,
-                                  StartSeq, BatchSize, Filter, Mode, WaitFor)
+                    run_direction(Ctx0#{parent := Self}, Source, Target,
+                                  SourceTransport, TargetTransport,
+                                  StartSeq)
                 end),
                 %% Run pull in this process
-                run_task_loop(Parent, TaskId, Target, Source, TargetTransport, SourceTransport,
-                              StartSeq, BatchSize, Filter, Mode, WaitFor)
+                run_direction(Ctx0, Target, Source, TargetTransport,
+                              SourceTransport, StartSeq)
         end
     end).
 
-run_task_loop(Parent, TaskId, Source, Target, SourceTransport, TargetTransport,
-              Since, BatchSize, Filter, Mode, WaitFor) ->
-    %% Build changes options
-    ChangesOpts = #{limit => BatchSize},
-    ChangesOpts2 = case maps:get(paths, Filter, undefined) of
-        undefined -> ChangesOpts;
-        Paths -> ChangesOpts#{paths => Paths}
-    end,
+run_direction(Ctx, From, To, FromTransport, ToTransport, Since) ->
+    Ctx2 = Ctx#{
+        from => From,
+        to => To,
+        from_transport => FromTransport,
+        to_transport => ToTransport,
+        wake => init_wake(Ctx, From, Since),
+        poll => ?POLL_MIN,
+        backoff => ?BACKOFF_MIN
+    },
+    run_task_loop(Ctx2, Since).
 
-    %% Get changes
-    case SourceTransport:get_changes(Source, Since, ChangesOpts2) of
+%% Continuous local sources wake on the changes stream, subscribed
+%% BEFORE the first drain so no write slips between drain and
+%% subscribe. Remote (and streamless) sources poll adaptively.
+init_wake(#{mode := continuous}, From, Since) when is_binary(From) ->
+    case barrel_docdb:subscribe_changes(From, Since,
+                                        #{mode => push,
+                                          owner => self()}) of
+        {ok, Stream} -> {stream, Stream};
+        {error, _} -> poll
+    end;
+init_wake(_Ctx, _From, _Since) ->
+    poll.
+
+run_task_loop(Ctx, Since) ->
+    #{parent := Parent, task_id := TaskId, mode := Mode,
+      from := From, to := To,
+      from_transport := FromTransport, to_transport := ToTransport,
+      batch_size := BatchSize, filter := Filter,
+      wait_for := WaitFor} = Ctx,
+
+    %% Changes options carry the whole filter: paths, query, channel
+    ChangesOpts = maps:merge(#{limit => BatchSize},
+                             maps:with([paths, query, channel], Filter)),
+
+    case FromTransport:get_changes(From, Since, ChangesOpts) of
         {ok, [], _LastSeq} when Mode =:= one_shot ->
             %% No more changes, one-shot complete
             gen_server:cast(Parent, {task_complete, TaskId});
 
-        {ok, [], _LastSeq} when Mode =:= continuous ->
-            %% No changes, wait and retry
-            timer:sleep(1000),
-            run_task_loop(Parent, TaskId, Source, Target, SourceTransport, TargetTransport,
-                          Since, BatchSize, Filter, Mode, WaitFor);
+        {ok, [], _LastSeq} ->
+            %% Idle: block on the wake signal (stream or poll timer)
+            run_task_loop(wait_for_wake(Ctx), Since);
 
         {ok, Changes, LastSeq} ->
-            %% Replicate batch
-            {ok, _Stats} = barrel_rep_alg:replicate(Source, Target, SourceTransport, TargetTransport, Changes),
-            %% If wait_for is specified, verify docs reached downstream
-            case wait_for_downstream(Changes, WaitFor) of
-              ok ->
-                %% Update checkpoint
-                gen_server:cast(Parent, {task_progress, TaskId, LastSeq}),
-                %% Continue
-                run_task_loop(Parent, TaskId, Source, Target, SourceTransport, TargetTransport,
-                              LastSeq, BatchSize, Filter, Mode, WaitFor);
-              {error, Reason} ->
-                gen_server:cast(Parent, {task_error, TaskId, Reason})
+            case replicate_batch(From, To, FromTransport, ToTransport,
+                                 Changes, WaitFor) of
+                ok ->
+                    %% Update checkpoint
+                    gen_server:cast(Parent,
+                                    {task_progress, TaskId, LastSeq}),
+                    run_task_loop(reset_pacing(Ctx), LastSeq);
+                {error, Reason} ->
+                    handle_loop_error(Ctx, Since, Reason)
             end;
         {error, Reason} ->
-            gen_server:cast(Parent, {task_error, TaskId, Reason})
+            handle_loop_error(Ctx, Since, Reason)
     end.
+
+replicate_batch(From, To, FromTransport, ToTransport, Changes, WaitFor) ->
+    case barrel_rep_alg:replicate(From, To, FromTransport, ToTransport,
+                                  Changes) of
+        {ok, _Stats} ->
+            %% If wait_for is specified, verify docs reached downstream
+            wait_for_downstream(Changes, WaitFor);
+        {error, _} = Error ->
+            Error
+    end.
+
+%% Continuous tasks ride out transient errors: record last_error on
+%% the task doc (status stays running) and back off exponentially
+%% with jitter. One-shot keeps fail-fast.
+handle_loop_error(#{mode := continuous} = Ctx, Since, Reason) ->
+    #{parent := Parent, task_id := TaskId, backoff := Backoff} = Ctx,
+    gen_server:cast(Parent, {task_last_error, TaskId, Reason}),
+    timer:sleep(with_jitter(Backoff)),
+    run_task_loop(Ctx#{backoff := min(Backoff * 2, ?BACKOFF_MAX)}, Since);
+handle_loop_error(#{parent := Parent, task_id := TaskId}, _Since,
+                  Reason) ->
+    gen_server:cast(Parent, {task_error, TaskId, Reason}).
+
+with_jitter(Ms) ->
+    Ms + rand:uniform(max(Ms div 4, 1)).
+
+reset_pacing(Ctx) ->
+    Ctx#{poll := ?POLL_MIN, backoff := ?BACKOFF_MIN}.
+
+%% Idle continuous task. Stream-woken: the stream payload is
+%% unfiltered, so it is a wake-up signal only; ack immediately and
+%% drain through the transport with the task's filter. Polling:
+%% adaptive interval, doubled while idle.
+wait_for_wake(#{wake := {stream, Stream}} = Ctx) ->
+    case barrel_changes_stream:await(Stream, infinity) of
+        {ReqId, _Changes} ->
+            ok = barrel_changes_stream:ack(Stream, ReqId),
+            Ctx;
+        [] ->
+            %% stream went away: degrade to polling
+            Ctx#{wake := poll}
+    end;
+wait_for_wake(#{wake := poll, poll := Poll} = Ctx) ->
+    timer:sleep(Poll),
+    Ctx#{poll := min(Poll * 2, ?POLL_MAX)}.
 
 %% @doc Wait for documents to reach downstream targets
 %% For each change, verify the revision exists at all wait_for targets
@@ -538,13 +630,12 @@ verify_at_targets(Docs, Targets, Retries, Delay) ->
             verify_at_targets(Docs, Targets, Retries - 1, Delay)
     end.
 
-%% @doc Get the appropriate transport for a target
-get_transport_for_target(Target) when is_binary(Target) ->
-    barrel_rep_transport_local;
-get_transport_for_target(#{url := _} = Target) ->
-    error({http_transport_removed, Target});
-get_transport_for_target(_) ->
-    barrel_rep_transport_local.
+%% @doc Get the appropriate transport for a (resolved) target
+get_transport_for_target(Target) ->
+    case is_remote(Target) of
+        true -> barrel_rep_transport_http;
+        false -> barrel_rep_transport_local
+    end.
 
 handle_task_down(Pid, Reason, State) ->
     %% Find task by pid
@@ -556,7 +647,8 @@ handle_task_down(Pid, Reason, State) ->
                 shutdown -> paused;
                 _ -> failed
             end,
-            _ = update_task_status(TaskId, Status, #{error => format_reason(Reason)}),
+            _ = update_task_status(TaskId, Status,
+                                   #{<<"error">> => format_reason(Reason)}),
             NewRunning = maps:remove(TaskId, State#state.running),
             State#state{running = NewRunning};
         error ->
@@ -628,28 +720,28 @@ update_task_status(TaskId, Status) ->
     update_task_status(TaskId, Status, #{}).
 
 update_task_status(TaskId, Status, Extra) ->
-    case barrel_docdb:get_local_doc(?TASKS_DB, task_doc_id(TaskId)) of
-        {ok, Doc} ->
-            Now = erlang:system_time(millisecond),
-            Doc2 = Doc#{
-                <<"status">> => atom_to_binary(Status),
-                <<"updated_at">> => Now
-            },
-            Doc3 = maps:merge(Doc2, maps:map(fun(_, V) -> V end, Extra)),
-            barrel_docdb:put_local_doc(?TASKS_DB, task_doc_id(TaskId), Doc3);
-        {error, _} ->
-            ok
-    end.
+    update_task_doc(TaskId, fun(Doc) ->
+        maps:merge(Doc#{<<"status">> => atom_to_binary(Status)}, Extra)
+    end).
 
 update_task_seq(TaskId, Seq) ->
+    update_task_doc(TaskId, fun(Doc) ->
+        Doc#{<<"last_seq">> => format_seq(Seq)}
+    end).
+
+update_task_last_error(TaskId, Reason) ->
+    update_task_doc(TaskId, fun(Doc) ->
+        Doc#{<<"last_error">> => format_reason(Reason)}
+    end).
+
+update_task_doc(TaskId, Fun) ->
     case barrel_docdb:get_local_doc(?TASKS_DB, task_doc_id(TaskId)) of
         {ok, Doc} ->
-            Now = erlang:system_time(millisecond),
-            Doc2 = Doc#{
-                <<"last_seq">> => format_seq(Seq),
-                <<"updated_at">> => Now
-            },
-            barrel_docdb:put_local_doc(?TASKS_DB, task_doc_id(TaskId), Doc2);
+            Doc2 = Fun(Doc),
+            Doc3 = Doc2#{<<"updated_at">> =>
+                             erlang:system_time(millisecond)},
+            barrel_docdb:put_local_doc(?TASKS_DB, task_doc_id(TaskId),
+                                       Doc3);
         {error, _} ->
             ok
     end.
@@ -673,45 +765,87 @@ task_to_doc(#{id := Id, config := Config, status := Status,
     }.
 
 doc_to_task(Doc) ->
-    #{
+    Task = #{
         id => maps:get(<<"id">>, Doc),
         config => map_to_config(maps:get(<<"config">>, Doc)),
         status => binary_to_existing_atom(maps:get(<<"status">>, Doc), utf8),
         last_seq => parse_seq(maps:get(<<"last_seq">>, Doc, <<"first">>)),
         created_at => maps:get(<<"created_at">>, Doc),
         updated_at => maps:get(<<"updated_at">>, Doc)
-    }.
-
-config_to_map(Config) ->
-    maps:map(
-        fun(source_transport, Mod) -> atom_to_binary(Mod);
-           (target_transport, Mod) -> atom_to_binary(Mod);
-           (mode, Mode) -> atom_to_binary(Mode);
-           (direction, Dir) -> atom_to_binary(Dir);
-           (_, V) -> V
+    },
+    maps:fold(
+        fun(<<"error">>, V, Acc) -> Acc#{error => V};
+           (<<"last_error">>, V, Acc) -> Acc#{last_error => V};
+           (_, _, Acc) -> Acc
         end,
-        Config
-    ).
+        Task,
+        Doc).
+
+%% The persisted config uses binary keys and wire-safe values: enums
+%% as binaries, the filter through barrel_rep_filter, and endpoints
+%% by their URL only (no secrets in task docs; auth re-resolves from
+%% the sync_auth env at task start).
+config_to_map(Config) ->
+    maps:fold(
+        fun(source, V, Acc) -> Acc#{<<"source">> => endpoint_to_doc(V)};
+           (target, V, Acc) -> Acc#{<<"target">> => endpoint_to_doc(V)};
+           (mode, V, Acc) -> Acc#{<<"mode">> => atom_to_binary(V, utf8)};
+           (direction, V, Acc) ->
+               Acc#{<<"direction">> => atom_to_binary(V, utf8)};
+           (source_transport, V, Acc) ->
+               Acc#{<<"source_transport">> => atom_to_binary(V, utf8)};
+           (target_transport, V, Acc) ->
+               Acc#{<<"target_transport">> => atom_to_binary(V, utf8)};
+           (batch_size, V, Acc) -> Acc#{<<"batch_size">> => V};
+           (filter, V, Acc) ->
+               Acc#{<<"filter">> => barrel_rep_filter:to_wire(V)};
+           (wait_for, V, Acc) ->
+               Acc#{<<"wait_for">> => [endpoint_to_doc(W) || W <- V]};
+           (_, _, Acc) -> Acc
+        end,
+        #{},
+        Config).
+
+endpoint_to_doc(#{url := Url}) -> Url;
+endpoint_to_doc(Other) -> Other.
 
 map_to_config(Map) ->
-    maps:map(
-        fun(<<"source_transport">>, Bin) -> binary_to_existing_atom(Bin, utf8);
-           (<<"target_transport">>, Bin) -> binary_to_existing_atom(Bin, utf8);
-           (<<"mode">>, Bin) -> binary_to_existing_atom(Bin, utf8);
-           (<<"direction">>, Bin) -> binary_to_existing_atom(Bin, utf8);
-           (K, V) when is_binary(K) -> {binary_to_existing_atom(K, utf8), V};
-           (_, V) -> V
+    maps:fold(
+        fun(<<"source">>, V, Acc) -> Acc#{source => V};
+           (<<"target">>, V, Acc) -> Acc#{target => V};
+           (<<"mode">>, V, Acc) ->
+               Acc#{mode => binary_to_existing_atom(V, utf8)};
+           (<<"direction">>, V, Acc) ->
+               Acc#{direction => binary_to_existing_atom(V, utf8)};
+           (<<"source_transport">>, V, Acc) ->
+               Acc#{source_transport => binary_to_existing_atom(V, utf8)};
+           (<<"target_transport">>, V, Acc) ->
+               Acc#{target_transport => binary_to_existing_atom(V, utf8)};
+           (<<"batch_size">>, V, Acc) -> Acc#{batch_size => V};
+           (<<"filter">>, V, Acc) ->
+               case barrel_rep_filter:from_wire(V) of
+                   {ok, Filter} -> Acc#{filter => Filter};
+                   {error, _} -> Acc
+               end;
+           (<<"wait_for">>, V, Acc) -> Acc#{wait_for => V};
+           (_, _, Acc) -> Acc
         end,
-        Map
-    ).
+        #{},
+        Map).
 
 format_seq(first) -> <<"first">>;
-format_seq(Seq) when is_tuple(Seq) ->
-    iolist_to_binary(io_lib:format("~p", [Seq]));
-format_seq(Seq) -> Seq.
+format_seq(Seq) -> barrel_rep_checkpoint:encode_seq(Seq).
 
 parse_seq(<<"first">>) -> first;
 parse_seq(Bin) when is_binary(Bin) ->
+    case barrel_rep_checkpoint:decode_seq(Bin) of
+        first -> legacy_parse_seq(Bin);
+        Seq -> Seq
+    end.
+
+%% Task docs written before the b64 codec stored the HLC with ~p;
+%% accept them once so a restart across the upgrade keeps its place.
+legacy_parse_seq(Bin) ->
     barrel_lib:safe(fun() ->
         {ok, Tokens, _} = erl_scan:string(binary_to_list(Bin) ++ "."),
         {ok, Term} = erl_parse:parse_term(Tokens),
@@ -729,7 +863,17 @@ format_reason(Reason) ->
 
 validate_config(Config) ->
     case {maps:is_key(source, Config), maps:is_key(target, Config)} of
-        {true, true} -> ok;
+        {true, true} ->
+            %% a bad remote URL fails at start_task, not asynchronously
+            %% inside the task process
+            try
+                _ = resolve_endpoint(maps:get(source, Config)),
+                _ = resolve_endpoint(maps:get(target, Config)),
+                ok
+            catch
+                error:{invalid_sync_url, Url} ->
+                    {error, {invalid_sync_url, Url}}
+            end;
         {false, _} -> {error, missing_source};
         {_, false} -> {error, missing_target}
     end.
@@ -738,25 +882,27 @@ generate_task_id() ->
     Rand = crypto:strong_rand_bytes(8),
     binary:encode_hex(Rand, lowercase).
 
+%% An explicit *_transport in the config wins; otherwise remote
+%% endpoints (URLs or endpoint maps) get the HTTP transport and
+%% database names the local one.
 get_transport(source, Config) ->
-    case maps:get(source, Config) of
-        Url when is_binary(Url), byte_size(Url) > 0 ->
-            case binary:match(Url, <<"://">>) of
-                nomatch -> maps:get(source_transport, Config, barrel_rep_transport_local);
-                _ -> error({http_transport_removed, Url})
-            end;
-        _ ->
-            maps:get(source_transport, Config, barrel_rep_transport_local)
-    end;
+    maps:get(source_transport, Config,
+             get_transport_for_target(maps:get(source, Config)));
 get_transport(target, Config) ->
-    case maps:get(target, Config) of
-        Url when is_binary(Url), byte_size(Url) > 0 ->
-            case binary:match(Url, <<"://">>) of
-                nomatch -> maps:get(target_transport, Config, barrel_rep_transport_local);
-                _ -> error({http_transport_removed, Url})
-            end;
-        _ ->
-            maps:get(target_transport, Config, barrel_rep_transport_local)
+    maps:get(target_transport, Config,
+             get_transport_for_target(maps:get(target, Config))).
+
+is_remote(#{url := _}) -> true;
+is_remote(Term) when is_binary(Term) ->
+    binary:match(Term, <<"://">>) =/= nomatch;
+is_remote(_) -> false.
+
+%% Remote endpoints normalize once (URL identity, auth from the
+%% sync_auth env); local database names pass through.
+resolve_endpoint(Term) ->
+    case is_remote(Term) of
+        true -> barrel_rep_transport_http:endpoint(Term);
+        false -> Term
     end.
 
 filter_tasks(Tasks, Filter) ->

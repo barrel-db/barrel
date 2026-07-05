@@ -19,7 +19,9 @@
     t_bidirectional_convergence/1,
     t_filtered_pull/1,
     t_checkpoint_reuse/1,
-    t_att_sync_rides_along/1
+    t_att_sync_rides_along/1,
+    t_continuous_push_over_http/1,
+    t_continuous_pull_over_http/1
 ]).
 
 -include_lib("common_test/include/ct.hrl").
@@ -27,7 +29,8 @@
 
 all() ->
     [t_push_over_http, t_pull_over_http, t_bidirectional_convergence,
-     t_filtered_pull, t_checkpoint_reuse, t_att_sync_rides_along].
+     t_filtered_pull, t_checkpoint_reuse, t_att_sync_rides_along,
+     t_continuous_push_over_http, t_continuous_pull_over_http].
 
 init_per_suite(Config) ->
     application:load(barrel_server),
@@ -181,3 +184,64 @@ t_att_sync_rides_along(Config) ->
     {ok, <<"blob">>} = barrel_docdb:get_attachment(Served, <<"d">>,
                                                    <<"f">>),
     ok.
+
+%% A continuous task with a remote URL target: the task manager
+%% resolves the HTTP transport itself, and the local changes stream
+%% wakes the push loop.
+t_continuous_push_over_http(Config) ->
+    Local = ?config(local, Config),
+    Served = ?config(served, Config),
+    Endpoint = ?config(endpoint, Config),
+    {ok, TaskId} = barrel_rep_tasks:start_task(#{
+        source => Local,
+        target => maps:get(url, Endpoint),
+        mode => continuous,
+        direction => push
+    }),
+    timer:sleep(300),
+    {ok, _} = barrel_docdb:put_doc(Local, #{<<"id">> => <<"cp1">>}),
+    ok = wait_until(doc_in(Served, <<"cp1">>), 50, 100),
+    %% still alive: a second write flows too
+    {ok, _} = barrel_docdb:put_doc(Local, #{<<"id">> => <<"cp2">>}),
+    ok = wait_until(doc_in(Served, <<"cp2">>), 50, 100),
+    ok = barrel_rep_tasks:stop_task(TaskId),
+    ok = barrel_rep_tasks:delete_task(TaskId),
+    ok.
+
+%% A continuous pull from a remote URL source: adaptive polling picks
+%% up remote writes (500ms floor, doubling while idle).
+t_continuous_pull_over_http(Config) ->
+    Local = ?config(local, Config),
+    Served = ?config(served, Config),
+    Endpoint = ?config(endpoint, Config),
+    {ok, _} = barrel_rep_transport_http:db_info(Endpoint),
+    {ok, TaskId} = barrel_rep_tasks:start_task(#{
+        source => Local,
+        target => maps:get(url, Endpoint),
+        mode => continuous,
+        direction => pull
+    }),
+    timer:sleep(300),
+    {ok, _} = barrel_docdb:put_doc(Served, #{<<"id">> => <<"cl1">>}),
+    ok = wait_until(doc_in(Local, <<"cl1">>), 100, 100),
+    ok = barrel_rep_tasks:stop_task(TaskId),
+    ok = barrel_rep_tasks:delete_task(TaskId),
+    ok.
+
+wait_until(_Fun, _IntervalMs, 0) ->
+    ct:fail(condition_never_met);
+wait_until(Fun, IntervalMs, Tries) ->
+    case Fun() of
+        true -> ok;
+        false ->
+            timer:sleep(IntervalMs),
+            wait_until(Fun, IntervalMs, Tries - 1)
+    end.
+
+doc_in(Db, DocId) ->
+    fun() ->
+        case barrel_docdb:get_doc(Db, DocId) of
+            {ok, _} -> true;
+            _ -> false
+        end
+    end.

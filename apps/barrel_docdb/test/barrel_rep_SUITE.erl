@@ -22,7 +22,8 @@ all() ->
         {group, filtered_replication},
         {group, hlc_replication},
         {group, direction},
-        {group, chain}
+        {group, chain},
+        {group, tasks}
     ].
 
 groups() ->
@@ -64,6 +65,12 @@ groups() ->
         {chain, [sequence], [
             chain_replication_wait_for,
             sync_put_doc
+        ]},
+        {tasks, [sequence], [
+            task_config_round_trip,
+            task_restore_after_manager_restart,
+            task_event_driven_latency,
+            task_continuous_survives_error
         ]}
     ].
 
@@ -108,6 +115,9 @@ init_per_group(Group, Config) ->
             {ok, _} = barrel_docdb:create_db(<<"chain_a">>, #{data_dir => DataDir ++ "_chain_a"}),
             {ok, _} = barrel_docdb:create_db(<<"chain_b">>, #{data_dir => DataDir ++ "_chain_b"}),
             {ok, _} = barrel_docdb:create_db(<<"chain_c">>, #{data_dir => DataDir ++ "_chain_c"});
+        tasks ->
+            {ok, _} = barrel_docdb:create_db(<<"test_source">>, #{data_dir => DataDir ++ "_source"}),
+            {ok, _} = barrel_docdb:create_db(<<"test_target">>, #{data_dir => DataDir ++ "_target"});
         _ ->
             ok
     end,
@@ -136,6 +146,9 @@ end_per_group(Group, Config) ->
             barrel_docdb:delete_db(<<"chain_a">>),
             barrel_docdb:delete_db(<<"chain_b">>),
             barrel_docdb:delete_db(<<"chain_c">>);
+        tasks ->
+            barrel_docdb:delete_db(<<"test_source">>),
+            barrel_docdb:delete_db(<<"test_target">>);
         _ ->
             ok
     end,
@@ -921,4 +934,136 @@ sync_put_doc(_Config) ->
     barrel_rep_tasks:pause_task(TaskAB),
     barrel_rep_tasks:delete_task(TaskAB),
 
+    ok.
+
+%%====================================================================
+%% Task manager rework tests (event-driven, restore, backoff)
+%%====================================================================
+
+wait_until(_Fun, _IntervalMs, 0) ->
+    ct:fail(condition_never_met);
+wait_until(Fun, IntervalMs, Tries) ->
+    case Fun() of
+        true ->
+            ok;
+        false ->
+            timer:sleep(IntervalMs),
+            wait_until(Fun, IntervalMs, Tries - 1)
+    end.
+
+doc_in(Db, DocId) ->
+    fun() ->
+        case barrel_docdb:get_doc(Db, DocId) of
+            {ok, _} -> true;
+            _ -> false
+        end
+    end.
+
+task_config_round_trip(_Config) ->
+    Filter = #{query => #{where => [{path, [<<"type">>], <<"a">>}]}},
+    {ok, TaskId} = barrel_rep_tasks:start_task(#{
+        source => <<"test_source">>,
+        target => <<"test_target">>,
+        mode => continuous,
+        direction => push,
+        batch_size => 42,
+        filter => Filter
+    }),
+    %% the persisted config round-trips: atom enums, filter, batch size
+    {ok, #{config := Config}} = barrel_rep_tasks:get_task(TaskId),
+    ?assertEqual(continuous, maps:get(mode, Config)),
+    ?assertEqual(push, maps:get(direction, Config)),
+    ?assertEqual(42, maps:get(batch_size, Config)),
+    ?assertEqual(Filter, maps:get(filter, Config)),
+    %% the query filter crosses into get_changes: matching doc flows
+    {ok, _} = barrel_docdb:put_doc(<<"test_source">>,
+        #{<<"id">> => <<"rt1">>, <<"type">> => <<"a">>}),
+    {ok, _} = barrel_docdb:put_doc(<<"test_source">>,
+        #{<<"id">> => <<"rt2">>, <<"type">> => <<"b">>}),
+    ok = wait_until(doc_in(<<"test_target">>, <<"rt1">>), 50, 100),
+    ?assertEqual({error, not_found},
+                 barrel_docdb:get_doc(<<"test_target">>, <<"rt2">>)),
+    %% the checkpointed seq round-trips as an HLC, not opaque text
+    ok = wait_until(fun() ->
+        case barrel_rep_tasks:get_task(TaskId) of
+            {ok, #{last_seq := Seq}} -> Seq =/= first;
+            _ -> false
+        end
+    end, 50, 100),
+    {ok, #{last_seq := Seq}} = barrel_rep_tasks:get_task(TaskId),
+    ?assert(is_tuple(Seq)),
+    ok = barrel_rep_tasks:stop_task(TaskId),
+    ok = barrel_rep_tasks:delete_task(TaskId),
+    ok.
+
+task_restore_after_manager_restart(_Config) ->
+    {ok, TaskId} = barrel_rep_tasks:start_task(#{
+        source => <<"test_source">>,
+        target => <<"test_target">>,
+        mode => continuous,
+        direction => push
+    }),
+    timer:sleep(200),
+    %% kill the manager; the supervisor restarts it and it restores
+    %% the task (regression: restored configs were mangled by
+    %% map_to_config and could never run)
+    OldPid = whereis(barrel_rep_tasks),
+    exit(OldPid, kill),
+    ok = wait_until(fun() ->
+        case whereis(barrel_rep_tasks) of
+            undefined -> false;
+            NewPid -> NewPid =/= OldPid
+        end
+    end, 50, 100),
+    timer:sleep(300),
+    {ok, #{status := running}} = barrel_rep_tasks:get_task(TaskId),
+    {ok, _} = barrel_docdb:put_doc(<<"test_source">>,
+                                   #{<<"id">> => <<"restored">>}),
+    ok = wait_until(doc_in(<<"test_target">>, <<"restored">>), 50, 100),
+    ok = barrel_rep_tasks:stop_task(TaskId),
+    ok = barrel_rep_tasks:delete_task(TaskId),
+    ok.
+
+task_event_driven_latency(_Config) ->
+    {ok, TaskId} = barrel_rep_tasks:start_task(#{
+        source => <<"test_source">>,
+        target => <<"test_target">>,
+        mode => continuous,
+        direction => push
+    }),
+    %% let the task drain and go idle on the changes stream
+    timer:sleep(400),
+    {ok, _} = barrel_docdb:put_doc(<<"test_source">>,
+                                   #{<<"id">> => <<"fast">>}),
+    T0 = erlang:monotonic_time(millisecond),
+    ok = wait_until(doc_in(<<"test_target">>, <<"fast">>), 10, 200),
+    Elapsed = erlang:monotonic_time(millisecond) - T0,
+    ct:pal("local continuous convergence in ~p ms", [Elapsed]),
+    %% the old loop slept a fixed 1000 ms between drains; the stream
+    %% wake must beat that comfortably
+    ?assert(Elapsed < 800),
+    ok = barrel_rep_tasks:stop_task(TaskId),
+    ok = barrel_rep_tasks:delete_task(TaskId),
+    ok.
+
+task_continuous_survives_error(_Config) ->
+    %% unreachable remote target: a continuous task records the error
+    %% and stays running (backoff), it does not fail
+    {ok, TaskId} = barrel_rep_tasks:start_task(#{
+        source => <<"test_source">>,
+        target => <<"http://127.0.0.1:1/db/nowhere">>,
+        mode => continuous,
+        direction => push
+    }),
+    {ok, _} = barrel_docdb:put_doc(<<"test_source">>,
+                                   #{<<"id">> => <<"err">>}),
+    ok = wait_until(fun() ->
+        case barrel_rep_tasks:get_task(TaskId) of
+            {ok, #{last_error := _}} -> true;
+            _ -> false
+        end
+    end, 100, 100),
+    {ok, #{status := running}} = barrel_rep_tasks:get_task(TaskId),
+    ok = barrel_rep_tasks:stop_task(TaskId),
+    ok = barrel_rep_tasks:delete_task(TaskId),
     ok.
