@@ -60,7 +60,8 @@
                 barrel_version:version(), boolean(), cause(),
                 barrel_vv:vv()) -> [term()].
 write_ops(DbName, ChangeHlc, DocId, Version, Deleted, Cause, VV) ->
-    [{put, barrel_store_keys:history_key(DbName, ChangeHlc),
+    Ks = barrel_keyspace:resolve(DbName),
+    [{put, barrel_store_keys:history_key(Ks, ChangeHlc),
       encode_entry(DocId, Version, Deleted, Cause, VV)}].
 
 %%====================================================================

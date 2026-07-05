@@ -55,7 +55,8 @@
                 docid(), revid(), boolean()) -> [term()].
 write_ops(_DbName, [], _NewHlc, _OldHlc, _DocId, _Rev, _Deleted) ->
     [];
-write_ops(DbName, Tags, NewHlc, OldHlc, DocId, Rev, Deleted) when is_list(Tags) ->
+write_ops(DbName0, Tags, NewHlc, OldHlc, DocId, Rev, Deleted) when is_list(Tags) ->
+    DbName = barrel_keyspace:resolve(DbName0),
     Entry = encode_entry(DocId, Rev, Deleted),
     lists:flatmap(
         fun(Tag) when is_binary(Tag) ->

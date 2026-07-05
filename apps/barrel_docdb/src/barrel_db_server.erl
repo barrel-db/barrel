@@ -462,7 +462,8 @@ handle_call(sweep_retention, _From,
 %% Tagged outbox operations
 handle_call({outbox_ack, Tag, Hlcs}, _From,
             #state{name = DbName, store_ref = StoreRef} = State) ->
-    Result = case [{delete, barrel_store_keys:outbox_key(DbName, Tag, Hlc)}
+    Ks = barrel_keyspace:resolve(DbName),
+    Result = case [{delete, barrel_store_keys:outbox_key(Ks, Tag, Hlc)}
                    || Hlc <- Hlcs] of
         [] -> ok;
         Ops -> barrel_store_rocksdb:write_batch(StoreRef, Ops, #{})
@@ -675,6 +676,7 @@ release_stale_refs(Name) ->
 %% All deletes and the floor advance commit in one batch; re-running a
 %% sweep is a no-op (deletes of missing keys do nothing).
 do_retention_sweep(StoreRef, AttRef, DbName, RetentionPeriod) ->
+    Ks = barrel_keyspace:resolve(DbName),
     CutoffMs = erlang:system_time(millisecond) - RetentionPeriod * 1000,
     Cutoff = barrel_hlc:from_wall_time(CutoffMs),
     %% Attachment feed tombstones follow the same window (separate
@@ -700,7 +702,7 @@ do_retention_sweep(StoreRef, AttRef, DbName, RetentionPeriod) ->
         #{to => Cutoff}),
     %% Channel leave rows are events, not state: age them out
     {LeaveOps, LeavesSwept} = sweep_channel_leaves(StoreRef, DbName, Cutoff),
-    FloorOp = {put, barrel_store_keys:db_meta(DbName, <<"history_floor">>),
+    FloorOp = {put, barrel_store_keys:db_meta(Ks, <<"history_floor">>),
                barrel_hlc:encode(Cutoff)},
     ok = barrel_store_rocksdb:write_batch(
         StoreRef, [FloorOp | Ops ++ LeaveOps], #{}),
@@ -710,10 +712,11 @@ do_retention_sweep(StoreRef, AttRef, DbName, RetentionPeriod) ->
 %% @private Delete leave rows older than the cutoff in every configured
 %% channel (member rows are live state and are never age-swept).
 sweep_channel_leaves(StoreRef, DbName, Cutoff) ->
+    Ks = barrel_keyspace:resolve(DbName),
     lists:foldl(
         fun(Channel, {OpsAcc, CountAcc}) ->
-            Start = barrel_store_keys:channel_prefix(DbName, Channel),
-            End = barrel_store_keys:channel_key(DbName, Channel, Cutoff),
+            Start = barrel_store_keys:channel_prefix(Ks, Channel),
+            End = barrel_store_keys:channel_key(Ks, Channel, Cutoff),
             barrel_store_rocksdb:fold_range(
                 StoreRef, Start, End,
                 fun(Key, Value, {InnerOps, InnerCount}) ->
@@ -733,9 +736,10 @@ sweep_channel_leaves(StoreRef, DbName, Cutoff) ->
 %% @private Ops for one expired history entry.
 sweep_entry_ops(StoreRef, DbName,
                 #{hlc := Hlc, id := DocId, version := Token}, Stats) ->
-    HistDel = {delete, barrel_store_keys:history_key(DbName, Hlc)},
+    Ks = barrel_keyspace:resolve(DbName),
+    HistDel = {delete, barrel_store_keys:history_key(Ks, Hlc)},
     VersionEnc = barrel_version:encode(barrel_version:from_token(Token)),
-    EntityKey = barrel_store_keys:doc_entity(DbName, DocId),
+    EntityKey = barrel_store_keys:doc_entity(Ks, DocId),
     case barrel_store_rocksdb:get_entity(StoreRef, EntityKey) of
         not_found ->
             %% Doc already fully forgotten
@@ -765,13 +769,14 @@ sweep_entry_ops(StoreRef, DbName,
 %% chain row and archived body. Live conflict siblings stay until
 %% resolved.
 sweep_old_version_ops(StoreRef, DbName, DocId, VersionEnc, HistDel, Stats) ->
-    ChainKey = barrel_store_keys:doc_version(DbName, DocId, VersionEnc),
+    Ks = barrel_keyspace:resolve(DbName),
+    ChainKey = barrel_store_keys:doc_version(Ks, DocId, VersionEnc),
     case barrel_store_rocksdb:get(StoreRef, ChainKey) of
         {ok, <<1:8, _/binary>>} ->
             %% Live conflict sibling
             {[HistDel], inc_sweep(history_swept, Stats)};
         {ok, _Superseded} ->
-            BodyKey = barrel_store_keys:doc_body_rev(DbName, DocId, VersionEnc),
+            BodyKey = barrel_store_keys:doc_body_rev(Ks, DocId, VersionEnc),
             {[HistDel, {delete, ChainKey}, {body_delete, BodyKey}],
              inc_sweep(superseded_removed, Stats)};
         not_found ->
@@ -782,27 +787,28 @@ sweep_old_version_ops(StoreRef, DbName, DocId, VersionEnc, HistDel, Stats) ->
 %% every chain row and archived body, and the live-feed row. The path
 %% index rows were already removed when the doc was deleted.
 forget_doc_ops(StoreRef, DbName, DocId, Columns) ->
+    Ks = barrel_keyspace:resolve(DbName),
     ChangeHlc = barrel_hlc:decode(proplists:get_value(?COL_HLC, Columns)),
-    Start = barrel_store_keys:doc_version_prefix(DbName, DocId),
-    End = barrel_store_keys:doc_version_end(DbName, DocId),
+    Start = barrel_store_keys:doc_version_prefix(Ks, DocId),
+    End = barrel_store_keys:doc_version_end(Ks, DocId),
     ChainOps = barrel_store_rocksdb:fold_range(
         StoreRef, Start, End,
         fun(Key, _Value, Acc) ->
-            VEnc = barrel_store_keys:decode_doc_version_key(DbName, DocId, Key),
+            VEnc = barrel_store_keys:decode_doc_version_key(Ks, DocId, Key),
             {ok, [{delete, Key},
                   {body_delete,
-                   barrel_store_keys:doc_body_rev(DbName, DocId, VEnc)}
+                   barrel_store_keys:doc_body_rev(Ks, DocId, VEnc)}
                   | Acc]}
         end,
         []),
     %% Channel rows live exactly at the doc's current change HLC (the
     %% writer invariant), so the forget covers them too
     ChannelDels = [{delete,
-                    barrel_store_keys:channel_key(DbName, C, ChangeHlc)}
+                    barrel_store_keys:channel_key(Ks, C, ChangeHlc)}
                    || C <- barrel_channel:names(DbName)],
-    [{entity_delete, barrel_store_keys:doc_entity(DbName, DocId)},
-     {body_delete, barrel_store_keys:doc_body(DbName, DocId)},
-     {delete, barrel_store_keys:doc_hlc(DbName, ChangeHlc)}
+    [{entity_delete, barrel_store_keys:doc_entity(Ks, DocId)},
+     {body_delete, barrel_store_keys:doc_body(Ks, DocId)},
+     {delete, barrel_store_keys:doc_hlc(Ks, ChangeHlc)}
      | ChannelDels ++ ChainOps].
 
 inc_sweep(Key, Stats) ->
@@ -860,7 +866,8 @@ embedding_columns(DocRecord) ->
 
 %% @doc Read a document's current version state (undefined when absent).
 read_current(StoreRef, DbName, DocId) ->
-    DocEntityKey = barrel_store_keys:doc_entity(DbName, DocId),
+    Ks = barrel_keyspace:resolve(DbName),
+    DocEntityKey = barrel_store_keys:doc_entity(Ks, DocId),
     case barrel_store_rocksdb:get_entity(StoreRef, DocEntityKey) of
         {ok, Columns} ->
             VV = case proplists:get_value(?COL_VV, Columns, <<>>) of
@@ -868,7 +875,7 @@ read_current(StoreRef, DbName, DocId) ->
                 VVBin -> barrel_vv:decode(VVBin)
             end,
             {Body, BodyCbor} = case barrel_store_rocksdb:body_get(StoreRef,
-                            barrel_store_keys:doc_body(DbName, DocId)) of
+                            barrel_store_keys:doc_body(Ks, DocId)) of
                 {ok, OldCborBin} ->
                     {barrel_docdb_codec_cbor:decode_any(OldCborBin), OldCborBin};
                 not_found ->
@@ -899,8 +906,11 @@ source_id(DbName) ->
     persistent_term:get({barrel_source, DbName}).
 
 %% @private Load or create the source id (persisted in db meta).
-ensure_source_id(StoreRef, DbName) ->
-    Key = barrel_store_keys:db_meta(DbName, <<"source_id">>),
+ensure_source_id(StoreRef, LogicalName) ->
+    %% Deliberately keyed by the LOGICAL name, never the keyspace: a
+    %% branch checkpoint carries only the parent-keyed source_id, so
+    %% this lookup misses on a fresh branch and mints a new author.
+    Key = barrel_store_keys:db_meta(LogicalName, <<"source_id">>),
     case barrel_store_rocksdb:get(StoreRef, Key) of
         {ok, SourceId} ->
             SourceId;
@@ -965,8 +975,9 @@ channel_ops(DbName, NewHlc, DocInfo, DocBody, OldHlc, OldDocBody,
     end.
 
 build_write_ops(StoreRef, DbName, DocRecord, Old, Opts) ->
+    Ks = barrel_keyspace:resolve(DbName),
     #{id := DocId, deleted := Deleted, doc := DocBody} = DocRecord,
-    DocEntityKey = barrel_store_keys:doc_entity(DbName, DocId),
+    DocEntityKey = barrel_store_keys:doc_entity(Ks, DocId),
 
     NextHlc = barrel_hlc:new_hlc(),
     NewVersion = barrel_version:new(NextHlc, source_id(DbName)),
@@ -1010,7 +1021,7 @@ build_write_ops(StoreRef, DbName, DocRecord, Old, Opts) ->
     %% Supersede the live-feed row of the previous write
     HlcDeleteOps = case OldHlc of
         undefined -> [];
-        _ -> [{delete, barrel_store_keys:doc_hlc(DbName, OldHlc)}]
+        _ -> [{delete, barrel_store_keys:doc_hlc(Ks, OldHlc)}]
     end,
 
     %% Path index operations (if not deleted)
@@ -1062,11 +1073,11 @@ build_write_ops(StoreRef, DbName, DocRecord, Old, Opts) ->
                 undefined -> [];
                 OldCbor ->
                     [{body_put,
-                      barrel_store_keys:doc_body_rev(DbName, DocId, OldVersionEnc),
+                      barrel_store_keys:doc_body_rev(Ks, DocId, OldVersionEnc),
                       OldCbor}]
             end,
             Chain = [{put,
-                      barrel_store_keys:doc_version(DbName, DocId, OldVersionEnc),
+                      barrel_store_keys:doc_version(Ks, DocId, OldVersionEnc),
                       sibling_entry(superseded, OldDeleted, OldVV)}],
             {Archive, Chain}
     end,
@@ -1085,7 +1096,7 @@ build_write_ops(StoreRef, DbName, DocRecord, Old, Opts) ->
                              OldDocBody, OldDeleted),
 
     %% Write new body to current location (no version in key)
-    BodyKey = barrel_store_keys:doc_body(DbName, DocId),
+    BodyKey = barrel_store_keys:doc_body(Ks, DocId),
     BodyOp = {body_put, BodyKey, CborBody},
     AllOps = DocOps ++ HlcDeleteOps ++ PathIndexOps ++ ChangeOps ++ PathHlcOps
         ++ ArchiveOps ++ ChainOps ++ OutboxOps ++ HistoryOps ++ ChannelOps
@@ -1161,7 +1172,8 @@ prepare_doc_ops(StoreRef, DbName, Doc, Opts) ->
 %% Read-modify-write of the entity columns is safe here: this runs in
 %% the database writer, which serializes all entity writes.
 do_set_doc_embedding(StoreRef, DbName, DocId, ExpectedRev, Vector) ->
-    DocEntityKey = barrel_store_keys:doc_entity(DbName, DocId),
+    Ks = barrel_keyspace:resolve(DbName),
+    DocEntityKey = barrel_store_keys:doc_entity(Ks, DocId),
     case barrel_store_rocksdb:get_entity(StoreRef, DocEntityKey) of
         {ok, Columns} ->
             CurrentToken = barrel_version:to_token(
@@ -1202,6 +1214,7 @@ do_get_docs(StoreRef, DbName, DocIds, Opts) ->
 %%   - rev: binary() - expected version token (optional, for conflict detection)
 %%   - sync: boolean() - if true, sync to disk before returning (default: false)
 do_delete_doc(StoreRef, DbName, DocId, Opts) ->
+    Ks = barrel_keyspace:resolve(DbName),
     case read_current(StoreRef, DbName, DocId) of
         undefined ->
             {error, not_found};
@@ -1220,7 +1233,7 @@ do_delete_doc(StoreRef, DbName, DocId, Opts) ->
             NewVersion = barrel_version:new(NextHlc, source_id(DbName)),
             NewToken = barrel_version:to_token(NewVersion),
             NewVV = barrel_vv:bump(OldVV, NewVersion),
-            DocEntityKey = barrel_store_keys:doc_entity(DbName, DocId),
+            DocEntityKey = barrel_store_keys:doc_entity(Ks, DocId),
 
             DocColumns = [
                 {?COL_VERSION, barrel_version:encode(NewVersion)},
@@ -1235,7 +1248,7 @@ do_delete_doc(StoreRef, DbName, DocId, Opts) ->
             DocOps = [{entity_put, DocEntityKey, DocColumns}],
 
             %% Supersede the live-feed row of the previous write
-            HlcDeleteOps = [{delete, barrel_store_keys:doc_hlc(DbName, OldHlc)}],
+            HlcDeleteOps = [{delete, barrel_store_keys:doc_hlc(Ks, OldHlc)}],
 
             %% Path index removal operations
             PathIndexOps = case barrel_ars_index:get_doc_paths(StoreRef, DbName, DocId) of
@@ -1265,11 +1278,11 @@ do_delete_doc(StoreRef, DbName, DocId, Opts) ->
                 undefined -> [];
                 OldCbor ->
                     [{body_put,
-                      barrel_store_keys:doc_body_rev(DbName, DocId, OldVersionEnc),
+                      barrel_store_keys:doc_body_rev(Ks, DocId, OldVersionEnc),
                       OldCbor}]
             end,
             ChainOps = [{put,
-                         barrel_store_keys:doc_version(DbName, DocId, OldVersionEnc),
+                         barrel_store_keys:doc_version(Ks, DocId, OldVersionEnc),
                          sibling_entry(superseded, OldDeleted, OldVV)}],
 
             %% Tagged outbox entries (deletes replace the pending entry too)
@@ -1307,8 +1320,9 @@ do_delete_doc(StoreRef, DbName, DocId, Opts) ->
 %%   - include_deleted: boolean() - include deleted documents (default: false)
 %% Note: Uses regular key iteration since wide columns are stored per-key
 do_fold_docs(StoreRef, DbName, Fun, Acc, Opts) ->
-    StartKey = barrel_store_keys:doc_entity_prefix(DbName),
-    EndKey = barrel_store_keys:doc_entity_end(DbName),
+    Ks = barrel_keyspace:resolve(DbName),
+    StartKey = barrel_store_keys:doc_entity_prefix(Ks),
+    EndKey = barrel_store_keys:doc_entity_end(Ks),
     PrefixLen = byte_size(StartKey),
     IncludeDeleted = maps:get(include_deleted, Opts, false),
 
@@ -1328,7 +1342,7 @@ do_fold_docs(StoreRef, DbName, Fun, Acc, Opts) ->
                         {ok, AccIn};
                     _ ->
                         %% Get document body from body CF (current body, no rev in key)
-                        BodyKey = barrel_store_keys:doc_body(DbName, DocId),
+                        BodyKey = barrel_store_keys:doc_body(Ks, DocId),
                         DocBody = case barrel_store_rocksdb:body_get(StoreRef, BodyKey) of
                             {ok, CborBin} -> barrel_docdb_codec_cbor:decode_any(CborBin);
                             not_found -> #{}
@@ -1476,14 +1490,15 @@ call_merger(Fun, DocId, LocalBody, RemoteBody) when is_function(Fun, 3) ->
 %% becomes current. The resolving write replicates like any other.
 apply_merged(StoreRef, DbName, DocId, MergedBody, RemoteBody, Version,
              RemoteVV, RemoteDeleted, Old, MergedVV, Tags) ->
+    Ks = barrel_keyspace:resolve(DbName),
     %% The remote arrival: superseded chain row, archived body, history
     RemoteChangeHlc = barrel_hlc:new_hlc(),
     VersionEnc = barrel_version:encode(Version),
     SiblingVV = barrel_vv:bump(RemoteVV, Version),
     RemoteOps = [
-        {put, barrel_store_keys:doc_version(DbName, DocId, VersionEnc),
+        {put, barrel_store_keys:doc_version(Ks, DocId, VersionEnc),
          sibling_entry(superseded, RemoteDeleted, SiblingVV)},
-        {body_put, barrel_store_keys:doc_body_rev(DbName, DocId, VersionEnc),
+        {body_put, barrel_store_keys:doc_body_rev(Ks, DocId, VersionEnc),
          barrel_docdb_codec_cbor:encode_cbor(RemoteBody)}
     ] ++ barrel_history:write_ops(DbName, RemoteChangeHlc, DocId, Version,
                                   RemoteDeleted, replicated, SiblingVV),
@@ -1511,6 +1526,7 @@ enforce_conflict_bound(_StoreRef, _DbName, _DocId, _NewSibling, NConflicts,
                        Max) when NConflicts =< Max ->
     {[], NConflicts};
 enforce_conflict_bound(StoreRef, DbName, DocId, NewSibling, NConflicts, Max) ->
+    Ks = barrel_keyspace:resolve(DbName),
     Existing = [V || {V, _Entry} <- conflict_siblings(StoreRef, DbName, DocId)],
     Sorted = lists:sort(
         fun(A, B) -> barrel_version:compare(A, B) =:= lt end,
@@ -1519,22 +1535,24 @@ enforce_conflict_bound(StoreRef, DbName, DocId, NewSibling, NConflicts, Max) ->
     Ops = lists:flatmap(
         fun(V) ->
             VEnc = barrel_version:encode(V),
-            [{delete, barrel_store_keys:doc_version(DbName, DocId, VEnc)},
+            [{delete, barrel_store_keys:doc_version(Ks, DocId, VEnc)},
              {body_delete,
-              barrel_store_keys:doc_body_rev(DbName, DocId, VEnc)}]
+              barrel_store_keys:doc_body_rev(Ks, DocId, VEnc)}]
         end,
         Victims),
     {Ops, Max}.
 
 %% @private Chain-row op for a version that is no longer current.
 chain_op(DbName, DocId, Version, Flag, Old) ->
+    Ks = barrel_keyspace:resolve(DbName),
     {put,
-     barrel_store_keys:doc_version(DbName, DocId, barrel_version:encode(Version)),
+     barrel_store_keys:doc_version(Ks, DocId, barrel_version:encode(Version)),
      sibling_entry(Flag, maps:get(deleted, Old), maps:get(vv, Old))}.
 
 %% @private The remote version becomes the current winner.
 apply_remote_current(StoreRef, DbName, DocId, DocBody, Version, VV, Deleted,
                      Old, NConflicts, ChainOps, Tags) ->
+    Ks = barrel_keyspace:resolve(DbName),
     ChangeHlc = barrel_hlc:new_hlc(),
     Token = barrel_version:to_token(Version),
     {OldHlc, OldDocBody, OldDocBodyCbor, CreatedAt, ExpiresAt, Tier} =
@@ -1556,13 +1574,13 @@ apply_remote_current(StoreRef, DbName, DocId, DocBody, Version, VV, Deleted,
         {?COL_EXPIRES_AT, ExpiresAt},
         {?COL_TIER, Tier}
     ],
-    DocOps = [{entity_put, barrel_store_keys:doc_entity(DbName, DocId),
+    DocOps = [{entity_put, barrel_store_keys:doc_entity(Ks, DocId),
                DocColumns}],
     DocInfo = #{id => DocId, rev => Token, deleted => Deleted,
                 num_conflicts => NConflicts, hlc => ChangeHlc},
     HlcDeleteOps = case OldHlc of
         undefined -> [];
-        _ -> [{delete, barrel_store_keys:doc_hlc(DbName, OldHlc)}]
+        _ -> [{delete, barrel_store_keys:doc_hlc(Ks, OldHlc)}]
     end,
     PathIndexOps = case Deleted of
         true when OldDocBody =/= undefined ->
@@ -1599,7 +1617,7 @@ apply_remote_current(StoreRef, DbName, DocId, DocBody, Version, VV, Deleted,
         {#{version := OldVersion}, OldCbor} ->
             [{body_put,
               barrel_store_keys:doc_body_rev(
-                  DbName, DocId, barrel_version:encode(OldVersion)),
+                  Ks, DocId, barrel_version:encode(OldVersion)),
               OldCbor}]
     end,
     HistoryOps = barrel_history:write_ops(
@@ -1614,7 +1632,7 @@ apply_remote_current(StoreRef, DbName, DocId, DocBody, Version, VV, Deleted,
     ChannelOps = channel_ops(DbName, ChangeHlc, DocInfo, DocBody, OldHlc,
                              OldDocBody, OldDeleted),
     CborBody = barrel_docdb_codec_cbor:encode_cbor(DocBody),
-    BodyOp = {body_put, barrel_store_keys:doc_body(DbName, DocId), CborBody},
+    BodyOp = {body_put, barrel_store_keys:doc_body(Ks, DocId), CborBody},
     AllOps = DocOps ++ HlcDeleteOps ++ PathIndexOps ++ ChangeOps ++ PathHlcOps
         ++ ArchiveOps ++ ChainOps ++ OutboxOps ++ HistoryOps ++ ChannelOps
         ++ [BodyOp],
@@ -1628,6 +1646,7 @@ apply_remote_current(StoreRef, DbName, DocId, DocBody, Version, VV, Deleted,
 %% ExtraOps carry sibling-bound drops, applied after the sibling puts.
 keep_local_add_conflict(StoreRef, DbName, DocId, RemoteBody, Version, RemoteVV,
                         RemoteDeleted, Old, MergedVV, NConflicts, ExtraOps) ->
+    Ks = barrel_keyspace:resolve(DbName),
     #{version := LocalV, hlc := OldHlc, deleted := LocalDeleted,
       body := LocalBody, created_at := CreatedAt, expires_at := ExpiresAt,
       tier := Tier} = Old,
@@ -1643,11 +1662,11 @@ keep_local_add_conflict(StoreRef, DbName, DocId, RemoteBody, Version, RemoteVV,
         {?COL_EXPIRES_AT, ExpiresAt},
         {?COL_TIER, Tier}
     ],
-    DocOps = [{entity_put, barrel_store_keys:doc_entity(DbName, DocId),
+    DocOps = [{entity_put, barrel_store_keys:doc_entity(Ks, DocId),
                DocColumns}],
     DocInfo = #{id => DocId, rev => LocalToken, deleted => LocalDeleted,
                 num_conflicts => NConflicts, hlc => ChangeHlc},
-    HlcDeleteOps = [{delete, barrel_store_keys:doc_hlc(DbName, OldHlc)}],
+    HlcDeleteOps = [{delete, barrel_store_keys:doc_hlc(Ks, OldHlc)}],
     ChangeInfo = DocInfo#{doc => LocalBody},
     ChangeOps = barrel_changes:write_change_ops(DbName, ChangeHlc, ChangeInfo),
     PathHlcOps = barrel_changes:update_path_index_ops(DbName, ChangeHlc,
@@ -1659,10 +1678,10 @@ keep_local_add_conflict(StoreRef, DbName, DocId, RemoteBody, Version, RemoteVV,
     SiblingEntry = <<1:8, %% conflict
                      (case RemoteDeleted of true -> 1; false -> 0 end):8,
                      (barrel_vv:encode(SiblingVV))/binary>>,
-    ChainOps = [{put, barrel_store_keys:doc_version(DbName, DocId, VersionEnc),
+    ChainOps = [{put, barrel_store_keys:doc_version(Ks, DocId, VersionEnc),
                  SiblingEntry}],
     ArchiveOps = [{body_put,
-                   barrel_store_keys:doc_body_rev(DbName, DocId, VersionEnc),
+                   barrel_store_keys:doc_body_rev(Ks, DocId, VersionEnc),
                    barrel_docdb_codec_cbor:encode_cbor(RemoteBody)}],
     %% History records the arrival of the losing sibling
     HistoryOps = barrel_history:write_ops(
@@ -1703,14 +1722,16 @@ do_diff_versions(StoreRef, DbName, TokenMap) ->
 
 %% @doc Put a local document (per-database)
 do_put_local_doc(StoreRef, DbName, DocId, Doc) ->
-    Key = barrel_store_keys:local_doc_key(DbName, DocId),
+    Ks = barrel_keyspace:resolve(DbName),
+    Key = barrel_store_keys:local_doc_key(Ks, DocId),
     Value = term_to_binary(Doc),
     ok = barrel_store_rocksdb:local_put(StoreRef, Key, Value),
     ok.
 
 %% @doc Get a local document (per-database)
 do_get_local_doc(StoreRef, DbName, DocId) ->
-    Key = barrel_store_keys:local_doc_key(DbName, DocId),
+    Ks = barrel_keyspace:resolve(DbName),
+    Key = barrel_store_keys:local_doc_key(Ks, DocId),
     case barrel_store_rocksdb:local_get(StoreRef, Key) of
         {ok, Value} ->
             {ok, binary_to_term(Value)};
@@ -1720,7 +1741,8 @@ do_get_local_doc(StoreRef, DbName, DocId) ->
 
 %% @doc Delete a local document (per-database)
 do_delete_local_doc(StoreRef, DbName, DocId) ->
-    Key = barrel_store_keys:local_doc_key(DbName, DocId),
+    Ks = barrel_keyspace:resolve(DbName),
+    Key = barrel_store_keys:local_doc_key(Ks, DocId),
     case barrel_store_rocksdb:local_get(StoreRef, Key) of
         {ok, _} ->
             ok = barrel_store_rocksdb:local_delete(StoreRef, Key),
@@ -1732,10 +1754,11 @@ do_delete_local_doc(StoreRef, DbName, DocId) ->
 %% @doc Fold over local documents matching a prefix
 %% The prefix is applied to the DocId portion (after DbName).
 do_fold_local_docs(StoreRef, DbName, DocIdPrefix, Fun, Acc0) ->
+    Ks = barrel_keyspace:resolve(DbName),
     %% Build full key prefix: DbName + 0 + DocIdPrefix
-    KeyPrefix = barrel_store_keys:local_doc_key(DbName, DocIdPrefix),
+    KeyPrefix = barrel_store_keys:local_doc_key(Ks, DocIdPrefix),
     %% Fold over matching keys, decode values, extract DocId
-    DbNameLen = byte_size(DbName),
+    DbNameLen = byte_size(Ks),
     Result = barrel_store_rocksdb:local_fold(
         StoreRef,
         KeyPrefix,
@@ -1831,14 +1854,15 @@ do_get_conflicts(StoreRef, DbName, DocId) ->
 %% @doc Scan the version chain for live conflict siblings.
 %% Returns [{version(), sibling_entry_map()}].
 conflict_siblings(StoreRef, DbName, DocId) ->
-    Start = barrel_store_keys:doc_version_prefix(DbName, DocId),
-    End = barrel_store_keys:doc_version_end(DbName, DocId),
+    Ks = barrel_keyspace:resolve(DbName),
+    Start = barrel_store_keys:doc_version_prefix(Ks, DocId),
+    End = barrel_store_keys:doc_version_end(Ks, DocId),
     Fold = fun(Key, Value, Acc) ->
         Entry = decode_sibling_entry(Value),
         case maps:get(flag, Entry) of
             conflict ->
                 VersionEnc = barrel_store_keys:decode_doc_version_key(
-                                 DbName, DocId, Key),
+                                 Ks, DocId, Key),
                 {ok, [{barrel_version:decode(VersionEnc), Entry} | Acc]};
             superseded ->
                 {ok, Acc}
@@ -1873,6 +1897,7 @@ do_resolve_conflict(StoreRef, DbName, DocId, BaseRev, Resolution) ->
 
 %% @private Apply a conflict resolution as a superseding write.
 apply_resolution(StoreRef, DbName, DocId, Old, CurrentVV, Siblings, Resolution) ->
+    Ks = barrel_keyspace:resolve(DbName),
     ResolvedBody = case Resolution of
         {merge, Doc} when is_map(Doc) ->
             {ok, barrel_doc:doc_without_meta(Doc)};
@@ -1914,7 +1939,7 @@ apply_resolution(StoreRef, DbName, DocId, Old, CurrentVV, Siblings, Resolution) 
             %% Flip every conflict sibling to superseded
             FlipOps = [{put,
                         barrel_store_keys:doc_version(
-                            DbName, DocId, barrel_version:encode(V)),
+                            Ks, DocId, barrel_version:encode(V)),
                         sibling_entry(superseded, maps:get(deleted, E),
                                       maps:get(vv, E))}
                        || {V, E} <- Siblings],
@@ -1929,7 +1954,8 @@ apply_resolution(StoreRef, DbName, DocId, Old, CurrentVV, Siblings, Resolution) 
 
 %% @private Read the archived body of a non-current version.
 read_version_body(StoreRef, DbName, DocId, Version) ->
-    Key = barrel_store_keys:doc_body_rev(DbName, DocId,
+    Ks = barrel_keyspace:resolve(DbName),
+    Key = barrel_store_keys:doc_body_rev(Ks, DocId,
                                          barrel_version:encode(Version)),
     case barrel_store_rocksdb:body_get(StoreRef, Key) of
         {ok, CborBin} -> {ok, barrel_docdb_codec_cbor:decode_any(CborBin)};

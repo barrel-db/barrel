@@ -92,7 +92,7 @@ index_doc(StoreRef, DbName, DocId, Doc) ->
 -spec index_doc_ops(db_name(), docid(), doc()) -> [{put, binary(), binary()}].
 index_doc_ops(DbName, DocId, Doc) ->
     Paths = barrel_ars:analyze(Doc),
-    make_index_ops(DbName, DocId, Paths).
+    make_index_ops(barrel_keyspace:resolve(DbName), DocId, Paths).
 
 %% @doc Update paths when a document changes.
 %% Computes the diff between old and new paths and applies changes.
@@ -116,7 +116,8 @@ update_doc(StoreRef, DbName, DocId, OldDoc, NewDoc) ->
 %% Note: Does not include posting list updates - use update_doc for full updates.
 -spec update_doc_ops(db_name(), docid(), doc(), doc()) ->
     [{put | delete, binary()} | {put, binary(), binary()}].
-update_doc_ops(DbName, DocId, OldDoc, NewDoc) ->
+update_doc_ops(DbName0, DocId, OldDoc, NewDoc) ->
+    DbName = barrel_keyspace:resolve(DbName0),
     OldPaths = barrel_ars:analyze(OldDoc),
     NewPaths = barrel_ars:analyze(NewDoc),
     {Added, Removed} = barrel_ars:diff(OldPaths, NewPaths),
@@ -152,7 +153,8 @@ remove_doc(StoreRef, DbName, DocId) ->
 %% Use this to combine with other operations in a single write_batch.
 -spec remove_doc_ops(db_name(), docid(), [{[term()], term()}]) ->
     [{posting_remove, binary(), binary()} | {delete, binary()} | {merge, binary(), integer()}].
-remove_doc_ops(DbName, DocId, Paths) ->
+remove_doc_ops(DbName0, DocId, Paths) ->
+    DbName = barrel_keyspace:resolve(DbName0),
     %% Remove DocId from all posting lists
     PostingOps = [{posting_remove,
                    barrel_store_keys:path_posting_key(DbName, Path),

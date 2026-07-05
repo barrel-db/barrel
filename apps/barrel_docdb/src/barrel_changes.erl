@@ -921,7 +921,8 @@ write_change(StoreRef, DbName, Hlc, DocInfo) ->
 -spec write_change_ops(db_name(), barrel_hlc:timestamp(),
                        #{id := binary(), rev := binary(), deleted := boolean(), _ => _}) ->
     [{put, binary(), binary()}].
-write_change_ops(DbName, Hlc, DocInfo) ->
+write_change_ops(DbName0, Hlc, DocInfo) ->
+    DbName = barrel_keyspace:resolve(DbName0),
     Key = barrel_store_keys:doc_hlc(DbName, Hlc),
     Value = encode_change(DocInfo),
     %% Also update last_hlc metadata for O(1) get_last_seq
@@ -937,7 +938,8 @@ write_change_ops(DbName, Hlc, DocInfo) ->
 update_change_bucket_ops(StoreRef, DbName, Hlc) ->
     NowSecs = erlang:system_time(second),
     BucketTs = NowSecs div ?BUCKET_GRANULARITY_SECS,
-    BucketKey = barrel_store_keys:change_bucket(DbName, BucketTs),
+    BucketKey = barrel_store_keys:change_bucket(
+                    barrel_keyspace:resolve(DbName), BucketTs),
     HlcBin = barrel_hlc:encode(Hlc),
 
     %% Read current bucket value and update
@@ -1043,7 +1045,8 @@ decode_change(<<DocIdLen:16, DocId:DocIdLen/binary,
 -spec write_path_index_ops(db_name(), barrel_hlc:timestamp(),
                            #{id := binary(), rev := binary(), deleted := boolean(), _ => _}) ->
     [{put, binary(), binary()} | {posting_append, binary(), binary()}].
-write_path_index_ops(DbName, Hlc, DocInfo) ->
+write_path_index_ops(DbName0, Hlc, DocInfo) ->
+    DbName = barrel_keyspace:resolve(DbName0),
     #{id := DocId, rev := Rev, deleted := Deleted} = DocInfo,
 
     %% Extract topics from document paths
@@ -1090,7 +1093,8 @@ write_path_index_ops(DbName, Hlc, DocInfo) ->
                             #{id := binary(), rev := binary(), deleted := boolean(), _ => _},
                             barrel_hlc:timestamp() | undefined, map() | undefined) ->
     [tuple()].
-update_path_index_ops(DbName, NewHlc, NewDocInfo, OldHlc, OldDoc) ->
+update_path_index_ops(DbName0, NewHlc, NewDocInfo, OldHlc, OldDoc) ->
+    DbName = barrel_keyspace:resolve(DbName0),
     %% Generate new path entries
     NewOps = write_path_index_ops(DbName, NewHlc, NewDocInfo),
 
