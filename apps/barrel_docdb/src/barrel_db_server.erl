@@ -60,6 +60,9 @@
 
 -record(state, {
     name :: binary(),
+    keyspace :: binary(),  %% name used for storage keys (parent's on a branch)
+    parent :: binary() | undefined,  %% timeline parent (branches only)
+    fork_hlc :: barrel_hlc:timestamp() | undefined,  %% fork instant (branches only)
     config :: map(),
     db_path :: string(),
     store_ref :: barrel_store_rocksdb:db_ref() | undefined,
@@ -269,11 +272,29 @@ init(Name, Config, CompiledChannels) ->
     %% the database cannot reopen. Release it when its owner is gone.
     ok = release_stale_refs(Name),
 
+    %% Branch identity comes from the TIMELINE sidecar file: it must be
+    %% readable BEFORE the compaction filter starts (the filter matches
+    %% key-embedded names) and before RocksDB opens.
+    case barrel_keyspace:read_meta(DbPath) of
+        {ok, #{keyspace := SidecarKs, parent := SidecarParent,
+               fork_hlc := SidecarForkHlc}} ->
+            init(Name, Config, CompiledChannels, DbPath,
+                 SidecarKs, SidecarParent,
+                 barrel_hlc:decode(SidecarForkHlc));
+        not_found ->
+            init(Name, Config, CompiledChannels, DbPath,
+                 Name, undefined, undefined);
+        {error, corrupt_timeline_meta} ->
+            {stop, corrupt_timeline_meta}
+    end.
+
+init(Name, Config, CompiledChannels, DbPath, Keyspace, Parent, ForkHlc) ->
     %% Start compaction filter handler BEFORE opening RocksDB
-    %% (handler pid is passed to CF options)
+    %% (handler pid is passed to CF options). The filter matches the
+    %% name embedded in keys, i.e. the keyspace.
     PruneDepth = maps:get(prune_depth, Config, 1000),
     {ok, FilterPid} = barrel_compaction_filter:start_link(#{
-        db_name => Name,
+        db_name => Keyspace,
         prune_depth => PruneDepth
     }),
 
@@ -291,7 +312,13 @@ init(Name, Config, CompiledChannels) ->
                 {ok, AttRef} ->
                     %% Register in persistent_term for lookup
                     %% barrel_store is used by barrel_doc_body_store for body CF access
-                    %% and by compaction filter handler for body deletion
+                    %% and by compaction filter handler for body deletion.
+                    %% The keyspace installs BEFORE the store ref so no
+                    %% reader ever sees a store without its keyspace.
+                    case Keyspace of
+                        Name -> ok;
+                        _ -> ok = barrel_keyspace:install(Name, Keyspace)
+                    end,
                     persistent_term:put({barrel_db, Name}, self()),
                     persistent_term:put({barrel_store, Name}, StoreRef),
                     persistent_term:put({barrel_source, Name},
@@ -322,6 +349,9 @@ init(Name, Config, CompiledChannels) ->
                     logger:info("Database ~s started at ~s", [Name, DbPath]),
                     {ok, #state{
                         name = Name,
+                        keyspace = Keyspace,
+                        parent = Parent,
+                        fork_hlc = ForkHlc,
                         config = Config,
                         db_path = DbPath,
                         store_ref = StoreRef,
@@ -346,15 +376,18 @@ init(Name, Config, CompiledChannels) ->
     end.
 
 %% @doc Handle synchronous calls
-handle_call(info, _From, #state{name = Name, config = Config, db_path = DbPath,
+handle_call(info, _From, #state{name = Name, keyspace = Keyspace,
+                                parent = Parent, fork_hlc = ForkHlc,
+                                config = Config, db_path = DbPath,
                                 store_ref = StoreRef, att_ref = AttRef,
                                 retention_period = RetentionPeriod} = State) ->
     AttFloor = case barrel_att_store:supports_sync(AttRef) of
         true -> barrel_att_store:att_floor(AttRef, Name);
         false -> undefined
     end,
-    Info = #{
+    Info0 = #{
         name => Name,
+        keyspace => Keyspace,
         config => Config,
         db_path => DbPath,
         pid => self(),
@@ -362,6 +395,10 @@ handle_call(info, _From, #state{name = Name, config = Config, db_path = DbPath,
         history_floor => barrel_history:history_floor(StoreRef, Name),
         att_floor => AttFloor
     },
+    Info = case Parent of
+        undefined -> Info0;
+        _ -> Info0#{parent => Parent, fork_hlc => ForkHlc}
+    end,
     {reply, {ok, Info}, State};
 
 handle_call(get_store_ref, _From, #state{store_ref = StoreRef} = State) ->
@@ -556,6 +593,7 @@ terminate(_Reason, #state{name = Name, store_ref = StoreRef, att_ref = AttRef,
     persistent_term:erase({barrel_db, Name}),
     persistent_term:erase({barrel_store, Name}),
     persistent_term:erase({barrel_source, Name}),
+    ok = barrel_keyspace:uninstall(Name),
     ok = barrel_channel:uninstall(Name),
     %% Close document store (includes body CF)
     _ =
@@ -617,6 +655,7 @@ release_stale_refs(Name) ->
             persistent_term:erase({barrel_store, Name}),
             persistent_term:erase({barrel_db, Name}),
             persistent_term:erase({barrel_source, Name}),
+            ok = barrel_keyspace:uninstall(Name),
             ok = barrel_channel:uninstall(Name),
             ok
     end.
