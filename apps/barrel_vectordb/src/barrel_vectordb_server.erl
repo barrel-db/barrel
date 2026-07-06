@@ -298,8 +298,16 @@ init_stores(Name, Config, DbPath, Dimension, Docstore, IndexModule,
     end,
     case init_rocksdb(DbPath, Env) of
         {ok, Db, CfHandles} ->
+            %% DiskANN owns flat files + an ids RocksDB: it gets the
+            %% crypto context (key + env) alongside its config
+            IndexConfig1 = case {IndexModule, Crypto} of
+                {barrel_vectordb_diskann, #{}} ->
+                    IndexConfig#{crypto => Crypto};
+                _ ->
+                    IndexConfig
+            end,
             %% Load or create vector index
-            case load_or_create_index(Db, CfHandles, Dimension, IndexConfig, IndexModule) of
+            case load_or_create_index(Db, CfHandles, Dimension, IndexConfig1, IndexModule) of
                 {ok, Index} ->
                     %% Initialize BM25 index if configured
                     BM25Backend = maps:get(bm25_backend, Config, none),
@@ -334,22 +342,10 @@ init_stores(Name, Config, DbPath, Dimension, Docstore, IndexModule,
     end.
 
 %% Encryption: the facade resolves one key per logical database and
-%% passes it as crypto => #{key => <<_:256>>}. DiskANN keeps plaintext
-%% flat files until its sector-cipher layer lands, so it is rejected
-%% outright with crypto enabled (fail closed). The disk BM25 backend
-%% encrypts its flat files with the same key.
+%% passes it as crypto => #{key => <<_:256>>}. The disk BM25 backend
+%% and DiskANN encrypt their flat files with the same key.
 init_crypto(Config, DbPath) ->
-    case maps:get(crypto, Config, none) of
-        none ->
-            barrel_vectordb_crypto:init(none, DbPath);
-        Crypto ->
-            case maps:get(backend, Config, hnsw) of
-                diskann ->
-                    {error, {encryption_unsupported, diskann}};
-                _ ->
-                    barrel_vectordb_crypto:init(Crypto, DbPath)
-            end
-    end.
+    barrel_vectordb_crypto:init(maps:get(crypto, Config, none), DbPath).
 
 %% @doc Handle a batch of operations.
 %% Partitions operations into reads (processed immediately) and writes (batched atomically).
@@ -978,10 +974,19 @@ load_or_create_index(Db, CfHandles, Dimension, IndexConfig, IndexModule) ->
 %% DiskANN-specific loading: try open existing, else create new
 load_or_create_diskann(Config, Dimension) ->
     BasePath = maps:get(base_path, Config),
+    Crypto = maps:get(crypto, Config, none),
     ok = filelib:ensure_dir(filename:join(BasePath, "dummy")),
-    case barrel_vectordb_diskann:open(BasePath) of
+    case barrel_vectordb_diskann:open(BasePath, #{crypto => Crypto}) of
         {ok, Index} ->
             {ok, Index};
+        %% key/matrix failures must fail the store open, not silently
+        %% recreate a fresh index over the data
+        {error, wrong_encryption_key} = Err ->
+            Err;
+        {error, index_is_encrypted} = Err ->
+            Err;
+        {error, cannot_encrypt_legacy_index} = Err ->
+            Err;
         {error, _} ->
             %% No existing index or failed to open - create new
             barrel_vectordb_diskann:new(Config#{dimension => Dimension, storage_mode => disk})

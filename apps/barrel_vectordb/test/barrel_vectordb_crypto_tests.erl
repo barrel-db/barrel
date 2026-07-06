@@ -23,10 +23,12 @@ crypto_test_() ->
        {"wrong key fails closed", fun test_wrong_key/0},
        {"plaintext open of an encrypted store fails", fun test_plain_of_enc/0},
        {"encrypting an existing plaintext store fails", fun test_enc_of_plain/0},
-       {"diskann rejected with crypto", fun test_unsupported/0},
        {"encrypted disk BM25 in a store", fun test_bm25_disk_store/0},
        {"bm25 disk index crypto roundtrip + compaction", fun test_bm25_disk_direct/0},
-       {"bm25 disk index open matrix", fun test_bm25_disk_matrix/0}
+       {"bm25 disk index open matrix", fun test_bm25_disk_matrix/0},
+       {"diskann crypto roundtrip + node rewrite churn", fun test_diskann_direct/0},
+       {"diskann open matrix", fun test_diskann_matrix/0},
+       {"encrypted diskann in a store", fun test_diskann_store/0}
      ]
     }.
 
@@ -180,18 +182,6 @@ test_enc_of_plain() ->
         os:cmd("rm -rf " ++ TestDir)
     end.
 
-test_unsupported() ->
-    TestDir = "/tmp/barrel_vectordb_crypto_un_"
-        ++ integer_to_list(erlang:unique_integer([positive])),
-    try
-        %% diskann keeps plaintext flat files until its sector-cipher
-        %% layer lands: rejected with crypto on
-        ?assertEqual({error, {encryption_unsupported, diskann}},
-                     start_store(TestDir, #{crypto => #{key => ?KEY1},
-                                            backend => diskann}))
-    after
-        os:cmd("rm -rf " ++ TestDir)
-    end.
 
 test_bm25_disk_store() ->
     TestDir = "/tmp/barrel_vectordb_crypto_bd_"
@@ -253,6 +243,109 @@ test_bm25_disk_direct() ->
         ok = barrel_vectordb_bm25_disk:close(I6)
     after
         os:cmd("rm -rf " ++ Path)
+    end.
+
+random_vector(Dim) ->
+    [rand:uniform() || _ <- lists:seq(1, Dim)].
+
+diskann_config(Path, Extra) ->
+    maps:merge(#{
+        dimension => 16,
+        r => 8,
+        l_build => 20,
+        l_search => 20,
+        storage_mode => disk,
+        base_path => Path,
+        use_pq => true,
+        pq_m => 2,
+        pq_k => 16
+    }, Extra).
+
+test_diskann_direct() ->
+    Path = "/tmp/barrel_vectordb_crypto_da_"
+        ++ integer_to_list(erlang:unique_integer([positive])),
+    Crypto = #{key => ?KEY1},
+    try
+        Vectors = [{integer_to_binary(I), random_vector(16)}
+                   || I <- lists:seq(1, 50)],
+        {ok, I0} = barrel_vectordb_diskann:build(
+            diskann_config(Path, #{crypto => Crypto}), Vectors),
+        Results = barrel_vectordb_diskann:search(I0, random_vector(16), 5),
+        ?assertEqual(5, length(Results)),
+        %% incremental inserts rewrite existing graph nodes in place
+        %% (fresh embedded nonce per rewrite)
+        I3 = lists:foldl(
+            fun(I, Acc) ->
+                {ok, Acc2} = barrel_vectordb_diskann:insert(
+                    Acc, <<"x", (integer_to_binary(I))/binary>>,
+                    random_vector(16)),
+                Acc2
+            end, I0, lists:seq(1, 20)),
+        ?assertEqual(70, barrel_vectordb_diskann:size(I3)),
+        ok = barrel_vectordb_diskann:close(I3),
+        %% reopen with the key: meta superblock + graph + vectors + pq
+        {ok, I4} = barrel_vectordb_diskann:open(Path,
+                                                #{crypto => Crypto}),
+        ?assertEqual(70, barrel_vectordb_diskann:size(I4)),
+        Results2 = barrel_vectordb_diskann:search(I4, random_vector(16), 5),
+        ?assertEqual(5, length(Results2)),
+        ok = barrel_vectordb_diskann:close(I4)
+    after
+        os:cmd("rm -rf " ++ Path)
+    end.
+
+test_diskann_matrix() ->
+    Path = "/tmp/barrel_vectordb_crypto_dx_"
+        ++ integer_to_list(erlang:unique_integer([positive])),
+    try
+        Vectors = [{integer_to_binary(I), random_vector(16)}
+                   || I <- lists:seq(1, 10)],
+        {ok, I0} = barrel_vectordb_diskann:build(
+            diskann_config(Path, #{crypto => #{key => ?KEY1}}), Vectors),
+        ok = barrel_vectordb_diskann:close(I0),
+        ?assertEqual({error, index_is_encrypted},
+                     barrel_vectordb_diskann:open(Path, #{})),
+        ?assertEqual({error, wrong_encryption_key},
+                     barrel_vectordb_diskann:open(
+                         Path, #{crypto => #{key => ?KEY2}})),
+        os:cmd("rm -rf " ++ Path),
+        {ok, P0} = barrel_vectordb_diskann:build(
+            diskann_config(Path, #{}), Vectors),
+        ok = barrel_vectordb_diskann:close(P0),
+        ?assertEqual({error, cannot_encrypt_legacy_index},
+                     barrel_vectordb_diskann:open(
+                         Path, #{crypto => #{key => ?KEY1}}))
+    after
+        os:cmd("rm -rf " ++ Path)
+    end.
+
+test_diskann_store() ->
+    TestDir = "/tmp/barrel_vectordb_crypto_ds_"
+        ++ integer_to_list(erlang:unique_integer([positive])),
+    try
+        {ok, _} = start_store(TestDir, #{crypto => #{key => ?KEY1},
+                                         backend => diskann,
+                                         diskann => #{r => 8,
+                                                      l_build => 20,
+                                                      l_search => 20}}),
+        ok = barrel_vectordb:add_vector(?STORE, <<"a">>, ?SENTINEL,
+                                        #{}, [1.0, 0.0, 0.0]),
+        {ok, [#{key := <<"a">>} | _]} =
+            barrel_vectordb:search_vector(?STORE, [1.0, 0.0, 0.0],
+                                          #{k => 1}),
+        stop_store(),
+        ?assertNot(found_on_disk(TestDir, ?SENTINEL)),
+        {ok, _} = start_store(TestDir, #{crypto => #{key => ?KEY1},
+                                         backend => diskann,
+                                         diskann => #{r => 8,
+                                                      l_build => 20,
+                                                      l_search => 20}}),
+        {ok, [#{key := <<"a">>} | _]} =
+            barrel_vectordb:search_vector(?STORE, [1.0, 0.0, 0.0],
+                                          #{k => 1})
+    after
+        catch barrel_vectordb:stop(?STORE),
+        os:cmd("rm -rf " ++ TestDir)
     end.
 
 test_bm25_disk_matrix() ->
