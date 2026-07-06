@@ -108,20 +108,24 @@
 -define(EMBED_TAG, <<"embed">>).
 
 -type db() :: #{
-    name := atom(),
+    name := binary(),
     docdb := binary(),
-    vstore := atom(),
+    vstore := binary(),
     embedding => barrel_embedding_policy:policy(),
     embed => term(),
     dimensions => pos_integer(),
     encryption => barrel_keyprovider:spec()
 }.
-%% Handle for a composed barrel database. The optional `embedding',
-%% `embed', and `dimensions' fields are present on record-mode databases
-%% (opened with the `embedding' option): the validated policy, the
-%% facade's barrel_embed state, and the resolved vector dimension.
-%% `encryption' carries the spec the database was opened with (branches
-%% inherit it).
+%% Handle for a composed barrel database. Treat it as opaque: names are
+%% binaries internally (atoms are accepted at every API entry and
+%% normalized, so dynamic database names never grow the atom table).
+%% The optional `embedding', `embed', and `dimensions' fields are
+%% present on record-mode databases (opened with the `embedding'
+%% option): the validated policy, the facade's barrel_embed state, and
+%% the resolved vector dimension. `encryption' carries the spec the
+%% database was opened with (branches inherit it).
+
+-type db_name() :: atom() | binary().
 
 -type stream() :: term().
 %% Opaque attachment read/write stream handle.
@@ -131,7 +135,7 @@
 %%====================================================================
 
 %% @doc Open a composed barrel database with default options.
--spec open(atom()) -> {ok, db()} | {error, term()}.
+-spec open(db_name()) -> {ok, db()} | {error, term()}.
 open(Name) ->
     open(Name, #{}).
 
@@ -156,16 +160,17 @@ open(Name) ->
 %% keyspace, so a branch resolves its parent's key) and hands it to the
 %% vector store. Runtime config: pass it again on every open. Branches
 %% inherit the spec from the parent handle.
--spec open(atom(), map()) -> {ok, db()} | {error, term()}.
-open(Name, Opts) when is_atom(Name), is_map(Opts) ->
+-spec open(db_name(), map()) -> {ok, db()} | {error, term()}.
+open(Name, Opts) when (is_atom(Name) orelse is_binary(Name)),
+                      is_map(Opts) ->
+    DbBin = to_name(Name),
     case maps:get(embedding, Opts, undefined) of
-        undefined -> open_plain(Name, Opts);
-        PolicyMap -> open_record(Name, Opts, PolicyMap)
+        undefined -> open_plain(DbBin, Opts);
+        PolicyMap -> open_record(DbBin, Opts, PolicyMap)
     end.
 
 %% @private Today's composed open, plus encryption threading.
-open_plain(Name, Opts) ->
-    DbBin = atom_to_binary(Name, utf8),
+open_plain(DbBin, Opts) ->
     EncSpec = maps:get(encryption, Opts, disabled),
     DocOpts = put_encryption(maps:get(docdb, Opts, #{}), EncSpec),
     VecConfig0 = maps:get(vectordb, Opts, #{}),
@@ -173,11 +178,11 @@ open_plain(Name, Opts) ->
         {ok, _DbPid} ->
             case vec_crypto_config(DbBin, EncSpec, VecConfig0) of
                 {ok, VecConfig} ->
-                    case barrel_vectordb:start_link(VecConfig#{name => Name}) of
+                    case barrel_vectordb:start_link(VecConfig#{name => DbBin}) of
                         {ok, _StorePid} ->
-                            {ok, with_encryption(#{name => Name,
+                            {ok, with_encryption(#{name => DbBin,
                                                    docdb => DbBin,
-                                                   vstore => Name},
+                                                   vstore => DbBin},
                                                  EncSpec)};
                         {error, _} = VErr ->
                             _ = barrel_docdb:close_db(DbBin),
@@ -194,16 +199,15 @@ open_plain(Name, Opts) ->
 %% @private Record-mode open: validate the policy, resolve the vector
 %% dimension, init the facade's embedder, persist the policy, and start
 %% the vector store with the read-through docstore adapter.
-open_record(Name, Opts, PolicyMap) ->
+open_record(DbBin, Opts, PolicyMap) ->
     case barrel_embedding_policy:validate(PolicyMap) of
         {ok, Policy} ->
-            do_open_record(Name, Opts, Policy);
+            do_open_record(DbBin, Opts, Policy);
         {error, _} = Err ->
             Err
     end.
 
-do_open_record(Name, Opts, Policy) ->
-    DbBin = atom_to_binary(Name, utf8),
+do_open_record(DbBin, Opts, Policy) ->
     %% Replicated arrivals must reach the indexer too: docdb tags
     %% replication-applied writes with the embed tag (docdb stays
     %% ignorant of why). Note: a docdb already running as plain in this
@@ -220,7 +224,7 @@ do_open_record(Name, Opts, Policy) ->
                     ok = persist_policy(DbBin, Policy),
                     case vec_crypto_config(DbBin, EncSpec, VecConfig0) of
                         {ok, VecConfig1} ->
-                            do_open_record_stores(Name, DbBin, Policy, Dim,
+                            do_open_record_stores(DbBin, Policy, Dim,
                                                   VecConfig0, VecConfig1,
                                                   EncSpec);
                         {error, _} = CErr ->
@@ -234,12 +238,12 @@ do_open_record(Name, Opts, Policy) ->
             Err
     end.
 
-do_open_record_stores(Name, DbBin, Policy, Dim, VecConfig0, VecConfig1,
+do_open_record_stores(DbBin, Policy, Dim, VecConfig0, VecConfig1,
                       EncSpec) ->
     case init_embed(Policy, Dim) of
         {ok, EmbedState} ->
             VecConfig = VecConfig1#{
-                name => Name,
+                name => DbBin,
                 dimension => Dim,
                 %% Memory BM25 cannot rebuild without a
                 %% text CF; record mode defaults to disk.
@@ -250,17 +254,17 @@ do_open_record_stores(Name, DbBin, Policy, Dim, VecConfig0, VecConfig1,
             },
             case barrel_vectordb:start_link(VecConfig) of
                 {ok, _StorePid} ->
-                    case start_indexer(Name, DbBin, Policy,
+                    case start_indexer(DbBin, Policy,
                                        EmbedState, Dim) of
                         ok ->
-                            {ok, with_encryption(#{name => Name, docdb => DbBin,
-                                                   vstore => Name,
+                            {ok, with_encryption(#{name => DbBin, docdb => DbBin,
+                                                   vstore => DbBin,
                                                    embedding => Policy,
                                                    embed => EmbedState,
                                                    dimensions => Dim},
                                                  EncSpec)};
                         {error, _} = IErr ->
-                            _ = barrel_vectordb:stop(Name),
+                            _ = barrel_vectordb:stop(DbBin),
                             _ = barrel_docdb:close_db(DbBin),
                             IErr
                     end;
@@ -295,19 +299,20 @@ close(#{name := Name, docdb := DbBin, vstore := Store} = Db) ->
 %% Opts: at (now | HlcT), docdb (branch docdb overrides), vectordb
 %% (branch vector store config, e.g. db_path), backfill (record mode:
 %% sync | none).
--spec branch(db(), atom()) -> {ok, db()} | {error, term()}.
+-spec branch(db(), db_name()) -> {ok, db()} | {error, term()}.
 branch(Db, BranchName) ->
     branch(Db, BranchName, #{}).
 
--spec branch(db(), atom(), map()) -> {ok, db()} | {error, term()}.
+-spec branch(db(), db_name(), map()) -> {ok, db()} | {error, term()}.
 branch(#{docdb := ParentBin} = Db, BranchName, Opts)
-        when is_atom(BranchName), is_map(Opts) ->
-    BranchBin = atom_to_binary(BranchName, utf8),
+        when (is_atom(BranchName) orelse is_binary(BranchName)),
+             is_map(Opts) ->
+    BranchBin = to_name(BranchName),
     DocOpts = maps:get(docdb, Opts, #{}),
     BranchOpts = DocOpts#{at => maps:get(at, Opts, now)},
     case barrel_docdb:branch_db(ParentBin, BranchBin, BranchOpts) of
         {ok, _Pid} ->
-            case open_branch(Db, BranchName, BranchBin, Opts) of
+            case open_branch(Db, BranchBin, Opts) of
                 {ok, _} = Ok ->
                     Ok;
                 {error, _} = OpenErr ->
@@ -321,12 +326,12 @@ branch(#{docdb := ParentBin} = Db, BranchName, Opts)
 %% @private The branch's facade side: a fresh vector store; record
 %% mode re-applies the parent's policy and backfills the index from
 %% the embeddings stored in doc bodies (see barrel_record_backfill).
-open_branch(#{embedding := Policy} = Db, BranchName, _BranchBin, Opts) ->
+open_branch(#{embedding := Policy} = Db, BranchBin, Opts) ->
     OpenOpts = with_encryption(#{embedding => Policy,
                                  vectordb => maps:get(vectordb, Opts, #{}),
                                  docdb => maps:get(docdb, Opts, #{})},
                                maps:get(encryption, Db, disabled)),
-    case open(BranchName, OpenOpts) of
+    case open(BranchBin, OpenOpts) of
         {ok, #{docdb := BranchBin, vstore := VStore,
                embedding := BranchPolicy, embed := Embed,
                dimensions := Dim} = Branch} ->
@@ -348,8 +353,8 @@ open_branch(#{embedding := Policy} = Db, BranchName, _BranchBin, Opts) ->
         {error, _} = Err ->
             Err
     end;
-open_branch(Db, BranchName, _BranchBin, Opts) ->
-    open(BranchName,
+open_branch(Db, BranchBin, Opts) ->
+    open(BranchBin,
          with_encryption(#{vectordb => maps:get(vectordb, Opts, #{}),
                            docdb => maps:get(docdb, Opts, #{})},
                          maps:get(encryption, Db, disabled))).
@@ -368,12 +373,7 @@ merge(#{docdb := BranchBin}, Opts) ->
         {ok, _Report} = Ok ->
             _ = case barrel_docdb:db_info(BranchBin) of
                 {ok, #{parent := Parent}} ->
-                    try
-                        barrel_record_indexer:nudge(
-                            binary_to_existing_atom(Parent, utf8))
-                    catch
-                        _:_ -> ok
-                    end;
+                    barrel_record_indexer:nudge(Parent);
                 _ ->
                     ok
             end,
@@ -828,6 +828,9 @@ batch_kind(Docs) ->
 
 %% @private Open the docdb database, creating it if it does not exist.
 -spec ensure_docdb(binary(), map()) -> {ok, pid()} | {error, term()}.
+to_name(Name) when is_binary(Name) -> Name;
+to_name(Name) when is_atom(Name) -> atom_to_binary(Name, utf8).
+
 ensure_docdb(DbBin, DocOpts) ->
     case barrel_docdb:open_db(DbBin) of
         {ok, Pid} ->
@@ -1142,15 +1145,15 @@ nudge_indexer(_Db, _Result) ->
 
 %% @private Start the per-database indexer under barrel_record_sup.
 %% Record mode needs the barrel application running (the supervisor).
--spec start_indexer(atom(), binary(), barrel_embedding_policy:policy(), term(),
+-spec start_indexer(binary(), barrel_embedding_policy:policy(), term(),
                     pos_integer()) -> ok | {error, term()}.
-start_indexer(Name, DbBin, Policy, EmbedState, Dim) ->
+start_indexer(DbBin, Policy, EmbedState, Dim) ->
     case erlang:whereis(barrel_record_sup) of
         undefined ->
             {error, barrel_app_not_started};
         _Pid ->
             case barrel_record_sup:start_indexer(#{
-                     name => Name, db => DbBin, vstore => Name,
+                     name => DbBin, db => DbBin, vstore => DbBin,
                      policy => Policy, embed => EmbedState,
                      dimensions => Dim}) of
                 {ok, _} -> ok;

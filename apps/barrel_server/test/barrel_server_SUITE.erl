@@ -24,7 +24,8 @@
     t_query_parse_error/1,
     t_query_subscribe_requires_sse/1,
     t_query_subscribe_sse/1,
-    t_not_found/1
+    t_not_found/1,
+    t_no_atom_leak/1
 ]).
 
 -include_lib("common_test/include/ct.hrl").
@@ -37,7 +38,7 @@ all() ->
      t_vector_search, t_changes_json, t_changes_sse,
      t_query_ndjson, t_query_get, t_query_params_json,
      t_query_parse_error, t_query_subscribe_requires_sse,
-     t_query_subscribe_sse, t_not_found].
+     t_query_subscribe_sse, t_not_found, t_no_atom_leak].
 
 init_per_suite(Config) ->
     %% Load first, then override env (application:load resets to .app defaults).
@@ -278,3 +279,16 @@ decode({ok, S, _H, Body}) ->
     {S, Decoded};
 decode(Other) ->
     error({http, Other}).
+
+t_no_atom_leak(Config) ->
+    B = base(Config),
+    %% a dynamically named database opened through the server never
+    %% becomes an atom anywhere in the open path
+    Name = "leakprobe" ++ integer_to_list(erlang:unique_integer([positive])),
+    {201, _} = req(put, B ++ "/db/" ++ Name, <<>>),
+    {201, _} = req_json(put, B ++ "/db/" ++ Name ++ "/doc/a", #{<<"v">> => 1}),
+    {200, #{<<"v">> := 1}} = req(get, B ++ "/db/" ++ Name ++ "/doc/a", <<>>),
+    ?assertError(badarg,
+                 binary_to_existing_atom(list_to_binary(Name), utf8)),
+    {200, _} = req(delete, B ++ "/db/" ++ Name, <<>>),
+    ok.

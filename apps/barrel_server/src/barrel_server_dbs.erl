@@ -80,9 +80,7 @@ handle_call({branch, Parent, BranchName, Opts}, _From, State) ->
         true ->
             case do_ensure(Parent, State) of
                 {ok, ParentDb, State1} ->
-                    case barrel:branch(ParentDb,
-                                       binary_to_atom(BranchName, utf8),
-                                       Opts) of
+                    case barrel:branch(ParentDb, BranchName, Opts) of
                         {ok, BranchDb} ->
                             Dbs = maps:put(BranchName, BranchDb,
                                            State1#state.dbs),
@@ -148,8 +146,7 @@ do_ensure(Name, State) ->
                     %% config for record-mode databases).
                     OpenOpts = application:get_env(barrel_server,
                                                    open_opts, #{}),
-                    case barrel:open(binary_to_atom(Name, utf8),
-                                     OpenOpts) of
+                    case barrel:open(Name, OpenOpts) of
                         {ok, Db} ->
                             Dbs = maps:put(Name, Db, State#state.dbs),
                             {ok, Db, State#state{dbs = Dbs}};

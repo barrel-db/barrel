@@ -19,7 +19,8 @@
     t_vectors/1,
     t_vector_batch/1,
     t_changes/1,
-    t_delete_db/1
+    t_delete_db/1,
+    t_binary_names/1
 ]).
 
 -include_lib("common_test/include/ct.hrl").
@@ -29,7 +30,8 @@
 
 all() ->
     [t_doc_crud, t_batch_docs, t_attachments, t_attachment_stream,
-     t_vectors, t_vector_batch, t_changes, t_delete_db].
+     t_vectors, t_vector_batch, t_changes, t_delete_db,
+     t_binary_names].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(barrel_docdb),
@@ -219,4 +221,39 @@ t_delete_db(Config) ->
     %% teardown close applies to this fresh instance
     {ok, Db2} = barrel:open(t_delete_db, #{vectordb => VCfg}),
     {error, not_found} = barrel:get_doc(Db2, <<"a">>),
+    ok.
+
+%%====================================================================
+%% Binary names
+%%====================================================================
+
+t_binary_names(Config) ->
+    Priv = ?config(priv_dir, Config),
+    Name = <<"binname_", (integer_to_binary(
+        erlang:unique_integer([positive])))/binary>>,
+    VPath = filename:join(Priv, binary_to_list(Name) ++ "_vec"),
+    {ok, Db} = barrel:open(Name, #{vectordb => #{dimension => ?DIM,
+                                                 db_path => VPath,
+                                                 bm25_backend => memory}}),
+    %% the handle is binary-named end to end
+    ?assertMatch(#{name := Name, docdb := Name, vstore := Name}, Db),
+    Vec = [1.0 | lists:duplicate(?DIM - 1, 0.0)],
+    {ok, _} = barrel:put_doc(Db, #{<<"id">> => <<"a">>, <<"v">> => 1}),
+    {ok, #{<<"v">> := 1}} = barrel:get_doc(Db, <<"a">>),
+    ok = barrel:vector_add(Db, <<"a">>, <<"hello">>, #{}, Vec),
+    {ok, [_ | _]} = barrel:search_vector(Db, Vec, #{k => 1}),
+    %% a branch by binary name works and stays binary
+    Branch = <<Name/binary, "_b">>,
+    BVPath = filename:join(Priv, binary_to_list(Branch) ++ "_vec"),
+    {ok, BranchDb} = barrel:branch(Db, Branch,
+                                   #{vectordb => #{dimension => ?DIM,
+                                                   db_path => BVPath,
+                                                   bm25_backend => memory}}),
+    ?assertMatch(#{name := Branch}, BranchDb),
+    {ok, _} = barrel:get_doc(BranchDb, <<"a">>),
+    ok = barrel:delete(BranchDb),
+    ok = barrel:close(Db),
+    %% deterministic no-atom-leak proof for the whole facade path
+    ?assertError(badarg, binary_to_existing_atom(Name, utf8)),
+    ?assertError(badarg, binary_to_existing_atom(Branch, utf8)),
     ok.

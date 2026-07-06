@@ -25,9 +25,9 @@ start_indexer(Config) ->
     supervisor:start_child(?SERVER, [Config]).
 
 %% @doc Stop the indexer of a database, if running.
--spec stop_indexer(atom()) -> ok.
+-spec stop_indexer(atom() | binary()) -> ok.
 stop_indexer(Name) ->
-    case erlang:whereis(barrel_record_indexer:name(Name)) of
+    case barrel_record_indexer:whereis_pid(Name) of
         undefined -> ok;
         Pid -> supervisor:terminate_child(?SERVER, Pid)
     end.

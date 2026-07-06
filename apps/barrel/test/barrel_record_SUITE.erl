@@ -232,7 +232,7 @@ adapter_never_touches_doc(Config) ->
 record_open_tags_writes(Config) ->
     {ok, Db} = open_record(record_tags_db, Config, #{fields => [<<"title">>]}),
     %% Freeze the indexer so pending-entry assertions cannot race it
-    ok = sys:suspend(erlang:whereis(barrel_record_indexer:name(record_tags_db))),
+    ok = sys:suspend(barrel_record_indexer:whereis_pid(record_tags_db)),
     DbBin = <<"record_tags_db">>,
     {ok, #{<<"rev">> := Rev}} = barrel:put_doc(Db, #{
         <<"id">> => <<"a">>, <<"title">> => <<"hello">>}),
@@ -255,7 +255,7 @@ record_user_tags_preserved(Config) ->
     {ok, Db} = open_record(record_user_tags_db, Config,
                            #{fields => [<<"title">>]}),
     ok = sys:suspend(
-        erlang:whereis(barrel_record_indexer:name(record_user_tags_db))),
+        barrel_record_indexer:whereis_pid(record_user_tags_db)),
     DbBin = <<"record_user_tags_db">>,
     {ok, _} = barrel:put_doc(Db, #{<<"id">> => <<"a">>, <<"title">> => <<"T">>},
                              #{outbox => [<<"audit">>]}),
@@ -355,8 +355,7 @@ indexer_nonmatching_acked(Config) ->
 
 indexer_crash_restart(Config) ->
     {ok, Db} = open_record(idx_crash_db, Config, #{fields => [<<"title">>]}),
-    IndexerName = barrel_record_indexer:name(idx_crash_db),
-    Pid0 = erlang:whereis(IndexerName),
+    Pid0 = barrel_record_indexer:whereis_pid(idx_crash_db),
     ?assert(is_pid(Pid0)),
     %% Freeze, enqueue work, kill mid-flight: the supervisor restarts the
     %% indexer and the pending entry converges.
@@ -365,7 +364,7 @@ indexer_crash_restart(Config) ->
                                    <<"title">> => <<"survives">>}),
     exit(Pid0, kill),
     ok = wait_until(fun() ->
-        case erlang:whereis(IndexerName) of
+        case barrel_record_indexer:whereis_pid(idx_crash_db) of
             undefined -> false;
             Pid -> Pid =/= Pid0
         end

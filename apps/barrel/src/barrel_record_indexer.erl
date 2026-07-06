@@ -31,7 +31,7 @@
 -module(barrel_record_indexer).
 -behaviour(gen_server).
 
--export([start_link/1, name/1, nudge/1]).
+-export([start_link/1, whereis_pid/1, nudge/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
 -define(EMBED_TAG, <<"embed">>).
@@ -41,9 +41,9 @@
 -define(MAX_FAILURES, 5).
 
 -record(state, {
-    name :: atom(),
+    name :: binary(),
     db :: binary(),
-    vstore :: atom(),
+    vstore :: binary(),
     policy :: barrel_embedding_policy:policy(),
     embed :: term(),
     dimensions :: pos_integer(),
@@ -58,24 +58,33 @@
 %%====================================================================
 
 %% @doc Start an indexer.
-%% Config: #{name := atom(), db := binary(), vstore := atom(),
+%% Config: #{name := binary(), db := binary(), vstore := binary(),
 %%           policy := policy(), embed := term(), batch_size => pos_integer()}.
 -spec start_link(map()) -> {ok, pid()} | {error, term()}.
 start_link(#{name := Name} = Config) ->
-    gen_server:start_link({local, name(Name)}, ?MODULE, Config, []).
+    %% Registered in the vectordb name registry: binary names, no
+    %% atoms minted for dynamically named databases.
+    ok = barrel_vectordb_registry:ensure(),
+    gen_server:start_link({via, barrel_vectordb_registry, reg_name(Name)},
+                          ?MODULE, Config, []).
 
-%% @doc Registered name of a database's indexer.
--spec name(atom()) -> atom().
-name(Name) ->
-    list_to_atom("barrel_record_indexer_" ++ atom_to_list(Name)).
+%% @doc The indexer's pid for a database, or undefined.
+-spec whereis_pid(atom() | binary()) -> pid() | undefined.
+whereis_pid(Name) ->
+    barrel_vectordb_registry:whereis_name(reg_name(Name)).
 
 %% @doc Trigger an immediate indexing round.
--spec nudge(atom()) -> ok.
+-spec nudge(atom() | binary()) -> ok.
 nudge(Name) ->
-    case erlang:whereis(name(Name)) of
+    case whereis_pid(Name) of
         undefined -> ok;
         Pid -> gen_server:cast(Pid, nudge)
     end.
+
+reg_name(Name) when is_binary(Name) ->
+    {record_indexer, Name};
+reg_name(Name) when is_atom(Name) ->
+    {record_indexer, atom_to_binary(Name, utf8)}.
 
 %%====================================================================
 %% gen_server callbacks
