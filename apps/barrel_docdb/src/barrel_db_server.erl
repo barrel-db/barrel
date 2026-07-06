@@ -457,12 +457,18 @@ handle_call(get_att_ref, _From, #state{att_ref = AttRef} = State) ->
 %% Document operations
 handle_call({put_doc, Doc, Opts}, _From,
             #state{name = DbName, store_ref = StoreRef} = State) ->
-    Result = do_put_doc(StoreRef, DbName, Doc, Opts),
+    Result = case validate_prov_opt(Opts) of
+        {ok, Opts1} -> do_put_doc(StoreRef, DbName, Doc, Opts1);
+        {error, _} = PErr -> PErr
+    end,
     {reply, Result, State};
 
 handle_call({put_docs, Docs, Opts}, _From,
             #state{name = DbName, store_ref = StoreRef} = State) ->
-    Result = do_put_docs(StoreRef, DbName, Docs, Opts),
+    Result = case validate_prov_opt(Opts) of
+        {ok, Opts1} -> do_put_docs(StoreRef, DbName, Docs, Opts1);
+        {error, _} = PErr -> PErr
+    end,
     {reply, Result, State};
 
 handle_call({get_doc, DocId, Opts}, _From,
@@ -477,7 +483,10 @@ handle_call({get_docs, DocIds, Opts}, _From,
 
 handle_call({delete_doc, DocId, Opts}, _From,
             #state{name = DbName, store_ref = StoreRef} = State) ->
-    Result = do_delete_doc(StoreRef, DbName, DocId, Opts),
+    Result = case validate_prov_opt(Opts) of
+        {ok, Opts1} -> do_delete_doc(StoreRef, DbName, DocId, Opts1);
+        {error, _} = PErr -> PErr
+    end,
     {reply, Result, State};
 
 handle_call({fold_docs, Fun, Acc}, _From,
@@ -974,6 +983,25 @@ embedding_columns(DocRecord) ->
              {?COL_EMBEDDING_SRC, maps:get(embedding_src, DocRecord, ?EMBEDDING_SRC_CLIENT)}]
     end.
 
+%% @doc Provenance entity column for a write. Present only when the
+%% caller supplied the provenance option; absent otherwise, which
+%% clears any previous value since entity_put replaces the entity.
+provenance_columns(undefined) -> [];
+provenance_columns(ProvEnc) -> [{?COL_PROVENANCE, ProvEnc}].
+
+%% @doc Validate the provenance write option (if any) and cache its
+%% encoded form for the op builders.
+validate_prov_opt(Opts) ->
+    case maps:find(provenance, Opts) of
+        error ->
+            {ok, Opts};
+        {ok, Prov} ->
+            case barrel_provenance:validate(Prov) of
+                {ok, Enc} -> {ok, Opts#{provenance_enc => Enc}};
+                {error, Reason} -> {error, {invalid_provenance, Reason}}
+            end
+    end.
+
 %% @doc Read a document's current version state (undefined when absent).
 read_current(StoreRef, DbName, DocId) ->
     Ks = barrel_keyspace:resolve(DbName),
@@ -1107,6 +1135,7 @@ build_write_ops(StoreRef, DbName, DocRecord, Old, Opts) ->
 
     NewVV = barrel_vv:bump(OldVV, NewVersion),
 
+    ProvEnc = maps:get(provenance_enc, Opts, undefined),
     DocColumns = [
         {?COL_VERSION, barrel_version:encode(NewVersion)},
         {?COL_DELETED, deleted_to_bin(Deleted)},
@@ -1116,7 +1145,7 @@ build_write_ops(StoreRef, DbName, DocRecord, Old, Opts) ->
         {?COL_CREATED_AT, CreatedAt},
         {?COL_EXPIRES_AT, ExpiresAt},
         {?COL_TIER, Tier}
-    ] ++ embedding_columns(DocRecord),
+    ] ++ provenance_columns(ProvEnc) ++ embedding_columns(DocRecord),
     DocOps = [{entity_put, DocEntityKey, DocColumns}],
 
     %% Change tracking info (rev carries the opaque version token)
@@ -1199,7 +1228,7 @@ build_write_ops(StoreRef, DbName, DocRecord, Old, Opts) ->
     %% Retained history entry (resolutions pass cause `resolve')
     HistoryOps = barrel_history:write_ops(
         DbName, NextHlc, DocId, NewVersion, Deleted,
-        maps:get(history_cause, Opts, local), NewVV),
+        maps:get(history_cause, Opts, local), NewVV, ProvEnc),
 
     %% Per-channel feed rows (write-time partial sync)
     ChannelOps = channel_ops(DbName, NextHlc, DocInfo, DocBody, OldHlc,
@@ -1345,6 +1374,7 @@ do_delete_doc(StoreRef, DbName, DocId, Opts) ->
             NewVV = barrel_vv:bump(OldVV, NewVersion),
             DocEntityKey = barrel_store_keys:doc_entity(Ks, DocId),
 
+            ProvEnc = maps:get(provenance_enc, Opts, undefined),
             DocColumns = [
                 {?COL_VERSION, barrel_version:encode(NewVersion)},
                 {?COL_DELETED, <<"true">>},
@@ -1354,7 +1384,7 @@ do_delete_doc(StoreRef, DbName, DocId, Opts) ->
                 {?COL_CREATED_AT, CreatedAt},
                 {?COL_EXPIRES_AT, ExpiresAt},
                 {?COL_TIER, Tier}
-            ],
+            ] ++ provenance_columns(ProvEnc),
             DocOps = [{entity_put, DocEntityKey, DocColumns}],
 
             %% Supersede the live-feed row of the previous write
@@ -1401,7 +1431,8 @@ do_delete_doc(StoreRef, DbName, DocId, Opts) ->
 
             %% Retained history entry for the tombstone
             HistoryOps = barrel_history:write_ops(
-                DbName, NextHlc, DocId, NewVersion, true, local, NewVV),
+                DbName, NextHlc, DocId, NewVersion, true, local, NewVV,
+                ProvEnc),
 
             %% The tombstone lands in the channels the doc was in
             ChannelOps = channel_ops(DbName, NextHlc, NewDocInfo, undefined,

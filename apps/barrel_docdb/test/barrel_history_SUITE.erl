@@ -17,7 +17,8 @@
 all() ->
     [
         {group, log},
-        {group, versions}
+        {group, versions},
+        {group, provenance}
     ].
 
 groups() ->
@@ -37,6 +38,14 @@ groups() ->
             doc_versions_with_conflict,
             version_body_current_and_archived,
             version_body_unknown
+        ]},
+        {provenance, [sequence], [
+            prov_roundtrip_put_delete,
+            prov_legacy_entry_decodes,
+            prov_replicated_carries_none,
+            prov_invalid_rejected,
+            prov_branch_checkpoint_carries,
+            prov_swept_with_history
         ]}
     ].
 
@@ -319,4 +328,117 @@ version_body_unknown(_Config) ->
     {UnknownTok, _} = remote_version(<<"peer_z">>),
     ?assertEqual({error, not_found},
                  barrel_docdb:get_version_body(Db, DocId, UnknownTok)),
+    ok.
+
+
+%%====================================================================
+%% Provenance
+%%====================================================================
+
+prov_roundtrip_put_delete(_Config) ->
+    Db = <<"history_test_db">>,
+    DocId = <<"prov_rt">>,
+    Prov = #{actor => <<"agent-1">>, session => <<"ses-9">>,
+             source => <<"test">>},
+    {ok, _} = barrel_docdb:put_doc(Db, #{<<"id">> => DocId, <<"v">> => 1},
+                                   #{provenance => Prov}),
+    {ok, #{<<"_rev">> := R}} = barrel_docdb:get_doc(Db, DocId),
+    {ok, _} = barrel_docdb:put_doc(Db, #{<<"id">> => DocId, <<"v">> => 2,
+                                         <<"_rev">> => R}),
+    {ok, _} = barrel_docdb:delete_doc(Db, DocId,
+                                      #{provenance => #{actor => <<"agent-2">>}}),
+    [E1, E2, E3] = doc_history(Db, DocId),
+    ?assertEqual(Prov, maps:get(provenance, E1)),
+    %% the provenance-less update recorded none
+    ?assertNot(maps:is_key(provenance, E2)),
+    ?assertEqual(#{actor => <<"agent-2">>}, maps:get(provenance, E3)),
+    ?assert(maps:get(deleted, E3)),
+    ok.
+
+prov_legacy_entry_decodes(_Config) ->
+    %% entries written before the TLV tail existed decode unchanged
+    VV = barrel_vv:bump(barrel_vv:new(),
+                        barrel_version:new(barrel_hlc:new_hlc(), <<1:64>>)),
+    Version = barrel_version:new(barrel_hlc:new_hlc(), <<2:64>>),
+    Legacy = barrel_history:encode_entry(<<"old">>, Version, false, local, VV),
+    Decoded = barrel_history:decode_entry(Legacy),
+    ?assertEqual(<<"old">>, maps:get(id, Decoded)),
+    ?assertEqual(VV, maps:get(vv, Decoded)),
+    ?assertNot(maps:is_key(provenance, Decoded)),
+    %% and an unknown future tag is skipped
+    WithTag = <<Legacy/binary, 99:8, 3:16, "xyz">>,
+    Decoded2 = barrel_history:decode_entry(WithTag),
+    ?assertEqual(maps:get(vv, Decoded), maps:get(vv, Decoded2)),
+    ok.
+
+prov_replicated_carries_none(_Config) ->
+    Db = <<"history_test_db">>,
+    DocId = <<"prov_repl">>,
+    {Tok, VVBin} = remote_version(<<"peer_prov">>),
+    {ok, DocId, Tok} = barrel_docdb:put_version(
+        Db, #{<<"id">> => DocId, <<"v">> => <<"remote">>}, Tok, VVBin, false),
+    [Entry] = doc_history(Db, DocId),
+    ?assertEqual(replicated, maps:get(cause, Entry)),
+    ?assertNot(maps:is_key(provenance, Entry)),
+    ok.
+
+prov_invalid_rejected(_Config) ->
+    Db = <<"history_test_db">>,
+    Doc = #{<<"id">> => <<"prov_bad">>},
+    ?assertMatch({error, {invalid_provenance, {unknown_provenance_keys, _}}},
+                 barrel_docdb:put_doc(Db, Doc, #{provenance => #{who => <<"x">>}})),
+    ?assertMatch({error, {invalid_provenance, {bad_provenance_values, _}}},
+                 barrel_docdb:put_doc(Db, Doc, #{provenance => #{actor => 42}})),
+    Big = binary:copy(<<"a">>, 300),
+    ?assertMatch({error, {invalid_provenance, {bad_provenance_values, _}}},
+                 barrel_docdb:put_doc(Db, Doc, #{provenance => #{actor => Big}})),
+    ?assertMatch({error, {invalid_provenance, empty_provenance}},
+                 barrel_docdb:put_doc(Db, Doc, #{provenance => #{}})),
+    %% nothing was written
+    ?assertEqual({error, not_found}, barrel_docdb:get_doc(Db, <<"prov_bad">>)),
+    ok.
+
+prov_branch_checkpoint_carries(Config) ->
+    Db = <<"history_test_db">>,
+    Branch = <<"history_test_db_provb">>,
+    DocId = <<"prov_branch">>,
+    Prov = #{actor => <<"agent-b">>},
+    {ok, _} = barrel_docdb:put_doc(Db, #{<<"id">> => DocId},
+                                   #{provenance => Prov}),
+    {ok, _} = barrel_docdb:branch_db(Db, Branch,
+                                     #{data_dir => ?config(data_dir, Config)}),
+    try
+        Entries = [E || #{id := Id} = E <- branch_history(Branch),
+                        Id =:= DocId],
+        ?assertMatch([#{provenance := Prov}], Entries)
+    after
+        _ = barrel_docdb:delete_db(Branch)
+    end,
+    ok.
+
+branch_history(Db) ->
+    {ok, Entries} = barrel_docdb:fold_history(
+        Db, fun(E, Acc) -> {ok, [E | Acc]} end, []),
+    lists:reverse(Entries).
+
+prov_swept_with_history(Config) ->
+    %% a short retention window sweeps entries and their TLV tails ride
+    %% along (they live in the same rows)
+    Db = <<"prov_sweep_db">>,
+    {ok, _Pid} = barrel_docdb:create_db(Db, #{
+        data_dir => ?config(data_dir, Config),
+        retention_period => 1}),
+    {ok, _} = barrel_docdb:put_doc(Db, #{<<"id">> => <<"a">>},
+                                   #{provenance => #{actor => <<"x">>}}),
+    %% a later write keeps the feed alive past the swept entry
+    timer:sleep(1100),
+    {ok, _} = barrel_docdb:put_doc(Db, #{<<"id">> => <<"b">>}),
+    {ok, _} = barrel_docdb:sweep_retention(Db),
+    try
+        Entries = branch_history(Db),
+        ?assertNot(lists:any(fun(#{id := Id}) -> Id =:= <<"a">> end,
+                             Entries))
+    after
+        _ = barrel_docdb:delete_db(Db)
+    end,
     ok.

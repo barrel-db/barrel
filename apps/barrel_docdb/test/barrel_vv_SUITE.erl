@@ -16,6 +16,7 @@
          compare_relations/1,
          contains_covers/1,
          codec_roundtrip/1,
+         decode_prefix_tail/1,
          merge_properties/1]).
 
 all() ->
@@ -24,6 +25,7 @@ all() ->
      compare_relations,
      contains_covers,
      codec_roundtrip,
+     decode_prefix_tail,
      merge_properties].
 
 %%====================================================================
@@ -137,3 +139,20 @@ random_vv() ->
         end,
         barrel_vv:new(),
         Nodes).
+
+
+decode_prefix_tail(_Config) ->
+    VV = barrel_vv:bump(
+        barrel_vv:bump(barrel_vv:new(), {ts(1, 0), <<"a">>}),
+        {ts(2, 0), <<"b">>}),
+    Enc = barrel_vv:encode(VV),
+    %% exact fit
+    ?assertEqual({VV, <<>>}, barrel_vv:decode_prefix(Enc)),
+    ?assertEqual(VV, barrel_vv:decode(Enc)),
+    %% trailing bytes are returned, not consumed
+    ?assertEqual({VV, <<"tail">>},
+                 barrel_vv:decode_prefix(<<Enc/binary, "tail">>)),
+    %% decode/1 refuses trailing bytes
+    ?assertError({badmatch, _},
+                 barrel_vv:decode(<<Enc/binary, "tail">>)),
+    ok.

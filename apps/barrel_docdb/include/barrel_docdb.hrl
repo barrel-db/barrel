@@ -145,6 +145,9 @@
 -define(COL_CREATED_AT, <<"created_at">>).
 -define(COL_EXPIRES_AT, <<"expires_at">>).
 -define(COL_TIER, <<"tier">>).
+%% Last-writer provenance (CBOR map: actor/session/source), set only by
+%% local writes carrying the provenance option
+-define(COL_PROVENANCE, <<"prov">>).
 %% Document embedding: 32-bit float binary + provenance (client-supplied via
 %% the _embedding doc field, or computed by an embedding policy). Derived
 %% data: never part of the body or the revision hash, surfaced as

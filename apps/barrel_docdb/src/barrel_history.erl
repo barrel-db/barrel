@@ -22,7 +22,7 @@
 -include("barrel_docdb.hrl").
 
 %% Writer-side op builder (appended to the document WriteBatch)
--export([write_ops/7]).
+-export([write_ops/7, write_ops/8]).
 
 %% Caller-side reads
 -export([fold/4, fold/5]).
@@ -31,7 +31,7 @@
 -export([history_floor/2]).
 
 %% Entry codec (exposed for tests)
--export([encode_entry/5, decode_entry/1]).
+-export([encode_entry/5, encode_entry/6, decode_entry/1]).
 
 -define(HISTORY_FLOOR_META, <<"history_floor">>).
 
@@ -43,7 +43,9 @@
     version := binary(),          %% version token
     deleted := boolean(),
     cause := cause(),
-    vv := barrel_vv:vv()
+    vv := barrel_vv:vv(),
+    %% present only when the write carried the provenance option
+    provenance => barrel_provenance:provenance()
 }.
 
 -export_type([cause/0, entry/0]).
@@ -60,9 +62,18 @@
                 barrel_version:version(), boolean(), cause(),
                 barrel_vv:vv()) -> [term()].
 write_ops(DbName, ChangeHlc, DocId, Version, Deleted, Cause, VV) ->
+    write_ops(DbName, ChangeHlc, DocId, Version, Deleted, Cause, VV,
+              undefined).
+
+%% @doc Like write_ops/7 with an encoded provenance blob (see
+%% barrel_provenance) recorded in the entry, or undefined.
+-spec write_ops(db_name(), barrel_hlc:timestamp(), docid(),
+                barrel_version:version(), boolean(), cause(),
+                barrel_vv:vv(), binary() | undefined) -> [term()].
+write_ops(DbName, ChangeHlc, DocId, Version, Deleted, Cause, VV, Prov) ->
     Ks = barrel_keyspace:resolve(DbName),
     [{put, barrel_store_keys:history_key(Ks, ChangeHlc),
-      encode_entry(DocId, Version, Deleted, Cause, VV)}].
+      encode_entry(DocId, Version, Deleted, Cause, VV, Prov)}].
 
 %%====================================================================
 %% Caller-side reads
@@ -185,34 +196,58 @@ history_floor(StoreRef, DbName0) ->
 %%====================================================================
 
 %% Format: <<Cause:8, Deleted:8, DocIdLen:16, DocId/binary,
-%%           VerLen:16, VersionEnc/binary, VV/binary>>
-%% The VV takes the remainder: its codec is self-delimiting.
+%%           VerLen:16, VersionEnc/binary, VV/binary, Tlvs/binary>>
+%% The VV codec is self-delimiting; an optional TLV tail follows it:
+%% <<Tag:8, Len:16, Value:Len/binary>>* with tag 1 = provenance CBOR.
+%% Unknown tags are skipped, and entries written before the tail
+%% existed decode unchanged (empty tail).
 
 %% @doc Encode a history entry value.
 -spec encode_entry(docid(), barrel_version:version(), boolean(), cause(),
                    barrel_vv:vv()) -> binary().
 encode_entry(DocId, Version, Deleted, Cause, VV) ->
+    encode_entry(DocId, Version, Deleted, Cause, VV, undefined).
+
+%% @doc Encode a history entry value with an optional encoded
+%% provenance blob.
+-spec encode_entry(docid(), barrel_version:version(), boolean(), cause(),
+                   barrel_vv:vv(), binary() | undefined) -> binary().
+encode_entry(DocId, Version, Deleted, Cause, VV, Prov) ->
     VersionEnc = barrel_version:encode(Version),
     VVBin = barrel_vv:encode(VV),
+    Tail = case Prov of
+        undefined -> <<>>;
+        _ -> <<1:8, (byte_size(Prov)):16, Prov/binary>>
+    end,
     <<(cause_to_byte(Cause)):8,
       (case Deleted of true -> 1; false -> 0 end):8,
       (byte_size(DocId)):16, DocId/binary,
       (byte_size(VersionEnc)):16, VersionEnc/binary,
-      VVBin/binary>>.
+      VVBin/binary, Tail/binary>>.
 
 %% @doc Decode a history entry value (without the key's HLC).
 -spec decode_entry(binary()) -> map().
 decode_entry(<<CauseByte:8, DelByte:8,
                DocIdLen:16, DocId:DocIdLen/binary,
                VerLen:16, VersionEnc:VerLen/binary,
-               VVBin/binary>>) ->
-    #{
+               Rest/binary>>) ->
+    {VV, Tail} = barrel_vv:decode_prefix(Rest),
+    Entry = #{
         id => DocId,
         version => barrel_version:to_token(barrel_version:decode(VersionEnc)),
         deleted => DelByte =:= 1,
         cause => byte_to_cause(CauseByte),
-        vv => barrel_vv:decode(VVBin)
-    }.
+        vv => VV
+    },
+    decode_tlvs(Tail, Entry).
+
+decode_tlvs(<<>>, Entry) ->
+    Entry;
+decode_tlvs(<<1:8, Len:16, Prov:Len/binary, Rest/binary>>, Entry) ->
+    decode_tlvs(Rest, Entry#{provenance => barrel_provenance:decode(Prov)});
+decode_tlvs(<<_Tag:8, Len:16, _Skip:Len/binary, Rest/binary>>, Entry) ->
+    %% forward compatibility: unknown tags are ignored
+    decode_tlvs(Rest, Entry).
 
 %%====================================================================
 %% Internal

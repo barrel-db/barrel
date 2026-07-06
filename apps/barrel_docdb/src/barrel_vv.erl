@@ -24,7 +24,7 @@
 -export([new/0]).
 -export([bump/2, merge/2]).
 -export([compare/2, contains/2]).
--export([encode/1, decode/1]).
+-export([encode/1, decode/1, decode_prefix/1]).
 
 -type vv() :: #{binary() => barrel_hlc:timestamp()}.
 %% NodeId -> highest HLC seen from that node.
@@ -90,9 +90,18 @@ encode(VV) ->
                || {Node, Hlc} <- Entries],
     iolist_to_binary([<<(length(Entries)):16>> | Encoded]).
 
-%% @doc Decode an encoded vector.
+%% @doc Decode an encoded vector (the input must be exactly one
+%% encoded vector).
 -spec decode(binary()) -> vv().
-decode(<<Count:16, Rest/binary>>) ->
+decode(Bin) ->
+    {VV, <<>>} = decode_prefix(Bin),
+    VV.
+
+%% @doc Decode an encoded vector from the head of the input and return
+%% the remaining bytes (history entries append an optional TLV tail
+%% after the VV).
+-spec decode_prefix(binary()) -> {vv(), binary()}.
+decode_prefix(<<Count:16, Rest/binary>>) ->
     decode_entries(Count, Rest, #{}).
 
 %%====================================================================
@@ -119,8 +128,8 @@ entry_compare(undefined, _) -> lt;
 entry_compare(_, undefined) -> gt;
 entry_compare(H1, H2) -> barrel_hlc:compare(H1, H2).
 
-decode_entries(0, <<>>, Acc) ->
-    Acc;
+decode_entries(0, Rest, Acc) ->
+    {Acc, Rest};
 decode_entries(N, <<NodeLen:8, Node:NodeLen/binary, HlcBin:12/binary,
                     Rest/binary>>, Acc) when N > 0 ->
     decode_entries(N - 1, Rest, Acc#{Node => barrel_hlc:decode(HlcBin)}).
