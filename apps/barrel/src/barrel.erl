@@ -21,6 +21,10 @@
     open/2,
     close/1,
     delete/1,
+    branch/2,
+    branch/3,
+    merge/1,
+    merge/2,
     info/1
 ]).
 
@@ -244,6 +248,76 @@ close(#{name := Name, docdb := DbBin, vstore := Store} = Db) ->
     end,
     _ = barrel_vectordb:stop(Store),
     barrel_docdb:close_db(DbBin).
+
+%% @doc Fork a composed database into a branch (timeline). The docdb
+%% forks instantly (at now, or rewound to a past HLC with
+%% `at => HlcT'); the branch opens as its own composed database with a
+%% FRESH vector store. Plain databases do not carry vectors across the
+%% fork in v1 (they live only in the vector store; re-add or reindex
+%% on the branch). Record-mode branches backfill from the embeddings
+%% stored in doc bodies, see barrel_record_backfill.
+%%
+%% Opts: at (now | HlcT), docdb (branch docdb overrides), vectordb
+%% (branch vector store config, e.g. db_path), backfill (record mode:
+%% sync | none).
+-spec branch(db(), atom()) -> {ok, db()} | {error, term()}.
+branch(Db, BranchName) ->
+    branch(Db, BranchName, #{}).
+
+-spec branch(db(), atom(), map()) -> {ok, db()} | {error, term()}.
+branch(#{docdb := ParentBin} = Db, BranchName, Opts)
+        when is_atom(BranchName), is_map(Opts) ->
+    BranchBin = atom_to_binary(BranchName, utf8),
+    DocOpts = maps:get(docdb, Opts, #{}),
+    BranchOpts = DocOpts#{at => maps:get(at, Opts, now)},
+    case barrel_docdb:branch_db(ParentBin, BranchBin, BranchOpts) of
+        {ok, _Pid} ->
+            case open_branch(Db, BranchName, BranchBin, Opts) of
+                {ok, _} = Ok ->
+                    Ok;
+                {error, _} = OpenErr ->
+                    _ = barrel_docdb:delete_db(BranchBin),
+                    OpenErr
+            end;
+        {error, _} = Err ->
+            Err
+    end.
+
+%% @private The branch's facade side: a fresh vector store; record
+%% mode re-applies the parent's policy and backfills (step 11).
+open_branch(#{embedding := _}, _BranchName, _BranchBin, _Opts) ->
+    {error, record_branch_not_implemented};
+open_branch(_Db, BranchName, _BranchBin, Opts) ->
+    open(BranchName, #{vectordb => maps:get(vectordb, Opts, #{}),
+                       docdb => maps:get(docdb, Opts, #{})}).
+
+%% @doc Merge a branch's edits back into its parent (see
+%% barrel_docdb:merge_branch/2). When the parent is a record-mode
+%% database open in this VM, its indexer is nudged so merged docs
+%% embed promptly (the outbox entries exist either way).
+-spec merge(db()) -> {ok, map()} | {error, term()}.
+merge(Db) ->
+    merge(Db, #{}).
+
+-spec merge(db(), map()) -> {ok, map()} | {error, term()}.
+merge(#{docdb := BranchBin}, Opts) ->
+    case barrel_docdb:merge_branch(BranchBin, Opts) of
+        {ok, _Report} = Ok ->
+            _ = case barrel_docdb:db_info(BranchBin) of
+                {ok, #{parent := Parent}} ->
+                    try
+                        barrel_record_indexer:nudge(
+                            binary_to_existing_atom(Parent, utf8))
+                    catch
+                        _:_ -> ok
+                    end;
+                _ ->
+                    ok
+            end,
+            Ok;
+        {error, _} = Err ->
+            Err
+    end.
 
 %% @doc Delete a composed barrel database: stop the indexer, destroy
 %% the vector store (handles closed, directory removed), and delete
