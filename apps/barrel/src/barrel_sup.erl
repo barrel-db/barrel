@@ -39,6 +39,12 @@ init([]) ->
             start => {barrel_bql_live_sup, start_link, []},
             type => supervisor,
             shutdown => infinity
+        },
+        #{
+            id => barrel_dbs,
+            start => {barrel_dbs, start_link, []},
+            type => worker,
+            shutdown => 5000
         }
     ],
     {ok, {SupFlags, Children}}.

@@ -3,9 +3,11 @@
 %%%
 %%% Children (one_for_one):
 %%% <ol>
-%%%   <li>{@link barrel_server_dbs} - owns open `barrel' database handles.</li>
 %%%   <li>{@link barrel_server_http} - the livery HTTP service.</li>
 %%% </ol>
+%%% Open database handles are owned by the facade's lifecycle manager
+%%% ({@link barrel_dbs}, in the barrel application); handlers reach it
+%%% through the {@link barrel_server_dbs} shim.
 %%% @end
 %%%-------------------------------------------------------------------
 -module(barrel_server_sup).
@@ -19,12 +21,6 @@ start_link() ->
 init([]) ->
     SupFlags = #{strategy => one_for_one, intensity => 5, period => 10},
     Children = [
-        #{id => barrel_server_dbs,
-          start => {barrel_server_dbs, start_link, []},
-          restart => permanent,
-          shutdown => 5000,
-          type => worker,
-          modules => [barrel_server_dbs]},
         #{id => barrel_server_http,
           start => {barrel_server_http, start_link, []},
           restart => permanent,
