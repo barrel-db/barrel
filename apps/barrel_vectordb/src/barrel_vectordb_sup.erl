@@ -4,8 +4,9 @@
 %%% This supervisor is the root of the barrel_vectordb OTP application.
 %%% barrel_vectordb is an embedded library: individual stores are started
 %%% on demand by the embedding application via
-%%% {@link barrel_vectordb:start_link/1}, so this supervisor has no
-%%% static children of its own.
+%%% {@link barrel_vectordb:start_link/1}. Its only static child is the
+%%% name registry stores register in ({@link barrel_vectordb_registry}),
+%%% which maps binary store names to pids without minting atoms.
 %%%
 %%% @end
 %%%-------------------------------------------------------------------
@@ -37,4 +38,11 @@ init([]) ->
         intensity => 5,
         period => 60
     },
-    {ok, {SupFlags, []}}.
+    Registry = #{
+        id => barrel_vectordb_registry,
+        start => {barrel_vectordb_registry, start_link, []},
+        restart => permanent,
+        shutdown => 5000,
+        type => worker
+    },
+    {ok, {SupFlags, [Registry]}}.

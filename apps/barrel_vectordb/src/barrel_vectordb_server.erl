@@ -56,8 +56,10 @@
 %% gen_batch_server callbacks
 -export([init/1, handle_batch/2, terminate/2]).
 
+-type store_ref() :: atom() | binary() | pid().
+
 -record(state, {
-    name :: atom(),
+    name :: binary(),
     db :: rocksdb:db_handle(),
     cf_vectors :: rocksdb:cf_handle(),
     cf_metadata :: rocksdb:cf_handle(),
@@ -95,8 +97,13 @@
 %% Default batch settings optimized for vector DB workloads:
 %%   - min_batch_size: 4 (responsive for single inserts, batches concurrent ones)
 %%   - max_batch_size: 256 (reasonable upper bound for memory/latency)
--spec start_link(atom(), map()) -> {ok, pid()} | {error, term()}.
+-spec start_link(atom() | binary(), map()) -> {ok, pid()} | {error, term()}.
 start_link(Name, Config) ->
+    %% Names are binaries internally: stores register in
+    %% barrel_vectordb_registry instead of {local, Atom}, so
+    %% dynamically named ephemeral stores never grow the atom table.
+    ok = barrel_vectordb_registry:ensure(),
+    NameBin = to_name(Name),
     BatchOpts = maps:get(batch, Config, #{}),
     %% Apply sensible defaults for vector DB workload
     DefaultBatch = #{min_batch_size => 4, max_batch_size => 256},
@@ -106,140 +113,151 @@ start_link(Name, Config) ->
         (min_batch_size, V, Acc) -> [{min_batch_size, V} | Acc];
         (_, _, Acc) -> Acc
     end, [], MergedBatch),
-    gen_batch_server:start_link({local, Name}, ?MODULE, {Name, Config},
-                                [{gen_batch_server, GBOpts}]).
+    gen_batch_server:start_link(
+        {via, barrel_vectordb_registry, {vstore, NameBin}}, ?MODULE,
+        {NameBin, Config}, [{gen_batch_server, GBOpts}]).
+
+%% Resolve a caller-supplied store reference to something
+%% gen_batch_server accepts: pids pass through, names (atom or binary)
+%% go through the registry.
+ref(Pid) when is_pid(Pid) -> Pid;
+ref(Name) ->
+    {via, barrel_vectordb_registry, {vstore, to_name(Name)}}.
+
+to_name(Name) when is_binary(Name) -> Name;
+to_name(Name) when is_atom(Name) -> atom_to_binary(Name, utf8).
 
 %% @doc Stop a store.
--spec stop(atom() | pid()) -> ok.
+-spec stop(store_ref()) -> ok.
 stop(Store) ->
-    gen_batch_server:stop(Store).
+    gen_batch_server:stop(ref(Store)).
 
 %% @doc The store's storage path (RocksDB dir; bm25/diskann nest
 %% under it).
--spec get_db_path(atom() | pid()) -> {ok, string()}.
+-spec get_db_path(store_ref()) -> {ok, string()}.
 get_db_path(Store) ->
-    gen_batch_server:call(Store, get_db_path).
+    gen_batch_server:call(ref(Store), get_db_path).
 
 %% @doc Add document with auto-embedding.
--spec add(atom() | pid(), binary(), binary(), map()) -> ok | {error, term()}.
+-spec add(store_ref(), binary(), binary(), map()) -> ok | {error, term()}.
 add(Store, Id, Text, Metadata) ->
-    gen_batch_server:call(Store, {add, Id, Text, Metadata}, ?LONG_TIMEOUT).
+    gen_batch_server:call(ref(Store), {add, Id, Text, Metadata}, ?LONG_TIMEOUT).
 
 %% @doc Add document with explicit vector.
--spec add_vector(atom() | pid(), binary(), binary(), map(), [float()]) -> ok | {error, term()}.
+-spec add_vector(store_ref(), binary(), binary(), map(), [float()]) -> ok | {error, term()}.
 add_vector(Store, Id, Text, Metadata, Vector) ->
-    gen_batch_server:call(Store, {add_vector, Id, Text, Metadata, Vector}, ?LONG_TIMEOUT).
+    gen_batch_server:call(ref(Store), {add_vector, Id, Text, Metadata, Vector}, ?LONG_TIMEOUT).
 
 %% @doc Add multiple documents.
--spec add_batch(atom() | pid(), [{binary(), binary(), map()}]) ->
+-spec add_batch(store_ref(), [{binary(), binary(), map()}]) ->
     {ok, #{inserted := non_neg_integer()}} | {error, term()}.
 add_batch(Store, Docs) ->
-    gen_batch_server:call(Store, {add_batch, Docs}, ?LONG_TIMEOUT).
+    gen_batch_server:call(ref(Store), {add_batch, Docs}, ?LONG_TIMEOUT).
 
 %% @doc Add multiple documents with pre-computed vectors (bulk insert).
--spec add_vector_batch(atom() | pid(), [{binary(), binary(), map(), [float()]}]) ->
+-spec add_vector_batch(store_ref(), [{binary(), binary(), map(), [float()]}]) ->
     {ok, #{inserted := non_neg_integer()}} | {error, term()}.
 add_vector_batch(Store, Docs) ->
-    gen_batch_server:call(Store, {add_vector_batch, Docs}, ?LONG_TIMEOUT).
+    gen_batch_server:call(ref(Store), {add_vector_batch, Docs}, ?LONG_TIMEOUT).
 
 %% @doc Index a vector without storing text/metadata (see barrel_vectordb).
--spec add_index_only(atom() | pid(), binary(), binary(), [float()]) ->
+-spec add_index_only(store_ref(), binary(), binary(), [float()]) ->
     ok | {error, term()}.
 add_index_only(Store, Id, Text, Vector) ->
-    gen_batch_server:call(Store, {index_only, Id, Text, Vector}, ?LONG_TIMEOUT).
+    gen_batch_server:call(ref(Store), {index_only, Id, Text, Vector}, ?LONG_TIMEOUT).
 
 %% @doc Index multiple vectors without storing text/metadata.
--spec add_index_only_batch(atom() | pid(), [{binary(), binary(), [float()]}]) ->
+-spec add_index_only_batch(store_ref(), [{binary(), binary(), [float()]}]) ->
     {ok, #{inserted := non_neg_integer()}} | {error, term()}.
 add_index_only_batch(Store, Entries) ->
-    gen_batch_server:call(Store, {index_only_batch, Entries}, ?LONG_TIMEOUT).
+    gen_batch_server:call(ref(Store), {index_only_batch, Entries}, ?LONG_TIMEOUT).
 
 %% @doc Get document by ID.
--spec get(atom() | pid(), binary()) -> {ok, map()} | not_found | {error, term()}.
+-spec get(store_ref(), binary()) -> {ok, map()} | not_found | {error, term()}.
 get(Store, Id) ->
-    gen_batch_server:call(Store, {get, Id}).
+    gen_batch_server:call(ref(Store), {get, Id}).
 
 %% @doc Update document metadata (re-embeds the text).
--spec update(atom() | pid(), binary(), binary(), map()) -> ok | not_found | {error, term()}.
+-spec update(store_ref(), binary(), binary(), map()) -> ok | not_found | {error, term()}.
 update(Store, Id, Text, Metadata) ->
-    gen_batch_server:call(Store, {update, Id, Text, Metadata}, ?LONG_TIMEOUT).
+    gen_batch_server:call(ref(Store), {update, Id, Text, Metadata}, ?LONG_TIMEOUT).
 
 %% @doc Insert or update document.
--spec upsert(atom() | pid(), binary(), binary(), map()) -> ok | {error, term()}.
+-spec upsert(store_ref(), binary(), binary(), map()) -> ok | {error, term()}.
 upsert(Store, Id, Text, Metadata) ->
-    gen_batch_server:call(Store, {upsert, Id, Text, Metadata}, ?LONG_TIMEOUT).
+    gen_batch_server:call(ref(Store), {upsert, Id, Text, Metadata}, ?LONG_TIMEOUT).
 
 %% @doc Delete document.
--spec delete(atom() | pid(), binary()) -> ok | {error, term()}.
+-spec delete(store_ref(), binary()) -> ok | {error, term()}.
 delete(Store, Id) ->
-    gen_batch_server:call(Store, {delete, Id}).
+    gen_batch_server:call(ref(Store), {delete, Id}).
 
 %% @doc Peek at documents (sample without search).
--spec peek(atom() | pid(), pos_integer()) -> {ok, [map()]}.
+-spec peek(store_ref(), pos_integer()) -> {ok, [map()]}.
 peek(Store, Limit) ->
-    gen_batch_server:call(Store, {peek, Limit}).
+    gen_batch_server:call(ref(Store), {peek, Limit}).
 
 %% @doc Search with text query.
--spec search(atom() | pid(), binary(), map()) -> {ok, [map()]} | {error, term()}.
+-spec search(store_ref(), binary(), map()) -> {ok, [map()]} | {error, term()}.
 search(Store, Query, Opts) ->
-    gen_batch_server:call(Store, {search, Query, Opts}, ?LONG_TIMEOUT).
+    gen_batch_server:call(ref(Store), {search, Query, Opts}, ?LONG_TIMEOUT).
 
 %% @doc Search with vector query.
--spec search_vector(atom() | pid(), [float()], map()) -> {ok, [map()]} | {error, term()}.
+-spec search_vector(store_ref(), [float()], map()) -> {ok, [map()]} | {error, term()}.
 search_vector(Store, Vector, Opts) ->
-    gen_batch_server:call(Store, {search_vector, Vector, Opts}, ?LONG_TIMEOUT).
+    gen_batch_server:call(ref(Store), {search_vector, Vector, Opts}, ?LONG_TIMEOUT).
 
 %% @doc Search with BM25 text query.
 %% Opts: #{k => integer()}
--spec search_bm25(atom() | pid(), binary(), map()) -> {ok, [{binary(), float()}]} | {error, term()}.
+-spec search_bm25(store_ref(), binary(), map()) -> {ok, [{binary(), float()}]} | {error, term()}.
 search_bm25(Store, Query, Opts) ->
-    gen_batch_server:call(Store, {search_bm25, Query, Opts}, ?LONG_TIMEOUT).
+    gen_batch_server:call(ref(Store), {search_bm25, Query, Opts}, ?LONG_TIMEOUT).
 
 %% @doc Hybrid search combining BM25 and vector search.
 %% Opts: #{k => integer(), bm25_weight => float(), vector_weight => float(), fusion => rrf | linear}
--spec search_hybrid(atom() | pid(), binary(), map()) -> {ok, [map()]} | {error, term()}.
+-spec search_hybrid(store_ref(), binary(), map()) -> {ok, [map()]} | {error, term()}.
 search_hybrid(Store, Query, Opts) ->
-    gen_batch_server:call(Store, {search_hybrid, Query, Opts}, ?LONG_TIMEOUT).
+    gen_batch_server:call(ref(Store), {search_hybrid, Query, Opts}, ?LONG_TIMEOUT).
 
 %% @doc Get BM25 index information.
--spec bm25_info(atom() | pid()) -> {ok, map()} | {error, bm25_not_enabled}.
+-spec bm25_info(store_ref()) -> {ok, map()} | {error, bm25_not_enabled}.
 bm25_info(Store) ->
-    gen_batch_server:call(Store, bm25_info).
+    gen_batch_server:call(ref(Store), bm25_info).
 
 %% @doc Trigger BM25 index compaction (disk backend only).
--spec bm25_compact(atom() | pid()) -> ok | {error, term()}.
+-spec bm25_compact(store_ref()) -> ok | {error, term()}.
 bm25_compact(Store) ->
-    gen_batch_server:call(Store, bm25_compact, ?LONG_TIMEOUT).
+    gen_batch_server:call(ref(Store), bm25_compact, ?LONG_TIMEOUT).
 
 %% @doc Embed single text.
--spec embed(atom() | pid(), binary()) -> {ok, [float()]} | {error, term()}.
+-spec embed(store_ref(), binary()) -> {ok, [float()]} | {error, term()}.
 embed(Store, Text) ->
-    gen_batch_server:call(Store, {embed, Text}, ?LONG_TIMEOUT).
+    gen_batch_server:call(ref(Store), {embed, Text}, ?LONG_TIMEOUT).
 
 %% @doc Embed multiple texts.
--spec embed_batch(atom() | pid(), [binary()]) -> {ok, [[float()]]} | {error, term()}.
+-spec embed_batch(store_ref(), [binary()]) -> {ok, [[float()]]} | {error, term()}.
 embed_batch(Store, Texts) ->
-    gen_batch_server:call(Store, {embed_batch, Texts}, ?LONG_TIMEOUT).
+    gen_batch_server:call(ref(Store), {embed_batch, Texts}, ?LONG_TIMEOUT).
 
 %% @doc Get store statistics.
--spec stats(atom() | pid()) -> {ok, map()}.
+-spec stats(store_ref()) -> {ok, map()}.
 stats(Store) ->
-    gen_batch_server:call(Store, stats).
+    gen_batch_server:call(ref(Store), stats).
 
 %% @doc Get document count.
--spec count(atom() | pid()) -> non_neg_integer().
+-spec count(store_ref()) -> non_neg_integer().
 count(Store) ->
-    gen_batch_server:call(Store, count).
+    gen_batch_server:call(ref(Store), count).
 
 %% @doc Get embedder information.
--spec embedder_info(atom() | pid()) -> {ok, map()}.
+-spec embedder_info(store_ref()) -> {ok, map()}.
 embedder_info(Store) ->
-    gen_batch_server:call(Store, embedder_info).
+    gen_batch_server:call(ref(Store), embedder_info).
 
 %% @doc Checkpoint HNSW index to disk.
--spec checkpoint(atom() | pid()) -> ok.
+-spec checkpoint(store_ref()) -> ok.
 checkpoint(Store) ->
-    gen_batch_server:call(Store, checkpoint).
+    gen_batch_server:call(ref(Store), checkpoint).
 
 %%====================================================================
 %% gen_batch_server callbacks

@@ -126,8 +126,9 @@
 ]).
 
 %% Types
--type store() :: atom() | pid().
-%% A store reference - either a registered name or a pid.
+-type store() :: atom() | binary() | pid().
+%% A store reference - a registered name (binary preferred; atoms are
+%% normalized, so dynamic names should be binaries) or a pid.
 
 -type id() :: binary().
 %% Unique document identifier.
@@ -729,4 +730,6 @@ checkpoint(Store) ->
 %% @private
 %% Generate default database path for a store name
 default_path(Name) when is_atom(Name) ->
-    "priv/barrel_vectordb_" ++ atom_to_list(Name).
+    "priv/barrel_vectordb_" ++ atom_to_list(Name);
+default_path(Name) when is_binary(Name) ->
+    "priv/barrel_vectordb_" ++ binary_to_list(Name).
