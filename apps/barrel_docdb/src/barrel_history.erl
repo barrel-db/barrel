@@ -130,7 +130,7 @@ get_doc_versions(StoreRef, DbName0, DocId) ->
     EntityKey = barrel_store_keys:doc_entity(DbName, DocId),
     case barrel_store_rocksdb:get_entity(StoreRef, EntityKey) of
         {ok, Columns} ->
-            Current = #{
+            Current0 = #{
                 version => barrel_version:to_token(
                     barrel_version:decode(
                         proplists:get_value(?COL_VERSION, Columns))),
@@ -141,6 +141,12 @@ get_doc_versions(StoreRef, DbName0, DocId) ->
                 vv => barrel_vv:decode(
                     proplists:get_value(?COL_VV, Columns, <<>>))
             },
+            Current = case proplists:get_value(?COL_PROVENANCE, Columns) of
+                undefined ->
+                    Current0;
+                ProvEnc ->
+                    Current0#{provenance => barrel_provenance:decode(ProvEnc)}
+            end,
             {ok, [Current | chain_versions(StoreRef, DbName, DocId)]};
         not_found ->
             {error, not_found}
@@ -148,10 +154,19 @@ get_doc_versions(StoreRef, DbName0, DocId) ->
 
 %% @doc The body of one version of a document: the current body when
 %% the token is the winner, the version-keyed archive otherwise. Bodies
-%% of swept versions are gone (`{error, not_found}').
+%% of swept versions are gone (`{error, not_found}'), and a token that
+%% does not parse is not found either (this path serves user-supplied
+%% tokens over REST and MCP).
 -spec get_version_body(barrel_store_rocksdb:db_ref(), db_name(), docid(),
                        binary()) -> {ok, map()} | {error, not_found}.
 get_version_body(StoreRef, DbName0, DocId, VersionToken) ->
+    try
+        do_get_version_body(StoreRef, DbName0, DocId, VersionToken)
+    catch
+        error:badarg -> {error, not_found}
+    end.
+
+do_get_version_body(StoreRef, DbName0, DocId, VersionToken) ->
     DbName = barrel_keyspace:resolve(DbName0),
     Version = barrel_version:from_token(VersionToken),
     EntityKey = barrel_store_keys:doc_entity(DbName, DocId),

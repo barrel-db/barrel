@@ -981,6 +981,7 @@ put_entity(#{ref := Ref}, Key, Columns, Opts) ->
 -define(COL_TIER, <<"tier">>).
 -define(COL_EMBEDDING, <<"emb">>).
 -define(COL_EMBEDDING_SRC, <<"embsrc">>).
+-define(COL_PROVENANCE, <<"prov">>).
 
 %% @doc Encode entity columns to fixed binary format.
 %% Format v4 (version vectors; the rev-tree formats are gone, pre-1.0
@@ -1015,18 +1016,35 @@ encode_entity(Columns) ->
         _ -> 0
     end,
 
-    %% Embedding extension: `<<EmbLen:32, Emb/binary, Src:8>>'
-    %% appended only when a vector is stored (src 0=client, 1=computed)
-    EmbExt = case proplists:get_value(?COL_EMBEDDING, Columns, <<>>) of
-        <<>> ->
+    %% Extension tail. Entities without provenance keep the exact
+    %% legacy shapes (empty, or the embedding extension
+    %% `<<EmbLen:32, Emb/binary, Src:8>>'); an entity carrying
+    %% provenance switches to the tagged form
+    %% `<<16#FFFFFFFF:32, (Tag:8, Len:32, Value)*>>' (the sentinel can
+    %% never be a real embedding length). Tag 1 = embedding
+    %% (`<<Src:8, Emb/binary>>'), tag 2 = provenance CBOR. Old code
+    %% ignores the tagged form entirely (drops embedding + provenance
+    %% visibility, no crash).
+    Emb = proplists:get_value(?COL_EMBEDDING, Columns, <<>>),
+    SrcByte = case proplists:get_value(?COL_EMBEDDING_SRC, Columns,
+                                       <<"client">>) of
+        <<"computed">> -> 1;
+        _ -> 0
+    end,
+    Prov = proplists:get_value(?COL_PROVENANCE, Columns, <<>>),
+    Ext = case {Emb, Prov} of
+        {<<>>, <<>>} ->
             <<>>;
-        EmbBin when is_binary(EmbBin) ->
-            SrcByte = case proplists:get_value(?COL_EMBEDDING_SRC, Columns,
-                                               <<"client">>) of
-                <<"computed">> -> 1;
-                _ -> 0
-            end,
-            <<(byte_size(EmbBin)):32, EmbBin/binary, SrcByte:8>>
+        {EmbBin, <<>>} ->
+            <<(byte_size(EmbBin)):32, EmbBin/binary, SrcByte:8>>;
+        {<<>>, ProvBin} ->
+            <<16#FFFFFFFF:32,
+              2:8, (byte_size(ProvBin)):32, ProvBin/binary>>;
+        {EmbBin, ProvBin} ->
+            EmbVal = <<SrcByte:8, EmbBin/binary>>,
+            <<16#FFFFFFFF:32,
+              1:8, (byte_size(EmbVal)):32, EmbVal/binary,
+              2:8, (byte_size(ProvBin)):32, ProvBin/binary>>
     end,
 
     <<(byte_size(Version)):16, Version/binary,
@@ -1037,7 +1055,7 @@ encode_entity(Columns) ->
       ExpiresAt:64,
       TierByte:8,
       NConflicts:16,
-      EmbExt/binary>>.
+      Ext/binary>>.
 
 %% @doc Decode entity from fixed binary format (v4).
 -spec decode_entity(binary()) -> [{binary(), term()}].
@@ -1058,14 +1076,31 @@ decode_entity(<<VerLen:16, Version:VerLen/binary,
                {?COL_TIER, Tier}],
     decode_entity_ext(Ext, Columns).
 
-%% @private Decode the optional embedding extension.
+%% @private Decode the optional extension tail (see encode_entity).
 decode_entity_ext(<<>>, Columns) ->
     Columns;
+decode_entity_ext(<<16#FFFFFFFF:32, Tagged/binary>>, Columns) ->
+    decode_entity_tags(Tagged, Columns);
 decode_entity_ext(<<EmbLen:32, Emb:EmbLen/binary, SrcByte:8>>, Columns) ->
     Src = case SrcByte of 1 -> <<"computed">>; _ -> <<"client">> end,
     Columns ++ [{?COL_EMBEDDING, Emb}, {?COL_EMBEDDING_SRC, Src}];
 decode_entity_ext(_Unknown, Columns) ->
     %% Future extension we do not understand: ignore
+    Columns.
+
+decode_entity_tags(<<>>, Columns) ->
+    Columns;
+decode_entity_tags(<<1:8, Len:32, Val:Len/binary, Rest/binary>>, Columns) ->
+    <<SrcByte:8, Emb/binary>> = Val,
+    Src = case SrcByte of 1 -> <<"computed">>; _ -> <<"client">> end,
+    decode_entity_tags(Rest, Columns ++ [{?COL_EMBEDDING, Emb},
+                                         {?COL_EMBEDDING_SRC, Src}]);
+decode_entity_tags(<<2:8, Len:32, Val:Len/binary, Rest/binary>>, Columns) ->
+    decode_entity_tags(Rest, Columns ++ [{?COL_PROVENANCE, Val}]);
+decode_entity_tags(<<_Tag:8, Len:32, _Val:Len/binary, Rest/binary>>, Columns) ->
+    %% unknown future tag: skip
+    decode_entity_tags(Rest, Columns);
+decode_entity_tags(_Garbled, Columns) ->
     Columns.
 
 %% @doc Get a wide-column entity from the default column family

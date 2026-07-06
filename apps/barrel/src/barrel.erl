@@ -39,6 +39,7 @@
     get_docs/2,
     get_docs/3,
     delete_doc/2,
+    delete_doc/3,
     delete_docs/2,
     find/2,
     find/3
@@ -79,6 +80,11 @@
 %% Changes feed (barrel_docdb)
 -export([
     changes/2,
+    history/1,
+    history/2,
+    doc_versions/2,
+    version_body/3,
+    history_floor/1,
     changes/3,
     subscribe/2,
     subscribe/3,
@@ -494,10 +500,15 @@ get_docs(#{docdb := DbBin}, DocIds, Opts) ->
 %% the document's vector; in sync mode the vector is removed before
 %% returning.
 -spec delete_doc(db(), binary()) -> {ok, map()} | {error, term()}.
-delete_doc(#{docdb := DbBin} = Db, DocId) ->
+delete_doc(Db, DocId) ->
+    delete_doc(Db, DocId, #{}).
+
+%% @doc Delete a document by id with options (e.g. `provenance').
+-spec delete_doc(db(), binary(), map()) -> {ok, map()} | {error, term()}.
+delete_doc(#{docdb := DbBin} = Db, DocId, Opts) ->
     case sync_action(Db, #{}, #{}) of
         {sync, undefined} ->
-            WriteOpts = record_write_opts(Db, #{return_hlc => true}),
+            WriteOpts = record_write_opts(Db, Opts#{return_hlc => true}),
             case barrel_docdb:delete_doc(DbBin, DocId, WriteOpts) of
                 {ok, Result} ->
                     ok = sync_index(Db, maps:get(<<"id">>, Result), deindex,
@@ -507,7 +518,8 @@ delete_doc(#{docdb := DbBin} = Db, DocId) ->
                     Err
             end;
         _ ->
-            Result = barrel_docdb:delete_doc(DbBin, DocId, record_write_opts(Db, #{})),
+            Result = barrel_docdb:delete_doc(DbBin, DocId,
+                                             record_write_opts(Db, Opts)),
             ok = nudge_indexer(Db, Result),
             Result
     end.
@@ -699,6 +711,55 @@ changes(#{docdb := DbBin}, Since) ->
 -spec changes(db(), term(), map()) -> {ok, [map()], term()}.
 changes(#{docdb := DbBin}, Since, Opts) ->
     barrel_docdb:get_changes(DbBin, Since, Opts).
+
+%% @doc The retained history log, oldest first: one entry per applied
+%% write within the retention window (see barrel_history). Entries
+%% carry hlc, id, version, deleted, cause, vv, and provenance when the
+%% write recorded it.
+-spec history(db()) -> {ok, [barrel_history:entry()]} | {error, term()}.
+history(Db) ->
+    history(Db, #{}).
+
+%% @doc Like {@link history/1} with options: `from'/`to' (HLC bounds),
+%% `limit' (bounds the SCAN, not the matches), and `id' (keep only one
+%% document's entries; applied while scanning, so combined with `limit'
+%% fewer than `limit' entries can return).
+-spec history(db(), map()) ->
+    {ok, [barrel_history:entry()]} | {error, term()}.
+history(#{docdb := DbBin}, Opts) ->
+    IdFilter = maps:get(id, Opts, undefined),
+    FoldOpts = maps:with([from, to, limit], Opts),
+    Fun = fun(Entry, Acc) ->
+        case IdFilter =:= undefined
+             orelse maps:get(id, Entry) =:= IdFilter of
+            true -> {ok, [Entry | Acc]};
+            false -> {ok, Acc}
+        end
+    end,
+    case barrel_docdb:fold_history(DbBin, Fun, [], FoldOpts) of
+        {ok, Entries} -> {ok, lists:reverse(Entries)};
+        {error, _} = Err -> Err
+    end.
+
+%% @doc Every retained version of a document: the current winner (with
+%% last-writer provenance when recorded) followed by live conflict
+%% siblings and superseded versions.
+-spec doc_versions(db(), binary()) -> {ok, [map()]} | {error, term()}.
+doc_versions(#{docdb := DbBin}, DocId) ->
+    barrel_docdb:get_doc_versions(DbBin, DocId).
+
+%% @doc The body of one version of a document (current or archived;
+%% swept bodies are gone).
+-spec version_body(db(), binary(), binary()) ->
+    {ok, map()} | {error, not_found}.
+version_body(#{docdb := DbBin}, DocId, VersionToken) ->
+    barrel_docdb:get_version_body(DbBin, DocId, VersionToken).
+
+%% @doc The oldest HLC the history is complete from (undefined until a
+%% retention sweep runs).
+-spec history_floor(db()) -> barrel_hlc:timestamp() | undefined.
+history_floor(#{docdb := DbBin}) ->
+    barrel_docdb:history_floor(DbBin).
 
 %% @doc Subscribe to a changes stream from `Since'. Returns a stream pid.
 -spec subscribe(db(), term()) -> {ok, pid()} | {error, term()}.
