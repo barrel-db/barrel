@@ -368,14 +368,12 @@ search(#{<<"db">> := Name, <<"mode">> := Mode} = Args, Ctx) ->
 
 search_reply({ok, Hits}) when is_list(Hits) ->
     reply(#{hits => [hit(H) || H <- Hits]});
-search_reply(Hits) when is_list(Hits) ->
-    reply(#{hits => [hit(H) || H <- Hits]});
 search_reply(Err) ->
     err(Err).
 
+%% vector hits are maps; BM25 hits are {Id, Score} tuples
 hit({Id, Score}) -> #{key => Id, score => Score};
-hit(Map) when is_map(Map) -> barrel_server_http:jsonable(Map);
-hit(Other) -> Other.
+hit(Map) when is_map(Map) -> barrel_server_http:jsonable(Map).
 
 %%====================================================================
 %% Changes

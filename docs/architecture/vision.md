@@ -96,16 +96,22 @@ within the retention window; today it keeps only the latest change per doc.
 ## Agent layer
 
 - Database-per-agent: open/create cheap enough for hundreds of ephemeral
-  databases per task; one supervised process per database.
+  databases per task; one supervised process per database, binary names end
+  to end (no atom leak), and a lifecycle manager (`barrel_dbs`) with idle
+  close and LRU eviction.
 - Spaces: shared context containers with capability tokens; context is shared
-  by reference, not copied.
+  by reference, not copied. A space IS a barrel database; a capability is a
+  hashed random token with read < write < admin rights, revocable locally.
 - Sessions with TTL and handoffs are barrel primitives (mechanisms folded in
-  from `barrel_memory`); a handoff is a shared space plus a capability.
+  from `barrel_memory`); a handoff is a shared space plus a capability whose
+  possession is the right to accept. Sessions ride a general document-TTL
+  primitive (`expires_at` + opt-in sweeper).
 - MCP as a first-class surface: databases and live queries exposed as MCP
   resources with subscriptions (specced but unimplemented industry-wide),
-  plus tools for query, write, branch, and merge.
+  plus tools for query, write, branch, and merge, and the agent layer.
 - Audit: provenance fields plus the retained change log answer "what did the
   agent know when" at the database level.
+- SHIPPED (phase 8): see decision log row 7.
 
 ## Concurrency and encryption
 
@@ -166,3 +172,4 @@ Migration path (staged, adapter-first):
 | 4 | barrel_memory | Standalone policy product on barrel primitives | Memory layer is commoditizing; substrate is the durable value; migration staged |
 | 5 | Branching | Timeline subsystem: checkpoint + retained HLC log; branch, PITR, merge-as-sync; linear lineage v1 | Merge is the leapfrog over Turso/Neon; PITR parity required. SHIPPED (phase 6): O(1) hard-link forks via rocksdb checkpoints + keyspace indirection (branch keeps the parent's name in keys, TIMELINE sidecar identity, fresh source_id); PITR rewind from the retained history log incl. conflict-window reconstruction; merge = incremental replication since fork through put_version (LWW/conflict_merger) with attachment phase; record-mode branches backfill their vector store from stored embeddings; REST /db/:db/_timeline/* |
 | 6 | Encryption at rest | Per-database keys via barrel_keyprovider, keyspace-resolved; EncryptedEnv + sector cipher for flat files | Keys double as agent isolation; a branch shares its parent's key by keyspace. SHIPPED (phase 7): barrel_crypto app (GCM envelope, offset-addressable CTR, key-check tokens, env/custom providers); EncryptedEnv on docdb docs+attachments and every vectordb RocksDB; BM25 disk (static postings nonce rotated per compaction, embedded blockmax) and DiskANN (embedded graph sectors, static vectors/pq, sealed meta/pq_state); fail-closed open matrix everywhere; one `encryption` spec at barrel:open covers the whole logical db; server via open_opts |
+| 7 | Agent layer | Spaces = databases + capability tokens; sessions/handoffs folded from barrel_memory; MCP inside barrel_server | Sharing by reference beats copying; possession-of-token beats caller identity for handoffs; one lifecycle manager serves REST, MCP, and spaces. SHIPPED (phase 8): binary db names + vectordb via-registry (atom leak closed); barrel_dbs lifecycle manager (idle close, LRU cap, pinning); provenance write option (actor/session/source, entity column + history TLV tail, local-only wire) with audit reads (history/doc_versions/version_body) and REST endpoints; doc TTL (expires_at, 0x1F expiry index, lazy reads + opt-in sweeper); apps/barrel_spaces (registry db, sp_ ids, per-space encryption), barrel_caps (bsp_ tokens, hash-only storage, rights ladder), sessions (sliding TTL, chronological messages, janitor), handoffs (CAS accept, complete revokes, chains); REST /spaces + /handoffs with capability bearers; MCP endpoint at /mcp (livery_mcp bridge, own auth provider for server + capability tokens, 26 tools, 3 resource templates, live-query bridge with debounced updated notifications, session GC, caps) |

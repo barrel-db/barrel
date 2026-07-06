@@ -29,7 +29,7 @@
                     skipped := non_neg_integer(),
                     failed := non_neg_integer()}.
 
--spec run(#{db := binary(), vstore := atom(),
+-spec run(#{db := binary(), vstore := atom() | binary(),
             policy := barrel_embedding_policy:policy(),
             embed := term(), dimensions := pos_integer(),
             batch_size => pos_integer()}) ->

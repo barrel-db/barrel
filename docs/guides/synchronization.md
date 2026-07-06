@@ -201,3 +201,7 @@ wire). To couple clocks by hand:
   vector sync is planned with the TypeScript client.
 - **Facade.** `barrel` (the embeddable facade) does not expose replication;
   call `barrel_rep` and `barrel_rep_tasks` on the underlying docdb name.
+- **Provenance.** The actor/session/source a write carries (see
+  [audit-provenance](audit-provenance.md)) does not travel on the wire.
+  Replicated arrivals are attributed `cause: replicated` with the origin
+  database's identity; the acting agent stays on the origin's own trail.

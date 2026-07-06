@@ -32,12 +32,17 @@ them; each underlying app stays usable on its own.
 | Reranking | Opt-in | `barrel_rerank` (cross-encoder). |
 | FAISS index backend | Opt-in | `barrel_faiss`; needs the FAISS C++ library, excluded from the default build (`rebar3 as faiss`). |
 | Changes feed | Ready | `changes/2`, `subscribe/2`; HLC cursor via `hlc_encode/1`. |
-| Synchronization / replication | Partial | Same-VM, documents only. See [synchronization](guides/synchronization.md). |
+| BQL queries | Ready | PartiQL dialect over docs, vectors, and BM25; live SUBSCRIBE queries. See [query-bql](guides/query-bql.md). |
+| Synchronization / replication | Ready | Same VM and over HTTP (`/db/:db/_sync/*`); documents, attachments, channels, continuous tasks. Vectors rebuild locally. See [synchronization](guides/synchronization.md). |
+| Timeline (branch, PITR, merge) | Ready | O(1) forks, point-in-time rewind, merge back as sync. See [timeline](guides/timeline.md). |
+| Audit and provenance | Ready | Retained history log; actor/session/source on writes; past bodies by version. See [audit-provenance](guides/audit-provenance.md). |
+| Document TTL | Ready | `expires_at` write option, lazy expiry, opt-in sweeper (`ttl_sweep_interval`). |
+| Encryption at rest | Opt-in | Per-database keys via `barrel_keyprovider`; EncryptedEnv plus a sector cipher for flat files. See [encryption](guides/encryption.md). |
 | REST/JSON server | Opt-in | `barrel_server` over `livery`, `rebar3 as server`. See [rest-server](guides/rest-server.md). |
-| Encryption at rest | Planned | RocksDB 3.1.0 EncryptedEnv (whole-DB) + value encryption for blobs. |
-| gRPC, HTTP/3, WebTransport, unix socket, OpenAPI | Planned | Phase 2 transports on `barrel_server`. |
-| Network replication (HTTP/gRPC transport) | Planned | Phase 3; a `barrel_rep_transport` implementation. |
-| SQL API, MCP tools, agentfs | Planned | Phase 5. |
+| Agent layer (spaces, capabilities, sessions, handoffs) | Ready | `barrel_spaces`; capability bearers on REST and MCP. See [spaces](guides/spaces.md). |
+| MCP endpoint (tools, resources, live queries) | Opt-in | `/mcp` in `barrel_server`, on by default there. See [mcp](guides/mcp.md). |
+| gRPC, HTTP/3, WebTransport, unix socket, OpenAPI | Planned | Later transports on `barrel_server`. |
+| SQL API, agentfs | Planned | Later. |
 
 ## Where things run
 

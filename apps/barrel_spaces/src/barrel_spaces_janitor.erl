@@ -66,25 +66,27 @@ do_sweep() ->
                     Deleted + sweep_space(SpaceDb)
                 end, 0, Spaces).
 
+%% a space can close between list and fold: skip it, next pass sees it
 sweep_space(SpaceDb) ->
-    case barrel_docdb:fold_docs(
-             SpaceDb,
-             fun(Doc, {Live, Dead, Acc}) ->
-                 case length(Acc) >= ?MAX_DELETES_PER_PASS of
-                     true ->
-                         {stop, {Live, Dead, Acc}};
-                     false ->
-                         classify(Doc, SpaceDb, Live, Dead, Acc)
-                 end
-             end, {sets:new(), sets:new(), []},
-             #{id_prefix => <<"session:">>}) of
+    try barrel_docdb:fold_docs(
+            SpaceDb,
+            fun(Doc, {Live, Dead, Acc}) ->
+                case length(Acc) >= ?MAX_DELETES_PER_PASS of
+                    true ->
+                        {stop, {Live, Dead, Acc}};
+                    false ->
+                        classify(Doc, SpaceDb, Live, Dead, Acc)
+                end
+            end, {sets:new(), sets:new(), []},
+            #{id_prefix => <<"session:">>}) of
         {ok, {_Live, _Dead, Orphans}} ->
             lists:foreach(
                 fun(DocId) ->
                     _ = barrel_docdb:delete_doc(SpaceDb, DocId)
                 end, Orphans),
-            length(Orphans);
-        {error, _} ->
+            length(Orphans)
+    catch
+        _:_ ->
             0
     end.
 

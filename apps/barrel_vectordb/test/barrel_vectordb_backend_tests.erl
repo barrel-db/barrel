@@ -42,7 +42,9 @@ test_start_hnsw_store() ->
     },
     {ok, Pid} = barrel_vectordb:start_link(Config),
     ?assert(is_pid(Pid)),
-    ?assertEqual(Pid, whereis(test_backend_store)).
+    %% stores register by binary name in the via registry
+    ?assertEqual(Pid, barrel_vectordb_registry:whereis_name(
+                          {vstore, <<"test_backend_store">>})).
 
 test_backend_in_stats() ->
     {ok, Stats} = barrel_vectordb:stats(test_backend_store),

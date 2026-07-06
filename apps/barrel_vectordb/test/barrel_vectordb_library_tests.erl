@@ -63,8 +63,8 @@ test_start_store_directly() ->
     {ok, Pid} = barrel_vectordb:start_link(Config),
     ?assert(is_pid(Pid)),
 
-    %% Verify it's registered
-    ?assertEqual(Pid, whereis(?TEST_STORE)),
+    %% Verify it's registered (by binary name, in the via registry)
+    ?assertEqual(Pid, store_pid()),
 
     %% Verify we can get stats
     {ok, Stats} = barrel_vectordb:stats(?TEST_STORE),
@@ -110,14 +110,18 @@ test_search() ->
 %% Test stopping the store
 test_stop_store() ->
     %% Store should be running
-    ?assert(is_pid(whereis(?TEST_STORE))),
+    ?assert(is_pid(store_pid())),
 
     %% Stop it
     ok = barrel_vectordb:stop(?TEST_STORE),
 
     %% Should no longer be registered
-    ?assertEqual(undefined, whereis(?TEST_STORE)),
+    ?assertEqual(undefined, store_pid()),
     ok.
+
+store_pid() ->
+    barrel_vectordb_registry:whereis_name(
+        {vstore, atom_to_binary(?TEST_STORE, utf8)}).
 
 %%====================================================================
 %% Supervisor Integration Test

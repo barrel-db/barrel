@@ -39,7 +39,7 @@
 %%% == Configuration ==
 %%% ```
 %%% #{
-%%%     name => atom(),              %% Store name (required)
+%%%     name => atom() | binary(),   %% Store name (required)
 %%%     path => string(),            %% RocksDB path
 %%%     dimensions => pos_integer(), %% Vector dimensions (default: 768)
 %%%     embedder => EmbedderConfig,  %% Embedding provider (optional)
@@ -149,6 +149,7 @@
     include_metadata => boolean(),
     ef_search => pos_integer(),
     %% Hybrid search options
+    query_vector => [number()],
     bm25_weight => float(),
     vector_weight => float(),
     fusion => rrf | linear
@@ -170,7 +171,7 @@
 %% A single search result.
 
 -type store_config() :: #{
-    name := atom(),
+    name := atom() | binary(),
     path => string() | binary(),
     db_path => string() | binary(),
     dimension => pos_integer(),

@@ -710,7 +710,8 @@ get_doc(Db, DocId, Opts) ->
 %% @param DocIds List of document IDs
 %% @returns List of `{ok, Document}' or `{error, not_found}' in same order as input
 %% @see get_docs/3
--spec get_docs(binary() | pid(), [binary()]) -> [{ok, map()} | {error, term()}].
+-spec get_docs(binary() | pid(), [binary()]) ->
+    [{ok, map()} | {error, term()}] | {error, term()}.
 get_docs(Db, DocIds) ->
     get_docs(Db, DocIds, #{}).
 
@@ -725,7 +726,8 @@ get_docs(Db, DocIds) ->
 %% @param DocIds List of document IDs
 %% @param Opts Options map
 %% @returns List of `{ok, Document}' or `{error, not_found}' in same order as input
--spec get_docs(binary() | pid(), [binary()], map()) -> [{ok, map()} | {error, term()}].
+-spec get_docs(binary() | pid(), [binary()], map()) ->
+    [{ok, map()} | {error, term()}] | {error, term()}.
 get_docs(Db, DocIds, Opts) ->
     DbName = db_name(Db),
     ExtraAttrs = #{<<"db.batch_size">> => length(DocIds)},

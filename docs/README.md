@@ -13,6 +13,9 @@ Start here.
 - [Synchronization](guides/synchronization.md): replication between databases.
 - [Timeline](guides/timeline.md): branch a database, work in isolation, merge back (incl. PITR).
 - [Encryption at rest](guides/encryption.md): per-database keys over every store and index file.
+- [Audit and provenance](guides/audit-provenance.md): who wrote what, when, and past versions.
+- [Spaces, sessions, and handoffs](guides/spaces.md): the agent layer with capability tokens.
+- [MCP endpoint](guides/mcp.md): tools, resources, and live queries for MCP clients.
 - [Distribute the umbrella apps](guides/distributing-apps.md): Hex packages, git mirrors, and consuming an app elsewhere.
 
 ## Architecture

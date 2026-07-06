@@ -129,6 +129,9 @@ Branches ride the whole existing API, including replication under
 - Deleting the parent is safe for its branches (hard links make them
   independent). A branch that is not open is not listed by
   `list_branches`.
+- A branch forks with the parent's retained history, so audit provenance
+  (who wrote what before the fork) travels with it; post-fork writes build
+  each side's own trail. See [audit-provenance](audit-provenance.md).
 - Attachments: a PITR branch keeps fork-time attachments (they are LWW
   state with no history, so their state at T is not reconstructable).
   Merges carry post-fork attachment work, digest-deduplicated.

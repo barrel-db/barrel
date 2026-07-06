@@ -106,7 +106,7 @@
     vector_stats/1
 ]).
 
--export_type([db/0]).
+-export_type([db/0, db_name/0]).
 
 %% Outbox tag carried by every record-mode write (and, via docdb
 %% config, by replication-applied writes); consumed by the record
@@ -486,12 +486,14 @@ get_doc(#{docdb := DbBin}, DocId, Opts) ->
 
 %% @doc Get multiple documents by id in one batch.
 %% Returns a result per input id, in order.
--spec get_docs(db(), [binary()]) -> [{ok, map()} | {error, term()}].
+-spec get_docs(db(), [binary()]) ->
+    [{ok, map()} | {error, term()}] | {error, term()}.
 get_docs(#{docdb := DbBin}, DocIds) ->
     barrel_docdb:get_docs(DbBin, DocIds).
 
 %% @doc Get multiple documents by id in one batch, with options.
--spec get_docs(db(), [binary()], map()) -> [{ok, map()} | {error, term()}].
+-spec get_docs(db(), [binary()], map()) ->
+    [{ok, map()} | {error, term()}] | {error, term()}.
 get_docs(#{docdb := DbBin}, DocIds, Opts) ->
     barrel_docdb:get_docs(DbBin, DocIds, Opts).
 
@@ -775,13 +777,20 @@ subscribe(#{docdb := DbBin}, Since, Opts) ->
 %% JSON/URL-safe string, for transports that serialise the changes feed.
 -spec hlc_encode(term()) -> binary().
 hlc_encode(Hlc) ->
-    base64:encode(barrel_hlc:encode(Hlc)).
+    %% urlsafe: cursors travel in query strings, where '+' and '/'
+    %% get mangled (12-byte HLCs never pad)
+    base64:encode(barrel_hlc:encode(Hlc), #{mode => urlsafe}).
 
 %% @doc Decode a cursor produced by {@link hlc_encode/1} back to an HLC
 %% timestamp usable as the `Since' argument of {@link changes/2}.
 -spec hlc_decode(binary()) -> term().
 hlc_decode(Cursor) ->
-    barrel_hlc:decode(base64:decode(Cursor)).
+    %% accept both alphabets: standard-base64 cursors predate the
+    %% urlsafe encoding
+    Bin = try base64:decode(Cursor, #{mode => urlsafe})
+          catch error:_ -> base64:decode(Cursor)
+          end,
+    barrel_hlc:decode(Bin).
 
 %%====================================================================
 %% Vectors (barrel_vectordb)
