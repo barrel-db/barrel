@@ -17,6 +17,7 @@
 -export([start_link/2]).
 -export([info/1, stop/1]).
 -export([get_store_ref/1, get_att_ref/1]).
+-export([sweep_ttl/1]).
 
 %% Document API
 -export([
@@ -81,7 +82,10 @@
     compaction_size_threshold :: pos_integer(),  %% Size threshold in bytes to trigger compaction
     retention_period :: non_neg_integer(),  %% Retention window in seconds (0 = infinite)
     retention_timer :: reference() | undefined,  %% Timer for periodic retention sweeps
-    retention_interval :: pos_integer()  %% Interval between sweeps in ms
+    retention_interval :: pos_integer(),  %% Interval between sweeps in ms
+    ttl_sweep_interval = 0 :: non_neg_integer(),  %% Doc TTL sweep interval in ms (0 = off)
+    ttl_sweep_batch = 512 :: pos_integer(),  %% Max expired docs per sweep pass
+    ttl_timer :: reference() | undefined  %% Timer for periodic TTL sweeps
 }).
 
 %% Default compaction settings
@@ -215,6 +219,12 @@ set_doc_embedding(Pid, DocId, ExpectedRev, Vector) ->
 -spec sweep_retention(pid()) -> {ok, map()} | {error, term()}.
 sweep_retention(Pid) ->
     gen_server:call(Pid, sweep_retention, infinity).
+
+%% @doc Run one doc TTL sweep pass now (test and ops hook). Returns
+%% the number of docs tombstoned.
+-spec sweep_ttl(pid()) -> {ok, non_neg_integer()}.
+sweep_ttl(Pid) ->
+    gen_server:call(Pid, ttl_sweep, infinity).
 
 %%====================================================================
 %% Replication API functions
@@ -378,6 +388,16 @@ init(Name, Config, CompiledChannels, DbPath, Keyspace, Parent, ForkHlc, Env) ->
                                                retention_sweep)
                     end,
 
+                    %% Doc TTL sweeper (opt-in): turns lazily expired
+                    %% docs into real tombstones
+                    TtlInterval = maps:get(ttl_sweep_interval, Config, 0),
+                    TtlBatch = maps:get(ttl_sweep_batch, Config, 512),
+                    TtlTimer = case TtlInterval of
+                        0 -> undefined;
+                        _ -> erlang:send_after(TtlInterval, self(),
+                                               ttl_sweep)
+                    end,
+
                     logger:info("Database ~s started at ~s", [Name, DbPath]),
                     {ok, #state{
                         name = Name,
@@ -395,7 +415,10 @@ init(Name, Config, CompiledChannels, DbPath, Keyspace, Parent, ForkHlc, Env) ->
                         compaction_size_threshold = CompactionThreshold,
                         retention_period = RetentionPeriod,
                         retention_timer = RetentionTimer,
-                        retention_interval = RetentionInterval
+                        retention_interval = RetentionInterval,
+                        ttl_sweep_interval = TtlInterval,
+                        ttl_sweep_batch = TtlBatch,
+                        ttl_timer = TtlTimer
                     }};
                 {error, AttReason} ->
                     %% Close document store if attachment store fails
@@ -515,6 +538,12 @@ handle_call(sweep_retention, _From,
     end,
     {reply, Result, State};
 
+%% Doc TTL sweep (manual trigger; also runs on the timer)
+handle_call(ttl_sweep, _From,
+            #state{name = DbName, store_ref = StoreRef,
+                   ttl_sweep_batch = Batch} = State) ->
+    {reply, do_ttl_sweep(StoreRef, DbName, Batch), State};
+
 %% Tagged outbox operations
 handle_call({outbox_ack, Tag, Hlcs}, _From,
             #state{name = DbName, store_ref = StoreRef} = State) ->
@@ -607,6 +636,18 @@ handle_info(retention_sweep, #state{name = DbName, store_ref = StoreRef,
                                       RetentionPeriod),
     TimerRef = erlang:send_after(Interval, self(), retention_sweep),
     {noreply, State#state{retention_timer = TimerRef}};
+
+handle_info(ttl_sweep, #state{name = DbName, store_ref = StoreRef,
+                              ttl_sweep_interval = Interval,
+                              ttl_sweep_batch = Batch} = State) ->
+    {ok, Swept} = do_ttl_sweep(StoreRef, DbName, Batch),
+    %% a full batch means more work is waiting: come back quickly
+    NextIn = case Swept >= Batch of
+        true -> 100;
+        false -> Interval
+    end,
+    TimerRef = erlang:send_after(NextIn, self(), ttl_sweep),
+    {noreply, State#state{ttl_timer = TimerRef}};
 
 handle_info(_Info, State) ->
     {noreply, State}.
@@ -792,6 +833,51 @@ release_stale_refs(Name) ->
 %% - the whole document when the entry is the current version of an
 %%   unconflicted tombstone (full forget: entity, bodies, chain, feed
 %%   row)
+%% One pass of the doc TTL sweeper: fold the expiry index up to now,
+%% re-check each doc's entity (a rewrite may have bumped or cleared the
+%% TTL, leaving a stale row), tombstone the ones still due through the
+%% normal delete path (feed, channels, and replication all correct),
+%% and drop stale rows.
+do_ttl_sweep(StoreRef, DbName, Batch) ->
+    Ks = barrel_keyspace:resolve(DbName),
+    NowMs = erlang:system_time(millisecond),
+    Start = barrel_store_keys:doc_expiry_prefix(Ks),
+    End = barrel_store_keys:doc_expiry_upto(Ks, NowMs),
+    Fold = fun(Key, _Value, Acc) ->
+        case length(Acc) >= Batch of
+            true -> {stop, Acc};
+            false -> {ok, [Key | Acc]}
+        end
+    end,
+    Keys = lists:reverse(
+        barrel_store_rocksdb:fold_range(StoreRef, Start, End, Fold, [])),
+    Swept = lists:foldl(
+        fun(Key, N) ->
+            {ExpiresMs, DocId} =
+                barrel_store_keys:decode_doc_expiry_key(Ks, Key),
+            Due = case read_current(StoreRef, DbName, DocId) of
+                #{expires_at := E} when E =:= ExpiresMs -> due;
+                undefined -> stale;
+                _Bumped -> stale
+            end,
+            case Due of
+                due ->
+                    case do_delete_doc(StoreRef, DbName, DocId, #{}) of
+                        {ok, _} -> N + 1;
+                        {error, not_found} ->
+                            drop_expiry_row(StoreRef, Key),
+                            N
+                    end;
+                stale ->
+                    drop_expiry_row(StoreRef, Key),
+                    N
+            end
+        end, 0, Keys),
+    {ok, Swept}.
+
+drop_expiry_row(StoreRef, Key) ->
+    ok = barrel_store_rocksdb:write_batch(StoreRef, [{delete, Key}], #{}).
+
 %% All deletes and the floor advance commit in one batch; re-running a
 %% sweep is a no-op (deletes of missing keys do nothing).
 do_retention_sweep(StoreRef, AttRef, DbName, RetentionPeriod) ->

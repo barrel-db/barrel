@@ -12,7 +12,12 @@
     t_set_preserve_clear/1,
     t_lazy_expiry_on_reads/1,
     t_delete_clears_ttl/1,
-    t_invalid_expires_rejected/1
+    t_invalid_expires_rejected/1,
+    t_sweeper_tombstones/1,
+    t_sweeper_skips_bumped/1,
+    t_sweeper_idempotent/1,
+    t_sweeper_timer_runs/1,
+    t_branch_sweeps_locally/1
 ]).
 
 -include_lib("common_test/include/ct.hrl").
@@ -20,7 +25,9 @@
 
 all() ->
     [t_set_preserve_clear, t_lazy_expiry_on_reads, t_delete_clears_ttl,
-     t_invalid_expires_rejected].
+     t_invalid_expires_rejected, t_sweeper_tombstones,
+     t_sweeper_skips_bumped, t_sweeper_idempotent, t_sweeper_timer_runs,
+     t_branch_sweeps_locally].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(barrel_docdb),
@@ -111,3 +118,101 @@ t_invalid_expires_rejected(Config) ->
                                       #{expires_at => <<"soon">>})),
     ?assertEqual({error, not_found}, barrel_docdb:get_doc(Db, <<"bad">>)),
     ok.
+
+
+%%====================================================================
+%% Sweeper
+%%====================================================================
+
+t_sweeper_tombstones(Config) ->
+    Db = ?config(db, Config),
+    {ok, _} = barrel_docdb:put_doc(Db, #{<<"id">> => <<"a">>},
+                                   #{expires_at => now_ms() - 1}),
+    {ok, _} = barrel_docdb:put_doc(Db, #{<<"id">> => <<"kept">>},
+                                   #{expires_at => now_ms() + 60000}),
+    {ok, 1} = barrel_docdb:sweep_ttl(Db),
+    %% a REAL tombstone: visible in the changes feed and to
+    %% include_deleted reads
+    {ok, Changes, _} = barrel_docdb:get_changes(Db, first),
+    Gone = [C || #{id := Id, deleted := true} = C <- Changes,
+                 Id =:= <<"a">>],
+    ?assertMatch([_], Gone),
+    {ok, #{<<"_deleted">> := true}} =
+        barrel_docdb:get_doc(Db, <<"a">>, #{include_deleted => true}),
+    {ok, _} = barrel_docdb:get_doc(Db, <<"kept">>),
+    ok.
+
+t_sweeper_skips_bumped(Config) ->
+    Db = ?config(db, Config),
+    {ok, #{<<"rev">> := R}} = barrel_docdb:put_doc(
+        Db, #{<<"id">> => <<"a">>}, #{expires_at => now_ms() + 40}),
+    %% bump the TTL before it fires; the write moves the index row
+    {ok, _} = barrel_docdb:put_doc(
+        Db, #{<<"id">> => <<"a">>, <<"_rev">> => R},
+        #{expires_at => now_ms() + 60000}),
+    timer:sleep(60),
+    {ok, 0} = barrel_docdb:sweep_ttl(Db),
+    {ok, _} = barrel_docdb:get_doc(Db, <<"a">>),
+    ok.
+
+t_sweeper_idempotent(Config) ->
+    Db = ?config(db, Config),
+    {ok, _} = barrel_docdb:put_doc(Db, #{<<"id">> => <<"a">>},
+                                   #{expires_at => now_ms() - 1}),
+    {ok, 1} = barrel_docdb:sweep_ttl(Db),
+    {ok, 0} = barrel_docdb:sweep_ttl(Db),
+    ok.
+
+t_sweeper_timer_runs(Config) ->
+    Db = <<"ttl_timer_db">>,
+    {ok, _} = barrel_docdb:create_db(Db, #{
+        data_dir => ?config(data_dir, Config),
+        ttl_sweep_interval => 50}),
+    try
+        {ok, _} = barrel_docdb:put_doc(Db, #{<<"id">> => <<"a">>},
+                                       #{expires_at => now_ms() - 1}),
+        ok = wait_until(fun() ->
+            case barrel_docdb:get_doc(Db, <<"a">>,
+                                      #{include_deleted => true}) of
+                {ok, #{<<"_deleted">> := true}} -> true;
+                _ -> false
+            end
+        end)
+    after
+        _ = barrel_docdb:delete_db(Db)
+    end,
+    ok.
+
+t_branch_sweeps_locally(Config) ->
+    Db = ?config(db, Config),
+    Branch = <<Db/binary, "_b">>,
+    {ok, _} = barrel_docdb:put_doc(Db, #{<<"id">> => <<"a">>},
+                                   #{expires_at => now_ms() + 30}),
+    {ok, _} = barrel_docdb:branch_db(Db, Branch, #{}),
+    try
+        timer:sleep(50),
+        %% the branch carries the parent's index rows (hard links) and
+        %% sweeps its own copy; the parent is untouched by it
+        {ok, 1} = barrel_docdb:sweep_ttl(Branch),
+        {ok, #{<<"_deleted">> := true}} =
+            barrel_docdb:get_doc(Branch, <<"a">>,
+                                 #{include_deleted => true}),
+        %% the parent's own sweep tombstones its copy independently
+        {ok, 1} = barrel_docdb:sweep_ttl(Db),
+        {ok, #{<<"_deleted">> := true}} =
+            barrel_docdb:get_doc(Db, <<"a">>, #{include_deleted => true})
+    after
+        _ = barrel_docdb:delete_db(Branch)
+    end,
+    ok.
+
+wait_until(Fun) ->
+    wait_until(Fun, 100).
+
+wait_until(_Fun, 0) ->
+    ct:fail(condition_never_met);
+wait_until(Fun, N) ->
+    case Fun() of
+        true -> ok;
+        false -> timer:sleep(20), wait_until(Fun, N - 1)
+    end.

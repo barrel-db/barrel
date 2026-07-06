@@ -165,7 +165,8 @@
     get_doc_versions/2,
     get_version_body/3,
     history_floor/1,
-    sweep_retention/1
+    sweep_retention/1,
+    sweep_ttl/1
 ]).
 
 %% Local documents (for checkpoints, not replicated)
@@ -1714,6 +1715,14 @@ history_floor(Db) ->
 sweep_retention(Db) ->
     with_db(Db, fun(Pid) ->
         barrel_db_server:sweep_retention(Pid)
+    end).
+
+%% @doc Run one doc TTL sweep pass now (see the ttl_sweep_interval
+%% database option). Returns the number of docs tombstoned.
+-spec sweep_ttl(binary() | pid()) -> {ok, non_neg_integer()} | {error, term()}.
+sweep_ttl(Db) ->
+    with_db(Db, fun(Pid) ->
+        barrel_db_server:sweep_ttl(Pid)
     end).
 
 %%====================================================================
