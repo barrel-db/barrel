@@ -22,4 +22,11 @@ init([]) ->
         intensity => 5,
         period => 60
     },
-    {ok, {SupFlags, []}}.
+    Janitor = #{
+        id => barrel_spaces_janitor,
+        start => {barrel_spaces_janitor, start_link, []},
+        restart => permanent,
+        shutdown => 5000,
+        type => worker
+    },
+    {ok, {SupFlags, [Janitor]}}.
