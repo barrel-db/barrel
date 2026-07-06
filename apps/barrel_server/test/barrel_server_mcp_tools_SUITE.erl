@@ -80,7 +80,8 @@ t_tools_list(_Config) ->
     Names = [maps:get(<<"name">>, T) || T <- Tools],
     Expected = [<<"db_create">>, <<"db_list">>, <<"db_info">>,
                 <<"doc_get">>, <<"doc_put">>, <<"doc_delete">>,
-                <<"query">>, <<"search">>, <<"changes">>,
+                <<"query">>, <<"query_subscribe">>,
+                <<"query_unsubscribe">>, <<"search">>, <<"changes">>,
                 <<"branch_create">>, <<"branch_list">>, <<"merge">>],
     ?assertEqual(lists:sort(Expected), lists:sort(Names)),
     %% annotations surface the behavioural hints

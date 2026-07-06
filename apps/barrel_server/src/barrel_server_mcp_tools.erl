@@ -25,6 +25,8 @@
     doc_put/2,
     doc_delete/2,
     'query'/2,
+    query_subscribe/2,
+    query_unsubscribe/2,
     search/2,
     changes/2,
     branch_create/2,
@@ -116,6 +118,21 @@ specs() ->
                                      <<"continuation">> => str()},
                                    [<<"db">>, <<"query">>]),
             annotations => #{<<"readOnlyHint">> => true}
+        }},
+        {<<"query_subscribe">>, query_subscribe, #{
+            description => <<"Start a live query from a BQL SUBSCRIBE "
+                             "statement. Returns a resource URI: read "
+                             "it for the materialized rows, subscribe "
+                             "to it for update notifications.">>,
+            input_schema => schema(#{<<"db">> => str(),
+                                     <<"query">> => str(),
+                                     <<"params">> => obj()},
+                                   [<<"db">>, <<"query">>])
+        }},
+        {<<"query_unsubscribe">>, query_unsubscribe, #{
+            description => <<"Stop a live query by sub id.">>,
+            input_schema => schema(#{<<"sub">> => str()}, [<<"sub">>]),
+            annotations => #{<<"idempotentHint">> => true}
         }},
         {<<"search">>, search, #{
             description => <<"Search a database: mode bm25 or hybrid "
@@ -289,6 +306,38 @@ query_result(Rows, Truncated, Meta) ->
             Base;
         Token ->
             Base#{continuation => base64:encode(Token, #{mode => urlsafe})}
+    end.
+
+%%====================================================================
+%% Live queries (the bridge owns the subscriptions)
+%%====================================================================
+
+query_subscribe(#{<<"db">> := Name, <<"query">> := Bql} = Args, Ctx) ->
+    with_db(Name, Ctx, write, fun(_Db) ->
+        Params = case maps:get(<<"params">>, Args, undefined) of
+            P when is_map(P) -> P;
+            _ -> #{}
+        end,
+        SessionId = maps:get(session_id, Ctx, undefined),
+        case barrel_server_mcp_live:subscribe(Name, Bql, Params,
+                                              SessionId) of
+            {ok, SubId, Uri} ->
+                #{ok => true, sub => SubId, uri => Uri};
+            {error, missing_subscribe} ->
+                {tool_error,
+                 #{error => <<"missing_subscribe">>,
+                   hint => <<"the statement must end with SUBSCRIBE; "
+                             "use query for one-shot reads">>}};
+            Err ->
+                err(Err)
+        end
+    end).
+
+%% possession of the (unguessable) sub id is the right to stop it
+query_unsubscribe(#{<<"sub">> := SubId}, _Ctx) ->
+    case barrel_server_mcp_live:unsubscribe(SubId) of
+        ok -> #{ok => true};
+        Err -> err(Err)
     end.
 
 %%====================================================================

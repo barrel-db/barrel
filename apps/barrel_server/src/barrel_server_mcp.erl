@@ -75,8 +75,11 @@ init([]) ->
     %% tools leave the shared registry with the server
     process_flag(trap_exit, true),
     case enabled() of
-        true -> ok = barrel_server_mcp_tools:register_all();
-        false -> ok
+        true ->
+            ok = barrel_server_mcp_tools:register_all(),
+            ok = barrel_server_mcp_resources:register_all();
+        false ->
+            ok
     end,
     {ok, #{}}.
 
@@ -92,7 +95,9 @@ handle_cast(_Msg, State) ->
 terminate(_Reason, _State) ->
     %% the registry lives in the barrel_mcp app and may already be
     %% gone during a full shutdown
-    try barrel_server_mcp_tools:unregister_all()
+    try
+        barrel_server_mcp_tools:unregister_all(),
+        barrel_server_mcp_resources:unregister_all()
     catch _:_ -> ok
     end,
     ok.

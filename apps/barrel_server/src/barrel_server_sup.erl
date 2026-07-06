@@ -3,6 +3,8 @@
 %%%
 %%% Children (one_for_one):
 %%% <ol>
+%%%   <li>{@link barrel_server_mcp_live} - the live-query bridge
+%%%       (owns every MCP-created subscription).</li>
 %%%   <li>{@link barrel_server_mcp} - the MCP tool registrar (before
 %%%       the HTTP service so /mcp never serves an empty registry).</li>
 %%%   <li>{@link barrel_server_http} - the livery HTTP service.</li>
@@ -23,6 +25,12 @@ start_link() ->
 init([]) ->
     SupFlags = #{strategy => one_for_one, intensity => 5, period => 10},
     Children = [
+        #{id => barrel_server_mcp_live,
+          start => {barrel_server_mcp_live, start_link, []},
+          restart => permanent,
+          shutdown => 5000,
+          type => worker,
+          modules => [barrel_server_mcp_live]},
         #{id => barrel_server_mcp,
           start => {barrel_server_mcp, start_link, []},
           restart => permanent,
