@@ -121,7 +121,8 @@
 
 %% API - Maintenance
 -export([
-    checkpoint/1
+    checkpoint/1,
+    destroy/1
 ]).
 
 %% Types
@@ -265,6 +266,18 @@ start_link(Config) ->
 %%
 %% @param Store Store name or pid
 %% @returns `ok'
+%% @doc Destroy a store: close every handle (RocksDB, index, disk
+%% BM25) and remove the storage directory. The store stops.
+-spec destroy(store()) -> ok | {error, term()}.
+destroy(Store) ->
+    {ok, DbPath} = barrel_vectordb_server:get_db_path(Store),
+    ok = stop(Store),
+    case file:del_dir_r(DbPath) of
+        ok -> ok;
+        {error, enoent} -> ok;
+        {error, _} = Err -> Err
+    end.
+
 -spec stop(store()) -> ok.
 stop(Store) ->
     barrel_vectordb_server:stop(Store).

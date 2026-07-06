@@ -20,6 +20,7 @@
     open/1,
     open/2,
     close/1,
+    delete/1,
     info/1
 ]).
 
@@ -243,6 +244,18 @@ close(#{name := Name, docdb := DbBin, vstore := Store} = Db) ->
     end,
     _ = barrel_vectordb:stop(Store),
     barrel_docdb:close_db(DbBin).
+
+%% @doc Delete a composed barrel database: stop the indexer, destroy
+%% the vector store (handles closed, directory removed), and delete
+%% the document database's files.
+-spec delete(db()) -> ok | {error, term()}.
+delete(#{name := Name, docdb := DbBin, vstore := Store} = Db) ->
+    _ = case Db of
+        #{embedding := _} -> barrel_record_sup:stop_indexer(Name);
+        _ -> ok
+    end,
+    _ = barrel_vectordb:destroy(Store),
+    barrel_docdb:delete_db(DbBin).
 
 %% @doc Database metadata.
 -spec info(db()) -> {ok, map()} | {error, term()}.

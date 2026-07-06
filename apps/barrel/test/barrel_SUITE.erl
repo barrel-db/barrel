@@ -18,7 +18,8 @@
     t_attachment_stream/1,
     t_vectors/1,
     t_vector_batch/1,
-    t_changes/1
+    t_changes/1,
+    t_delete_db/1
 ]).
 
 -include_lib("common_test/include/ct.hrl").
@@ -28,7 +29,7 @@
 
 all() ->
     [t_doc_crud, t_batch_docs, t_attachments, t_attachment_stream,
-     t_vectors, t_vector_batch, t_changes].
+     t_vectors, t_vector_batch, t_changes, t_delete_db].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(barrel_docdb),
@@ -193,3 +194,29 @@ t_changes(Config) ->
 
 vec(Base) ->
     [Base + (I / 100) || I <- lists:seq(1, ?DIM)].
+
+%%====================================================================
+%% Lifecycle
+%%====================================================================
+
+t_delete_db(Config) ->
+    #{docdb := DbBin, vstore := Store} = Db = ?config(db, Config),
+    Priv = ?config(priv_dir, Config),
+    {ok, _} = barrel:put_doc(Db, #{<<"id">> => <<"a">>}),
+    ok = barrel:vector_add(Db, <<"a">>, <<"text">>, #{},
+                           lists:duplicate(?DIM, 0.5)),
+    {ok, VPath} = barrel_vectordb_server:get_db_path(Store),
+    DocPath = filename:join(Priv, binary_to_list(DbBin)),
+    ?assert(filelib:is_dir(VPath)),
+    ?assert(filelib:is_dir(DocPath)),
+    ok = barrel:delete(Db),
+    %% both storage trees are gone and a fresh open starts empty
+    ?assertNot(filelib:is_dir(VPath)),
+    ?assertNot(filelib:is_dir(DocPath)),
+    VCfg = #{dimension => ?DIM, db_path => VPath,
+             bm25_backend => memory},
+    %% the reopen registers the same names, so the standard
+    %% teardown close applies to this fresh instance
+    {ok, Db2} = barrel:open(t_delete_db, #{vectordb => VCfg}),
+    {error, not_found} = barrel:get_doc(Db2, <<"a">>),
+    ok.

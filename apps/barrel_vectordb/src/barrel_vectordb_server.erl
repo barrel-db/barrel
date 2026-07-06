@@ -27,6 +27,7 @@
 -export([
     start_link/2,
     stop/1,
+    get_db_path/1,
     add/4,
     add_vector/5,
     add_batch/2,
@@ -108,6 +109,12 @@ start_link(Name, Config) ->
 -spec stop(atom() | pid()) -> ok.
 stop(Store) ->
     gen_batch_server:stop(Store).
+
+%% @doc The store's storage path (RocksDB dir; bm25/diskann nest
+%% under it).
+-spec get_db_path(atom() | pid()) -> {ok, string()}.
+get_db_path(Store) ->
+    gen_batch_server:call(Store, get_db_path).
 
 %% @doc Add document with auto-embedding.
 -spec add(atom() | pid(), binary(), binary(), map()) -> ok | {error, term()}.
@@ -485,6 +492,11 @@ process_single_op({call, From, {search_hybrid, Query, Opts}}, State) ->
             {{reply, From, Error}, State}
     end;
 
+%% Storage path (destroy support)
+process_single_op({call, From, get_db_path}, #state{config = Config} = State) ->
+    DbPath = maps:get(db_path, Config, "priv/barrel_vectordb_data"),
+    {{reply, From, {ok, DbPath}}, State};
+
 %% BM25 info
 process_single_op({call, From, bm25_info}, State) ->
     Result = do_bm25_info(State),
@@ -846,11 +858,19 @@ prepare_batch_embeddings(Docs, State) ->
     end.
 
 terminate(_Reason, #state{db = Db, index = Index, index_module = Mod, cf_hnsw = CfHnsw,
+                          bm25_index = BM25, bm25_backend = BM25Backend,
                           docstore = Docstore}) ->
     %% Persist index metadata before closing
     _ = persist_index_meta(Db, CfHnsw, Index, Mod),
     %% Close index if backend supports it (e.g., FAISS releases NIF resources)
     _ = maybe_close_index(Mod, Index),
+    %% The disk BM25 backend holds file + nested RocksDB handles
+    _ = case {BM25Backend, BM25} of
+        {disk, Idx} when Idx =/= undefined ->
+            catch barrel_vectordb_bm25_disk:close(Idx);
+        _ ->
+            ok
+    end,
     _ = rocksdb:close(Db),
     _ = docstore_terminate(Docstore),
     ok.
