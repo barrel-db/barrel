@@ -59,11 +59,10 @@ check_marker(DbPath, Key) ->
             {error, {crypto_marker_read_failed, Reason}}
     end.
 
+%% rocksdb:new_env/1 cannot fail per its contract
 new_env(Key) ->
-    case rocksdb:new_env({encrypted, Key}) of
-        {ok, Env} -> {ok, #{key => Key, env => Env}};
-        {error, Reason} -> {error, {encryption_env_failed, Reason}}
-    end.
+    {ok, Env} = rocksdb:new_env({encrypted, Key}),
+    {ok, #{key => Key, env => Env}}.
 
 write_marker(Marker, Key) ->
     Token = barrel_crypto:key_check_new(Key),

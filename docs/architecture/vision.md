@@ -113,11 +113,14 @@ within the retention window; today it keeps only the latest change per doc.
   (queries already bypass it; `get_doc` must too). Group commit in the
   writer. Document-level rev CAS stays as commit-time conflict detection.
   Write scale-out comes from many databases, which the agent model provides.
-- Encryption at rest is not wired today anywhere. Design: a
-  `barrel_keyprovider` behaviour with per-database keys (BYOK), RocksDB
-  EncryptedEnv for both stores, envelope encryption (AES-256-GCM) for the
-  file-based artifacts EncryptedEnv cannot cover: DiskANN, FAISS, BM25 disk
-  files, exported blobs. Per-database keys double as agent isolation.
+- Encryption at rest: a `barrel_keyprovider` behaviour with per-database
+  keys (BYOK) resolved on the KEYSPACE (a branch opens with its parent's
+  key), RocksDB EncryptedEnv for every store, and a sector cipher
+  (offset-addressable AES-256-CTR + GCM envelopes for term files) for the
+  mmap'd flat files EncryptedEnv cannot cover: BM25 disk and DiskANN.
+  HNSW/FAISS state persists through the encrypted stores. Fail-closed
+  opens via cleartext key-check markers. Per-database keys double as
+  agent isolation. SHIPPED (phase 7).
 
 ## Browser: barrel-lite
 
@@ -162,3 +165,4 @@ Migration path (staged, adapter-first):
 | 3 | Query dialect | PartiQL semantics | JSON-first SQL semantics already specified; nothing to invent. SHIPPED as BQL v1 (phase 4): leex/yecc parser lowering onto the query engine, vector_top_k/bm25_top_k/hybrid_top_k table functions, UNNEST, SUBSCRIBE live queries, streaming REST endpoint |
 | 4 | barrel_memory | Standalone policy product on barrel primitives | Memory layer is commoditizing; substrate is the durable value; migration staged |
 | 5 | Branching | Timeline subsystem: checkpoint + retained HLC log; branch, PITR, merge-as-sync; linear lineage v1 | Merge is the leapfrog over Turso/Neon; PITR parity required. SHIPPED (phase 6): O(1) hard-link forks via rocksdb checkpoints + keyspace indirection (branch keeps the parent's name in keys, TIMELINE sidecar identity, fresh source_id); PITR rewind from the retained history log incl. conflict-window reconstruction; merge = incremental replication since fork through put_version (LWW/conflict_merger) with attachment phase; record-mode branches backfill their vector store from stored embeddings; REST /db/:db/_timeline/* |
+| 6 | Encryption at rest | Per-database keys via barrel_keyprovider, keyspace-resolved; EncryptedEnv + sector cipher for flat files | Keys double as agent isolation; a branch shares its parent's key by keyspace. SHIPPED (phase 7): barrel_crypto app (GCM envelope, offset-addressable CTR, key-check tokens, env/custom providers); EncryptedEnv on docdb docs+attachments and every vectordb RocksDB; BM25 disk (static postings nonce rotated per compaction, embedded blockmax) and DiskANN (embedded graph sectors, static vectors/pq, sealed meta/pq_state); fail-closed open matrix everywhere; one `encryption` spec at barrel:open covers the whole logical db; server via open_opts |

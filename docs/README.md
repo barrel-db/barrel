@@ -12,6 +12,7 @@ Start here.
 - [Run the REST server](guides/rest-server.md): `barrel_server` over HTTP.
 - [Synchronization](guides/synchronization.md): replication between databases.
 - [Timeline](guides/timeline.md): branch a database, work in isolation, merge back (incl. PITR).
+- [Encryption at rest](guides/encryption.md): per-database keys over every store and index file.
 - [Distribute the umbrella apps](guides/distributing-apps.md): Hex packages, git mirrors, and consuming an app elsewhere.
 
 ## Architecture

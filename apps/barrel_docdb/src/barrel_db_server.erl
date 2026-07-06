@@ -699,11 +699,9 @@ check_crypto_marker(DbPath, Key) ->
             {error, {crypto_marker_read_failed, Reason}}
     end.
 
+%% rocksdb:new_env/1 cannot fail per its contract
 new_encrypted_env(Key) ->
-    case rocksdb:new_env({encrypted, Key}) of
-        {ok, Env} -> {ok, Env};
-        {error, Reason} -> {error, {encryption_env_failed, Reason}}
-    end.
+    rocksdb:new_env({encrypted, Key}).
 
 %% Written atomically (temp + rename) once, at the first encrypted open.
 write_crypto_marker(MarkerPath, Key) ->
