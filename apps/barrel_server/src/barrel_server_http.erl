@@ -42,6 +42,16 @@
     search_hybrid/1
 ]).
 
+%% Shared request/response plumbing for the other handler modules
+%% (barrel_server_spaces, MCP tools).
+-export([
+    json_resp/2,
+    error_resp/1,
+    with_json/2,
+    param/2,
+    jsonable/1
+]).
+
 %%====================================================================
 %% Service
 %%====================================================================
@@ -126,6 +136,9 @@ routes() ->
         {<<"POST">>,   <<"/db/:db/search/vector">>,      {?MODULE, search_vector}},
         {<<"POST">>,   <<"/db/:db/search/bm25">>,        {?MODULE, search_bm25}},
         {<<"POST">>,   <<"/db/:db/search/hybrid">>,      {?MODULE, search_hybrid}}
+
+        %% Agent layer (spaces, grants, sessions, handoffs)
+        | barrel_server_spaces:routes()
     ].
 
 %%====================================================================

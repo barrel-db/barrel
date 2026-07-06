@@ -1,15 +1,20 @@
 %%%-------------------------------------------------------------------
-%%% @doc Static bearer-token auth for the whole REST API.
+%%% @doc Bearer-token auth for the whole REST API.
 %%%
-%%% Configured via `{barrel_server, auth, #{tokens => [Bin]}}' (or
-%%% `#{token => Bin}'); a token LIST makes rotation possible (accept
-%%% old and new during a rollover). Unconfigured = the middleware is
-%%% not installed and the server stays open. When installed, every
-%%% route except `/health' (probes carry no secrets) requires
+%%% Two kinds of bearer. Global tokens come from
+%%% `{barrel_server, auth, #{tokens => [Bin]}}' (or `#{token => Bin}';
+%%% a LIST makes rotation possible) and open every route. Capability
+%%% tokens (`bsp_...', issued by barrel_caps for one space) only
+%%% authenticate the agent-layer routes (`/spaces', `/handoffs');
+%%% per-route rights are enforced by barrel_server_caps, and any other
+%%% path answers 401. Unconfigured = the middleware is not installed
+%%% and the server stays open. When installed, every route except
+%%% `/health' (probes carry no secrets) requires
 %%% `Authorization: Bearer <token>'.
 %%%
-%%% Comparison is constant time: both sides are SHA-256 hashed (fixed
-%%% length, no length oracle) and compared with crypto:hash_equals/2.
+%%% Global-token comparison is constant time: both sides are SHA-256
+%%% hashed (fixed length, no length oracle) and compared with
+%%% crypto:hash_equals/2.
 %%% @end
 %%%-------------------------------------------------------------------
 -module(barrel_server_auth).
@@ -38,10 +43,16 @@ call(Req, Next, #{hashes := Hashes}) ->
     case livery_req:path(Req) of
         <<"/health">> ->
             Next(Req);
-        _ ->
+        Path ->
             case livery_ext:bearer_token(Req) of
                 undefined ->
                     unauthorized();
+                <<"bsp_", _/binary>> = Token ->
+                    case capability_path(Path)
+                         andalso live_capability(Token) of
+                        true -> Next(Req);
+                        false -> unauthorized()
+                    end;
                 Token ->
                     Hash = crypto:hash(sha256, Token),
                     case lists:any(
@@ -53,6 +64,18 @@ call(Req, Next, #{hashes := Hashes}) ->
                         false -> unauthorized()
                     end
             end
+    end.
+
+%% Capability tokens authenticate only the agent-layer surface; the
+%% database routes stay global-bearer.
+capability_path(<<"/spaces", _/binary>>) -> true;
+capability_path(<<"/handoffs", _/binary>>) -> true;
+capability_path(_) -> false.
+
+live_capability(Token) ->
+    case barrel_caps:auth_context(Token) of
+        {ok, _} -> true;
+        {error, _} -> false
     end.
 
 unauthorized() ->
