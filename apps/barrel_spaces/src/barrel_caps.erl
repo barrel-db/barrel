@@ -18,7 +18,8 @@
          revoke/1,
          revoke_all/1,
          list/1,
-         auth_context/1]).
+         auth_context/1,
+         token_id/1]).
 
 -type right() :: read | write | admin.
 -export_type([right/0]).
@@ -189,9 +190,11 @@ check_liveness(#{<<"expires_at">> := E} = Grant) ->
         false -> {ok, Grant}
     end.
 
+%% @doc The grant-naming id inside a token (or a bare token id).
+-spec token_id(binary()) -> {ok, binary()} | error.
 token_id(<<"bsp_", TokenId:16/binary, "_", _Secret/binary>>) ->
     {ok, TokenId};
-token_id(TokenId) when byte_size(TokenId) =:= 16 ->
+token_id(TokenId) when is_binary(TokenId), byte_size(TokenId) =:= 16 ->
     {ok, TokenId};
 token_id(_) ->
     error.
