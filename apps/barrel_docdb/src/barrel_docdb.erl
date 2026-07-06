@@ -72,7 +72,8 @@
 %% Timeline (branch, merge)
 -export([
     branch_db/3,
-    list_branches/1
+    list_branches/1,
+    merge_branch/2
 ]).
 
 %% Document CRUD
@@ -314,6 +315,12 @@ branch_db(Parent, BranchName, Opts) ->
 -spec list_branches(binary()) -> [binary()].
 list_branches(Parent) ->
     barrel_timeline:list_branches(Parent).
+
+%% @doc Merge a branch's edits back into its parent. See
+%% barrel_timeline:merge_branch/2.
+-spec merge_branch(binary(), map()) -> {ok, map()} | {error, term()}.
+merge_branch(Branch, Opts) ->
+    barrel_timeline:merge_branch(Branch, Opts).
 
 %% @doc Close a database.
 %%

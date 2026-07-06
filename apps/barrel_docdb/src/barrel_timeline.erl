@@ -23,7 +23,9 @@
 
 -include("barrel_docdb.hrl").
 
--export([branch_db/3, list_branches/1]).
+-export([branch_db/3, list_branches/1, merge_branch/2]).
+
+-define(MERGE_CKPT_DOC, <<"_timeline/merge">>).
 
 %%====================================================================
 %% Branch
@@ -143,6 +145,117 @@ branch_config(PInfo, BranchPath, Opts) ->
         error -> maps:remove(channels, Merged)
     end,
     WithChannels#{data_dir => filename:dirname(BranchPath)}.
+
+%%====================================================================
+%% Merge
+%%====================================================================
+
+%% @doc Ship the branch's edits to its parent: one-shot replication
+%% over the local transports starting at the fork instant (exclusive),
+%% then the attachment phase from the same boundary. Conflicts resolve
+%% on the parent through its configured machinery (deterministic LWW,
+%% conflict_merger when set); redelivery is a no-op, and a merge
+%% checkpoint (a local doc on the branch) makes repeated merges
+%% incremental. A PITR rewind is NOT merged: restored versions sit at
+%% or before the fork and the parent's vectors already contain them.
+%%
+%% Opts: batch_size (default 100), attachments (default true),
+%% att_batch_size. Limitations (documented): the parent's
+%% conflict_merger is db-open-time config, there is no per-merge
+%% override; the report carries replication stats, not per-doc
+%% conflict detail. Merge at least once per retention window: branch
+%% retention can forget an expired tombstone, and a forgotten delete
+%% never ships.
+-spec merge_branch(binary(), map()) -> {ok, map()} | {error, term()}.
+merge_branch(Branch, Opts) when is_binary(Branch), is_map(Opts) ->
+    case barrel_docdb:db_info(Branch) of
+        {ok, #{parent := Parent, fork_hlc := ForkHlc}} ->
+            case barrel_docdb:open_db(Parent) of
+                {ok, _} ->
+                    do_merge(Branch, Parent, ForkHlc, Opts);
+                {error, not_found} ->
+                    {error, parent_not_found}
+            end;
+        {ok, _} ->
+            {error, not_a_branch};
+        {error, _} = Err ->
+            Err
+    end.
+
+do_merge(Branch, Parent, ForkHlc, Opts) ->
+    Since = max_seq(ForkHlc, merge_ckpt(Branch, <<"last_merged">>)),
+    DocFun = fun(Seq) ->
+        update_merge_ckpt(Branch, <<"last_merged">>, Seq)
+    end,
+    case barrel_rep_alg:replicate_batch(
+             Branch, Parent,
+             barrel_rep_transport_local, barrel_rep_transport_local,
+             #{since => Since,
+               batch_size => maps:get(batch_size, Opts, 100),
+               checkpoint_fun => DocFun}) of
+        {ok, Stats} ->
+            case merge_attachments(Branch, Parent, ForkHlc, Opts) of
+                {error, AttErr} ->
+                    {error, {att_sync_failed, AttErr}};
+                AttResult ->
+                    {ok, Stats#{
+                        att_sync => AttResult,
+                        last_merged =>
+                            merge_ckpt(Branch, <<"last_merged">>)
+                    }}
+            end;
+        {error, _} = Err ->
+            Err
+    end.
+
+merge_attachments(Branch, Parent, ForkHlc, Opts) ->
+    case maps:get(attachments, Opts, true) of
+        false ->
+            disabled;
+        true ->
+            AttSince = max_seq(ForkHlc,
+                               merge_ckpt(Branch, <<"last_att_merged">>)),
+            AttFun = fun(Seq) ->
+                update_merge_ckpt(Branch, <<"last_att_merged">>, Seq)
+            end,
+            case barrel_rep_att:sync_from(
+                     Branch, Parent,
+                     barrel_rep_transport_local,
+                     barrel_rep_transport_local,
+                     AttSince, AttFun, Opts) of
+                {ok, AttStats} -> AttStats;
+                skipped -> skipped;
+                {error, _} = Err -> Err
+            end
+    end.
+
+merge_ckpt(Branch, Field) ->
+    case barrel_docdb:get_local_doc(Branch, ?MERGE_CKPT_DOC) of
+        {ok, Doc} ->
+            case maps:get(Field, Doc, undefined) of
+                undefined -> first;
+                Bin -> barrel_rep_checkpoint:decode_seq(Bin)
+            end;
+        {error, not_found} ->
+            first
+    end.
+
+update_merge_ckpt(Branch, Field, Seq) ->
+    Doc = case barrel_docdb:get_local_doc(Branch, ?MERGE_CKPT_DOC) of
+        {ok, D} -> D;
+        {error, not_found} -> #{}
+    end,
+    barrel_docdb:put_local_doc(
+        Branch, ?MERGE_CKPT_DOC,
+        Doc#{Field => barrel_rep_checkpoint:encode_seq(Seq)}).
+
+max_seq(Hlc, first) ->
+    Hlc;
+max_seq(Hlc, Other) ->
+    case barrel_hlc:less(Hlc, Other) of
+        true -> Other;
+        false -> Hlc
+    end.
 
 %%====================================================================
 %% PITR rewind (at => HlcT)

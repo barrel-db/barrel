@@ -13,7 +13,7 @@
 
 -include("barrel_docdb.hrl").
 
--export([sync/5]).
+-export([sync/5, sync_from/7]).
 
 -define(DEFAULT_BATCH, 100).
 
@@ -44,15 +44,45 @@ do_sync(Source, Target, SourceTransport, TargetTransport, Opts) ->
     StartSeq0 = barrel_rep_checkpoint:get_start_seq(Checkpoint),
     StartSeq = maybe_reset_on_att_floor(StartSeq0, Source, SourceTransport,
                                         RepId),
+    %% bridge the checkpoint object into the fun-based loop: each
+    %% call persists the given seq under the run's session
+    CheckpointFun = fun(Seq) ->
+        barrel_rep_checkpoint:write_checkpoint(
+            barrel_rep_checkpoint:set_last_seq(Seq, Checkpoint))
+    end,
+    run(Source, Target, SourceTransport, TargetTransport, StartSeq,
+        CheckpointFun, Opts).
+
+%% @doc Run the attachment phase from an explicit since with a
+%% caller-supplied checkpoint fun (invoked with the last visited feed
+%% HLC after each batch, and once more on completion). This is the
+%% timeline merge entry point; sync/5 wraps it with the
+%% replication-checkpoint machinery.
+-spec sync_from(term(), term(), module(), module(),
+                barrel_hlc:timestamp() | first,
+                fun((barrel_hlc:timestamp() | first) -> ok), map()) ->
+    {ok, map()} | skipped | {error, term()}.
+sync_from(Source, Target, SourceTransport, TargetTransport, Since,
+          CheckpointFun, Opts) ->
+    case supports(SourceTransport) andalso supports(TargetTransport) of
+        false ->
+            skipped;
+        true ->
+            run(Source, Target, SourceTransport, TargetTransport,
+                Since, CheckpointFun, Opts)
+    end.
+
+run(Source, Target, SourceTransport, TargetTransport, Since,
+    CheckpointFun, Opts) ->
     BatchSize = maps:get(att_batch_size, Opts, ?DEFAULT_BATCH),
     Stats0 = #{atts_written => 0, atts_skipped => 0, atts_ignored => 0,
                atts_deleted => 0, att_read_failures => 0,
                att_write_failures => 0, att_bytes_written => 0},
-    loop(Source, Target, SourceTransport, TargetTransport, StartSeq,
-         BatchSize, Checkpoint, Stats0).
+    loop(Source, Target, SourceTransport, TargetTransport, Since,
+         BatchSize, CheckpointFun, Stats0).
 
 loop(Source, Target, SourceTransport, TargetTransport, Since, BatchSize,
-     Checkpoint, Stats) ->
+     CheckpointFun, Stats) ->
     case SourceTransport:att_changes(Source, Since, #{limit => BatchSize}) of
         {error, att_sync_unsupported} ->
             %% the transport speaks the protocol but the backend has
@@ -61,17 +91,15 @@ loop(Source, Target, SourceTransport, TargetTransport, Since, BatchSize,
         {error, _} = Error ->
             Error;
         {ok, [], _LastSeq} ->
-            ok = barrel_rep_checkpoint:write_checkpoint(Checkpoint),
+            ok = CheckpointFun(Since),
             {ok, Stats};
         {ok, Entries, LastSeq} ->
             case process_batch(Source, Target, SourceTransport,
                                TargetTransport, Entries, Stats) of
                 {ok, Stats2} ->
-                    Checkpoint2 = barrel_rep_checkpoint:set_last_seq(
-                        LastSeq, Checkpoint),
-                    ok = barrel_rep_checkpoint:write_checkpoint(Checkpoint2),
+                    ok = CheckpointFun(LastSeq),
                     loop(Source, Target, SourceTransport, TargetTransport,
-                         LastSeq, BatchSize, Checkpoint2, Stats2);
+                         LastSeq, BatchSize, CheckpointFun, Stats2);
                 {error, _} = Error ->
                     Error
             end
