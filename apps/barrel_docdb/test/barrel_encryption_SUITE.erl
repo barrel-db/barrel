@@ -17,7 +17,12 @@
     t_plaintext_open_of_encrypted/1,
     t_encrypt_existing_plaintext/1,
     t_key_provider_error/1,
-    t_gc_env_retained/1
+    t_gc_env_retained/1,
+    t_branch_encrypted/1,
+    t_branch_pitr_encrypted/1,
+    t_merge_encrypted/1,
+    t_branch_reopen_wrong_key/1,
+    t_branch_encryption_mismatch/1
 ]).
 
 -include_lib("common_test/include/ct.hrl").
@@ -31,7 +36,9 @@ all() ->
     [t_encrypted_roundtrip, t_sentinel_absent_on_disk,
      t_attachments_encrypted, t_wrong_key,
      t_plaintext_open_of_encrypted, t_encrypt_existing_plaintext,
-     t_key_provider_error, t_gc_env_retained].
+     t_key_provider_error, t_gc_env_retained,
+     t_branch_encrypted, t_branch_pitr_encrypted, t_merge_encrypted,
+     t_branch_reopen_wrong_key, t_branch_encryption_mismatch].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(barrel_docdb),
@@ -53,6 +60,7 @@ init_per_testcase(Case, Config) ->
 end_per_testcase(_Case, Config) ->
     application:set_env(barrel_docdb, test_encryption_master,
                         <<"suite master secret">>),
+    _ = barrel_docdb:delete_db(<<(?config(db, Config))/binary, "_b">>),
     _ = barrel_docdb:delete_db(?config(db, Config)),
     ok.
 
@@ -193,4 +201,97 @@ t_gc_env_retained(Config) ->
     {ok, _} = barrel_docdb:get_doc(Db, <<"a">>),
     {ok, _} = barrel_docdb:put_doc(Db, #{<<"id">> => <<"b">>}),
     {ok, _} = barrel_docdb:get_doc(Db, <<"b">>),
+    ok.
+
+%%====================================================================
+%% Timeline on encrypted databases
+%%====================================================================
+
+t_branch_encrypted(Config) ->
+    Db = ?config(db, Config),
+    Branch = <<Db/binary, "_b">>,
+    {ok, _} = barrel_docdb:create_db(Db, enc_opts(Config)),
+    {ok, _} = barrel_docdb:put_doc(Db, #{<<"id">> => <<"a">>,
+                                         <<"v">> => 1}),
+    %% the branch inherits the parent's encryption spec and key-check
+    %% marker; it opens under the parent's key and works right away
+    {ok, _} = barrel_docdb:branch_db(Db, Branch, #{}),
+    BranchPath = filename:join(?config(data_dir, Config),
+                               binary_to_list(Branch)),
+    ?assert(filelib:is_regular(filename:join(BranchPath, "CRYPTO"))),
+    {ok, #{<<"v">> := 1}} = barrel_docdb:get_doc(Branch, <<"a">>),
+    %% branch writes are encrypted too, and stay isolated
+    {ok, _} = barrel_docdb:put_doc(Branch, #{<<"id">> => <<"bonly">>,
+                                             <<"secret">> => ?SENTINEL}),
+    {error, not_found} = barrel_docdb:get_doc(Db, <<"bonly">>),
+    ok = barrel_docdb:close_db(Branch),
+    ?assertNot(found_on_disk(BranchPath, ?SENTINEL)),
+    ok.
+
+t_branch_pitr_encrypted(Config) ->
+    Db = ?config(db, Config),
+    Branch = <<Db/binary, "_b">>,
+    {ok, _} = barrel_docdb:create_db(Db, enc_opts(Config)),
+    {ok, _} = barrel_docdb:put_doc(Db, #{<<"id">> => <<"d">>,
+                                         <<"v">> => 1}),
+    {ok, _, T} = barrel_docdb:get_changes(Db, first),
+    {ok, #{<<"_rev">> := R1}} = barrel_docdb:get_doc(Db, <<"d">>),
+    {ok, _} = barrel_docdb:put_doc(Db, #{<<"id">> => <<"d">>,
+                                         <<"v">> => 2,
+                                         <<"_rev">> => R1}),
+    %% the rewind runs on a direct open of the encrypted checkpoint
+    {ok, _} = barrel_docdb:branch_db(Db, Branch, #{at => T}),
+    {ok, #{<<"v">> := 1}} = barrel_docdb:get_doc(Branch, <<"d">>),
+    {ok, #{<<"v">> := 2}} = barrel_docdb:get_doc(Db, <<"d">>),
+    ok.
+
+t_merge_encrypted(Config) ->
+    Db = ?config(db, Config),
+    Branch = <<Db/binary, "_b">>,
+    {ok, _} = barrel_docdb:create_db(Db, enc_opts(Config)),
+    {ok, _} = barrel_docdb:put_doc(Db, #{<<"id">> => <<"a">>}),
+    {ok, _} = barrel_docdb:branch_db(Db, Branch, #{}),
+    {ok, _} = barrel_docdb:put_doc(Branch, #{<<"id">> => <<"feature">>,
+                                             <<"done">> => true}),
+    {ok, #{docs_written := 1}} = barrel_docdb:merge_branch(Branch, #{}),
+    {ok, #{<<"done">> := true}} = barrel_docdb:get_doc(Db, <<"feature">>),
+    ok.
+
+t_branch_reopen_wrong_key(Config) ->
+    Db = ?config(db, Config),
+    Branch = <<Db/binary, "_b">>,
+    {ok, _} = barrel_docdb:create_db(Db, enc_opts(Config)),
+    {ok, _} = barrel_docdb:put_doc(Db, #{<<"id">> => <<"a">>}),
+    {ok, _} = barrel_docdb:branch_db(Db, Branch, #{}),
+    ok = barrel_docdb:close_db(Branch),
+    application:set_env(barrel_docdb, test_encryption_master,
+                        <<"another master">>),
+    ?assertEqual({error, wrong_encryption_key},
+                 barrel_docdb:create_db(Branch, enc_opts(Config))),
+    application:set_env(barrel_docdb, test_encryption_master,
+                        <<"suite master secret">>),
+    {ok, _} = barrel_docdb:create_db(Branch, enc_opts(Config)),
+    {ok, _} = barrel_docdb:get_doc(Branch, <<"a">>),
+    ok.
+
+t_branch_encryption_mismatch(Config) ->
+    Db = ?config(db, Config),
+    Branch = <<Db/binary, "_b">>,
+    BranchPath = filename:join(?config(data_dir, Config),
+                               binary_to_list(Branch)),
+    %% a plaintext parent cannot fork into an encrypted branch
+    {ok, _} = barrel_docdb:create_db(Db, plain_opts(Config)),
+    ?assertEqual({error, cannot_encrypt_existing_db},
+                 barrel_docdb:branch_db(Db, Branch,
+                     #{encryption => #{provider => ?PROVIDER}})),
+    ?assertNot(filelib:is_file(BranchPath)),
+    ok = barrel_docdb:close_db(Db),
+    os:cmd("rm -rf " ++ filename:join(?config(data_dir, Config),
+                                      binary_to_list(Db))),
+    %% an encrypted parent cannot fork into a plaintext branch
+    {ok, _} = barrel_docdb:create_db(Db, enc_opts(Config)),
+    ?assertEqual({error, db_is_encrypted},
+                 barrel_docdb:branch_db(Db, Branch,
+                                        #{encryption => disabled})),
+    ?assertNot(filelib:is_file(BranchPath)),
     ok.

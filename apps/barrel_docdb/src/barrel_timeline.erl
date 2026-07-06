@@ -112,6 +112,10 @@ fork(Parent, ParentPid, PInfo, BranchName, BranchPath, Opts) ->
             parent => Parent,
             fork_hlc => barrel_hlc:encode(ForkHlc)
         }),
+        %% an encrypted parent's checkpoint is ciphertext under the
+        %% parent's key: carry the key-check marker so the branch's
+        %% open verifies against the same key (same keyspace)
+        ok = copy_crypto_marker(maps:get(db_path, PInfo), BranchPath),
         case maps:get(at, Opts, now) of
             now -> ok;
             T when is_tuple(T) ->
@@ -133,9 +137,20 @@ fork(Parent, ParentPid, PInfo, BranchName, BranchPath, Opts) ->
             erlang:raise(Class, Reason, Stack)
     end.
 
-%% The branch's first open inherits the parent's config; channels are
-%% forced from the parent, the data_dir points at the branch's base,
-%% and caller options are merged on top of the rest.
+copy_crypto_marker(ParentPath, BranchPath) ->
+    Src = filename:join(ParentPath, "CRYPTO"),
+    case filelib:is_regular(Src) of
+        true ->
+            {ok, _} = file:copy(Src, filename:join(BranchPath, "CRYPTO")),
+            ok;
+        false ->
+            ok
+    end.
+
+%% The branch's first open inherits the parent's config (including its
+%% encryption spec: the checkpoint is ciphertext under the parent's
+%% key); channels are forced from the parent, the data_dir points at
+%% the branch's base, and caller options are merged on top of the rest.
 branch_config(PInfo, BranchPath, Opts) ->
     ParentConfig = maps:get(config, PInfo, #{}),
     CallerOpts = maps:without([at, data_dir], Opts),
@@ -296,7 +311,21 @@ rewind_branch(DocsPath, PInfo, ForkHlc, T) ->
     Config = maps:get(config, PInfo, #{}),
     {ok, Compiled} = barrel_channel:compile(
         maps:get(channels, Config, #{})),
-    StoreOpts = maps:get(store_opts, Config, #{}),
+    StoreOpts0 = maps:get(store_opts, Config, #{}),
+    %% the checkpoint is ciphertext under the parent's key: this direct
+    %% open resolves it explicitly from the parent's spec + keyspace
+    %% (no db_server involved). The env handle stays referenced through
+    %% StoreOpts for the whole rewind.
+    StoreOpts = case barrel_keyprovider:key_for_db(
+                       maps:get(encryption, Config, disabled), Ks) of
+        {ok, plaintext} ->
+            StoreOpts0;
+        {ok, Key} ->
+            {ok, Env} = rocksdb:new_env({encrypted, Key}),
+            StoreOpts0#{env => Env};
+        {error, KeyErr} ->
+            throw({error, {encryption_key_error, KeyErr}})
+    end,
     {ok, StoreRef} = barrel_store_rocksdb:open(DocsPath, StoreOpts),
     try
         rewind(StoreRef, Ks, Compiled, T)
