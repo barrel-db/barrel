@@ -16,6 +16,8 @@
 -export([doc_info/2, doc_info_prefix/1, doc_info_end/1]).
 -export([doc_rev/3, doc_rev_prefix/2]).
 -export([doc_hlc/2, doc_hlc_prefix/1, doc_hlc_end/1]).
+-export([doc_expiry/3, doc_expiry_prefix/1, doc_expiry_upto/2,
+         decode_doc_expiry_key/2]).
 
 %% Column-wide document keys (CBOR codec)
 -export([doc_current/2, doc_current_prefix/1, doc_current_end/1]).
@@ -135,6 +137,7 @@
 -define(PREFIX_HISTORY, 16#1C).       %% Retained history log: DbName + change HLC → history entry
 -define(PREFIX_DOC_VERSION, 16#1D).   %% Version chain: DbName + DocId + ':' + version → sibling entry
 -define(PREFIX_CHANNEL, 16#1E).       %% Per-channel change feed: DbName + channel (null-terminated) + HLC → row
+-define(PREFIX_DOC_EXPIRY, 16#1F).    %% Doc TTL index: DbName + ExpiresMs:64 + DocId → <<>>
 
 %% Value prefix max length for value-first index (128 bytes)
 -define(VALUE_PREFIX_MAX_LEN, 128).
@@ -228,6 +231,34 @@ doc_hlc(DbName, HlcTS) ->
 -spec doc_hlc_prefix(db_name()) -> binary().
 doc_hlc_prefix(DbName) ->
     <<?PREFIX_DOC_HLC, (encode_name(DbName))/binary>>.
+
+%% @doc Doc TTL index row: sorted by expiry instant so the sweeper
+%% folds exactly the expired range.
+-spec doc_expiry(db_name(), non_neg_integer(), binary()) -> binary().
+doc_expiry(DbName, ExpiresMs, DocId) ->
+    <<?PREFIX_DOC_EXPIRY, (encode_name(DbName))/binary,
+      ExpiresMs:64/big, DocId/binary>>.
+
+%% @doc Prefix of all TTL index rows of a database.
+-spec doc_expiry_prefix(db_name()) -> binary().
+doc_expiry_prefix(DbName) ->
+    <<?PREFIX_DOC_EXPIRY, (encode_name(DbName))/binary>>.
+
+%% @doc Exclusive upper bound covering every row expiring at or before
+%% NowMs (the doc id tail sorts above the bare instant, so bound at
+%% NowMs + 1).
+-spec doc_expiry_upto(db_name(), non_neg_integer()) -> binary().
+doc_expiry_upto(DbName, NowMs) ->
+    <<?PREFIX_DOC_EXPIRY, (encode_name(DbName))/binary,
+      (NowMs + 1):64/big>>.
+
+%% @doc The doc id inside a TTL index key.
+-spec decode_doc_expiry_key(db_name(), binary()) ->
+    {non_neg_integer(), binary()}.
+decode_doc_expiry_key(DbName, Key) ->
+    PrefixSize = byte_size(doc_expiry_prefix(DbName)),
+    <<_:PrefixSize/binary, ExpiresMs:64/big, DocId/binary>> = Key,
+    {ExpiresMs, DocId}.
 
 %% @doc End marker for HLC range scan
 -spec doc_hlc_end(db_name()) -> binary().

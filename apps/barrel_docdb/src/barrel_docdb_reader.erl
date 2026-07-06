@@ -20,6 +20,7 @@
 -include("barrel_docdb.hrl").
 
 -export([get_doc/4, get_docs/4]).
+-export([expired/1]).
 -export([get_replication_doc/3]).
 
 %% @doc Get a document by id, reading entity and body under one snapshot.
@@ -106,7 +107,17 @@ with_snapshot(StoreRef, Fun) ->
 do_get_doc(StoreRef, DbName, DocId, Opts, Snapshot) ->
     DocEntityKey = barrel_store_keys:doc_entity(DbName, DocId),
     case barrel_store_rocksdb:get_entity_with_snapshot(StoreRef, DocEntityKey, Snapshot) of
-        {ok, Columns} ->
+        {ok, Columns0} ->
+            case expired(Columns0) of
+                true -> {error, not_found};
+                false -> do_get_doc_live(StoreRef, DbName, DocId, Opts,
+                                         Snapshot, Columns0)
+            end;
+        not_found ->
+            {error, not_found}
+    end.
+
+do_get_doc_live(StoreRef, DbName, DocId, Opts, Snapshot, Columns) ->
             %% The winner is stored at write time; its token is the API rev
             Rev = barrel_version:to_token(
                 barrel_version:decode(
@@ -158,10 +169,7 @@ do_get_doc(StoreRef, DbName, DocId, Opts, Snapshot) ->
                         not_found ->
                             {error, not_found}
                     end
-            end;
-        not_found ->
-            {error, not_found}
-    end.
+            end.
 
 %% @private Get multiple documents by id (batch entity + body fetch).
 do_get_docs(StoreRef, DbName, DocIds, Opts, Snapshot) ->
@@ -186,9 +194,12 @@ do_get_docs(StoreRef, DbName, DocIds, Opts, Snapshot) ->
                         barrel_version:decode(
                             proplists:get_value(?COL_VERSION, Columns))),
                     Deleted = bin_to_deleted(proplists:get_value(?COL_DELETED, Columns, <<"false">>)),
-                    case {Deleted, IncludeDeleted} of
-                        {true, false} ->
+                    case {Deleted andalso not IncludeDeleted,
+                          expired(Columns)} of
+                        {true, _} ->
                             Map;  %% Skip deleted
+                        {_, true} ->
+                            Map;  %% Lazily expired
                         _ ->
                             DocBody = barrel_docdb_codec_cbor:decode_any(CborBin),
                             Result = DocBody#{<<"id">> => DocId, <<"_rev">> => Rev},
@@ -229,6 +240,18 @@ maybe_add_embedding(Doc, Columns, Opts) ->
             end;
         false ->
             Doc
+    end.
+
+%% @doc Whether an entity's expires_at column marks the document
+%% lazily expired: the TTL sweeper turns these into real tombstones,
+%% and reads treat them as gone in the meantime.
+-spec expired([{binary(), term()}]) -> boolean().
+expired(Columns) ->
+    case proplists:get_value(?COL_EXPIRES_AT, Columns, 0) of
+        ExpiresMs when is_integer(ExpiresMs), ExpiresMs > 0 ->
+            ExpiresMs =< erlang:system_time(millisecond);
+        _ ->
+            false
     end.
 
 %% @private Convert binary back to boolean from wide column storage

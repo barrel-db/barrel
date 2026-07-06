@@ -989,18 +989,37 @@ embedding_columns(DocRecord) ->
 provenance_columns(undefined) -> [];
 provenance_columns(ProvEnc) -> [{?COL_PROVENANCE, ProvEnc}].
 
-%% @doc Validate the provenance write option (if any) and cache its
-%% encoded form for the op builders.
+%% @doc Validate the provenance and expires_at write options (if any);
+%% caches the encoded provenance for the op builders.
 validate_prov_opt(Opts) ->
-    case maps:find(provenance, Opts) of
-        error ->
-            {ok, Opts};
-        {ok, Prov} ->
-            case barrel_provenance:validate(Prov) of
-                {ok, Enc} -> {ok, Opts#{provenance_enc => Enc}};
-                {error, Reason} -> {error, {invalid_provenance, Reason}}
+    case maps:find(expires_at, Opts) of
+        {ok, E} when not (is_integer(E) andalso E >= 0) ->
+            {error, {invalid_expires_at, E}};
+        _ ->
+            case maps:find(provenance, Opts) of
+                error ->
+                    {ok, Opts};
+                {ok, Prov} ->
+                    case barrel_provenance:validate(Prov) of
+                        {ok, Enc} ->
+                            {ok, Opts#{provenance_enc => Enc}};
+                        {error, Reason} ->
+                            {error, {invalid_provenance, Reason}}
+                    end
             end
     end.
+
+%% @doc TTL index maintenance for one write: the row moves with the
+%% doc's expires_at so the sweeper folds exactly the expired range.
+expiry_index_ops(_Ks, _DocId, Same, Same) ->
+    [];
+expiry_index_ops(Ks, DocId, 0, New) ->
+    [{put, barrel_store_keys:doc_expiry(Ks, New, DocId), <<>>}];
+expiry_index_ops(Ks, DocId, Old, 0) ->
+    [{delete, barrel_store_keys:doc_expiry(Ks, Old, DocId)}];
+expiry_index_ops(Ks, DocId, Old, New) ->
+    [{delete, barrel_store_keys:doc_expiry(Ks, Old, DocId)},
+     {put, barrel_store_keys:doc_expiry(Ks, New, DocId), <<>>}].
 
 %% @doc Read a document's current version state (undefined when absent).
 read_current(StoreRef, DbName, DocId) ->
@@ -1136,6 +1155,9 @@ build_write_ops(StoreRef, DbName, DocRecord, Old, Opts) ->
     NewVV = barrel_vv:bump(OldVV, NewVersion),
 
     ProvEnc = maps:get(provenance_enc, Opts, undefined),
+    %% Doc TTL: absent = preserve, 0 = clear, N = expire at N (unix ms)
+    NewExpires = maps:get(expires_at, Opts, ExpiresAt),
+    ExpiryOps = expiry_index_ops(Ks, DocId, ExpiresAt, NewExpires),
     DocColumns = [
         {?COL_VERSION, barrel_version:encode(NewVersion)},
         {?COL_DELETED, deleted_to_bin(Deleted)},
@@ -1143,7 +1165,7 @@ build_write_ops(StoreRef, DbName, DocRecord, Old, Opts) ->
         {?COL_VV, barrel_vv:encode(NewVV)},
         {?COL_NCONFLICTS, NConflicts},
         {?COL_CREATED_AT, CreatedAt},
-        {?COL_EXPIRES_AT, ExpiresAt},
+        {?COL_EXPIRES_AT, NewExpires},
         {?COL_TIER, Tier}
     ] ++ provenance_columns(ProvEnc) ++ embedding_columns(DocRecord),
     DocOps = [{entity_put, DocEntityKey, DocColumns}],
@@ -1239,7 +1261,7 @@ build_write_ops(StoreRef, DbName, DocRecord, Old, Opts) ->
     BodyOp = {body_put, BodyKey, CborBody},
     AllOps = DocOps ++ HlcDeleteOps ++ PathIndexOps ++ ChangeOps ++ PathHlcOps
         ++ ArchiveOps ++ ChainOps ++ OutboxOps ++ HistoryOps ++ ChannelOps
-        ++ [BodyOp],
+        ++ ExpiryOps ++ [BodyOp],
     {AllOps, {DocId, NewToken, NextHlc, Deleted, DocBody}}.
 
 %% @doc Put multiple documents in a single batch (batch write)
@@ -1375,6 +1397,8 @@ do_delete_doc(StoreRef, DbName, DocId, Opts) ->
             DocEntityKey = barrel_store_keys:doc_entity(Ks, DocId),
 
             ProvEnc = maps:get(provenance_enc, Opts, undefined),
+            %% a tombstone has no TTL; drop any pending expiry row
+            ExpiryOps = expiry_index_ops(Ks, DocId, ExpiresAt, 0),
             DocColumns = [
                 {?COL_VERSION, barrel_version:encode(NewVersion)},
                 {?COL_DELETED, <<"true">>},
@@ -1382,7 +1406,7 @@ do_delete_doc(StoreRef, DbName, DocId, Opts) ->
                 {?COL_VV, barrel_vv:encode(NewVV)},
                 {?COL_NCONFLICTS, NConflicts},
                 {?COL_CREATED_AT, CreatedAt},
-                {?COL_EXPIRES_AT, ExpiresAt},
+                {?COL_EXPIRES_AT, 0},
                 {?COL_TIER, Tier}
             ] ++ provenance_columns(ProvEnc),
             DocOps = [{entity_put, DocEntityKey, DocColumns}],
@@ -1441,7 +1465,7 @@ do_delete_doc(StoreRef, DbName, DocId, Opts) ->
             %% Write batch atomically
             AllOps = DocOps ++ HlcDeleteOps ++ PathIndexOps ++ ChangeOps ++ PathHlcOps
                 ++ ArchiveOps ++ ChainOps ++ OutboxOps ++ HistoryOps
-                ++ ChannelOps,
+                ++ ChannelOps ++ ExpiryOps,
             WriteOpts = #{sync => maps:get(sync, Opts, false)},
             ok = barrel_store_rocksdb:write_batch(StoreRef, AllOps, WriteOpts),
 
@@ -1477,9 +1501,14 @@ do_fold_docs(StoreRef, DbName, Fun, Acc, Opts) ->
                     barrel_version:decode(
                         proplists:get_value(?COL_VERSION, Columns))),
                 Deleted = bin_to_deleted(proplists:get_value(?COL_DELETED, Columns, <<"false">>)),
-                case {Deleted, IncludeDeleted} of
-                    {true, false} ->
+                case {Deleted andalso not IncludeDeleted,
+                      barrel_docdb_reader:expired(Columns)} of
+                    {true, _} ->
                         %% Skip deleted documents
+                        {ok, AccIn};
+                    {_, true} ->
+                        %% Lazily expired (the TTL sweeper will
+                        %% tombstone it)
                         {ok, AccIn};
                     _ ->
                         %% Get document body from body CF (current body, no rev in key)
