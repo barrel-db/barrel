@@ -29,7 +29,7 @@
          space_info/1]).
 
 %% Shared helpers for the other agent-layer modules
--export([registry_db/0, new_id/1, now_ms/0]).
+-export([registry_db/0, new_id/1, now_ms/0, base32/1]).
 
 -define(REGISTRY_DB, <<"_barrel_spaces">>).
 
@@ -240,8 +240,9 @@ revoke_grants(Id) ->
         false -> ok
     end.
 
-%% RFC 4648 base32, lowercase, no padding (input sizes are multiples
-%% of 5 bits by construction: 10 bytes -> 16 chars).
+%% @doc RFC 4648 base32, lowercase, no padding (callers pass sizes
+%% that are multiples of 5 bits: 10 bytes -> 16 chars, 25 -> 40).
+-spec base32(binary()) -> binary().
 base32(Bin) ->
     << <<(b32_char(C))>> || <<C:5>> <= Bin >>.
 
