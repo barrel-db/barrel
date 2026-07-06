@@ -20,7 +20,10 @@
     fork_dir_exists_error/1,
     fork_channels_inherited/1,
     branch_reopen_resumes_channels/1,
-    inherited_rep_checkpoints_inert/1
+    inherited_rep_checkpoints_inert/1,
+    delete_closed_branch_removes_files/1,
+    delete_parent_branch_survives/1,
+    list_branches_open_only/1
 ]).
 
 -include_lib("common_test/include/ct.hrl").
@@ -32,7 +35,8 @@ all() ->
      fork_attachments_visible, fork_under_write_load,
      fork_branch_of_branch_rejected, fork_dir_exists_error,
      fork_channels_inherited, branch_reopen_resumes_channels,
-     inherited_rep_checkpoints_inert].
+     inherited_rep_checkpoints_inert, delete_closed_branch_removes_files,
+     delete_parent_branch_survives, list_branches_open_only].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(barrel_docdb),
@@ -462,5 +466,65 @@ inherited_rep_checkpoints_inert(Config) ->
     after
         _ = barrel_docdb:delete_db(Branch),
         _ = barrel_docdb:delete_db(Target)
+    end,
+    ok.
+
+%%====================================================================
+%% Lifecycle
+%%====================================================================
+
+delete_closed_branch_removes_files(Config) ->
+    Db = ?config(db, Config),
+    DataDir = ?config(data_dir, Config),
+    Branch = <<Db/binary, "_b">>,
+    {ok, _} = barrel_docdb:put_doc(Db, #{<<"id">> => <<"a">>}),
+    {ok, _} = barrel_docdb:branch_db(Db, Branch, #{}),
+    ok = barrel_docdb:close_db(Branch),
+    BranchPath = filename:join(DataDir, binary_to_list(Branch)),
+    ?assert(filelib:is_dir(BranchPath)),
+    %% a closed db's files are located under its data_dir and removed
+    ok = barrel_docdb:delete_db(Branch, #{data_dir => DataDir}),
+    ?assertNot(filelib:is_dir(BranchPath)),
+    ok.
+
+delete_parent_branch_survives(Config) ->
+    Db = ?config(db, Config),
+    DataDir = ?config(data_dir, Config),
+    Branch = <<Db/binary, "_b">>,
+    {ok, _} = barrel_docdb:put_doc(Db, #{<<"id">> => <<"a">>,
+                                         <<"v">> => 1}),
+    {ok, _} = barrel_docdb:branch_db(Db, Branch, #{}),
+    try
+        %% hard links make the branch independent of the parent's files
+        ok = barrel_docdb:delete_db(Db),
+        {ok, #{<<"v">> := 1}} = barrel_docdb:get_doc(Branch, <<"a">>),
+        {ok, _} = barrel_docdb:put_doc(Branch, #{<<"id">> => <<"b">>}),
+        %% and it survives a close + reopen after the parent is gone
+        ok = barrel_docdb:close_db(Branch),
+        {ok, _} = barrel_docdb:create_db(Branch,
+                                         #{data_dir => DataDir}),
+        {ok, _} = barrel_docdb:get_doc(Branch, <<"b">>)
+    after
+        _ = barrel_docdb:delete_db(Branch),
+        {ok, _} = barrel_docdb:create_db(Db, #{data_dir => DataDir})
+    end,
+    ok.
+
+list_branches_open_only(Config) ->
+    Db = ?config(db, Config),
+    Branch1 = <<Db/binary, "_b1">>,
+    Branch2 = <<Db/binary, "_b2">>,
+    {ok, _} = barrel_docdb:branch_db(Db, Branch1, #{}),
+    {ok, _} = barrel_docdb:branch_db(Db, Branch2, #{}),
+    try
+        ?assertEqual([Branch1, Branch2],
+                     lists:sort(barrel_docdb:list_branches(Db))),
+        ok = barrel_docdb:close_db(Branch2),
+        ?assertEqual([Branch1], barrel_docdb:list_branches(Db)),
+        ?assertEqual([], barrel_docdb:list_branches(Branch1))
+    after
+        _ = barrel_docdb:delete_db(Branch1),
+        _ = barrel_docdb:delete_db(Branch2, #{data_dir =>
+                                              ?config(data_dir, Config)})
     end,
     ok.

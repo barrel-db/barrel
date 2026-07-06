@@ -62,6 +62,7 @@
     open_db/1,
     close_db/1,
     delete_db/1,
+    delete_db/2,
     db_info/1,
     db_pid/1,
     list_dbs/0,
@@ -70,7 +71,8 @@
 
 %% Timeline (branch, merge)
 -export([
-    branch_db/3
+    branch_db/3,
+    list_branches/1
 ]).
 
 %% Document CRUD
@@ -307,6 +309,12 @@ open_db(Name) when is_binary(Name) ->
 branch_db(Parent, BranchName, Opts) ->
     barrel_timeline:branch_db(Parent, BranchName, Opts).
 
+%% @doc The OPEN branches of a database (a branch that exists on disk
+%% but is not running is not listed).
+-spec list_branches(binary()) -> [binary()].
+list_branches(Parent) ->
+    barrel_timeline:list_branches(Parent).
+
 %% @doc Close a database.
 %%
 %% Stops the database process and releases resources. The database
@@ -346,27 +354,44 @@ close_db(Pid) when is_pid(Pid) ->
 %% @returns `ok' on success (also returns `ok' if database doesn't exist)
 -spec delete_db(binary()) -> ok | {error, term()}.
 delete_db(Name) when is_binary(Name) ->
+    delete_db(Name, #{}).
+
+%% @doc Delete a database, locating a CLOSED database's files under
+%% `data_dir' (the option, else the app env default). Open databases
+%% are stopped first, using their actual path.
+-spec delete_db(binary(), map()) -> ok | {error, term()}.
+delete_db(Name, Opts) when is_binary(Name), is_map(Opts) ->
     case validate_db_name(Name) of
         ok ->
-            do_delete_db(Name);
+            do_delete_db(Name, Opts);
         {error, _} = Err ->
             Err
     end.
 
-do_delete_db(Name) ->
+do_delete_db(Name, Opts) ->
     case get_db(Name) of
         {ok, Pid} ->
             {ok, Info} = barrel_db_server:info(Pid),
             DbPath = maps:get(db_path, Info),
             barrel_db_server:stop(Pid),
             %% Remove data directory via stdlib (no shell, no injection).
-            case file:del_dir_r(DbPath) of
-                ok -> ok;
-                {error, enoent} -> ok;
-                {error, _} = Err -> Err
-            end;
+            del_db_dir(DbPath);
         {error, not_found} ->
-            ok
+            %% Not open: remove the on-disk files where they would
+            %% live. Databases created under a data_dir that is
+            %% neither the option nor the app env cannot be located;
+            %% pass delete_db/2 with their data_dir.
+            DefaultDataDir = application:get_env(barrel_docdb, data_dir,
+                                                 "/tmp/barrel_data"),
+            DataDir = maps:get(data_dir, Opts, DefaultDataDir),
+            del_db_dir(filename:join(DataDir, binary_to_list(Name)))
+    end.
+
+del_db_dir(DbPath) ->
+    case file:del_dir_r(DbPath) of
+        ok -> ok;
+        {error, enoent} -> ok;
+        {error, _} = Err -> Err
     end.
 
 %% @doc Get database information.

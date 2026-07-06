@@ -23,11 +23,24 @@
 
 -include("barrel_docdb.hrl").
 
--export([branch_db/3]).
+-export([branch_db/3, list_branches/1]).
 
 %%====================================================================
 %% Branch
 %%====================================================================
+
+%% @doc The OPEN branches of a database, from the registry (a parent
+%% tracks nothing; on-disk-but-closed branches are not listed).
+-spec list_branches(binary()) -> [binary()].
+list_branches(Parent) ->
+    lists:filter(
+        fun(Name) ->
+            case barrel_docdb:db_info(Name) of
+                {ok, #{parent := Parent}} -> true;
+                _ -> false
+            end
+        end,
+        barrel_docdb:list_dbs()).
 
 %% @doc Fork a database. `Opts':
 %% - `at => now' (default): the branch starts at the fork instant.
