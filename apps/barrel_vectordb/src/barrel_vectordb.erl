@@ -171,6 +171,8 @@
 -type store_config() :: #{
     name := atom(),
     path => string() | binary(),
+    db_path => string() | binary(),
+    dimension => pos_integer(),
     dimensions => pos_integer(),
     embedder => embedder_config(),
     backend => hnsw | faiss | diskann,
@@ -180,7 +182,10 @@
     %% BM25 options
     bm25_backend => memory | disk | none,
     bm25 => map(),
-    bm25_disk => map()
+    bm25_disk => map(),
+    %% Read-through document backend (record mode)
+    docstore => {module(), map()},
+    _ => _
 }.
 %% Store configuration options.
 

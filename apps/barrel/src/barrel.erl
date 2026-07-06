@@ -284,9 +284,34 @@ branch(#{docdb := ParentBin} = Db, BranchName, Opts)
     end.
 
 %% @private The branch's facade side: a fresh vector store; record
-%% mode re-applies the parent's policy and backfills (step 11).
-open_branch(#{embedding := _}, _BranchName, _BranchBin, _Opts) ->
-    {error, record_branch_not_implemented};
+%% mode re-applies the parent's policy and backfills the index from
+%% the embeddings stored in doc bodies (see barrel_record_backfill).
+open_branch(#{embedding := Policy}, BranchName, _BranchBin, Opts) ->
+    OpenOpts = #{embedding => Policy,
+                 vectordb => maps:get(vectordb, Opts, #{}),
+                 docdb => maps:get(docdb, Opts, #{})},
+    case open(BranchName, OpenOpts) of
+        {ok, #{docdb := BranchBin, vstore := VStore,
+               embedding := BranchPolicy, embed := Embed,
+               dimensions := Dim} = Branch} ->
+            case maps:get(backfill, Opts, sync) of
+                none ->
+                    {ok, Branch};
+                sync ->
+                    case barrel_record_backfill:run(#{
+                             db => BranchBin, vstore => VStore,
+                             policy => BranchPolicy, embed => Embed,
+                             dimensions => Dim}) of
+                        {ok, _Report} ->
+                            {ok, Branch};
+                        {error, Reason} ->
+                            _ = close(Branch),
+                            {error, {backfill_failed, Reason}}
+                    end
+            end;
+        {error, _} = Err ->
+            Err
+    end;
 open_branch(_Db, BranchName, _BranchBin, Opts) ->
     open(BranchName, #{vectordb => maps:get(vectordb, Opts, #{}),
                        docdb => maps:get(docdb, Opts, #{})}).
