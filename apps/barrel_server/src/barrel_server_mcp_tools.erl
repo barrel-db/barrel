@@ -182,20 +182,20 @@ specs() ->
 
 db_create(#{<<"db">> := Name}, Ctx) ->
     with_db(Name, Ctx, write, fun(_Db) ->
-        #{ok => true, db => Name}
+        reply(#{ok => true, db => Name})
     end).
 
 db_list(_Args, Ctx) ->
     Dbs = [Db || Db <- barrel_server_dbs:list(),
                  barrel_server_mcp_auth:allow(Ctx, Db, read) =:= ok],
-    #{dbs => lists:sort(Dbs)}.
+    reply(#{dbs => lists:sort(Dbs)}).
 
 db_info(#{<<"db">> := Name}, Ctx) ->
     with_db(Name, Ctx, read, fun(Db) ->
         case barrel:info(Db) of
             {ok, Info} ->
-                barrel_server_http:jsonable(
-                    barrel_server_http:encode_hlcs(Info));
+                reply(barrel_server_http:jsonable(
+                    barrel_server_http:encode_hlcs(Info)));
             Err ->
                 err(Err)
         end
@@ -208,7 +208,7 @@ db_info(#{<<"db">> := Name}, Ctx) ->
 doc_get(#{<<"db">> := Name, <<"id">> := Id}, Ctx) ->
     with_db(Name, Ctx, read, fun(Db) ->
         case barrel:get_doc(Db, Id) of
-            {ok, Doc} -> Doc;
+            {ok, Doc} -> reply(Doc);
             Err -> err(Err)
         end
     end).
@@ -218,7 +218,7 @@ doc_put(#{<<"db">> := Name, <<"doc">> := Doc} = Args, Ctx) ->
         case Doc of
             #{<<"id">> := Id} when is_binary(Id) ->
                 case barrel:put_doc(Db, Doc, write_opts(Ctx, Args)) of
-                    {ok, Res} -> barrel_server_http:jsonable(Res);
+                    {ok, Res} -> reply(barrel_server_http:jsonable(Res));
                     Err -> err(Err)
                 end;
             _ ->
@@ -231,7 +231,7 @@ doc_put(#{<<"db">> := Name, <<"doc">> := Doc} = Args, Ctx) ->
 doc_delete(#{<<"db">> := Name, <<"id">> := Id} = Args, Ctx) ->
     with_db(Name, Ctx, write, fun(Db) ->
         case barrel:delete_doc(Db, Id, write_opts(Ctx, Args)) of
-            {ok, Res} -> barrel_server_http:jsonable(Res);
+            {ok, Res} -> reply(barrel_server_http:jsonable(Res));
             Err -> err(Err)
         end
     end).
@@ -270,7 +270,8 @@ run_query(Db, Bql, Params, Args) ->
             case barrel:'query'(Db, Bql, Opts) of
                 {ok, Rows0, Meta} ->
                     Rows = lists:sublist(Rows0, MaxRows),
-                    query_result(Rows, length(Rows0) > MaxRows, Meta);
+                    reply(query_result(Rows, length(Rows0) > MaxRows,
+                                       Meta));
                 Err ->
                     err(Err)
             end;
@@ -322,7 +323,7 @@ query_subscribe(#{<<"db">> := Name, <<"query">> := Bql} = Args, Ctx) ->
         case barrel_server_mcp_live:subscribe(Name, Bql, Params,
                                               SessionId) of
             {ok, SubId, Uri} ->
-                #{ok => true, sub => SubId, uri => Uri};
+                reply(#{ok => true, sub => SubId, uri => Uri});
             {error, missing_subscribe} ->
                 {tool_error,
                  #{error => <<"missing_subscribe">>,
@@ -336,7 +337,7 @@ query_subscribe(#{<<"db">> := Name, <<"query">> := Bql} = Args, Ctx) ->
 %% possession of the (unguessable) sub id is the right to stop it
 query_unsubscribe(#{<<"sub">> := SubId}, _Ctx) ->
     case barrel_server_mcp_live:unsubscribe(SubId) of
-        ok -> #{ok => true};
+        ok -> reply(#{ok => true});
         Err -> err(Err)
     end.
 
@@ -366,9 +367,9 @@ search(#{<<"db">> := Name, <<"mode">> := Mode} = Args, Ctx) ->
     end).
 
 search_reply({ok, Hits}) when is_list(Hits) ->
-    #{hits => [hit(H) || H <- Hits]};
+    reply(#{hits => [hit(H) || H <- Hits]});
 search_reply(Hits) when is_list(Hits) ->
-    #{hits => [hit(H) || H <- Hits]};
+    reply(#{hits => [hit(H) || H <- Hits]});
 search_reply(Err) ->
     err(Err).
 
@@ -385,9 +386,9 @@ changes(#{<<"db">> := Name} = Args, Ctx) ->
         case since(Args) of
             {ok, Since} ->
                 {ok, Changes, Last} = barrel:changes(Db, Since),
-                #{changes => [barrel_server_http:sanitize_change(C)
-                              || C <- Changes],
-                  last => barrel:hlc_encode(Last)};
+                reply(#{changes => [barrel_server_http:sanitize_change(C)
+                                    || C <- Changes],
+                        last => barrel:hlc_encode(Last)});
             error ->
                 {tool_error, #{error => <<"bad_since">>}}
         end
@@ -417,11 +418,11 @@ branch_create(#{<<"db">> := Name, <<"name">> := Branch} = Args, Ctx) ->
                                               #{at => At}) of
                     {ok, #{docdb := BranchBin} = BranchDb} ->
                         {ok, Info} = barrel:info(BranchDb),
-                        #{ok => true,
-                          branch => BranchBin,
-                          parent => ParentBin,
-                          fork_hlc => barrel:hlc_encode(
-                              maps:get(fork_hlc, Info))};
+                        reply(#{ok => true,
+                                branch => BranchBin,
+                                parent => ParentBin,
+                                fork_hlc => barrel:hlc_encode(
+                                    maps:get(fork_hlc, Info))});
                     Err ->
                         err(Err)
                 end;
@@ -448,10 +449,10 @@ branch_list(#{<<"db">> := Name}, Ctx) ->
                  branches => barrel_docdb:list_branches(DbBin)},
         case barrel:info(Db) of
             {ok, #{parent := Parent, fork_hlc := ForkHlc}} ->
-                Base#{parent => Parent,
-                      fork_hlc => barrel:hlc_encode(ForkHlc)};
+                reply(Base#{parent => Parent,
+                            fork_hlc => barrel:hlc_encode(ForkHlc)});
             {ok, _} ->
-                Base;
+                reply(Base);
             Err ->
                 err(Err)
         end
@@ -461,8 +462,8 @@ merge(#{<<"db">> := Name}, Ctx) ->
     with_db(Name, Ctx, admin, fun(Db) ->
         case barrel:merge(Db) of
             {ok, Report} ->
-                barrel_server_http:jsonable(
-                    barrel_server_http:merge_report(Report));
+                reply(barrel_server_http:jsonable(
+                    barrel_server_http:merge_report(Report)));
             Err ->
                 err(Err)
         end
@@ -482,6 +483,12 @@ with_db(Name, Ctx, Right, Fun) ->
         {error, forbidden} ->
             {tool_error, #{error => <<"forbidden">>, db => Name}}
     end.
+
+%% Tool results are JSON-encoded here: the framework passes a map
+%% carrying a <<"type">> key through as a pre-built content block, so
+%% a document with a user "type" field would corrupt the result shape.
+reply(Map) ->
+    iolist_to_binary(json:encode(Map)).
 
 err({error, Reason}) ->
     err(Reason);

@@ -77,6 +77,7 @@ init([]) ->
     case enabled() of
         true ->
             ok = barrel_server_mcp_tools:register_all(),
+            ok = barrel_server_mcp_agent:register_all(),
             ok = barrel_server_mcp_resources:register_all();
         false ->
             ok
@@ -97,6 +98,7 @@ terminate(_Reason, _State) ->
     %% gone during a full shutdown
     try
         barrel_server_mcp_tools:unregister_all(),
+        barrel_server_mcp_agent:unregister_all(),
         barrel_server_mcp_resources:unregister_all()
     catch _:_ -> ok
     end,

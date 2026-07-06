@@ -83,7 +83,7 @@ t_tools_list(_Config) ->
                 <<"query">>, <<"query_subscribe">>,
                 <<"query_unsubscribe">>, <<"search">>, <<"changes">>,
                 <<"branch_create">>, <<"branch_list">>, <<"merge">>],
-    ?assertEqual(lists:sort(Expected), lists:sort(Names)),
+    ?assertEqual([], Expected -- Names),
     %% annotations surface the behavioural hints
     [Delete] = [T || #{<<"name">> := <<"doc_delete">>} = T <- Tools],
     ?assertMatch(#{<<"destructiveHint">> := true},
