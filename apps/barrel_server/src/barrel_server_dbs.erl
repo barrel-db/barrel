@@ -15,7 +15,7 @@
 -module(barrel_server_dbs).
 -behaviour(gen_server).
 
--export([start_link/0, ensure/1, close/1]).
+-export([start_link/0, ensure/1, close/1, branch/3, destroy/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
 -define(SERVER, ?MODULE).
@@ -40,6 +40,23 @@ ensure(Name) when is_binary(Name) ->
 close(Name) when is_binary(Name) ->
     gen_server:call(?SERVER, {close, Name}, infinity).
 
+%% @doc Fork `Parent' into `BranchName' and own the branch handle.
+%% Runs inside the manager because a barrel database links its vector
+%% store to the process that opens it. Opts: at => now | HlcT.
+-spec branch(binary(), binary(), map()) ->
+    {ok, barrel:db()} | {error, term()}.
+branch(Parent, BranchName, Opts) when is_binary(Parent),
+                                      is_binary(BranchName),
+                                      is_map(Opts) ->
+    gen_server:call(?SERVER, {branch, Parent, BranchName, Opts},
+                    infinity).
+
+%% @doc Destroy the database `Name': close it and delete its files
+%% (docdb and vector store).
+-spec destroy(binary()) -> ok | {error, term()}.
+destroy(Name) when is_binary(Name) ->
+    gen_server:call(?SERVER, {destroy, Name}, infinity).
+
 %%====================================================================
 %% gen_server
 %%====================================================================
@@ -52,26 +69,42 @@ init([]) ->
     {ok, #state{}}.
 
 handle_call({ensure, Name}, _From, State) ->
-    case valid_name(Name) of
+    case do_ensure(Name, State) of
+        {ok, Db, State1} -> {reply, {ok, Db}, State1};
+        {error, Reason, State1} -> {reply, {error, Reason}, State1}
+    end;
+handle_call({branch, Parent, BranchName, Opts}, _From, State) ->
+    case valid_name(BranchName) of
         false ->
             {reply, {error, invalid_name}, State};
         true ->
-            case maps:find(Name, State#state.dbs) of
-                {ok, Db} ->
-                    {reply, {ok, Db}, State};
-                error ->
-                    %% Default open options from the barrel_server app env
-                    %% (e.g. a server-wide embedding policy or vectordb
-                    %% config for record-mode databases).
-                    OpenOpts = application:get_env(barrel_server, open_opts, #{}),
-                    case barrel:open(binary_to_atom(Name, utf8), OpenOpts) of
-                        {ok, Db} ->
-                            Dbs = maps:put(Name, Db, State#state.dbs),
-                            {reply, {ok, Db}, State#state{dbs = Dbs}};
+            case do_ensure(Parent, State) of
+                {ok, ParentDb, State1} ->
+                    case barrel:branch(ParentDb,
+                                       binary_to_atom(BranchName, utf8),
+                                       Opts) of
+                        {ok, BranchDb} ->
+                            Dbs = maps:put(BranchName, BranchDb,
+                                           State1#state.dbs),
+                            {reply, {ok, BranchDb},
+                             State1#state{dbs = Dbs}};
                         {error, _} = Err ->
-                            {reply, Err, State}
-                    end
+                            {reply, Err, State1}
+                    end;
+                {error, Reason, State1} ->
+                    {reply, {error, Reason}, State1}
             end
+    end;
+handle_call({destroy, Name}, _From, State) ->
+    case do_ensure(Name, State) of
+        {ok, Db, State1} ->
+            Dbs = maps:remove(Name, State1#state.dbs),
+            Result = try barrel:delete(Db)
+                     catch _:Reason -> {error, Reason}
+                     end,
+            {reply, Result, State1#state{dbs = Dbs}};
+        {error, Reason, State1} ->
+            {reply, {error, Reason}, State1}
     end;
 handle_call({close, Name}, _From, State) ->
     case maps:take(Name, State#state.dbs) of
@@ -100,6 +133,31 @@ terminate(_Reason, State) ->
 %%====================================================================
 %% Internal
 %%====================================================================
+
+do_ensure(Name, State) ->
+    case valid_name(Name) of
+        false ->
+            {error, invalid_name, State};
+        true ->
+            case maps:find(Name, State#state.dbs) of
+                {ok, Db} ->
+                    {ok, Db, State};
+                error ->
+                    %% Default open options from the barrel_server app env
+                    %% (e.g. a server-wide embedding policy or vectordb
+                    %% config for record-mode databases).
+                    OpenOpts = application:get_env(barrel_server,
+                                                   open_opts, #{}),
+                    case barrel:open(binary_to_atom(Name, utf8),
+                                     OpenOpts) of
+                        {ok, Db} ->
+                            Dbs = maps:put(Name, Db, State#state.dbs),
+                            {ok, Db, State#state{dbs = Dbs}};
+                        {error, Reason} ->
+                            {error, Reason, State}
+                    end
+            end
+    end.
 
 %% @private Accept only short, filesystem- and atom-safe names.
 -spec valid_name(binary()) -> boolean().

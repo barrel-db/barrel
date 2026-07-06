@@ -19,6 +19,9 @@
     create_db/1,
     db_info/1,
     drop_db/1,
+    timeline_info/1,
+    timeline_branch/1,
+    timeline_merge/1,
     put_doc/1,
     get_doc/1,
     delete_doc/1,
@@ -76,6 +79,11 @@ routes() ->
         {<<"PUT">>,    <<"/db/:db">>,                    {?MODULE, create_db}},
         {<<"GET">>,    <<"/db/:db">>,                    {?MODULE, db_info}},
         {<<"DELETE">>, <<"/db/:db">>,                    {?MODULE, drop_db}},
+
+        %% Timeline (branch, merge, lineage)
+        {<<"GET">>,    <<"/db/:db/_timeline">>,          {?MODULE, timeline_info}},
+        {<<"POST">>,   <<"/db/:db/_timeline/branch">>,   {?MODULE, timeline_branch}},
+        {<<"POST">>,   <<"/db/:db/_timeline/merge">>,    {?MODULE, timeline_merge}},
 
         {<<"PUT">>,    <<"/db/:db/doc/:id">>,            {?MODULE, put_doc}},
         {<<"GET">>,    <<"/db/:db/doc/:id">>,            {?MODULE, get_doc}},
@@ -138,15 +146,152 @@ create_db(Req) ->
 db_info(Req) ->
     with_db(Req, fun(Db) ->
         case barrel:info(Db) of
-            {ok, Info} -> json_resp(200, jsonable(Info));
+            {ok, Info} -> json_resp(200, jsonable(encode_hlcs(Info)));
             Err -> error_resp(Err)
         end
     end).
 
+%% HLC tuples are not JSON-encodable and jsonable/1 would drop them
+%% silently; render them as cursors.
+encode_hlcs(Map) ->
+    maps:map(
+        fun(K, V) when K =:= fork_hlc; K =:= history_floor;
+                       K =:= att_floor ->
+                case V of
+                    undefined -> V;
+                    _ -> barrel:hlc_encode(V)
+                end;
+           (_, V) ->
+                V
+        end,
+        Map).
+
 drop_db(Req) ->
     Name = livery_req:binding(<<"db">>, Req),
-    ok = barrel_server_dbs:close(Name),
-    json_resp(200, #{ok => true, db => Name}).
+    case param(<<"purge">>, Req) of
+        <<"true">> ->
+            case barrel_server_dbs:destroy(Name) of
+                ok -> json_resp(200, #{ok => true, db => Name,
+                                       purged => true});
+                Err -> error_resp(Err)
+            end;
+        _ ->
+            ok = barrel_server_dbs:close(Name),
+            json_resp(200, #{ok => true, db => Name})
+    end.
+
+%%====================================================================
+%% Timeline
+%%====================================================================
+
+timeline_info(Req) ->
+    with_db(Req, fun(#{docdb := DbBin} = Db) ->
+        case barrel:info(Db) of
+            {ok, Info} ->
+                Base = #{db => DbBin,
+                         branches => barrel_docdb:list_branches(DbBin)},
+                WithLineage = case Info of
+                    #{parent := Parent, fork_hlc := ForkHlc} ->
+                        Base#{parent => Parent,
+                              fork_hlc => barrel:hlc_encode(ForkHlc)};
+                    _ ->
+                        Base
+                end,
+                json_resp(200, WithLineage);
+            Err ->
+                error_resp(Err)
+        end
+    end).
+
+timeline_branch(Req) ->
+    with_db(Req, fun(Db) ->
+        with_json(Req, fun(Body) ->
+            case maps:get(<<"name">>, Body, undefined) of
+                Name when is_binary(Name), Name =/= <<>> ->
+                    case branch_at(Body) of
+                        {ok, At} ->
+                            do_timeline_branch(Db, Name, At);
+                        error ->
+                            json_resp(400, #{error => <<"bad_at">>})
+                    end;
+                _ ->
+                    json_resp(400, #{error => <<"invalid_name">>})
+            end
+        end)
+    end).
+
+do_timeline_branch(#{docdb := ParentBin}, Name, At) ->
+    case barrel_server_dbs:branch(ParentBin, Name, #{at => At}) of
+        {ok, #{docdb := BranchBin} = Branch} ->
+            {ok, Info} = barrel:info(Branch),
+            json_resp(201, #{ok => true,
+                             branch => BranchBin,
+                             parent => ParentBin,
+                             fork_hlc => barrel:hlc_encode(
+                                 maps:get(fork_hlc, Info))});
+        {error, invalid_name} ->
+            json_resp(400, #{error => <<"invalid_name">>});
+        {error, already_exists} ->
+            json_resp(409, #{error => <<"already_exists">>});
+        {error, cannot_branch_a_branch} ->
+            json_resp(409, #{error => <<"cannot_branch_a_branch">>});
+        {error, pitr_window_exceeded} ->
+            json_resp(400, #{error => <<"pitr_window_exceeded">>});
+        {error, {pitr_window_exceeded, DocId}} ->
+            json_resp(400, #{error => <<"pitr_window_exceeded">>,
+                             doc => DocId});
+        Err ->
+            error_resp(Err)
+    end.
+
+%% `at' is a changes cursor (the same encoding /db/:db/changes
+%% returns); `at_time' is RFC3339. Absent both, fork at now.
+branch_at(Body) ->
+    case {maps:get(<<"at">>, Body, undefined),
+          maps:get(<<"at_time">>, Body, undefined)} of
+        {undefined, undefined} ->
+            {ok, now};
+        {Cursor, undefined} when is_binary(Cursor) ->
+            try {ok, barrel:hlc_decode(Cursor)}
+            catch _:_ -> error
+            end;
+        {undefined, Rfc3339} when is_binary(Rfc3339) ->
+            try
+                Ms = calendar:rfc3339_to_system_time(
+                    binary_to_list(Rfc3339), [{unit, millisecond}]),
+                {ok, barrel_hlc:from_wall_time(Ms)}
+            catch _:_ -> error
+            end;
+        _ ->
+            error
+    end.
+
+timeline_merge(Req) ->
+    with_db(Req, fun(Db) ->
+        case barrel:merge(Db) of
+            {ok, Report} ->
+                json_resp(200, jsonable(merge_report(Report)));
+            {error, not_a_branch} ->
+                json_resp(409, #{error => <<"not_a_branch">>});
+            {error, parent_not_found} ->
+                json_resp(404, #{error => <<"parent_not_found">>});
+            Err ->
+                error_resp(Err)
+        end
+    end).
+
+merge_report(Report) ->
+    R1 = case maps:get(last_merged, Report, undefined) of
+        undefined -> Report;
+        first -> Report#{last_merged => <<"first">>};
+        Hlc -> Report#{last_merged => barrel:hlc_encode(Hlc)}
+    end,
+    case maps:get(att_sync, R1, undefined) of
+        AttStats when is_map(AttStats) -> R1;
+        Atom when is_atom(Atom) ->
+            R1#{att_sync => atom_to_binary(Atom, utf8)};
+        _ -> R1
+    end.
 
 %%====================================================================
 %% Documents
