@@ -32,6 +32,7 @@
 
 %% Change value codec (shared with the channel feed, barrel_channel)
 -export([encode_change/1]).
+-export([remove_path_index_ops/3]).
 
 %% Path-indexed changes API
 -export([
@@ -1086,6 +1087,41 @@ write_path_index_ops(DbName0, Hlc, DocInfo) ->
                        || Prefix <- AllPrefixes],
 
     PathHlcOps ++ PrefixChangeOps.
+
+%% @doc Exact inverse of write_path_index_ops/3, for a change row
+%% being removed from the feed (timeline rewind): deletes the path_hlc
+%% rows and posting entries that the write created, deriving topics
+%% the same way (a tombstone's rows live under its own doc id, and the
+%% posting marker carries the row's own rev and deleted flag).
+-spec remove_path_index_ops(db_name(), barrel_hlc:timestamp(),
+                            #{id := binary(), rev := binary(),
+                              deleted := boolean(), _ => _}) -> [tuple()].
+remove_path_index_ops(DbName0, Hlc, DocInfo) ->
+    DbName = barrel_keyspace:resolve(DbName0),
+    #{id := DocId, rev := Rev, deleted := Deleted} = DocInfo,
+    Topics = case Deleted of
+        true ->
+            [DocId];
+        false ->
+            Doc = maps:get(doc, DocInfo, #{}),
+            case Doc of
+                #{} ->
+                    barrel_ars:paths_to_topics(barrel_ars:analyze(Doc));
+                _ ->
+                    [DocId]
+            end
+    end,
+    ChangeValue = encode_change(#{id => DocId, rev => Rev,
+                                  deleted => Deleted}),
+    AllPrefixes = lists:usort(lists:flatmap(fun topic_prefixes/1, Topics)),
+    HlcBin = barrel_hlc:encode(Hlc),
+    Bucket = barrel_store_keys:hlc_to_bucket(Hlc),
+    [{delete, barrel_store_keys:path_hlc(DbName, P, Hlc)}
+     || P <- AllPrefixes]
+    ++ [{posting_remove,
+         barrel_store_keys:prefix_changes_key(DbName, P, Bucket),
+         <<HlcBin/binary, ChangeValue/binary>>}
+        || P <- AllPrefixes].
 
 %% @doc Generate operations to update path index (remove old entries + add new).
 %% Used when a document is updated to maintain a current path index without stale entries.

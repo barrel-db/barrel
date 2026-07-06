@@ -82,7 +82,8 @@
 -export([att_data/3, att_data_prefix/2]).
 
 %% Tagged outbox keys (durable work queue written with the doc batch)
--export([outbox_key/3, outbox_prefix/2, outbox_end/2, decode_outbox_key/2]).
+-export([outbox_key/3, outbox_prefix/2, outbox_end/2, decode_outbox_key/2,
+         outbox_db_prefix/1, outbox_db_end/1]).
 
 %% Per-doc version chains (superseded and conflict siblings)
 -export([doc_version/3, doc_version_prefix/2, doc_version_end/2,
@@ -308,6 +309,17 @@ outbox_end(DbName, Tag) ->
     <<?PREFIX_OUTBOX, (encode_name(DbName))/binary, (encode_topic(Tag))/binary,
       16#FF, 16#FF, 16#FF, 16#FF, 16#FF, 16#FF, 16#FF, 16#FF,
       16#FF, 16#FF, 16#FF, 16#FF>>.
+
+%% @doc Start key for scanning ALL outbox entries of a database
+%% (every tag), for maintenance scans (timeline rewind).
+-spec outbox_db_prefix(db_name()) -> binary().
+outbox_db_prefix(DbName) ->
+    <<?PREFIX_OUTBOX, (encode_name(DbName))/binary>>.
+
+%% @doc End marker for the whole-database outbox range.
+-spec outbox_db_end(db_name()) -> binary().
+outbox_db_end(DbName) ->
+    <<?PREFIX_OUTBOX, (encode_name(DbName))/binary, 16#FF>>.
 
 %% @doc Decode an outbox key to extract tag and HLC.
 -spec decode_outbox_key(db_name(), binary()) -> {binary(), barrel_hlc:timestamp()}.

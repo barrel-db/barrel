@@ -21,6 +21,7 @@
 
 -export([
     compile/1,
+    write_ops_compiled/7,
     install/2,
     uninstall/1,
     names/1,
@@ -172,11 +173,22 @@ segments_match(_, _) ->
                 [binary()]) -> [term()].
 write_ops(DbName, NewHlc, DocInfo, NewTopics, OldHlc, OldTopics) ->
     %% config by the LOGICAL name, keys by the keyspace
-    case channels(DbName) of
+    write_ops_compiled(channels(DbName), barrel_keyspace:resolve(DbName),
+                       NewHlc, DocInfo, NewTopics, OldHlc, OldTopics).
+
+%% @doc Pure variant of write_ops/6: the compiled channel set and the
+%% key name are explicit arguments (no persistent_term reads), so it
+%% is callable before a database is registered (timeline rewind).
+-spec write_ops_compiled(compiled(), binary(), barrel_hlc:timestamp(),
+                         map(), [binary()],
+                         barrel_hlc:timestamp() | undefined,
+                         [binary()]) -> [term()].
+write_ops_compiled(Compiled0, Ks, NewHlc, DocInfo, NewTopics, OldHlc,
+                   OldTopics) ->
+    case Compiled0 of
         Compiled when map_size(Compiled) =:= 0 ->
             [];
         Compiled ->
-            Ks = barrel_keyspace:resolve(DbName),
             DeleteOps = case OldHlc of
                 undefined -> [];
                 _ -> [{delete,
