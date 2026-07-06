@@ -1420,8 +1420,9 @@ do_put_version(StoreRef, DbName, Config, Doc, Version, RemoteVV, Deleted) ->
     Tags = maps:get(outbox_tags_on_replication, Config, []),
     case read_current(StoreRef, DbName, DocId) of
         undefined ->
+            CreateVV = barrel_vv:bump(RemoteVV, Version),
             apply_remote_current(StoreRef, DbName, DocId, DocBody, Version,
-                                 barrel_vv:bump(RemoteVV, Version), Deleted,
+                                 CreateVV, CreateVV, Deleted,
                                  undefined, 0, [], Tags);
         #{version := LocalV, vv := LocalVV} = Old ->
             case barrel_vv:contains(LocalVV, Version) of
@@ -1434,11 +1435,12 @@ do_put_version(StoreRef, DbName, Config, Doc, Version, RemoteVV, Deleted) ->
                     case barrel_vv:compare(RemoteVV, LocalVV) of
                         dominates ->
                             %% Fast-forward: old winner superseded
+                            %% (dominating bump == merged vector)
                             Chain = [chain_op(DbName, DocId, LocalV,
                                               superseded, Old)],
                             apply_remote_current(StoreRef, DbName, DocId,
                                                  DocBody, Version, MergedVV,
-                                                 Deleted, Old,
+                                                 MergedVV, Deleted, Old,
                                                  maps:get(num_conflicts, Old),
                                                  Chain, Tags);
                         _Concurrent ->
@@ -1471,7 +1473,9 @@ handle_concurrent(StoreRef, DbName, Config, DocId, DocBody, Version, RemoteVV,
                         StoreRef, DbName, DocId, LocalV, NConflicts0, Max),
                     Chain = [chain_op(DbName, DocId, LocalV, conflict, Old)],
                     apply_remote_current(StoreRef, DbName, DocId, DocBody,
-                                         Version, MergedVV, Deleted, Old,
+                                         Version, MergedVV,
+                                         barrel_vv:bump(RemoteVV, Version),
+                                         Deleted, Old,
                                          NConflicts, Chain ++ DropOps, Tags);
                 _LocalWins ->
                     {DropOps, NConflicts} = enforce_conflict_bound(
@@ -1575,9 +1579,14 @@ chain_op(DbName, DocId, Version, Flag, Old) ->
      barrel_store_keys:doc_version(Ks, DocId, barrel_version:encode(Version)),
      sibling_entry(Flag, maps:get(deleted, Old), maps:get(vv, Old))}.
 
-%% @private The remote version becomes the current winner.
-apply_remote_current(StoreRef, DbName, DocId, DocBody, Version, VV, Deleted,
-                     Old, NConflicts, ChainOps, Tags) ->
+%% @private The remote version becomes the current winner. `VV' is
+%% the entity's vector (merged); `HistVV' is the arrival's OWN causal
+%% vector (its bump), recorded in history. They differ only in the
+%% concurrent remote-wins case, and keeping the causal one preserves
+%% the concurrency information the timeline rewind reconstructs
+%% conflict windows from.
+apply_remote_current(StoreRef, DbName, DocId, DocBody, Version, VV, HistVV,
+                     Deleted, Old, NConflicts, ChainOps, Tags) ->
     Ks = barrel_keyspace:resolve(DbName),
     ChangeHlc = barrel_hlc:new_hlc(),
     Token = barrel_version:to_token(Version),
@@ -1647,7 +1656,7 @@ apply_remote_current(StoreRef, DbName, DocId, DocBody, Version, VV, Deleted,
               OldCbor}]
     end,
     HistoryOps = barrel_history:write_ops(
-        DbName, ChangeHlc, DocId, Version, Deleted, replicated, VV),
+        DbName, ChangeHlc, DocId, Version, Deleted, replicated, HistVV),
     OutboxOps = barrel_outbox:write_ops(DbName, Tags, ChangeHlc, OldHlc,
                                         DocId, Token, Deleted),
     %% Replicated arrivals land in channel feeds too

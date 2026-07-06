@@ -20,7 +20,9 @@
     rewind_channels/1,
     rewind_outbox_swept/1,
     rewind_floor_guard/1,
-    rewind_then_write/1
+    rewind_then_write/1,
+    rewind_stale_doc_guard/1,
+    rewind_conflict_window/1
 ]).
 
 -include_lib("common_test/include/ct.hrl").
@@ -30,7 +32,8 @@ all() ->
     [rewind_updates, rewind_forgets_created_after_t,
      rewind_restores_deleted_after_t, rewind_restores_tombstone,
      rewind_feed_replay, rewind_query_index, rewind_channels,
-     rewind_outbox_swept, rewind_floor_guard, rewind_then_write].
+     rewind_outbox_swept, rewind_floor_guard, rewind_then_write,
+     rewind_stale_doc_guard, rewind_conflict_window].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(barrel_docdb),
@@ -273,4 +276,74 @@ rewind_then_write(Config) ->
     %% the branch's post-fork writes are strictly after T
     {ok, PostT, _} = barrel_docdb:get_changes(Branch, T),
     ?assertEqual(2, length(PostT)),
+    ok.
+
+%% A doc whose entries at or before T were all swept (its last pre-T
+%% write predates the floor) cannot be rewound: per-doc guard.
+rewind_stale_doc_guard(Config) ->
+    Db0 = ?config(db, Config),
+    DataDir = ?config(data_dir, Config),
+    Branch = ?config(branch, Config),
+    ok = barrel_docdb:close_db(Db0),
+    {ok, _} = barrel_docdb:create_db(Db0, #{data_dir => DataDir,
+                                            retention_period => 1}),
+    {ok, _} = barrel_docdb:put_doc(Db0, #{<<"id">> => <<"a">>,
+                                          <<"v">> => 1}),
+    timer:sleep(1500),
+    %% T anchored by ANOTHER doc's write, so the floor lands between
+    %% a's only pre-T entry and T
+    {ok, _} = barrel_docdb:put_doc(Db0, #{<<"id">> => <<"anchor">>}),
+    T = cursor(Db0),
+    {ok, #{<<"_rev">> := R}} = barrel_docdb:get_doc(Db0, <<"a">>),
+    {ok, _} = barrel_docdb:put_doc(Db0, #{<<"id">> => <<"a">>,
+                                          <<"v">> => 2,
+                                          <<"_rev">> => R}),
+    {ok, _} = barrel_docdb:sweep_retention(Db0),
+    ?assertEqual({error, {pitr_window_exceeded, <<"a">>}},
+                 barrel_docdb:branch_db(Db0, Branch, #{at => T})),
+    ok.
+
+%% A concurrent window at T: the branch restores the deterministic
+%% LWW winner as current and the loser as a live conflict sibling,
+%% even though a post-T resolution settled it on the parent.
+rewind_conflict_window(Config) ->
+    Db = ?config(db, Config),
+    Branch = ?config(branch, Config),
+    {ok, #{<<"rev">> := LocalTok}} = barrel_docdb:put_doc(
+        Db, #{<<"id">> => <<"d">>, <<"v">> => <<"local">>}),
+    %% a concurrent remote version, minted after the local write so it
+    %% wins LWW deterministically
+    RemoteV = barrel_version:new(barrel_hlc:new_hlc(), <<"peer_x">>),
+    RemoteTok = barrel_version:to_token(RemoteV),
+    {ok, _, RemoteTok} = barrel_docdb:put_version(
+        Db, #{<<"id">> => <<"d">>, <<"v">> => <<"remote">>},
+        RemoteTok,
+        barrel_vv:encode(barrel_vv:bump(barrel_vv:new(), RemoteV)),
+        false),
+    {ok, [_]} = barrel_docdb:get_conflicts(Db, <<"d">>),
+    T = cursor(Db),
+    %% post-T: resolve the conflict on the parent, then move on
+    {ok, _} = barrel_docdb:resolve_conflict(
+        Db, <<"d">>, RemoteTok, {merge, #{<<"v">> => <<"settled">>}}),
+    {ok, []} = barrel_docdb:get_conflicts(Db, <<"d">>),
+    {ok, _} = barrel_docdb:branch_db(Db, Branch, #{at => T}),
+    %% at T: remote wins, local is a live conflict sibling
+    {ok, #{<<"v">> := <<"remote">>, <<"_rev">> := RemoteTok}} =
+        barrel_docdb:get_doc(Branch, <<"d">>),
+    {ok, [LocalTok]} = barrel_docdb:get_conflicts(Branch, <<"d">>),
+    %% the sibling body is readable and the parent kept its resolution
+    {ok, #{<<"v">> := <<"local">>}} =
+        barrel_docdb:get_version_body(Branch, <<"d">>, LocalTok),
+    {ok, #{<<"v">> := <<"settled">>}} = barrel_docdb:get_doc(Db,
+                                                             <<"d">>),
+    %% redelivering the sibling version is a no-op (vector merged)
+    {ok, _, RemoteTok2} = barrel_docdb:put_version(
+        Branch, #{<<"id">> => <<"d">>, <<"v">> => <<"local">>},
+        LocalTok,
+        barrel_vv:encode(
+            barrel_vv:bump(barrel_vv:new(),
+                           barrel_version:from_token(LocalTok))),
+        false),
+    ?assertEqual(RemoteTok, RemoteTok2),
+    {ok, [LocalTok]} = barrel_docdb:get_conflicts(Branch, <<"d">>),
     ok.

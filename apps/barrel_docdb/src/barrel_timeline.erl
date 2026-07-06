@@ -229,43 +229,98 @@ collect_post_t(StoreRef, Ks, T) ->
         {#{}, []},
         #{from => T}).
 
-%% Pass B: one reverse scan of history at or before T, newest first,
-%% resolving each affected doc to its restore target. Docs with no
-%% retained entry at or before T either never existed at T (their
-%% first post-T entry is a genuine create: singleton vector) and are
-%% forgotten, or their T-state predates retention and the fork aborts.
+%% Pass B: one reverse scan of history at or before T collecting
+%% every retained entry of each affected doc, then per doc the
+%% CONTAINMENT-MAXIMAL entries (no other entry's vector contains
+%% their version) reconstruct the state at T: the deterministic LWW
+%% winner among the maximals is restored as current and the other
+%% maximals as live conflict siblings, exactly the shape put_version
+%% would have left. Docs with no retained entry at or before T either
+%% never existed at T (their created_at is after T) and are
+%% forgotten, or their T-state predates retention and the fork
+%% aborts.
 resolve_targets(StoreRef, Ks, T, PostT) ->
     Start = barrel_store_keys:history_prefix(Ks),
     End = <<(barrel_store_keys:history_key(Ks, T))/binary, 0>>,
-    Unresolved0 = maps:map(fun(_, _) -> unresolved end, PostT),
-    Resolved = barrel_store_rocksdb:fold_range_reverse(
+    Collected = barrel_store_rocksdb:fold_range_reverse(
         StoreRef, Start, End,
         fun(Key, Value, Acc) ->
             Hlc = barrel_store_keys:decode_history_key(Ks, Key),
             Entry = (barrel_history:decode_entry(Value))#{hlc => Hlc},
             Id = maps:get(id, Entry),
-            Acc2 = case maps:get(Id, Acc, undefined) of
-                unresolved -> Acc#{Id => {restore, Entry}};
-                _ -> Acc
-            end,
-            case lists:member(unresolved, maps:values(Acc2)) of
-                false -> {stop, Acc2};
-                true -> {ok, Acc2}
+            case maps:is_key(Id, PostT) of
+                true ->
+                    {ok, maps:update_with(
+                        Id, fun(Es) -> [Entry | Es] end, [Entry], Acc)};
+                false ->
+                    {ok, Acc}
             end
         end,
-        Unresolved0),
+        #{}),
     maps:map(
-        fun(Id, unresolved) ->
-                %% no retained entry at or before T
-                [First | _] = maps:get(Id, PostT),
-                case map_size(maps:get(vv, First)) of
-                    1 -> forget;
-                    _ -> throw({error, {pitr_window_exceeded, Id}})
-                end;
-           (_Id, {restore, Entry}) ->
-                {restore, Entry}
+        fun(Id, _) ->
+            case maps:get(Id, Collected, []) of
+                [] ->
+                    %% No retained entry at or before T: either the
+                    %% doc was created after T (forget) or its pre-T
+                    %% history was swept (abort). The write-invariant
+                    %% created_at column disambiguates; a missing one
+                    %% aborts conservatively.
+                    case entity_created_at(StoreRef, Ks, Id) of
+                        undefined ->
+                            throw({error, {pitr_window_exceeded, Id}});
+                        CreatedAt ->
+                            case barrel_hlc:less(T, CreatedAt) of
+                                true ->
+                                    forget;
+                                false ->
+                                    throw({error,
+                                           {pitr_window_exceeded, Id}})
+                            end
+                    end;
+                Entries ->
+                    {Winner, Siblings, Superseded} =
+                        split_window(Entries),
+                    {restore, Winner, Siblings, Superseded}
+            end
         end,
-        Resolved).
+        PostT).
+
+entity_created_at(StoreRef, Ks, Id) ->
+    case barrel_store_rocksdb:get_entity(
+             StoreRef, barrel_store_keys:doc_entity(Ks, Id)) of
+        {ok, Columns} ->
+            case proplists:get_value(?COL_CREATED_AT, Columns, <<>>) of
+                <<>> -> undefined;
+                Bin -> barrel_hlc:decode(Bin)
+            end;
+        not_found ->
+            undefined
+    end.
+
+%% Containment-maximal split of a doc's retained entries at or before
+%% T: maximals are the concurrent heads (nothing covers them), the
+%% LWW-largest version among them is the winner, the rest are live
+%% conflict siblings; everything else is superseded. Linear histories
+%% degrade to a single maximal.
+split_window(Entries) ->
+    Maximal = [E || E <- Entries, is_maximal(E, Entries)],
+    [Winner | Siblings] = lists:sort(
+        fun(A, B) ->
+            VA = barrel_version:from_token(maps:get(version, A)),
+            VB = barrel_version:from_token(maps:get(version, B)),
+            barrel_version:max(VA, VB) =:= VA
+        end,
+        Maximal),
+    {Winner, Siblings, Entries -- Maximal}.
+
+is_maximal(E, Entries) ->
+    V = barrel_version:from_token(maps:get(version, E)),
+    not lists:any(
+        fun(O) ->
+            O =/= E andalso barrel_vv:contains(maps:get(vv, O), V)
+        end,
+        Entries).
 
 rewind_docs(_StoreRef, _Ks, _Compiled, []) ->
     ok;
@@ -291,11 +346,73 @@ doc_rewind_ops(StoreRef, Ks, Compiled, Id, Target) ->
             ++ chain_forget_ops(StoreRef, Ks, Id)
             ++ [{entity_delete, barrel_store_keys:doc_entity(Ks, Id)},
                 {body_delete, barrel_store_keys:doc_body(Ks, Id)}];
-        {restore, Entry} ->
+        {restore, Winner, Siblings, Superseded} ->
+            {SiblingOps, Kept} =
+                sibling_ops(StoreRef, Ks, Id, Siblings),
+            %% the entity's vector is the MERGE of the winner and its
+            %% live siblings, exactly what put_version leaves behind
+            %% (otherwise a redelivered sibling would double up)
+            MergedVV = lists:foldl(
+                fun(E, Acc) -> barrel_vv:merge(Acc, maps:get(vv, E)) end,
+                maps:get(vv, Winner),
+                Kept),
             CommonDels
-            ++ post_t_version_dels(Ks, Id, Entry, Current)
-            ++ restore_ops(StoreRef, Ks, Compiled, Id, Entry)
+            ++ post_t_version_dels(Ks, Id, Winner, Current)
+            ++ SiblingOps
+            ++ superseded_flip_ops(Ks, Id, Superseded)
+            ++ restore_ops(StoreRef, Ks, Compiled, Id,
+                           Winner#{vv := MergedVV}, length(Kept))
     end.
+
+%% Live conflict siblings at T: their chain rows flip back to
+%% conflict. A sibling whose archived body was dropped by the
+%% conflict bound is dropped here too (the bound is deterministic
+%% across replicas), chain row and all.
+sibling_ops(StoreRef, Ks, Id, Siblings) ->
+    lists:foldr(
+        fun(#{version := Token, deleted := Del, vv := VV} = E,
+            {Ops, Kept}) ->
+            VEnc = barrel_version:encode(
+                barrel_version:from_token(Token)),
+            BodyKey = barrel_store_keys:doc_body_rev(Ks, Id, VEnc),
+            HasBody = case Del of
+                true -> true;
+                false ->
+                    barrel_store_rocksdb:body_get(StoreRef, BodyKey)
+                        =/= not_found
+            end,
+            case HasBody of
+                true ->
+                    Row = <<1:8,
+                            (case Del of true -> 1; false -> 0 end):8,
+                            (barrel_vv:encode(VV))/binary>>,
+                    Op = {put,
+                          barrel_store_keys:doc_version(Ks, Id, VEnc),
+                          Row},
+                    {[Op | Ops], [E | Kept]};
+                false ->
+                    Drop = [{delete,
+                             barrel_store_keys:doc_version(Ks, Id,
+                                                           VEnc)}],
+                    {Drop ++ Ops, Kept}
+            end
+        end,
+        {[], []},
+        Siblings).
+
+%% Non-maximal entries at or before T are superseded at T; post-T
+%% resolutions may have left their chain rows in another state, so
+%% rewrite them (overwriting an identical row is a no-op).
+superseded_flip_ops(Ks, Id, Superseded) ->
+    [{put,
+      barrel_store_keys:doc_version(
+          Ks, Id,
+          barrel_version:encode(
+              barrel_version:from_token(maps:get(version, E)))),
+      <<0:8,
+        (case maps:get(deleted, E) of true -> 1; false -> 0 end):8,
+        (barrel_vv:encode(maps:get(vv, E)))/binary>>}
+     || E <- Superseded].
 
 %% The doc's CURRENT footprint outside the entity/body: live feed row,
 %% path-index rows, channel rows, and the current-body path index.
@@ -343,7 +460,7 @@ chain_forget_ops(StoreRef, Ks, Id) ->
         end,
         []).
 
-restore_ops(StoreRef, Ks, Compiled, Id, Entry) ->
+restore_ops(StoreRef, Ks, Compiled, Id, Entry, NConflicts) ->
     #{hlc := RestHlc, version := RestToken, deleted := RestDeleted,
       vv := RestVV} = Entry,
     Current = read_current_state(StoreRef, Ks, Id),
@@ -363,13 +480,13 @@ restore_ops(StoreRef, Ks, Compiled, Id, Entry) ->
                        end},
         {?COL_HLC, barrel_hlc:encode(RestHlc)},
         {?COL_VV, barrel_vv:encode(RestVV)},
-        {?COL_NCONFLICTS, 0},
+        {?COL_NCONFLICTS, NConflicts},
         {?COL_CREATED_AT, maps:get(created_at, Current)},
         {?COL_EXPIRES_AT, maps:get(expires_at, Current)},
         {?COL_TIER, maps:get(tier, Current)}
     ],
     RestInfo0 = #{id => Id, rev => RestToken, deleted => RestDeleted,
-                  num_conflicts => 0, hlc => RestHlc},
+                  num_conflicts => NConflicts, hlc => RestHlc},
     RestInfo = case RestDeleted of
         true -> RestInfo0;
         false -> RestInfo0#{doc => RestBody}
