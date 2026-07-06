@@ -23,6 +23,9 @@
     timeline_branch/1,
     timeline_merge/1,
     put_doc/1,
+    history/1,
+    doc_versions/1,
+    version_body/1,
     get_doc/1,
     delete_doc/1,
     bulk_docs/1,
@@ -88,6 +91,9 @@ routes() ->
         {<<"PUT">>,    <<"/db/:db/doc/:id">>,            {?MODULE, put_doc}},
         {<<"GET">>,    <<"/db/:db/doc/:id">>,            {?MODULE, get_doc}},
         {<<"DELETE">>, <<"/db/:db/doc/:id">>,            {?MODULE, delete_doc}},
+        {<<"GET">>,    <<"/db/:db/_history">>,           {?MODULE, history}},
+        {<<"GET">>,    <<"/db/:db/doc/:id/_versions">>,  {?MODULE, doc_versions}},
+        {<<"GET">>,    <<"/db/:db/doc/:id/_versions/:rev">>, {?MODULE, version_body}},
         {<<"POST">>,   <<"/db/:db/_bulk_docs">>,         {?MODULE, bulk_docs}},
         {<<"POST">>,   <<"/db/:db/_bulk_get">>,          {?MODULE, bulk_get}},
         {<<"POST">>,   <<"/db/:db/find">>,               {?MODULE, find}},
@@ -302,7 +308,7 @@ put_doc(Req) ->
         with_json(Req, fun(Body) ->
             Id = livery_req:binding(<<"id">>, Req),
             Doc = Body#{<<"id">> => Id},
-            case barrel:put_doc(Db, Doc) of
+            case barrel:put_doc(Db, Doc, prov_opts(Req)) of
                 {ok, Res} -> json_resp(201, jsonable(Res));
                 Err -> error_resp(Err)
             end
@@ -321,7 +327,7 @@ get_doc(Req) ->
 delete_doc(Req) ->
     with_db(Req, fun(Db) ->
         Id = livery_req:binding(<<"id">>, Req),
-        case barrel:delete_doc(Db, Id) of
+        case barrel:delete_doc(Db, Id, prov_opts(Req)) of
             {ok, Res} -> json_resp(200, jsonable(Res));
             Err -> error_resp(Err)
         end
@@ -331,9 +337,128 @@ bulk_docs(Req) ->
     with_db(Req, fun(Db) ->
         with_json(Req, fun(Body) ->
             Docs = maps:get(<<"docs">>, Body, []),
-            Results = barrel:put_docs(Db, Docs),
-            json_resp(201, #{results => [batch_result(R) || R <- Results]})
+            case barrel:put_docs(Db, Docs, prov_opts(Req)) of
+                {error, _} = Err ->
+                    error_resp(Err);
+                Results ->
+                    json_resp(201,
+                              #{results => [batch_result(R) || R <- Results]})
+            end
         end)
+    end).
+
+%% Provenance from write headers (batch-wide for bulk writes);
+%% validation happens in the writer and maps to 400 on failure.
+prov_opts(Req) ->
+    Prov = lists:foldl(
+        fun({Header, Key}, Acc) ->
+            case livery_req:header(Header, Req, undefined) of
+                undefined -> Acc;
+                Value -> Acc#{Key => Value}
+            end
+        end, #{},
+        [{<<"x-barrel-actor">>, actor},
+         {<<"x-barrel-session">>, session},
+         {<<"x-barrel-source">>, source}]),
+    case map_size(Prov) of
+        0 -> #{};
+        _ -> #{provenance => Prov}
+    end.
+
+%%====================================================================
+%% Audit: retained history and per-document versions
+%%====================================================================
+
+history(Req) ->
+    with_db(Req, fun(Db) ->
+        try history_opts(Req) of
+            Opts ->
+                case barrel:history(Db, Opts) of
+                    {ok, Entries} ->
+                        json_resp(200, #{
+                            history => [history_json(E) || E <- Entries]});
+                    Err ->
+                        error_resp(Err)
+                end
+        catch
+            throw:Reason -> error_resp(Reason)
+        end
+    end).
+
+history_opts(Req) ->
+    Opts0 = case param(<<"since">>, Req) of
+        undefined -> #{};
+        Since -> #{from => decode_cursor(Since, bad_since)}
+    end,
+    Opts1 = case param(<<"until">>, Req) of
+        undefined -> Opts0;
+        Until -> Opts0#{to => decode_cursor(Until, bad_until)}
+    end,
+    Opts2 = case param(<<"limit">>, Req) of
+        undefined -> Opts1;
+        Limit ->
+            try Opts1#{limit => binary_to_integer(Limit)}
+            catch error:badarg -> throw(bad_limit)
+            end
+    end,
+    case param(<<"id">>, Req) of
+        undefined -> Opts2;
+        Id -> Opts2#{id => Id}
+    end.
+
+decode_cursor(Cursor, ErrorTag) ->
+    try barrel:hlc_decode(Cursor)
+    catch _:_ -> throw(ErrorTag)
+    end.
+
+history_json(#{hlc := Hlc, id := Id, version := Version,
+               deleted := Deleted, cause := Cause} = Entry) ->
+    Base = #{
+        id => Id,
+        rev => Version,
+        deleted => Deleted,
+        cause => atom_to_binary(Cause, utf8),
+        hlc => barrel:hlc_encode(Hlc)
+    },
+    with_provenance_json(Entry, Base).
+
+doc_versions(Req) ->
+    with_db(Req, fun(Db) ->
+        Id = livery_req:binding(<<"id">>, Req),
+        case barrel:doc_versions(Db, Id) of
+            {ok, Versions} ->
+                json_resp(200, #{
+                    id => Id,
+                    versions => [version_json(V) || V <- Versions]});
+            Err ->
+                error_resp(Err)
+        end
+    end).
+
+version_json(#{version := Version, status := Status,
+               deleted := Deleted} = V) ->
+    Base = #{
+        rev => Version,
+        status => atom_to_binary(Status, utf8),
+        deleted => Deleted
+    },
+    with_provenance_json(V, Base).
+
+with_provenance_json(#{provenance := Prov}, Base) ->
+    Base#{provenance => maps:fold(
+        fun(K, Value, Acc) -> Acc#{atom_to_binary(K, utf8) => Value} end,
+        #{}, Prov)};
+with_provenance_json(_Entry, Base) ->
+    Base.
+
+version_body(Req) ->
+    with_db(Req, fun(Db) ->
+        Id = livery_req:binding(<<"id">>, Req),
+        Rev = livery_req:binding(<<"rev">>, Req),
+        case barrel:version_body(Db, Id, Rev) of
+            {ok, Body} -> json_resp(200, Body);
+            Err -> error_resp(Err)
+        end
     end).
 
 bulk_get(Req) ->
@@ -798,6 +923,11 @@ error_resp({error, Reason}) -> error_resp(Reason);
 error_resp(not_found) -> json_resp(404, #{error => <<"not_found">>});
 error_resp(invalid_name) -> json_resp(400, #{error => <<"invalid_name">>});
 error_resp(bad_json) -> json_resp(400, #{error => <<"bad_json">>});
+error_resp({invalid_provenance, _}) ->
+    json_resp(400, #{error => <<"invalid_provenance">>});
+error_resp(bad_since) -> json_resp(400, #{error => <<"bad_since">>});
+error_resp(bad_until) -> json_resp(400, #{error => <<"bad_until">>});
+error_resp(bad_limit) -> json_resp(400, #{error => <<"bad_limit">>});
 error_resp(Reason) ->
     json_resp(500, #{error => iolist_to_binary(io_lib:format("~p", [Reason]))}).
 
