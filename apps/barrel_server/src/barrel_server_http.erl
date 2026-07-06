@@ -139,7 +139,9 @@ routes() ->
 
         %% Agent layer (spaces, grants, sessions, handoffs)
         | barrel_server_spaces:routes()
-    ].
+    ]
+    %% MCP endpoint (empty when disabled)
+    ++ barrel_server_mcp:routes().
 
 %%====================================================================
 %% Meta handlers

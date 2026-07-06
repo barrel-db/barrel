@@ -9,6 +9,7 @@
         crypto,
         barrel,
         barrel_spaces,
+        barrel_mcp,
         livery
     ]},
     {env, [
