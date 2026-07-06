@@ -237,6 +237,12 @@ create_db(Name) ->
 %%   <li>`data_dir' - Directory to store database files (default: `/tmp/barrel_data')</li>
 %%   <li>`store_opts' - RocksDB options for document store</li>
 %%   <li>`att_opts' - RocksDB options for attachment store</li>
+%%   <li>`encryption' - `disabled | default | #{provider => Mod}': encrypt
+%%       both stores at rest (RocksDB EncryptedEnv, AES-256-CTR) with a
+%%       per-database key resolved by `barrel_keyprovider'. Runtime config
+%%       like `channels': pass it again on every reopen. A database cannot
+%%       change between plaintext and encrypted after creation
+%%       (default: `disabled')</li>
 %% </ul>
 %%
 %% == Example ==

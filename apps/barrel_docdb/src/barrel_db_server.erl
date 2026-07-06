@@ -70,6 +70,11 @@
     db_path :: string(),
     store_ref :: barrel_store_rocksdb:db_ref() | undefined,
     att_ref :: barrel_att_store:att_ref() | undefined,
+    %% EncryptedEnv shared by both stores. The NIF frees the underlying
+    %% env when the handle is garbage collected, so it must stay
+    %% referenced for the whole db lifetime (also carried in the store
+    %% and att refs).
+    env :: rocksdb:env_handle() | undefined,
     filter_pid :: pid() | undefined,  %% Compaction filter handler for this database
     compaction_timer :: reference() | undefined,  %% Timer for periodic compaction checks
     compaction_interval :: pos_integer(),  %% Interval between checks in ms (default: 1 hour)
@@ -301,6 +306,20 @@ init(Name, Config, CompiledChannels) ->
     end.
 
 init(Name, Config, CompiledChannels, DbPath, Keyspace, Parent, ForkHlc) ->
+    %% Encryption resolves on the KEYSPACE (a branch opens with its
+    %% parent's key: the checkpoint is ciphertext under it) and is
+    %% checked against the CRYPTO marker before RocksDB opens, so a
+    %% wrong key or an encrypted/plaintext mismatch fails cleanly
+    %% instead of surfacing as corruption.
+    case init_encryption(Config, Keyspace, DbPath) of
+        {ok, Env} ->
+            init(Name, Config, CompiledChannels, DbPath, Keyspace,
+                 Parent, ForkHlc, Env);
+        {error, EncReason} ->
+            {stop, EncReason}
+    end.
+
+init(Name, Config, CompiledChannels, DbPath, Keyspace, Parent, ForkHlc, Env) ->
     %% Start compaction filter handler BEFORE opening RocksDB
     %% (handler pid is passed to CF options). The filter matches the
     %% name embedded in keys, i.e. the keyspace.
@@ -314,12 +333,13 @@ init(Name, Config, CompiledChannels, DbPath, Keyspace, Parent, ForkHlc) ->
     DocStorePath = filename:join(DbPath, "docs"),
     StoreOpts0 = maps:get(store_opts, Config, #{}),
     %% Pass the filter handler to the store options
-    StoreOpts = StoreOpts0#{compaction_filter_handler => FilterPid},
+    StoreOpts = add_env_opt(StoreOpts0#{compaction_filter_handler => FilterPid},
+                            Env),
     case barrel_store_rocksdb:open(DocStorePath, StoreOpts) of
         {ok, StoreRef} ->
             %% Open attachment store (separate RocksDB with BlobDB)
             AttStorePath = filename:join(DbPath, "attachments"),
-            AttOpts = maps:get(att_opts, Config, #{}),
+            AttOpts = add_env_opt(maps:get(att_opts, Config, #{}), Env),
             case barrel_att_store:open(AttStorePath, AttOpts) of
                 {ok, AttRef} ->
                     %% Register in persistent_term for lookup
@@ -368,6 +388,7 @@ init(Name, Config, CompiledChannels, DbPath, Keyspace, Parent, ForkHlc) ->
                         db_path = DbPath,
                         store_ref = StoreRef,
                         att_ref = AttRef,
+                        env = Env,
                         filter_pid = FilterPid,
                         compaction_timer = TimerRef,
                         compaction_interval = CompactionInterval,
@@ -634,6 +655,71 @@ terminate(_Reason, #state{name = Name, store_ref = StoreRef, att_ref = AttRef,
 %%====================================================================
 %% Internal functions
 %%====================================================================
+
+%% @private Resolve the encryption spec against the CRYPTO marker file
+%% (a cleartext key-check token next to TIMELINE) and build the
+%% EncryptedEnv. Fail-closed matrix: wrong key -> wrong_encryption_key,
+%% plaintext open of an encrypted db -> db_is_encrypted, encrypted open
+%% of an existing plaintext db -> cannot_encrypt_existing_db.
+init_encryption(Config, Keyspace, DbPath) ->
+    Spec = maps:get(encryption, Config, disabled),
+    case barrel_keyprovider:key_for_db(Spec, Keyspace) of
+        {ok, plaintext} ->
+            case filelib:is_regular(crypto_marker_path(DbPath)) of
+                true -> {error, db_is_encrypted};
+                false -> {ok, undefined}
+            end;
+        {ok, Key} ->
+            check_crypto_marker(DbPath, Key);
+        {error, Reason} ->
+            {error, {encryption_key_error, Reason}}
+    end.
+
+check_crypto_marker(DbPath, Key) ->
+    MarkerPath = crypto_marker_path(DbPath),
+    case file:read_file(MarkerPath) of
+        {ok, Token} ->
+            case barrel_crypto:key_check_verify(Key, Token) of
+                true -> new_encrypted_env(Key);
+                false -> {error, wrong_encryption_key}
+            end;
+        {error, enoent} ->
+            case filelib:is_dir(filename:join(DbPath, "docs")) of
+                true ->
+                    {error, cannot_encrypt_existing_db};
+                false ->
+                    case write_crypto_marker(MarkerPath, Key) of
+                        ok ->
+                            new_encrypted_env(Key);
+                        {error, Reason} ->
+                            {error, {crypto_marker_write_failed, Reason}}
+                    end
+            end;
+        {error, Reason} ->
+            {error, {crypto_marker_read_failed, Reason}}
+    end.
+
+new_encrypted_env(Key) ->
+    case rocksdb:new_env({encrypted, Key}) of
+        {ok, Env} -> {ok, Env};
+        {error, Reason} -> {error, {encryption_env_failed, Reason}}
+    end.
+
+%% Written atomically (temp + rename) once, at the first encrypted open.
+write_crypto_marker(MarkerPath, Key) ->
+    Token = barrel_crypto:key_check_new(Key),
+    ok = filelib:ensure_dir(MarkerPath),
+    Tmp = MarkerPath ++ ".tmp",
+    case file:write_file(Tmp, Token) of
+        ok -> file:rename(Tmp, MarkerPath);
+        {error, _} = Err -> Err
+    end.
+
+crypto_marker_path(DbPath) ->
+    filename:join(DbPath, "CRYPTO").
+
+add_env_opt(Opts, undefined) -> Opts;
+add_env_opt(Opts, Env) -> Opts#{env => Env}.
 
 %% @doc Check database size and trigger compaction if threshold exceeded
 %% Called periodically by the compaction_check timer.

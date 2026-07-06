@@ -12,7 +12,8 @@
         hlc,
         match_trie,
         instrument,
-        hackney
+        hackney,
+        barrel_crypto
     ]},
     {env, [
         {data_dir, "data/barrel_docdb"},

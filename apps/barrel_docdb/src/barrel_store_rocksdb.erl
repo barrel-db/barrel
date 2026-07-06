@@ -60,7 +60,11 @@
     bitmap_cf := rocksdb:cf_handle(),
     posting_cf := rocksdb:cf_handle(),
     body_cf := rocksdb:cf_handle(),
-    local_cf := rocksdb:cf_handle()
+    local_cf := rocksdb:cf_handle(),
+    %% EncryptedEnv handle when the store is encrypted. Kept in the ref
+    %% on purpose: the NIF frees the env when the handle is garbage
+    %% collected, so it must stay reachable as long as the db is open.
+    env => rocksdb:env_handle()
 }.
 
 -type snapshot() :: rocksdb:snapshot_handle().
@@ -88,7 +92,12 @@
 -spec open(string(), map()) -> {ok, db_ref()} | {error, term()}.
 open(Path, Options) ->
     ok = filelib:ensure_dir(Path ++ "/"),
-    DbOpts = build_db_options(Options),
+    DbOpts0 = build_db_options(Options),
+    Env = maps:get(env, Options, undefined),
+    DbOpts = case Env of
+        undefined -> DbOpts0;
+        _ -> [{env, Env} | DbOpts0]
+    end,
     BitmapSize = maps:get(bitmap_size, Options, 1048576),  %% 1M bits default
 
     %% Column family descriptors with their options
@@ -102,10 +111,14 @@ open(Path, Options) ->
 
     case rocksdb:open(Path, DbOpts, CFDescriptors) of
         {ok, Ref, [DefaultCF, BitmapCF, PostingCF, BodyCF, LocalCF]} ->
-            {ok, #{ref => Ref, path => Path,
-                   default_cf => DefaultCF, bitmap_cf => BitmapCF,
-                   posting_cf => PostingCF, body_cf => BodyCF,
-                   local_cf => LocalCF}};
+            DbRef = #{ref => Ref, path => Path,
+                      default_cf => DefaultCF, bitmap_cf => BitmapCF,
+                      posting_cf => PostingCF, body_cf => BodyCF,
+                      local_cf => LocalCF},
+            case Env of
+                undefined -> {ok, DbRef};
+                _ -> {ok, DbRef#{env => Env}}
+            end;
         {error, Reason} ->
             {error, {db_open_failed, Reason}}
     end.

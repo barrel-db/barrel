@@ -44,7 +44,10 @@
     ref := rocksdb:db_handle(),
     path := string(),
     chunk_threshold => pos_integer(),
-    chunk_size => pos_integer()
+    chunk_size => pos_integer(),
+    %% EncryptedEnv handle when the store is encrypted; kept in the ref
+    %% so the NIF does not free the env while the db is open.
+    env => rocksdb:env_handle()
 }.
 
 -type att_stream() :: #{
@@ -70,17 +73,26 @@
 -spec open(string(), map()) -> {ok, att_ref()} | {error, term()}.
 open(Path, Options) ->
     ok = filelib:ensure_dir(Path ++ "/"),
-    DbOpts = build_blob_options(Options),
+    DbOpts0 = build_blob_options(Options),
+    Env = maps:get(env, Options, undefined),
+    DbOpts = case Env of
+        undefined -> DbOpts0;
+        _ -> [{env, Env} | DbOpts0]
+    end,
     case rocksdb:open(Path, DbOpts) of
         {ok, Ref} ->
             ChunkThreshold = maps:get(chunk_threshold, Options, ?DEFAULT_CHUNK_THRESHOLD),
             ChunkSize = maps:get(chunk_size, Options, ?DEFAULT_CHUNK_SIZE),
-            {ok, #{
+            AttRef = #{
                 ref => Ref,
                 path => Path,
                 chunk_threshold => ChunkThreshold,
                 chunk_size => ChunkSize
-            }};
+            },
+            case Env of
+                undefined -> {ok, AttRef};
+                _ -> {ok, AttRef#{env => Env}}
+            end;
         {error, Reason} ->
             {error, {att_store_open_failed, Reason}}
     end.

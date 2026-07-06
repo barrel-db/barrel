@@ -62,6 +62,13 @@ jobs:
         with:
           path: ~/.cache/rebar3
           key: rebar3-${{ matrix.app }}-${{ hashFiles(format('apps/{0}/rebar.config', matrix.app)) }}
+      # barrel_docdb depends on the sibling barrel_crypto; isolated builds
+      # resolve it as a checkout dependency
+      - name: Link sibling checkouts
+        if: matrix.app == 'barrel_docdb'
+        run: |
+          mkdir -p apps/barrel_docdb/_checkouts
+          ln -s ../../barrel_crypto apps/barrel_docdb/_checkouts/barrel_crypto
       - name: Compile (isolated)
         working-directory: apps/${{ matrix.app }}
         run: rebar3 compile
