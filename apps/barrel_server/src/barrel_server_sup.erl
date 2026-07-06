@@ -3,6 +3,8 @@
 %%%
 %%% Children (one_for_one):
 %%% <ol>
+%%%   <li>{@link barrel_server_mcp} - the MCP tool registrar (before
+%%%       the HTTP service so /mcp never serves an empty registry).</li>
 %%%   <li>{@link barrel_server_http} - the livery HTTP service.</li>
 %%% </ol>
 %%% Open database handles are owned by the facade's lifecycle manager
@@ -21,6 +23,12 @@ start_link() ->
 init([]) ->
     SupFlags = #{strategy => one_for_one, intensity => 5, period => 10},
     Children = [
+        #{id => barrel_server_mcp,
+          start => {barrel_server_mcp, start_link, []},
+          restart => permanent,
+          shutdown => 5000,
+          type => worker,
+          modules => [barrel_server_mcp]},
         #{id => barrel_server_http,
           start => {barrel_server_http, start_link, []},
           restart => permanent,

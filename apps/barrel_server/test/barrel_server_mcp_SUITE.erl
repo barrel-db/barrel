@@ -14,7 +14,7 @@
          init_per_group/2, end_per_group/2]).
 -export([
     t_initialize/1,
-    t_empty_tools/1,
+    t_registered_tools/1,
     t_session_roundtrip/1,
     t_rest_unaffected/1,
     t_disabled_not_mounted/1,
@@ -34,7 +34,7 @@ all() ->
 
 groups() ->
     [
-        {open, [], [t_initialize, t_empty_tools, t_session_roundtrip,
+        {open, [], [t_initialize, t_registered_tools, t_session_roundtrip,
                     t_rest_unaffected, t_disabled_not_mounted]},
         {locked, [], [t_locked_requires_auth, t_locked_bad_token,
                       t_locked_server_token, t_locked_capability_token]}
@@ -81,10 +81,12 @@ t_initialize(_Config) ->
     barrel_mcp_client:close(C),
     ok.
 
-t_empty_tools(_Config) ->
+t_registered_tools(_Config) ->
     C = connect(#{}),
     {ok, Tools} = barrel_mcp_client:list_tools(C),
-    ?assertEqual([], Tools),
+    Names = [maps:get(<<"name">>, T) || T <- Tools],
+    ?assert(lists:member(<<"doc_put">>, Names)),
+    ?assert(lists:member(<<"query">>, Names)),
     barrel_mcp_client:close(C),
     ok.
 
@@ -161,7 +163,7 @@ t_locked_bad_token(_Config) ->
 t_locked_server_token(_Config) ->
     C = connect(#{auth => {bearer, ?ROOT}}),
     {ok, Tools} = barrel_mcp_client:list_tools(C),
-    ?assertEqual([], Tools),
+    ?assert(length(Tools) > 0),
     {ok, _} = barrel_mcp_client:ping(C),
     barrel_mcp_client:close(C),
     ok.
@@ -177,7 +179,7 @@ t_locked_capability_token(Config) ->
     C = connect(#{auth => {bearer, Token}}),
     {ok, _} = barrel_mcp_client:ping(C),
     {ok, Tools} = barrel_mcp_client:list_tools(C),
-    ?assertEqual([], Tools),
+    ?assert(length(Tools) > 0),
     barrel_mcp_client:close(C),
     %% a revoked capability stops initializing
     ok = barrel_caps:revoke(Token),

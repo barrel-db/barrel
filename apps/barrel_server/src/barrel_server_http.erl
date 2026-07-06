@@ -42,14 +42,17 @@
     search_hybrid/1
 ]).
 
-%% Shared request/response plumbing for the other handler modules
-%% (barrel_server_spaces, MCP tools).
+%% Shared request/response plumbing and JSON shaping for the other
+%% handler modules (barrel_server_spaces, MCP tools).
 -export([
     json_resp/2,
     error_resp/1,
     with_json/2,
     param/2,
-    jsonable/1
+    jsonable/1,
+    encode_hlcs/1,
+    merge_report/1,
+    sanitize_change/1
 ]).
 
 %%====================================================================

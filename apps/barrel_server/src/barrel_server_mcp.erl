@@ -12,13 +12,22 @@
 %%% Auth: `/mcp' is exempt from the global bearer middleware and
 %%% authenticates through barrel_server_mcp_auth instead, which
 %%% covers the same server tokens plus capability (`bsp_') tokens.
-%%% Tools and resources register through barrel_mcp's registry (see
-%%% barrel_server_mcp_tools in later steps).
+%%%
+%%% Also the registrar: a supervised gen_server (started before the
+%%% HTTP service) that registers the barrel tools in barrel_mcp's
+%%% shared registry on start and unregisters them on shutdown.
 %%% @end
 %%%-------------------------------------------------------------------
 -module(barrel_server_mcp).
+-behaviour(gen_server).
 
+-export([start_link/0]).
 -export([enabled/0, routes/0, handler_opts/0]).
+-export([init/1, handle_call/3, handle_cast/2, terminate/2]).
+
+-spec start_link() -> {ok, pid()} | {error, term()}.
+start_link() ->
+    gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
 %% @doc Whether the MCP endpoint is mounted.
 -spec enabled() -> boolean().
@@ -55,3 +64,35 @@ handler_opts() ->
 
 config() ->
     application:get_env(barrel_server, mcp, #{}).
+
+%%====================================================================
+%% gen_server (the tool registrar)
+%%====================================================================
+
+%% @private
+init([]) ->
+    %% trap exits so terminate runs on supervisor shutdown and the
+    %% tools leave the shared registry with the server
+    process_flag(trap_exit, true),
+    case enabled() of
+        true -> ok = barrel_server_mcp_tools:register_all();
+        false -> ok
+    end,
+    {ok, #{}}.
+
+%% @private
+handle_call(_Req, _From, State) ->
+    {reply, ok, State}.
+
+%% @private
+handle_cast(_Msg, State) ->
+    {noreply, State}.
+
+%% @private
+terminate(_Reason, _State) ->
+    %% the registry lives in the barrel_mcp app and may already be
+    %% gone during a full shutdown
+    try barrel_server_mcp_tools:unregister_all()
+    catch _:_ -> ok
+    end,
+    ok.
