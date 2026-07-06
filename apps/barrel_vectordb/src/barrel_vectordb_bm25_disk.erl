@@ -29,6 +29,7 @@
     stats/1,
     %% Persistence
     open/1,
+    open/2,
     close/1,
     sync/1,
     %% Index management
@@ -76,6 +77,9 @@
     cf_docs_fwd :: rocksdb:cf_handle() | undefined,
     cf_docs_rev :: rocksdb:cf_handle() | undefined,
     id_db_standalone = false :: boolean(),
+    %% EncryptedEnv used by the ids RocksDB; kept referenced here (the
+    %% NIF frees the env when the handle is garbage collected)
+    id_db_env :: term() | undefined,
 
     %% File I/O
     file_handle :: term() | undefined,
@@ -147,15 +151,27 @@ new(Options) ->
             },
             HotMaxSize = maps:get(hot_max_size, Options, ?DEFAULT_HOT_MAX_SIZE),
             HotThreshold = maps:get(hot_compaction_threshold, Options, ?DEFAULT_HOT_COMPACTION_THRESHOLD),
+            Crypto = maps:get(crypto, Options, none),
 
-            create_index(BasePathBin, Config, HotMaxSize, HotThreshold)
+            create_index(BasePathBin, Config, HotMaxSize, HotThreshold,
+                         Crypto)
     end.
 
 %% @doc Open an existing disk-native BM25 index
 -spec open(binary() | string()) -> {ok, bm25_disk_index()} | {error, term()}.
 open(Path) ->
+    open(Path, #{}).
+
+%% @doc Open with options: `crypto => none | #{key := <<_:256>>,
+%% env => rocksdb env}'. The key encrypts the flat files; the env is
+%% the EncryptedEnv for the bm25.ids RocksDB.
+-spec open(binary() | string(), map()) ->
+    {ok, bm25_disk_index()} | {error, term()}.
+open(Path, Opts) ->
     BasePathBin = to_binary(Path),
-    case barrel_vectordb_bm25_disk_file:open(BasePathBin) of
+    Crypto = maps:get(crypto, Opts, none),
+    case barrel_vectordb_bm25_disk_file:open(BasePathBin,
+                                             #{crypto => file_crypto(Crypto)}) of
         {ok, FileHandle} ->
             Header = barrel_vectordb_bm25_disk_file:read_header(FileHandle),
             Config = #bm25_disk_config{
@@ -163,8 +179,8 @@ open(Path) ->
                 b = maps:get(b, Header, ?DEFAULT_B),
                 block_size = maps:get(block_size, Header, ?DEFAULT_BLOCK_SIZE)
             },
-            case open_id_db(BasePathBin) of
-                {ok, IdDb, CfTermsFwd, CfTermsRev, CfDocsFwd, CfDocsRev, Standalone} ->
+            case open_id_db(BasePathBin, Crypto) of
+                {ok, IdDb, CfTermsFwd, CfTermsRev, CfDocsFwd, CfDocsRev, Standalone, IdEnv} ->
                     %% Load counters from RocksDB
                     NextTermId = get_next_id(IdDb, CfTermsRev),
                     NextDocId = get_next_id(IdDb, CfDocsRev),
@@ -192,6 +208,7 @@ open(Path) ->
                         cf_docs_fwd = CfDocsFwd,
                         cf_docs_rev = CfDocsRev,
                         id_db_standalone = Standalone,
+                        id_db_env = IdEnv,
                         file_handle = FileHandle,
                         doc_stats_table = DocStatsTable,
                         term_stats_table = TermStatsTable,
@@ -565,8 +582,12 @@ compact(Index) ->
         %% 2. Chunk into blocks and compute max impact per block
         {BlockMaxIndex, PostingBlocks} = build_block_max_index(Index1, SortedPostings),
 
-        %% 3. Write postings to disk
-        {ok, NewFileHandle} = write_postings_to_disk(Index1, PostingBlocks),
+        %% 3. Write postings to disk. Offsets restart at the first
+        %% sector on every compaction, so the static-mode nonce must
+        %% rotate first (persisted by the header write in step 5).
+        FileHandle0 = barrel_vectordb_bm25_disk_file:rotate_data_nonce(
+            Index1#bm25_disk_index.file_handle),
+        {ok, NewFileHandle} = write_postings_to_disk(FileHandle0, PostingBlocks),
 
         %% 4. Write block-max index
         {ok, NewFileHandle2} = barrel_vectordb_bm25_disk_file:write_blockmax_index(
@@ -611,7 +632,7 @@ compact(Index) ->
 %% Internal Functions - Index Creation
 %%====================================================================
 
-create_index(BasePathBin, Config, HotMaxSize, HotThreshold) ->
+create_index(BasePathBin, Config, HotMaxSize, HotThreshold, Crypto) ->
     %% Create directory
     ok = filelib:ensure_dir(filename:join(BasePathBin, "dummy")),
 
@@ -619,13 +640,14 @@ create_index(BasePathBin, Config, HotMaxSize, HotThreshold) ->
     FileConfig = #{
         k1 => Config#bm25_disk_config.k1,
         b => Config#bm25_disk_config.b,
-        block_size => Config#bm25_disk_config.block_size
+        block_size => Config#bm25_disk_config.block_size,
+        crypto => file_crypto(Crypto)
     },
     case barrel_vectordb_bm25_disk_file:create(BasePathBin, FileConfig) of
         {ok, FileHandle} ->
             %% Open/create RocksDB for ID mapping
-            case open_id_db(BasePathBin) of
-                {ok, IdDb, CfTermsFwd, CfTermsRev, CfDocsFwd, CfDocsRev, Standalone} ->
+            case open_id_db(BasePathBin, Crypto) of
+                {ok, IdDb, CfTermsFwd, CfTermsRev, CfDocsFwd, CfDocsRev, Standalone, IdEnv} ->
                     %% Create ETS tables
                     DocStatsTable = ets:new(bm25_doc_stats, [set, public]),
                     TermStatsTable = ets:new(bm25_term_stats, [set, public]),
@@ -639,6 +661,7 @@ create_index(BasePathBin, Config, HotMaxSize, HotThreshold) ->
                         cf_docs_fwd = CfDocsFwd,
                         cf_docs_rev = CfDocsRev,
                         id_db_standalone = Standalone,
+                        id_db_env = IdEnv,
                         file_handle = FileHandle,
                         doc_stats_table = DocStatsTable,
                         term_stats_table = TermStatsTable,
@@ -653,7 +676,20 @@ create_index(BasePathBin, Config, HotMaxSize, HotThreshold) ->
             Error
     end.
 
-open_id_db(BasePathBin) ->
+%% none | #{key := <<_:256>>, env => Env}: the key encrypts the flat
+%% files, the EncryptedEnv covers the bm25.ids RocksDB (terms and doc
+%% ids are plaintext content otherwise). A standalone caller passing
+%% only the key gets an env minted here.
+file_crypto(none) -> none;
+file_crypto(#{key := Key}) -> #{key => Key}.
+
+id_db_env(none) -> undefined;
+id_db_env(#{env := Env}) -> Env;
+id_db_env(#{key := Key}) ->
+    {ok, Env} = rocksdb:new_env({encrypted, Key}),
+    Env.
+
+open_id_db(BasePathBin, Crypto) ->
     DbPath = filename:join(BasePathBin, "bm25.ids"),
     DbPathList = binary_to_list(DbPath),
 
@@ -661,11 +697,17 @@ open_id_db(BasePathBin) ->
     CfOpts = [{create_if_missing, true}],
     CfDescriptors = [{Name, CfOpts} || Name <- CfNames],
 
-    DbOpts = [{create_if_missing, true}, {create_missing_column_families, true}],
+    DbOpts0 = [{create_if_missing, true}, {create_missing_column_families, true}],
+    IdEnv = id_db_env(Crypto),
+    DbOpts = case IdEnv of
+        undefined -> DbOpts0;
+        _ -> [{env, IdEnv} | DbOpts0]
+    end,
 
     case rocksdb:open(DbPathList, DbOpts, CfDescriptors) of
         {ok, Db, [_DefaultCf, CfTermsFwd, CfTermsRev, CfDocsFwd, CfDocsRev]} ->
-            {ok, Db, CfTermsFwd, CfTermsRev, CfDocsFwd, CfDocsRev, true};
+            {ok, Db, CfTermsFwd, CfTermsRev, CfDocsFwd, CfDocsRev, true,
+             IdEnv};
         {error, _} = Error ->
             Error
     end.
@@ -1215,7 +1257,7 @@ compute_max_impact(Postings, IDF, K1, B, _AvgDL) ->
         Postings
     ).
 
-write_postings_to_disk(#bm25_disk_index{file_handle = FileHandle}, PostingBlocks) ->
+write_postings_to_disk(FileHandle, PostingBlocks) ->
     lists:foreach(
         fun({Offset, Block}) ->
             ok = barrel_vectordb_bm25_disk_file:write_block(FileHandle, Offset, Block)

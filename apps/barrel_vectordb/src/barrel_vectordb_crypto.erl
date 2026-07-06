@@ -14,12 +14,15 @@
 
 -export([init/2]).
 
+-type ctx() :: none | #{key := binary(), env := rocksdb:env_handle()}.
+-export_type([ctx/0]).
+
 -spec init(none | #{key := binary(), _ => _}, string() | binary()) ->
-    {ok, rocksdb:env_handle() | undefined} | {error, term()}.
+    {ok, ctx()} | {error, term()}.
 init(none, DbPath) ->
     case filelib:is_regular(marker_path(DbPath)) of
         true -> {error, db_is_encrypted};
-        false -> {ok, undefined}
+        false -> {ok, none}
     end;
 init(#{key := Key}, DbPath) when is_binary(Key), byte_size(Key) =:= 32 ->
     check_marker(DbPath, Key);
@@ -58,7 +61,7 @@ check_marker(DbPath, Key) ->
 
 new_env(Key) ->
     case rocksdb:new_env({encrypted, Key}) of
-        {ok, Env} -> {ok, Env};
+        {ok, Env} -> {ok, #{key => Key, env => Env}};
         {error, Reason} -> {error, {encryption_env_failed, Reason}}
     end.
 

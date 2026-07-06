@@ -48,9 +48,10 @@
     dimension :: pos_integer(),
     embed_state :: barrel_embed:embed_state() | undefined,
     config :: map(),
-    %% EncryptedEnv for this store's RocksDB; retained here because the
-    %% NIF frees the env when the handle is garbage collected.
-    env :: rocksdb:env_handle() | undefined
+    %% Encryption context (none or key + EncryptedEnv); retained here
+    %% because the NIF frees the env when the handle is garbage
+    %% collected.
+    crypto = none :: barrel_vectordb_crypto:ctx()
 }).
 
 %%====================================================================
@@ -134,7 +135,7 @@ init(Config) ->
     case barrel_embed:init(EmbedConfig) of
         {ok, EmbedState} ->
             case init_rocksdb(DbPath, Config) of
-                {ok, Db, CfHandles, Env} ->
+                {ok, Db, CfHandles, Crypto} ->
                     %% Load or create HNSW index
                     HnswIndex = load_or_create_index(Db, CfHandles, Dimension, HnswConfig),
 
@@ -150,7 +151,7 @@ init(Config) ->
                         dimension = Dimension,
                         embed_state = EmbedState,
                         config = Config,
-                        env = Env
+                        crypto = Crypto
                     },
                     {ok, State};
                 {error, Reason} ->
@@ -239,12 +240,12 @@ init_rocksdb(DbPath, Config) ->
 
     case barrel_vectordb_crypto:init(maps:get(crypto, Config, none),
                                      DbPath) of
-        {ok, Env} ->
+        {ok, Crypto} ->
             Options0 = [{create_if_missing, true},
                         {create_missing_column_families, true}],
-            Options = case Env of
-                undefined -> Options0;
-                _ -> [{env, Env} | Options0]
+            Options = case Crypto of
+                none -> Options0;
+                #{env := Env} -> [{env, Env} | Options0]
             end,
 
             %% Define column families (including DiskANN ID mapping)
@@ -268,7 +269,7 @@ init_rocksdb(DbPath, Config) ->
                         hnsw => CfHnsw,
                         diskann_ids_fwd => CfDiskannIdsFwd,
                         diskann_ids_rev => CfDiskannIdsRev
-                    }, Env};
+                    }, Crypto};
                 {error, Reason} ->
                     {error, Reason}
             end;

@@ -75,9 +75,10 @@
     %% RocksDB column families (default). `{Module, Ctx}' = an external
     %% barrel_vectordb_docstore (vectors always stay local).
     docstore :: undefined | {module(), term()},
-    %% EncryptedEnv for this store's RocksDB. Retained here because the
-    %% NIF frees the env when the handle is garbage collected.
-    env :: rocksdb:env_handle() | undefined
+    %% Encryption context: none, or the key + EncryptedEnv shared by
+    %% this store's RocksDBs and disk indexes. Retained here because
+    %% the NIF frees the env when the handle is garbage collected.
+    crypto = none :: barrel_vectordb_crypto:ctx()
 }).
 
 %%====================================================================
@@ -276,9 +277,9 @@ init({Name, Config}) ->
     case barrel_embed:init(EmbedConfig) of
         {ok, EmbedState} ->
             case init_crypto(Config, DbPath) of
-                {ok, Env} ->
+                {ok, Crypto} ->
                     init_stores(Name, Config, DbPath, Dimension, Docstore,
-                                IndexModule, IndexConfig, EmbedState, Env);
+                                IndexModule, IndexConfig, EmbedState, Crypto);
                 {error, CryptoReason} ->
                     %% {error, _} (not {stop, _}): gen_batch_server exits
                     %% normal on it, so a linked caller survives the
@@ -290,7 +291,11 @@ init({Name, Config}) ->
     end.
 
 init_stores(Name, Config, DbPath, Dimension, Docstore, IndexModule,
-            IndexConfig, EmbedState, Env) ->
+            IndexConfig, EmbedState, Crypto) ->
+    Env = case Crypto of
+        none -> undefined;
+        #{env := E} -> E
+    end,
     case init_rocksdb(DbPath, Env) of
         {ok, Db, CfHandles} ->
             %% Load or create vector index
@@ -298,7 +303,7 @@ init_stores(Name, Config, DbPath, Dimension, Docstore, IndexModule,
                 {ok, Index} ->
                     %% Initialize BM25 index if configured
                     BM25Backend = maps:get(bm25_backend, Config, none),
-                    case init_bm25(DbPath, BM25Backend, Config) of
+                    case init_bm25(DbPath, BM25Backend, Config, Crypto) of
                         {ok, BM25Index} ->
                             State = #state{
                                 name = Name,
@@ -315,7 +320,7 @@ init_stores(Name, Config, DbPath, Dimension, Docstore, IndexModule,
                                 bm25_index = BM25Index,
                                 bm25_backend = BM25Backend,
                                 docstore = Docstore,
-                                env = Env
+                                crypto = Crypto
                             },
                             {ok, State};
                         {error, BM25Error} ->
@@ -329,20 +334,18 @@ init_stores(Name, Config, DbPath, Dimension, Docstore, IndexModule,
     end.
 
 %% Encryption: the facade resolves one key per logical database and
-%% passes it as crypto => #{key => <<_:256>>}. Disk-file index backends
-%% keep plaintext flat files until their sector-cipher layers land, so
-%% they are rejected outright with crypto enabled (fail closed).
+%% passes it as crypto => #{key => <<_:256>>}. DiskANN keeps plaintext
+%% flat files until its sector-cipher layer lands, so it is rejected
+%% outright with crypto enabled (fail closed). The disk BM25 backend
+%% encrypts its flat files with the same key.
 init_crypto(Config, DbPath) ->
     case maps:get(crypto, Config, none) of
         none ->
             barrel_vectordb_crypto:init(none, DbPath);
         Crypto ->
-            case {maps:get(backend, Config, hnsw),
-                  maps:get(bm25_backend, Config, none)} of
-                {diskann, _} ->
+            case maps:get(backend, Config, hnsw) of
+                diskann ->
                     {error, {encryption_unsupported, diskann}};
-                {_, disk} ->
-                    {error, {encryption_unsupported, bm25_disk}};
                 _ ->
                     barrel_vectordb_crypto:init(Crypto, DbPath)
             end
@@ -1300,20 +1303,20 @@ decode_vector(Binary) ->
 %%====================================================================
 
 %% Initialize BM25 index based on backend type
-init_bm25(_DbPath, none, _Config) ->
+init_bm25(_DbPath, none, _Config, _Crypto) ->
     {ok, undefined};
-init_bm25(_DbPath, memory, Config) ->
+init_bm25(_DbPath, memory, Config, _Crypto) ->
     BM25Config = maps:get(bm25, Config, #{}),
     Index = barrel_vectordb_bm25:new(BM25Config),
     {ok, Index};
-init_bm25(DbPath, disk, Config) ->
+init_bm25(DbPath, disk, Config, Crypto) ->
     BM25Config = maps:get(bm25_disk, Config, #{}),
     BasePath = maps:get(base_path, BM25Config, filename:join(DbPath, "bm25")),
-    FinalConfig = BM25Config#{base_path => BasePath},
+    FinalConfig = BM25Config#{base_path => BasePath, crypto => Crypto},
     %% Try to open existing index or create new
     case filelib:is_dir(BasePath) of
         true ->
-            barrel_vectordb_bm25_disk:open(BasePath);
+            barrel_vectordb_bm25_disk:open(BasePath, #{crypto => Crypto});
         false ->
             barrel_vectordb_bm25_disk:new(FinalConfig)
     end.

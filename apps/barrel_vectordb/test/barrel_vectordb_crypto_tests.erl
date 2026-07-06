@@ -23,7 +23,10 @@ crypto_test_() ->
        {"wrong key fails closed", fun test_wrong_key/0},
        {"plaintext open of an encrypted store fails", fun test_plain_of_enc/0},
        {"encrypting an existing plaintext store fails", fun test_enc_of_plain/0},
-       {"disk-index backends rejected with crypto", fun test_unsupported/0}
+       {"diskann rejected with crypto", fun test_unsupported/0},
+       {"encrypted disk BM25 in a store", fun test_bm25_disk_store/0},
+       {"bm25 disk index crypto roundtrip + compaction", fun test_bm25_disk_direct/0},
+       {"bm25 disk index open matrix", fun test_bm25_disk_matrix/0}
      ]
     }.
 
@@ -181,14 +184,95 @@ test_unsupported() ->
     TestDir = "/tmp/barrel_vectordb_crypto_un_"
         ++ integer_to_list(erlang:unique_integer([positive])),
     try
-        %% disk-file index backends keep plaintext flat files until
-        %% their sector-cipher layers land: rejected with crypto on
-        ?assertEqual({error, {encryption_unsupported, bm25_disk}},
-                     start_store(TestDir, #{crypto => #{key => ?KEY1},
-                                            bm25_backend => disk})),
+        %% diskann keeps plaintext flat files until its sector-cipher
+        %% layer lands: rejected with crypto on
         ?assertEqual({error, {encryption_unsupported, diskann}},
                      start_store(TestDir, #{crypto => #{key => ?KEY1},
                                             backend => diskann}))
     after
         os:cmd("rm -rf " ++ TestDir)
+    end.
+
+test_bm25_disk_store() ->
+    TestDir = "/tmp/barrel_vectordb_crypto_bd_"
+        ++ integer_to_list(erlang:unique_integer([positive])),
+    try
+        {ok, _} = start_store(TestDir, #{crypto => #{key => ?KEY1},
+                                         bm25_backend => disk}),
+        ok = barrel_vectordb:add_vector(?STORE, <<"a">>, ?SENTINEL,
+                                        #{}, [1.0, 0.0, 0.0]),
+        {ok, [{<<"a">>, _} | _]} =
+            barrel_vectordb:search_bm25(?STORE, ?SENTINEL, #{k => 1}),
+        %% flush the hot layer so the postings survive the restart
+        %% (encrypted under a rotated nonce)
+        ok = barrel_vectordb_server:bm25_compact(?STORE),
+        stop_store(),
+        %% the sentinel term reaches bm25.ids (EncryptedEnv) and the
+        %% text CF; nothing on disk carries it in clear
+        ?assertNot(found_on_disk(TestDir, ?SENTINEL)),
+        {ok, _} = start_store(TestDir, #{crypto => #{key => ?KEY1},
+                                         bm25_backend => disk}),
+        {ok, [{<<"a">>, _} | _]} =
+            barrel_vectordb:search_bm25(?STORE, ?SENTINEL, #{k => 1})
+    after
+        catch barrel_vectordb:stop(?STORE),
+        os:cmd("rm -rf " ++ TestDir)
+    end.
+
+test_bm25_disk_direct() ->
+    Path = "/tmp/barrel_vectordb_crypto_bm_"
+        ++ integer_to_list(erlang:unique_integer([positive])),
+    Crypto = #{key => ?KEY1},
+    try
+        {ok, I0} = barrel_vectordb_bm25_disk:new(#{base_path => Path,
+                                                   crypto => Crypto}),
+        {ok, I1} = barrel_vectordb_bm25_disk:add(I0, <<"d1">>,
+                                                 <<"hello world">>),
+        {ok, I2} = barrel_vectordb_bm25_disk:add(I1, <<"d2">>,
+                                                 <<"world peace">>),
+        [{<<"d1">>, _} | _] = barrel_vectordb_bm25_disk:search(
+                                  I2, <<"hello">>, 2),
+        %% first compaction writes postings under a rotated nonce
+        {ok, I3} = barrel_vectordb_bm25_disk:compact(I2),
+        [{<<"d1">>, _} | _] = barrel_vectordb_bm25_disk:search(
+                                  I3, <<"hello">>, 2),
+        %% second compaction rewrites the same offsets: readable only
+        %% because the nonce rotated again
+        {ok, I4} = barrel_vectordb_bm25_disk:add(I3, <<"d3">>,
+                                                 <<"hello again">>),
+        {ok, I5} = barrel_vectordb_bm25_disk:compact(I4),
+        Hits = barrel_vectordb_bm25_disk:search(I5, <<"hello">>, 3),
+        ?assert(lists:keymember(<<"d1">>, 1, Hits) orelse
+                lists:keymember(<<"d3">>, 1, Hits)),
+        ok = barrel_vectordb_bm25_disk:close(I5),
+        %% reopen with the key: superblock + rotated nonce persisted
+        {ok, I6} = barrel_vectordb_bm25_disk:open(Path,
+                                                  #{crypto => Crypto}),
+        Hits2 = barrel_vectordb_bm25_disk:search(I6, <<"hello">>, 3),
+        ?assert(length(Hits2) >= 1),
+        ok = barrel_vectordb_bm25_disk:close(I6)
+    after
+        os:cmd("rm -rf " ++ Path)
+    end.
+
+test_bm25_disk_matrix() ->
+    Path = "/tmp/barrel_vectordb_crypto_bx_"
+        ++ integer_to_list(erlang:unique_integer([positive])),
+    try
+        {ok, I0} = barrel_vectordb_bm25_disk:new(#{base_path => Path,
+                                                   crypto => #{key => ?KEY1}}),
+        ok = barrel_vectordb_bm25_disk:close(I0),
+        ?assertEqual({error, index_is_encrypted},
+                     barrel_vectordb_bm25_disk:open(Path, #{})),
+        ?assertEqual({error, wrong_encryption_key},
+                     barrel_vectordb_bm25_disk:open(
+                         Path, #{crypto => #{key => ?KEY2}})),
+        os:cmd("rm -rf " ++ Path),
+        {ok, P0} = barrel_vectordb_bm25_disk:new(#{base_path => Path}),
+        ok = barrel_vectordb_bm25_disk:close(P0),
+        ?assertEqual({error, cannot_encrypt_legacy_index},
+                     barrel_vectordb_bm25_disk:open(
+                         Path, #{crypto => #{key => ?KEY1}}))
+    after
+        os:cmd("rm -rf " ++ Path)
     end.

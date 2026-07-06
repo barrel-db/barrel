@@ -22,9 +22,11 @@
 -export([
     create/2,
     open/1,
+    open/2,
     close/1,
     sync/1,
-    get_path/1
+    get_path/1,
+    rotate_data_nonce/1
 ]).
 
 %% API - Header operations
@@ -84,7 +86,16 @@
     postings_fd :: file:fd() | undefined,
     blockmax_fd :: file:fd() | undefined,
     blockmax_mmap :: term() | undefined,
-    header :: map()
+    header :: map(),
+    %% Encryption state. bm25.postings is append-only between
+    %% compactions: STATIC mode under postings_nonce, rotated on every
+    %% compaction (offsets are reused across rewrites). bm25.blockmax
+    %% is rewritten in place: EMBEDDED sectors (fresh nonce per sector
+    %% per write). bm25.meta becomes a cleartext "BC" superblock
+    %% (key-check token + nonces) carrying the GCM-sealed header.
+    crypto :: undefined | #{key := binary(),
+                            postings_nonce := binary(),
+                            key_check := binary()}
 }).
 
 -type bm25_file() :: #bm25_file{}.
@@ -133,7 +144,8 @@ create(Path, Config) ->
                 meta_fd = MetaFd,
                 postings_fd = PostingsFd,
                 blockmax_fd = BlockmaxFd,
-                header = Header
+                header = Header,
+                crypto = new_crypto(maps:get(crypto, Config, none))
             },
             ok = write_header_internal(File, Header),
             {ok, File};
@@ -144,6 +156,12 @@ create(Path, Config) ->
 %% @doc Open an existing BM25 disk index
 -spec open(binary() | string()) -> {ok, bm25_file()} | {error, term()}.
 open(Path) ->
+    open(Path, #{}).
+
+%% @doc Open with options: `crypto => none | #{key := <<_:256>>}'. The
+%% open fails closed on any encrypted/plaintext mismatch or wrong key.
+-spec open(binary() | string(), map()) -> {ok, bm25_file()} | {error, term()}.
+open(Path, Opts) ->
     PathBin = to_binary(Path),
 
     MetaPath = filename:join(PathBin, "bm25.meta"),
@@ -152,8 +170,8 @@ open(Path) ->
 
     case open_files(MetaPath, PostingsPath, BlockmaxPath, [read, write, binary, raw]) of
         {ok, MetaFd, PostingsFd, BlockmaxFd} ->
-            case read_header_internal(MetaFd) of
-                {ok, Header} ->
+            case read_meta(MetaFd, maps:get(crypto, Opts, none)) of
+                {ok, Header, Crypto} ->
                     %% Try to open blockmax with mmap
                     BlockmaxMmap = try_open_mmap(BlockmaxPath),
                     {ok, #bm25_file{
@@ -162,7 +180,8 @@ open(Path) ->
                         postings_fd = PostingsFd,
                         blockmax_fd = BlockmaxFd,
                         blockmax_mmap = BlockmaxMmap,
-                        header = Header
+                        header = Header,
+                        crypto = Crypto
                     }};
                 {error, _} = Error ->
                     _ = file:close(MetaFd),
@@ -198,6 +217,16 @@ sync(#bm25_file{meta_fd = MetaFd, postings_fd = PostingsFd, blockmax_fd = Blockm
 %% @doc Get the base path
 -spec get_path(bm25_file()) -> binary().
 get_path(#bm25_file{path = Path}) -> Path.
+
+%% @doc Fresh postings nonce for a full rewrite (compaction): posting
+%% offsets are reused across compactions, so the static-mode nonce must
+%% rotate before the rewrite. Persisted by the next header write.
+-spec rotate_data_nonce(bm25_file()) -> bm25_file().
+rotate_data_nonce(#bm25_file{crypto = undefined} = File) ->
+    File;
+rotate_data_nonce(#bm25_file{crypto = Crypto} = File) ->
+    File#bm25_file{
+        crypto = Crypto#{postings_nonce => barrel_crypto:new_nonce(8)}}.
 
 %%====================================================================
 %% Header Operations
@@ -287,22 +316,32 @@ varint_encode_list(Values) ->
 
 %% @doc Write a block at the specified offset (sector-aligned)
 -spec write_block(bm25_file(), non_neg_integer(), binary()) -> ok | {error, term()}.
-write_block(#bm25_file{postings_fd = Fd}, Offset, Data) ->
+write_block(#bm25_file{postings_fd = Fd, crypto = Crypto}, Offset, Data) ->
     PaddedData = pad_to_sector(Data),
-    file:pwrite(Fd, Offset, PaddedData).
+    file:pwrite(Fd, Offset, postings_crypt(Crypto, Offset, PaddedData)).
 
 %% @doc Read a block from the specified offset
 -spec read_block(bm25_file(), non_neg_integer()) -> {ok, binary()} | {error, term()}.
-read_block(#bm25_file{postings_fd = Fd}, Offset) ->
-    file:pread(Fd, Offset, ?SECTOR_SIZE).
+read_block(#bm25_file{postings_fd = Fd, crypto = Crypto}, Offset) ->
+    case file:pread(Fd, Offset, ?SECTOR_SIZE) of
+        {ok, Data} -> {ok, postings_crypt(Crypto, Offset, Data)};
+        Other -> Other
+    end.
 
 %% @doc Read multiple blocks (batch read)
 -spec read_blocks(bm25_file(), [{non_neg_integer(), non_neg_integer()}]) ->
     {ok, [binary()]} | {error, term()}.
-read_blocks(#bm25_file{postings_fd = Fd}, OffsetSizePairs) ->
+read_blocks(#bm25_file{postings_fd = Fd, crypto = Crypto}, OffsetSizePairs) ->
     case file:pread(Fd, OffsetSizePairs) of
-        {ok, Datas} -> {ok, Datas};
-        {error, _} = Error -> Error
+        {ok, Datas} ->
+            {ok, lists:zipwith(
+                fun({Offset, _Size}, Data) when is_binary(Data) ->
+                        postings_crypt(Crypto, Offset, Data);
+                   (_Pair, Other) ->
+                        Other
+                end, OffsetSizePairs, Datas)};
+        {error, _} = Error ->
+            Error
     end.
 
 %% @doc Pad binary to sector alignment
@@ -381,10 +420,10 @@ decode_posting_block(Bin) ->
 %% @doc Write postings for a term at specified offset
 -spec write_postings(bm25_file(), non_neg_integer(), [posting()]) ->
     {ok, non_neg_integer()} | {error, term()}.
-write_postings(#bm25_file{postings_fd = Fd} = _File, Offset, Postings) ->
+write_postings(#bm25_file{postings_fd = Fd, crypto = Crypto}, Offset, Postings) ->
     EncodedBlock = encode_posting_block(Postings),
     PaddedBlock = pad_to_sector(EncodedBlock),
-    case file:pwrite(Fd, Offset, PaddedBlock) of
+    case file:pwrite(Fd, Offset, postings_crypt(Crypto, Offset, PaddedBlock)) of
         ok -> {ok, byte_size(PaddedBlock)};
         {error, _} = Error -> Error
     end.
@@ -392,10 +431,10 @@ write_postings(#bm25_file{postings_fd = Fd} = _File, Offset, Postings) ->
 %% @doc Read postings from specified offset and size
 -spec read_postings(bm25_file(), non_neg_integer(), non_neg_integer()) ->
     {ok, [posting()]} | {error, term()}.
-read_postings(#bm25_file{postings_fd = Fd}, Offset, Size) ->
+read_postings(#bm25_file{postings_fd = Fd, crypto = Crypto}, Offset, Size) ->
     case file:pread(Fd, Offset, Size) of
         {ok, Data} ->
-            decode_posting_block(Data);
+            decode_posting_block(postings_crypt(Crypto, Offset, Data));
         {error, _} = Error ->
             Error
     end.
@@ -410,7 +449,8 @@ read_postings(#bm25_file{postings_fd = Fd}, Offset, Size) ->
 %% Block: [MaxImpact:32/float][DocStart:32][DocEnd:32][Offset:64][Size:32]
 -spec write_blockmax_index(bm25_file(), #{non_neg_integer() => [block_max_entry()]}) ->
     {ok, bm25_file()} | {error, term()}.
-write_blockmax_index(#bm25_file{blockmax_fd = Fd, header = Header} = File, TermBlocks) ->
+write_blockmax_index(#bm25_file{blockmax_fd = Fd, header = Header,
+                                crypto = Crypto} = File, TermBlocks) ->
     TermCount = maps:size(TermBlocks),
     %% Build binary
     EntriesBin = maps:fold(
@@ -423,7 +463,12 @@ write_blockmax_index(#bm25_file{blockmax_fd = Fd, header = Header} = File, TermB
         TermBlocks
     ),
     IndexBin = <<TermCount:32/little, EntriesBin/binary>>,
-    PaddedBin = pad_to_sector(IndexBin),
+    %% Rewritten in place: embedded sectors draw a fresh nonce on every
+    %% write, so no nonce bookkeeping is needed for this file.
+    PaddedBin = case Crypto of
+        undefined -> pad_to_sector(IndexBin);
+        #{key := Key} -> barrel_crypto_file:seal_logical(Key, IndexBin)
+    end,
 
     case file:pwrite(Fd, 0, PaddedBin) of
         ok ->
@@ -436,11 +481,18 @@ write_blockmax_index(#bm25_file{blockmax_fd = Fd, header = Header} = File, TermB
 %% @doc Read block-max index from file
 %% Returns map of TermIntId => [BlockMaxEntry]
 -spec read_blockmax_index(bm25_file()) -> {ok, #{non_neg_integer() => [block_max_entry()]}} | {error, term()}.
-read_blockmax_index(#bm25_file{blockmax_fd = Fd, blockmax_mmap = Mmap}) ->
+read_blockmax_index(#bm25_file{blockmax_fd = Fd, blockmax_mmap = Mmap,
+                               crypto = Crypto}) ->
     %% Read header to get term count
-    ReadFun = case Mmap of
+    PhysRead = case Mmap of
         undefined -> fun(Off, Size) -> file:pread(Fd, Off, Size) end;
         _ -> fun(Off, Size) -> iommap:pread(Mmap, Off, Size) end
+    end,
+    ReadFun = case Crypto of
+        undefined ->
+            PhysRead;
+        #{key := Key} ->
+            barrel_crypto_file:decrypting_readfun(embedded, Key, PhysRead)
     end,
 
     case ReadFun(0, 4) of
@@ -517,7 +569,22 @@ try_open_mmap(Path) ->
             undefined
     end.
 
-write_header_internal(#bm25_file{meta_fd = Fd}, Header) ->
+write_header_internal(#bm25_file{meta_fd = Fd, crypto = undefined}, Header) ->
+    PaddedHeader = pad_to_sector(encode_header(Header)),
+    file:pwrite(Fd, 0, PaddedHeader);
+write_header_internal(#bm25_file{meta_fd = Fd,
+                                 crypto = #{key := Key,
+                                            postings_nonce := Nonce,
+                                            key_check := Token}}, Header) ->
+    Sealed = barrel_crypto:encrypt(encode_header(Header), Key),
+    Sb = barrel_crypto_file:superblock_encode(#{
+        key_check => Token,
+        nonces => #{postings => Nonce},
+        header => Sealed
+    }),
+    file:pwrite(Fd, 0, pad_to_sector(Sb)).
+
+encode_header(Header) ->
     Magic = maps:get(magic, Header, ?MAGIC),
     Version = maps:get(version, Header, ?VERSION),
     TermCount = maps:get(term_count, Header, 0),
@@ -530,7 +597,7 @@ write_header_internal(#bm25_file{meta_fd = Fd}, Header) ->
     PostingsOffset = maps:get(postings_offset, Header, ?SECTOR_SIZE),
     BlockmaxOffset = maps:get(blockmax_offset, Header, 0),
 
-    HeaderBin = <<
+    <<
         Magic/binary,
         Version:32/little,
         TermCount:32/little,
@@ -542,40 +609,100 @@ write_header_internal(#bm25_file{meta_fd = Fd}, Header) ->
         BlockSize:32/little,
         PostingsOffset:64/little,
         BlockmaxOffset:64/little
-    >>,
-    PaddedHeader = pad_to_sector(HeaderBin),
-    file:pwrite(Fd, 0, PaddedHeader).
+    >>.
 
-read_header_internal(Fd) ->
-    case file:pread(Fd, 0, ?SECTOR_SIZE) of
-        {ok, <<Magic:8/binary, Version:32/little, TermCount:32/little,
+parse_header(<<Magic:8/binary, Version:32/little, TermCount:32/little,
                DocCount:32/little, TotalTokens:64/little,
                AvgDL:64/float-little, K1:64/float-little, B:64/float-little,
                BlockSize:32/little, PostingsOffset:64/little,
-               BlockmaxOffset:64/little, _Rest/binary>>} ->
-            case Magic of
-                ?MAGIC ->
-                    {ok, #{
-                        magic => Magic,
-                        version => Version,
-                        term_count => TermCount,
-                        doc_count => DocCount,
-                        total_tokens => TotalTokens,
-                        avgdl => AvgDL,
-                        k1 => K1,
-                        b => B,
-                        block_size => BlockSize,
-                        postings_offset => PostingsOffset,
-                        blockmax_offset => BlockmaxOffset
-                    }};
-                _ ->
-                    {error, invalid_magic}
-            end;
-        {ok, _} ->
+               BlockmaxOffset:64/little, _Rest/binary>>) ->
+    case Magic of
+        ?MAGIC ->
+            {ok, #{
+                magic => Magic,
+                version => Version,
+                term_count => TermCount,
+                doc_count => DocCount,
+                total_tokens => TotalTokens,
+                avgdl => AvgDL,
+                k1 => K1,
+                b => B,
+                block_size => BlockSize,
+                postings_offset => PostingsOffset,
+                blockmax_offset => BlockmaxOffset
+            }};
+        _ ->
+            {error, invalid_magic}
+    end;
+parse_header(_) ->
+    {error, invalid_header}.
+
+%% Read + validate the meta sector against the requested crypto state:
+%% the fail-closed open matrix for the flat files.
+read_meta(Fd, Crypto) ->
+    case file:pread(Fd, 0, ?SECTOR_SIZE) of
+        {ok, Bin} ->
+            decode_meta(Bin, Crypto);
+        eof ->
             {error, invalid_header};
         {error, _} = Error ->
             Error
     end.
+
+decode_meta(Bin, none) ->
+    case barrel_crypto_file:superblock_decode(Bin) of
+        plaintext ->
+            case parse_header(Bin) of
+                {ok, Header} -> {ok, Header, undefined};
+                {error, _} = Err -> Err
+            end;
+        {ok, _} ->
+            {error, index_is_encrypted};
+        {error, _} = Err ->
+            Err
+    end;
+decode_meta(Bin, #{key := Key}) ->
+    case barrel_crypto_file:superblock_decode(Bin) of
+        {ok, #{key_check := Token, nonces := #{postings := Nonce},
+               header := Sealed}} ->
+            case barrel_crypto:key_check_verify(Key, Token) of
+                false ->
+                    {error, wrong_encryption_key};
+                true ->
+                    case barrel_crypto:decrypt(Sealed, Key) of
+                        {error, _} ->
+                            {error, corrupt_superblock};
+                        HeaderBin ->
+                            case parse_header(HeaderBin) of
+                                {ok, Header} ->
+                                    {ok, Header,
+                                     #{key => Key,
+                                       postings_nonce => Nonce,
+                                       key_check => Token}};
+                                {error, _} = Err ->
+                                    Err
+                            end
+                    end
+            end;
+        {ok, _} ->
+            {error, corrupt_superblock};
+        plaintext ->
+            {error, cannot_encrypt_legacy_index};
+        {error, _} = Err ->
+            Err
+    end.
+
+new_crypto(none) ->
+    undefined;
+new_crypto(#{key := Key}) when is_binary(Key), byte_size(Key) =:= 32 ->
+    #{key => Key,
+      postings_nonce => barrel_crypto:new_nonce(8),
+      key_check => barrel_crypto:key_check_new(Key)}.
+
+postings_crypt(undefined, _Offset, Bin) ->
+    Bin;
+postings_crypt(#{key := Key, postings_nonce := Nonce}, Offset, Bin) ->
+    barrel_crypto_file:crypt_static(Key, Nonce, Offset, Bin).
 
 %% Delta encode postings
 delta_encode_postings([], _PrevDocId, DeltaAcc, TFAcc) ->
