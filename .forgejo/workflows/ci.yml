@@ -38,7 +38,7 @@ jobs:
       - run: rebar3 compile
       # barrel_embed's eunit needs an external embedding backend (Python/ollama);
       # it is compile-checked in the leaf job instead.
-      - run: rebar3 as test eunit --app barrel,barrel_docdb,barrel_vectordb,barrel_rerank
+      - run: rebar3 as test eunit --app barrel,barrel_crypto,barrel_docdb,barrel_vectordb,barrel_rerank
       - run: rebar3 as test ct
 
   leaf:
@@ -49,7 +49,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        app: [barrel_docdb, barrel_rerank, barrel_embed]
+        app: [barrel_crypto, barrel_docdb, barrel_rerank, barrel_embed]
     steps:
       - uses: actions/checkout@v4
       - name: System dependencies

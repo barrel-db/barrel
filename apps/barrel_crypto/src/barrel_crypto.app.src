@@ -1,0 +1,14 @@
+{application, barrel_crypto, [
+    {description, "Encryption primitives and key providers for Barrel (AES-256-GCM envelope, offset-addressable CTR, HKDF key derivation)"},
+    {vsn, "0.2.0"},
+    {registered, []},
+    {applications, [
+        kernel,
+        stdlib,
+        crypto
+    ]},
+    {env, []},
+    {modules, []},
+    {licenses, ["Apache-2.0"]},
+    {links, [{"GitHub", "https://github.com/barrel-db/barrel"}]}
+]}.
