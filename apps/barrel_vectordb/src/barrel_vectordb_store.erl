@@ -47,7 +47,10 @@
     hnsw_index :: hnsw_index(),
     dimension :: pos_integer(),
     embed_state :: barrel_embed:embed_state() | undefined,
-    config :: map()
+    config :: map(),
+    %% EncryptedEnv for this store's RocksDB; retained here because the
+    %% NIF frees the env when the handle is garbage collected.
+    env :: rocksdb:env_handle() | undefined
 }).
 
 %%====================================================================
@@ -130,8 +133,8 @@ init(Config) ->
     EmbedConfig = Config#{dimensions => Dimension},
     case barrel_embed:init(EmbedConfig) of
         {ok, EmbedState} ->
-            case init_rocksdb(DbPath) of
-                {ok, Db, CfHandles} ->
+            case init_rocksdb(DbPath, Config) of
+                {ok, Db, CfHandles, Env} ->
                     %% Load or create HNSW index
                     HnswIndex = load_or_create_index(Db, CfHandles, Dimension, HnswConfig),
 
@@ -146,7 +149,8 @@ init(Config) ->
                         hnsw_index = HnswIndex,
                         dimension = Dimension,
                         embed_state = EmbedState,
-                        config = Config
+                        config = Config,
+                        env = Env
                     },
                     {ok, State};
                 {error, Reason} ->
@@ -229,36 +233,47 @@ terminate(_Reason, #state{db = Db, hnsw_index = Index, cf_hnsw = CfHnsw}) ->
 %%====================================================================
 
 %% Initialize RocksDB with column families
-init_rocksdb(DbPath) ->
+init_rocksdb(DbPath, Config) ->
     %% Ensure directory exists
     ok = filelib:ensure_dir(DbPath ++ "/"),
 
-    Options = [{create_if_missing, true}, {create_missing_column_families, true}],
+    case barrel_vectordb_crypto:init(maps:get(crypto, Config, none),
+                                     DbPath) of
+        {ok, Env} ->
+            Options0 = [{create_if_missing, true},
+                        {create_missing_column_families, true}],
+            Options = case Env of
+                undefined -> Options0;
+                _ -> [{env, Env} | Options0]
+            end,
 
-    %% Define column families (including DiskANN ID mapping)
-    CfDefs = [
-        {?CF_DEFAULT, []},
-        {?CF_VECTORS, []},
-        {?CF_METADATA, []},
-        {?CF_TEXT, []},
-        {?CF_HNSW, []},
-        {?CF_DISKANN_IDS_FWD, []},
-        {?CF_DISKANN_IDS_REV, []}
-    ],
+            %% Define column families (including DiskANN ID mapping)
+            CfDefs = [
+                {?CF_DEFAULT, []},
+                {?CF_VECTORS, []},
+                {?CF_METADATA, []},
+                {?CF_TEXT, []},
+                {?CF_HNSW, []},
+                {?CF_DISKANN_IDS_FWD, []},
+                {?CF_DISKANN_IDS_REV, []}
+            ],
 
-    case rocksdb:open(DbPath, Options, CfDefs) of
-        {ok, Db, [_Default, CfVectors, CfMetadata, CfText, CfHnsw,
-                  CfDiskannIdsFwd, CfDiskannIdsRev]} ->
-            {ok, Db, #{
-                vectors => CfVectors,
-                metadata => CfMetadata,
-                text => CfText,
-                hnsw => CfHnsw,
-                diskann_ids_fwd => CfDiskannIdsFwd,
-                diskann_ids_rev => CfDiskannIdsRev
-            }};
-        {error, Reason} ->
-            {error, Reason}
+            case rocksdb:open(DbPath, Options, CfDefs) of
+                {ok, Db, [_Default, CfVectors, CfMetadata, CfText, CfHnsw,
+                          CfDiskannIdsFwd, CfDiskannIdsRev]} ->
+                    {ok, Db, #{
+                        vectors => CfVectors,
+                        metadata => CfMetadata,
+                        text => CfText,
+                        hnsw => CfHnsw,
+                        diskann_ids_fwd => CfDiskannIdsFwd,
+                        diskann_ids_rev => CfDiskannIdsRev
+                    }, Env};
+                {error, Reason} ->
+                    {error, Reason}
+            end;
+        {error, _} = Err ->
+            Err
     end.
 
 %% Load existing index or create new one

@@ -12,7 +12,8 @@
         rocksdb,
         hackney,
         gen_batch_server,
-        barrel_embed
+        barrel_embed,
+        barrel_crypto
     ]},
     {env, [
         {default_dimensions, 768},

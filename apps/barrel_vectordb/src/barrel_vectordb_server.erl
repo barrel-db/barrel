@@ -74,7 +74,10 @@
     %% Document backend for text + metadata. `undefined' = this store's own
     %% RocksDB column families (default). `{Module, Ctx}' = an external
     %% barrel_vectordb_docstore (vectors always stay local).
-    docstore :: undefined | {module(), term()}
+    docstore :: undefined | {module(), term()},
+    %% EncryptedEnv for this store's RocksDB. Retained here because the
+    %% NIF frees the env when the handle is garbage collected.
+    env :: rocksdb:env_handle() | undefined
 }).
 
 %%====================================================================
@@ -272,43 +275,77 @@ init({Name, Config}) ->
     EmbedConfig = Config#{dimensions => Dimension},
     case barrel_embed:init(EmbedConfig) of
         {ok, EmbedState} ->
-            case init_rocksdb(DbPath) of
-                {ok, Db, CfHandles} ->
-                    %% Load or create vector index
-                    case load_or_create_index(Db, CfHandles, Dimension, IndexConfig, IndexModule) of
-                        {ok, Index} ->
-                            %% Initialize BM25 index if configured
-                            BM25Backend = maps:get(bm25_backend, Config, none),
-                            case init_bm25(DbPath, BM25Backend, Config) of
-                                {ok, BM25Index} ->
-                                    State = #state{
-                                        name = Name,
-                                        db = Db,
-                                        cf_vectors = maps:get(vectors, CfHandles),
-                                        cf_metadata = maps:get(metadata, CfHandles),
-                                        cf_text = maps:get(text, CfHandles),
-                                        cf_hnsw = maps:get(hnsw, CfHandles),
-                                        index = Index,
-                                        index_module = IndexModule,
-                                        dimension = Dimension,
-                                        embed_state = EmbedState,
-                                        config = Config,
-                                        bm25_index = BM25Index,
-                                        bm25_backend = BM25Backend,
-                                        docstore = Docstore
-                                    },
-                                    {ok, State};
-                                {error, BM25Error} ->
-                                    {stop, {bm25_init_failed, BM25Error}}
-                            end;
-                        {error, IndexError} ->
-                            {stop, {index_init_failed, IndexError}}
-                    end;
-                {error, Reason} ->
-                    {stop, {db_open_failed, Reason}}
+            case init_crypto(Config, DbPath) of
+                {ok, Env} ->
+                    init_stores(Name, Config, DbPath, Dimension, Docstore,
+                                IndexModule, IndexConfig, EmbedState, Env);
+                {error, CryptoReason} ->
+                    %% {error, _} (not {stop, _}): gen_batch_server exits
+                    %% normal on it, so a linked caller survives the
+                    %% failed open and gets {error, CryptoReason}
+                    {error, CryptoReason}
             end;
         {error, EmbedError} ->
             {stop, {embed_init_failed, EmbedError}}
+    end.
+
+init_stores(Name, Config, DbPath, Dimension, Docstore, IndexModule,
+            IndexConfig, EmbedState, Env) ->
+    case init_rocksdb(DbPath, Env) of
+        {ok, Db, CfHandles} ->
+            %% Load or create vector index
+            case load_or_create_index(Db, CfHandles, Dimension, IndexConfig, IndexModule) of
+                {ok, Index} ->
+                    %% Initialize BM25 index if configured
+                    BM25Backend = maps:get(bm25_backend, Config, none),
+                    case init_bm25(DbPath, BM25Backend, Config) of
+                        {ok, BM25Index} ->
+                            State = #state{
+                                name = Name,
+                                db = Db,
+                                cf_vectors = maps:get(vectors, CfHandles),
+                                cf_metadata = maps:get(metadata, CfHandles),
+                                cf_text = maps:get(text, CfHandles),
+                                cf_hnsw = maps:get(hnsw, CfHandles),
+                                index = Index,
+                                index_module = IndexModule,
+                                dimension = Dimension,
+                                embed_state = EmbedState,
+                                config = Config,
+                                bm25_index = BM25Index,
+                                bm25_backend = BM25Backend,
+                                docstore = Docstore,
+                                env = Env
+                            },
+                            {ok, State};
+                        {error, BM25Error} ->
+                            {stop, {bm25_init_failed, BM25Error}}
+                    end;
+                {error, IndexError} ->
+                    {stop, {index_init_failed, IndexError}}
+            end;
+        {error, Reason} ->
+            {stop, {db_open_failed, Reason}}
+    end.
+
+%% Encryption: the facade resolves one key per logical database and
+%% passes it as crypto => #{key => <<_:256>>}. Disk-file index backends
+%% keep plaintext flat files until their sector-cipher layers land, so
+%% they are rejected outright with crypto enabled (fail closed).
+init_crypto(Config, DbPath) ->
+    case maps:get(crypto, Config, none) of
+        none ->
+            barrel_vectordb_crypto:init(none, DbPath);
+        Crypto ->
+            case {maps:get(backend, Config, hnsw),
+                  maps:get(bm25_backend, Config, none)} of
+                {diskann, _} ->
+                    {error, {encryption_unsupported, diskann}};
+                {_, disk} ->
+                    {error, {encryption_unsupported, bm25_disk}};
+                _ ->
+                    barrel_vectordb_crypto:init(Crypto, DbPath)
+            end
     end.
 
 %% @doc Handle a batch of operations.
@@ -887,11 +924,15 @@ maybe_close_index(Mod, Index) ->
 %%====================================================================
 
 %% Initialize RocksDB with column families
-init_rocksdb(DbPath) ->
+init_rocksdb(DbPath, Env) ->
     %% Ensure directory exists
     ok = filelib:ensure_dir(DbPath ++ "/"),
 
-    Options = [{create_if_missing, true}, {create_missing_column_families, true}],
+    Options0 = [{create_if_missing, true}, {create_missing_column_families, true}],
+    Options = case Env of
+        undefined -> Options0;
+        _ -> [{env, Env} | Options0]
+    end,
 
     CfDefs = [
         {?CF_DEFAULT, []},
