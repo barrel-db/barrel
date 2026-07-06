@@ -11,6 +11,7 @@ Start here.
 - [Query with BQL](guides/query-bql.md): one query language over documents, vectors, and keyword search.
 - [Run the REST server](guides/rest-server.md): `barrel_server` over HTTP.
 - [Synchronization](guides/synchronization.md): replication between databases.
+- [Timeline](guides/timeline.md): branch a database, work in isolation, merge back (incl. PITR).
 - [Distribute the umbrella apps](guides/distributing-apps.md): Hex packages, git mirrors, and consuming an app elsewhere.
 
 ## Architecture
