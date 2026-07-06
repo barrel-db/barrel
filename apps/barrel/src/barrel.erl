@@ -113,12 +113,15 @@
     vstore := atom(),
     embedding => barrel_embedding_policy:policy(),
     embed => term(),
-    dimensions => pos_integer()
+    dimensions => pos_integer(),
+    encryption => barrel_keyprovider:spec()
 }.
 %% Handle for a composed barrel database. The optional `embedding',
 %% `embed', and `dimensions' fields are present on record-mode databases
 %% (opened with the `embedding' option): the validated policy, the
 %% facade's barrel_embed state, and the resolved vector dimension.
+%% `encryption' carries the spec the database was opened with (branches
+%% inherit it).
 
 -type stream() :: term().
 %% Opaque attachment read/write stream handle.
@@ -146,6 +149,13 @@ open(Name) ->
 %% store keeps only vectors and indexes (text/metadata read through the
 %% record's documents), and BM25 defaults to the disk backend so it
 %% survives restarts. Without the option, behavior is unchanged.
+%%
+%% `encryption => disabled | default | #{provider => Mod}' encrypts the
+%% WHOLE logical database at rest under one key: the docdb stores take
+%% it as-is, and the facade resolves the key once (on the docdb
+%% keyspace, so a branch resolves its parent's key) and hands it to the
+%% vector store. Runtime config: pass it again on every open. Branches
+%% inherit the spec from the parent handle.
 -spec open(atom(), map()) -> {ok, db()} | {error, term()}.
 open(Name, Opts) when is_atom(Name), is_map(Opts) ->
     case maps:get(embedding, Opts, undefined) of
@@ -153,19 +163,29 @@ open(Name, Opts) when is_atom(Name), is_map(Opts) ->
         PolicyMap -> open_record(Name, Opts, PolicyMap)
     end.
 
-%% @private Today's composed open, unchanged.
+%% @private Today's composed open, plus encryption threading.
 open_plain(Name, Opts) ->
     DbBin = atom_to_binary(Name, utf8),
-    DocOpts = maps:get(docdb, Opts, #{}),
-    VecConfig = maps:get(vectordb, Opts, #{}),
+    EncSpec = maps:get(encryption, Opts, disabled),
+    DocOpts = put_encryption(maps:get(docdb, Opts, #{}), EncSpec),
+    VecConfig0 = maps:get(vectordb, Opts, #{}),
     case ensure_docdb(DbBin, DocOpts) of
         {ok, _DbPid} ->
-            case barrel_vectordb:start_link(VecConfig#{name => Name}) of
-                {ok, _StorePid} ->
-                    {ok, #{name => Name, docdb => DbBin, vstore => Name}};
-                {error, _} = VErr ->
+            case vec_crypto_config(DbBin, EncSpec, VecConfig0) of
+                {ok, VecConfig} ->
+                    case barrel_vectordb:start_link(VecConfig#{name => Name}) of
+                        {ok, _StorePid} ->
+                            {ok, with_encryption(#{name => Name,
+                                                   docdb => DbBin,
+                                                   vstore => Name},
+                                                 EncSpec)};
+                        {error, _} = VErr ->
+                            _ = barrel_docdb:close_db(DbBin),
+                            VErr
+                    end;
+                {error, _} = CErr ->
                     _ = barrel_docdb:close_db(DbBin),
-                    VErr
+                    CErr
             end;
         {error, _} = Err ->
             Err
@@ -188,54 +208,69 @@ do_open_record(Name, Opts, Policy) ->
     %% replication-applied writes with the embed tag (docdb stays
     %% ignorant of why). Note: a docdb already running as plain in this
     %% VM keeps its config; runtime config update is a follow-up.
+    EncSpec = maps:get(encryption, Opts, disabled),
     DocOpts0 = maps:get(docdb, Opts, #{}),
-    DocOpts = DocOpts0#{outbox_tags_on_replication => [?EMBED_TAG]},
+    DocOpts = put_encryption(DocOpts0#{outbox_tags_on_replication => [?EMBED_TAG]},
+                             EncSpec),
     VecConfig0 = maps:get(vectordb, Opts, #{}),
     case resolve_dimension(Policy, VecConfig0) of
         {ok, Dim} ->
             case ensure_docdb(DbBin, DocOpts) of
                 {ok, _DbPid} ->
                     ok = persist_policy(DbBin, Policy),
-                    case init_embed(Policy, Dim) of
-                        {ok, EmbedState} ->
-                            VecConfig = VecConfig0#{
-                                name => Name,
-                                dimension => Dim,
-                                %% Memory BM25 cannot rebuild without a
-                                %% text CF; record mode defaults to disk.
-                                bm25_backend =>
-                                    maps:get(bm25_backend, VecConfig0, disk),
-                                docstore => {barrel_record_docstore,
-                                             #{db => DbBin, policy => Policy}}
-                            },
-                            case barrel_vectordb:start_link(VecConfig) of
-                                {ok, _StorePid} ->
-                                    case start_indexer(Name, DbBin, Policy,
-                                                       EmbedState, Dim) of
-                                        ok ->
-                                            {ok, #{name => Name, docdb => DbBin,
-                                                   vstore => Name,
-                                                   embedding => Policy,
-                                                   embed => EmbedState,
-                                                   dimensions => Dim}};
-                                        {error, _} = IErr ->
-                                            _ = barrel_vectordb:stop(Name),
-                                            _ = barrel_docdb:close_db(DbBin),
-                                            IErr
-                                    end;
-                                {error, _} = VErr ->
-                                    _ = barrel_docdb:close_db(DbBin),
-                                    VErr
-                            end;
-                        {error, _} = EErr ->
+                    case vec_crypto_config(DbBin, EncSpec, VecConfig0) of
+                        {ok, VecConfig1} ->
+                            do_open_record_stores(Name, DbBin, Policy, Dim,
+                                                  VecConfig0, VecConfig1,
+                                                  EncSpec);
+                        {error, _} = CErr ->
                             _ = barrel_docdb:close_db(DbBin),
-                            EErr
+                            CErr
                     end;
                 {error, _} = Err ->
                     Err
             end;
         {error, _} = Err ->
             Err
+    end.
+
+do_open_record_stores(Name, DbBin, Policy, Dim, VecConfig0, VecConfig1,
+                      EncSpec) ->
+    case init_embed(Policy, Dim) of
+        {ok, EmbedState} ->
+            VecConfig = VecConfig1#{
+                name => Name,
+                dimension => Dim,
+                %% Memory BM25 cannot rebuild without a
+                %% text CF; record mode defaults to disk.
+                bm25_backend =>
+                    maps:get(bm25_backend, VecConfig0, disk),
+                docstore => {barrel_record_docstore,
+                             #{db => DbBin, policy => Policy}}
+            },
+            case barrel_vectordb:start_link(VecConfig) of
+                {ok, _StorePid} ->
+                    case start_indexer(Name, DbBin, Policy,
+                                       EmbedState, Dim) of
+                        ok ->
+                            {ok, with_encryption(#{name => Name, docdb => DbBin,
+                                                   vstore => Name,
+                                                   embedding => Policy,
+                                                   embed => EmbedState,
+                                                   dimensions => Dim},
+                                                 EncSpec)};
+                        {error, _} = IErr ->
+                            _ = barrel_vectordb:stop(Name),
+                            _ = barrel_docdb:close_db(DbBin),
+                            IErr
+                    end;
+                {error, _} = VErr ->
+                    _ = barrel_docdb:close_db(DbBin),
+                    VErr
+            end;
+        {error, _} = EErr ->
+            _ = barrel_docdb:close_db(DbBin),
+            EErr
     end.
 
 %% @doc Close a composed barrel database (indexer, then vector store,
@@ -286,10 +321,11 @@ branch(#{docdb := ParentBin} = Db, BranchName, Opts)
 %% @private The branch's facade side: a fresh vector store; record
 %% mode re-applies the parent's policy and backfills the index from
 %% the embeddings stored in doc bodies (see barrel_record_backfill).
-open_branch(#{embedding := Policy}, BranchName, _BranchBin, Opts) ->
-    OpenOpts = #{embedding => Policy,
-                 vectordb => maps:get(vectordb, Opts, #{}),
-                 docdb => maps:get(docdb, Opts, #{})},
+open_branch(#{embedding := Policy} = Db, BranchName, _BranchBin, Opts) ->
+    OpenOpts = with_encryption(#{embedding => Policy,
+                                 vectordb => maps:get(vectordb, Opts, #{}),
+                                 docdb => maps:get(docdb, Opts, #{})},
+                               maps:get(encryption, Db, disabled)),
     case open(BranchName, OpenOpts) of
         {ok, #{docdb := BranchBin, vstore := VStore,
                embedding := BranchPolicy, embed := Embed,
@@ -312,9 +348,11 @@ open_branch(#{embedding := Policy}, BranchName, _BranchBin, Opts) ->
         {error, _} = Err ->
             Err
     end;
-open_branch(_Db, BranchName, _BranchBin, Opts) ->
-    open(BranchName, #{vectordb => maps:get(vectordb, Opts, #{}),
-                       docdb => maps:get(docdb, Opts, #{})}).
+open_branch(Db, BranchName, _BranchBin, Opts) ->
+    open(BranchName,
+         with_encryption(#{vectordb => maps:get(vectordb, Opts, #{}),
+                           docdb => maps:get(docdb, Opts, #{})},
+                         maps:get(encryption, Db, disabled))).
 
 %% @doc Merge a branch's edits back into its parent (see
 %% barrel_docdb:merge_branch/2). When the parent is a record-mode
@@ -796,6 +834,30 @@ ensure_docdb(DbBin, DocOpts) ->
             {ok, Pid};
         {error, _} ->
             barrel_docdb:create_db(DbBin, DocOpts)
+    end.
+
+put_encryption(DocOpts, disabled) -> DocOpts;
+put_encryption(DocOpts, Spec) -> DocOpts#{encryption => Spec}.
+
+with_encryption(Map, disabled) -> Map;
+with_encryption(Map, Spec) -> Map#{encryption => Spec}.
+
+%% The vectordb side of a composed db encrypts under the SAME key as
+%% its docdb: one logical database, one key. The key resolves on the
+%% docdb KEYSPACE, so a branch's fresh vector store gets its parent's
+%% key. Vectordb never calls the provider itself.
+vec_crypto_config(_DbBin, disabled, VecConfig) ->
+    {ok, VecConfig};
+vec_crypto_config(DbBin, Spec, VecConfig) ->
+    {ok, Info} = barrel_docdb:db_info(DbBin),
+    Keyspace = maps:get(keyspace, Info, DbBin),
+    case barrel_keyprovider:key_for_db(Spec, Keyspace) of
+        {ok, plaintext} ->
+            {ok, VecConfig};
+        {ok, Key} ->
+            {ok, VecConfig#{crypto => #{key => Key}}};
+        {error, Reason} ->
+            {error, {encryption_key_error, Reason}}
     end.
 
 %%====================================================================
