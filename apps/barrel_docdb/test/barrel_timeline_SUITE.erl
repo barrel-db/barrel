@@ -23,7 +23,9 @@
     inherited_rep_checkpoints_inert/1,
     delete_closed_branch_removes_files/1,
     delete_parent_branch_survives/1,
-    list_branches_open_only/1
+    list_branches_open_only/1,
+    branch_sweeper_independent_floor/1,
+    merge_after_branch_sweep/1
 ]).
 
 -include_lib("common_test/include/ct.hrl").
@@ -36,7 +38,8 @@ all() ->
      fork_branch_of_branch_rejected, fork_dir_exists_error,
      fork_channels_inherited, branch_reopen_resumes_channels,
      inherited_rep_checkpoints_inert, delete_closed_branch_removes_files,
-     delete_parent_branch_survives, list_branches_open_only].
+     delete_parent_branch_survives, list_branches_open_only,
+     branch_sweeper_independent_floor, merge_after_branch_sweep].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(barrel_docdb),
@@ -526,5 +529,68 @@ list_branches_open_only(Config) ->
         _ = barrel_docdb:delete_db(Branch1),
         _ = barrel_docdb:delete_db(Branch2, #{data_dir =>
                                               ?config(data_dir, Config)})
+    end,
+    ok.
+
+%%====================================================================
+%% Retention interplay
+%%====================================================================
+
+branch_sweeper_independent_floor(Config) ->
+    Db0 = ?config(db, Config),
+    DataDir = ?config(data_dir, Config),
+    Branch = <<Db0/binary, "_b">>,
+    ok = barrel_docdb:close_db(Db0),
+    {ok, _} = barrel_docdb:create_db(Db0, #{data_dir => DataDir,
+                                            retention_period => 1}),
+    {ok, _} = barrel_docdb:put_doc(Db0, #{<<"id">> => <<"a">>}),
+    {ok, _} = barrel_docdb:branch_db(Db0, Branch, #{}),
+    try
+        timer:sleep(1100),
+        %% sweeping the BRANCH advances its own floor only
+        {ok, _} = barrel_docdb:sweep_retention(Branch),
+        {ok, BInfo} = barrel_docdb:db_info(Branch),
+        ?assertNotEqual(undefined,
+                        maps:get(history_floor, BInfo, undefined)),
+        {ok, PInfo} = barrel_docdb:db_info(Db0),
+        ?assertEqual(undefined,
+                     maps:get(history_floor, PInfo, undefined)),
+        %% and sweeping the parent leaves the branch's floor alone
+        {ok, _} = barrel_docdb:sweep_retention(Db0),
+        {ok, BInfo2} = barrel_docdb:db_info(Branch),
+        ?assertEqual(maps:get(history_floor, BInfo),
+                     maps:get(history_floor, BInfo2))
+    after
+        _ = barrel_docdb:delete_db(Branch)
+    end,
+    ok.
+
+merge_after_branch_sweep(Config) ->
+    Db0 = ?config(db, Config),
+    DataDir = ?config(data_dir, Config),
+    Branch = <<Db0/binary, "_b">>,
+    ok = barrel_docdb:close_db(Db0),
+    {ok, _} = barrel_docdb:create_db(Db0, #{data_dir => DataDir,
+                                            retention_period => 1}),
+    {ok, #{<<"rev">> := DR}} = barrel_docdb:put_doc(
+        Db0, #{<<"id">> => <<"doomed">>}),
+    {ok, _} = barrel_docdb:branch_db(Db0, Branch, #{}),
+    try
+        {ok, _} = barrel_docdb:put_doc(Branch, #{<<"id">> => <<"kept">>,
+                                                 <<"v">> => 1}),
+        {ok, _} = barrel_docdb:delete_doc(Branch, <<"doomed">>,
+                                          #{rev => DR}),
+        timer:sleep(1100),
+        %% the sweep forgets the expired tombstone but keeps live state
+        {ok, _} = barrel_docdb:sweep_retention(Branch),
+        {ok, Report} = barrel_docdb:merge_branch(Branch, #{}),
+        %% live branch edits still converge after the sweep
+        {ok, #{<<"v">> := 1}} = barrel_docdb:get_doc(Db0, <<"kept">>),
+        %% the forgotten delete never ships: the documented hazard
+        %% behind "merge at least once per retention window"
+        ?assertMatch(#{docs_written := 1}, Report),
+        {ok, _} = barrel_docdb:get_doc(Db0, <<"doomed">>)
+    after
+        _ = barrel_docdb:delete_db(Branch)
     end,
     ok.
