@@ -40,6 +40,9 @@
 %% Retention sweep (also runs on a timer; exposed for tests and tools)
 -export([sweep_retention/1]).
 
+%% Timeline fork (checkpoint both stores from inside the writer)
+-export([checkpoint_to/3]).
+
 %% Replication API
 -export([
     put_version/5,
@@ -102,6 +105,15 @@ start_link(Name, Config) ->
 -spec info(pid()) -> {ok, map()} | {error, term()}.
 info(Pid) ->
     gen_server:call(Pid, info).
+
+%% @doc Checkpoint both stores into a branch's directories, minting
+%% the fork instant inside the writer: every write applied before this
+%% call is in the checkpoint and every later one has a larger HLC.
+%% Blocks the writer for the memtable flush + hard links.
+-spec checkpoint_to(pid(), string(), string()) ->
+    {ok, barrel_hlc:timestamp()} | {error, term()}.
+checkpoint_to(Pid, DocsPath, AttPath) ->
+    gen_server:call(Pid, {checkpoint_to, DocsPath, AttPath}, infinity).
 
 %% @doc Get the document store reference
 -spec get_store_ref(pid()) -> {ok, barrel_store_rocksdb:db_ref()} | {error, term()}.
@@ -400,6 +412,20 @@ handle_call(info, _From, #state{name = Name, keyspace = Keyspace,
         _ -> Info0#{parent => Parent, fork_hlc => ForkHlc}
     end,
     {reply, {ok, Info}, State};
+
+handle_call({checkpoint_to, DocsPath, AttPath}, _From,
+            #state{store_ref = StoreRef, att_ref = AttRef} = State) ->
+    ForkHlc = barrel_hlc:new_hlc(),
+    Result = case barrel_store_rocksdb:checkpoint(StoreRef, DocsPath) of
+        ok ->
+            case barrel_att_store:checkpoint(AttRef, AttPath) of
+                ok -> {ok, ForkHlc};
+                {error, _} = AttErr -> AttErr
+            end;
+        {error, _} = Err ->
+            Err
+    end,
+    {reply, Result, State};
 
 handle_call(get_store_ref, _From, #state{store_ref = StoreRef} = State) ->
     {reply, {ok, StoreRef}, State};

@@ -96,5 +96,10 @@
 -callback rebuild_feed(AttRef :: map(), DbName :: binary()) ->
     {ok, map()} | {error, term()}.
 
+%% Hard-link snapshot of the whole attachment store into a new
+%% directory (timeline forks). Backends without it cannot be branched.
+-callback checkpoint(AttRef :: map(), Path :: string()) ->
+    ok | {error, term()}.
+
 -optional_callbacks([delete/5, att_changes/4, att_floor/2,
-                     sweep_att_feed/3, rebuild_feed/2]).
+                     sweep_att_feed/3, rebuild_feed/2, checkpoint/2]).

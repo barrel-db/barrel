@@ -8,7 +8,7 @@
 -behaviour(barrel_store).
 
 %% barrel_store callbacks
--export([open/2, close/1]).
+-export([open/2, close/1, checkpoint/2]).
 -export([put/3, put/4, get/2, key_exists/2, multi_key_exists/2, multi_get/2, delete/2]).
 -export([merge/3]).
 -export([write_batch/2, write_batch/3]).
@@ -114,6 +114,14 @@ open(Path, Options) ->
 -spec close(db_ref()) -> ok.
 close(#{ref := Ref}) ->
     rocksdb:close(Ref).
+
+%% @doc Hard-link snapshot of the whole database (all column
+%% families) into a new directory. RocksDB flushes the memtable
+%% itself; the target path must not exist. The checkpoint dir is a
+%% fully independent database.
+-spec checkpoint(db_ref(), string()) -> ok | {error, term()}.
+checkpoint(#{ref := Ref}, Path) ->
+    rocksdb:checkpoint(Ref, Path).
 
 %% @doc Put a key-value pair
 -spec put(db_ref(), binary(), binary()) -> ok | {error, term()}.

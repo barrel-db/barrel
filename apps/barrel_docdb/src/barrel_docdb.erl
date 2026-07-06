@@ -64,7 +64,13 @@
     delete_db/1,
     db_info/1,
     db_pid/1,
-    list_dbs/0
+    list_dbs/0,
+    validate_db_name/1
+]).
+
+%% Timeline (branch, merge)
+-export([
+    branch_db/3
 ]).
 
 %% Document CRUD
@@ -293,6 +299,13 @@ validate_db_name_chars(_) ->
 -spec open_db(binary()) -> {ok, pid()} | {error, term()}.
 open_db(Name) when is_binary(Name) ->
     get_db(Name).
+
+%% @doc Fork a database into a new branch (timeline). See
+%% barrel_timeline:branch_db/3 for the options.
+-spec branch_db(binary(), binary(), map()) ->
+    {ok, pid()} | {error, term()}.
+branch_db(Parent, BranchName, Opts) ->
+    barrel_timeline:branch_db(Parent, BranchName, Opts).
 
 %% @doc Close a database.
 %%

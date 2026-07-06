@@ -22,7 +22,7 @@
 -define(DEFAULT_CHUNK_SIZE, 65536).       %% 64 KB
 
 %% API
--export([open/2, close/1]).
+-export([open/2, close/1, checkpoint/2]).
 -export([put/5, put/6, get/4, delete/4, delete/5]).
 -export([delete_all/3]).
 -export([fold/5]).
@@ -87,6 +87,12 @@ open(Path, Options) ->
 
 %% @doc Close the attachment store
 -spec close(att_ref()) -> ok.
+%% @doc Hard-link snapshot into Path (timeline forks); the target
+%% must not exist.
+-spec checkpoint(att_ref(), string()) -> ok | {error, term()}.
+checkpoint(#{ref := Ref}, Path) ->
+    rocksdb:checkpoint(Ref, Path).
+
 close(#{ref := Ref}) ->
     rocksdb:close(Ref).
 

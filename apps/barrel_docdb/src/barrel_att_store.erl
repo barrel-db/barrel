@@ -31,6 +31,7 @@
 %% Sync support (optional backend callbacks; see barrel_att_backend)
 -export([delete/5, att_changes/4, att_floor/2, sweep_att_feed/3,
          rebuild_feed/2, supports_sync/1]).
+-export([checkpoint/2]).
 
 -export_type([att_ref/0, att_stream/0]).
 
@@ -188,6 +189,17 @@ supports_sync(AttRef) ->
     B = backend(AttRef),
     _ = code:ensure_loaded(B),
     erlang:function_exported(B, att_changes, 4).
+
+%% @doc Hard-link snapshot of the attachment store into Path
+%% (timeline forks). {error, unsupported} for backends without it.
+-spec checkpoint(att_ref(), string()) -> ok | {error, term()}.
+checkpoint(AttRef, Path) ->
+    B = backend(AttRef),
+    _ = code:ensure_loaded(B),
+    case erlang:function_exported(B, checkpoint, 2) of
+        true -> B:checkpoint(AttRef, Path);
+        false -> {error, unsupported}
+    end.
 
 backend(#{backend := B}) -> B;
 backend(_) -> ?DEFAULT_BACKEND.
