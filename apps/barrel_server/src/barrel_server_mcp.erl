@@ -9,9 +9,11 @@
 %%% - `allow_missing_origin' - accept requests without an Origin
 %%%   header (default true; non-browser MCP clients send none)
 %%%
-%%% Auth: the global bearer middleware covers `/mcp' like every other
-%%% route. Tools and resources register through barrel_mcp's registry
-%%% (see barrel_server_mcp_tools in later steps).
+%%% Auth: `/mcp' is exempt from the global bearer middleware and
+%%% authenticates through barrel_server_mcp_auth instead, which
+%%% covers the same server tokens plus capability (`bsp_') tokens.
+%%% Tools and resources register through barrel_mcp's registry (see
+%%% barrel_server_mcp_tools in later steps).
 %%% @end
 %%%-------------------------------------------------------------------
 -module(barrel_server_mcp).
@@ -46,6 +48,7 @@ routes() ->
 handler_opts() ->
     Cfg = config(),
     #{
+        auth => #{provider => barrel_server_mcp_auth},
         allowed_origins => maps:get(allowed_origins, Cfg, any),
         allow_missing_origin => maps:get(allow_missing_origin, Cfg, true)
     }.

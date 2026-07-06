@@ -20,7 +20,7 @@
 -module(barrel_server_auth).
 -behaviour(livery_middleware).
 
--export([state_from_env/0]).
+-export([state_from_env/0, hashes/0]).
 -export([call/3]).
 
 %% @doc Middleware state from the app env; undefined = no auth.
@@ -39,9 +39,23 @@ state_from_env() ->
             undefined
     end.
 
+%% @doc The configured token hashes (undefined = open server). The
+%% MCP auth provider checks server bearers against the same set.
+-spec hashes() -> [binary()] | undefined.
+hashes() ->
+    case state_from_env() of
+        undefined -> undefined;
+        #{hashes := Hashes} -> Hashes
+    end.
+
 call(Req, Next, #{hashes := Hashes}) ->
     case livery_req:path(Req) of
         <<"/health">> ->
+            Next(Req);
+        <<"/mcp">> ->
+            %% the MCP endpoint authenticates through its own provider
+            %% (barrel_server_mcp_auth), which covers the same server
+            %% tokens plus capability tokens
             Next(Req);
         Path ->
             case livery_ext:bearer_token(Req) of
