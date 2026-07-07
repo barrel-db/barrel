@@ -14,9 +14,14 @@ export { Database } from "./db.js";
 export type {
   OpenOptions,
   RemoteOptions,
+  TabsOptions,
   SyncOptions,
   LiveOptions,
 } from "./db.js";
+
+export { BroadcastChannelBus, LeaderChangedError } from "./tabs/channel.js";
+export type { Broadcaster } from "./tabs/channel.js";
+export type { LockManager } from "./tabs/leader.js";
 
 export { MemoryAdapter } from "./store/memory.js";
 export type {
