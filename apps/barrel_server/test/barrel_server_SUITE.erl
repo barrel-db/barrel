@@ -18,6 +18,7 @@
     t_vector_search/1,
     t_changes_json/1,
     t_changes_sse/1,
+    t_changes_continuous/1,
     t_query_ndjson/1,
     t_query_get/1,
     t_query_params_json/1,
@@ -36,6 +37,7 @@
 all() ->
     [t_db_lifecycle, t_doc_crud, t_bulk, t_attachment,
      t_vector_search, t_changes_json, t_changes_sse,
+     t_changes_continuous,
      t_query_ndjson, t_query_get, t_query_params_json,
      t_query_parse_error, t_query_subscribe_requires_sse,
      t_query_subscribe_sse, t_not_found, t_no_atom_leak].
@@ -134,6 +136,22 @@ t_changes_sse(Config) ->
                             [{<<"accept">>, <<"text/event-stream">>}]),
     ?assertNotEqual(nomatch, binary:match(Body, <<"data: ">>)),
     ?assertNotEqual(nomatch, binary:match(Body, <<"event: last">>)),
+    ok.
+
+t_changes_continuous(Config) ->
+    B = base(Config),
+    %% a fresh db so the stream content is controlled
+    {201, _} = req(put, B ++ "/db/contdb", <<>>),
+    Url = B ++ "/db/contdb/changes?feed=continuous",
+    {ok, Client} = hackney:request(
+        get, list_to_binary(Url),
+        [{<<"accept">>, <<"text/event-stream">>}], <<>>, [async]),
+    %% write a doc after subscribing; it arrives on the open stream as a
+    %% data line carrying the id
+    {201, _} = req_json(put, B ++ "/db/contdb/doc/c1",
+                        #{<<"n">> => 1}),
+    ok = wait_sse(Client, <<"\"id\":\"c1\"">>, <<>>),
+    hackney:close(Client),
     ok.
 
 t_query_ndjson(Config) ->

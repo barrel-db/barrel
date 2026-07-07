@@ -88,6 +88,8 @@
     changes/3,
     subscribe/2,
     subscribe/3,
+    subscribe_ack/2,
+    subscribe_stop/1,
     hlc_encode/1,
     hlc_decode/1
 ]).
@@ -772,6 +774,16 @@ subscribe(#{docdb := DbBin}, Since) ->
 -spec subscribe(db(), term(), map()) -> {ok, pid()} | {error, term()}.
 subscribe(#{docdb := DbBin}, Since, Opts) ->
     barrel_docdb:subscribe_changes(DbBin, Since, Opts).
+
+%% @doc Acknowledge a push-mode batch (drives backpressure).
+-spec subscribe_ack(pid(), reference()) -> ok.
+subscribe_ack(Stream, ReqId) ->
+    barrel_changes_stream:ack(Stream, ReqId).
+
+%% @doc Stop a changes stream started with subscribe/2,3.
+-spec subscribe_stop(pid()) -> ok.
+subscribe_stop(Stream) ->
+    barrel_changes_stream:stop(Stream).
 
 %% @doc Encode an HLC timestamp (the cursor returned by {@link changes/2}) as a
 %% JSON/URL-safe string, for transports that serialise the changes feed.

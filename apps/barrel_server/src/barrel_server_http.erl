@@ -721,24 +721,74 @@ change_event(#{action := Action, id := Id} = Change) ->
 changes(Req) ->
     with_db(Req, fun(Db) ->
         Since = since_from_query(Req),
-        {ok, Changes, Last} = barrel:changes(Db, Since),
-        case wants_sse(Req) of
-            true ->
-                livery_resp:sse(200, fun(Emit) ->
-                    lists:foreach(
-                        fun(C) ->
-                            Emit(#{data => json:encode(sanitize_change(C))})
-                        end, Changes),
-                    Emit(#{event => <<"last">>, data => barrel:hlc_encode(Last)}),
-                    ok
-                end);
-            false ->
-                json_resp(200, #{
-                    changes => [sanitize_change(C) || C <- Changes],
-                    last => barrel:hlc_encode(Last)
-                })
+        case param(<<"feed">>, Req) of
+            <<"continuous">> ->
+                changes_continuous(Db, Since);
+            _ ->
+                changes_snapshot(Db, Since, wants_sse(Req))
         end
     end).
+
+%% One-shot: fold the current window, then close (SSE or JSON).
+changes_snapshot(Db, Since, Sse) ->
+    {ok, Changes, Last} = barrel:changes(Db, Since),
+    case Sse of
+        true ->
+            livery_resp:sse(200, fun(Emit) ->
+                lists:foreach(
+                    fun(C) ->
+                        Emit(#{data => json:encode(sanitize_change(C))})
+                    end, Changes),
+                Emit(#{event => <<"last">>, data => barrel:hlc_encode(Last)}),
+                ok
+            end);
+        false ->
+            json_resp(200, #{
+                changes => [sanitize_change(C) || C <- Changes],
+                last => barrel:hlc_encode(Last)
+            })
+    end.
+
+%% Continuous: hold an SSE stream open, driven by a push subscription.
+%% Each change is a data line carrying its own hlc cursor; there is no
+%% terminal "last" event. Reuses the query SUBSCRIBE pattern (ack for
+%% backpressure, 30s ping heartbeat, stop on a dead client).
+changes_continuous(Db, Since) ->
+    livery_resp:sse(200, fun(Emit) ->
+        case barrel:subscribe(Db, Since, #{mode => push, owner => self()}) of
+            {ok, Stream} ->
+                changes_loop(Stream, Emit);
+            {error, Reason} ->
+                _ = Emit(#{event => <<"error">>,
+                          data => json:encode(#{error => err_bin(Reason)})}),
+                ok
+        end
+    end).
+
+changes_loop(Stream, Emit) ->
+    receive
+        {changes, ReqId, Changes} ->
+            case emit_changes(Changes, Emit) of
+                ok ->
+                    ok = barrel:subscribe_ack(Stream, ReqId),
+                    changes_loop(Stream, Emit);
+                stop ->
+                    barrel:subscribe_stop(Stream)
+            end
+    after 30000 ->
+        case Emit(#{event => <<"ping">>, data => <<"{}">>}) of
+            ok -> changes_loop(Stream, Emit);
+            {error, _} -> barrel:subscribe_stop(Stream)
+        end
+    end.
+
+emit_changes([], _Emit) ->
+    ok;
+emit_changes([C | Rest], Emit) ->
+    case Emit(#{data => json:encode(sanitize_change(C))}) of
+        ok -> emit_changes(Rest, Emit);
+        {error, _} -> stop
+    end.
 
 %%====================================================================
 %% Attachments
