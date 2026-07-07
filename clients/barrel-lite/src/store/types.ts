@@ -42,4 +42,23 @@ export interface DbMeta {
   clock: { wall: string; logical: number };
   /** Pull cursors keyed by replication identity. */
   checkpoints: Record<string, string>;
+  /** Attachment feed cursors keyed by replication identity. */
+  attCheckpoints?: Record<string, string>;
+}
+
+/**
+ * One attachment index entry: the local mirror of the server's feed
+ * row, correlated to a document only by (id, name). The blob bytes live
+ * in the content-addressed blob store under `digest`. origin is the LWW
+ * key (a standard-base64 HLC). A tombstone has op "delete" and no digest.
+ */
+export interface AttRef {
+  id: string;
+  name: string;
+  digest: string;
+  length: number;
+  contentType: string;
+  origin: string;
+  op: "put" | "delete";
+  dirty: boolean;
 }

@@ -12,14 +12,15 @@
  */
 import { base64Decode, base64Encode } from "../codec/base64.js";
 import { randomSourceId, utf8Decode, utf8Encode } from "../codec/bytes.js";
-import { compareHlc, type HlcClock } from "../codec/hlc.js";
+import { compareHlc, encodeHlc, type HlcClock } from "../codec/hlc.js";
 import { versionFromToken, versionToToken } from "../codec/version.js";
 import { vvBump, vvDecode, vvEncode, vvNew } from "../codec/vv.js";
 import type { JsonObject } from "../json.js";
-import type { DbMeta, DocRecord, StorageArea } from "./types.js";
+import type { AttRef, DbMeta, DocRecord, StorageArea } from "./types.js";
 
 const DOCS_BLOB = "docs.json";
 const META_BLOB = "meta.json";
+const ATTREFS_BLOB = "attrefs.json";
 const SNAPSHOT_VERSION = 1;
 
 interface DocsSnapshot {
@@ -27,10 +28,20 @@ interface DocsSnapshot {
   docs: DocRecord[];
 }
 
+interface AttRefsSnapshot {
+  v: number;
+  attrefs: AttRef[];
+}
+
+function attRefKey(id: string, name: string): string {
+  return `${encodeURIComponent(id)}/${encodeURIComponent(name)}`;
+}
+
 export class LocalStore {
   private readonly area: StorageArea;
   private readonly clock: HlcClock;
   private readonly docs = new Map<string, DocRecord>();
+  private readonly attrefs = new Map<string, AttRef>();
   private meta: DbMeta;
   private needsFlush = false;
 
@@ -61,7 +72,20 @@ export class LocalStore {
       const snap = JSON.parse(utf8Decode(docsBytes)) as DocsSnapshot;
       for (const rec of snap.docs) store.docs.set(rec.id, rec);
     }
+    const attrefsBytes = await area.read(ATTREFS_BLOB);
+    if (attrefsBytes) {
+      const snap = JSON.parse(utf8Decode(attrefsBytes)) as AttRefsSnapshot;
+      for (const ref of snap.attrefs) {
+        store.attrefs.set(attRefKey(ref.id, ref.name), ref);
+      }
+    }
     return store;
+  }
+
+  /** A fresh standard-base64 origin HLC (attachment LWW key), advancing
+   * the shared clock so it stays monotonic with document writes. */
+  mintOrigin(): string {
+    return base64Encode(encodeHlc(this.clock.now()), "standard");
   }
 
   get sourceId(): string {
@@ -155,6 +179,47 @@ export class LocalStore {
     this.needsFlush = true;
   }
 
+  //==================================================================
+  // Attachment index
+  //==================================================================
+
+  getAttRef(id: string, name: string): AttRef | undefined {
+    return this.attrefs.get(attRefKey(id, name));
+  }
+
+  allAttRefs(): AttRef[] {
+    return [...this.attrefs.values()];
+  }
+
+  dirtyAttRefs(): AttRef[] {
+    return this.allAttRefs().filter((r) => r.dirty);
+  }
+
+  putAttRef(ref: AttRef): void {
+    this.attrefs.set(attRefKey(ref.id, ref.name), ref);
+    this.needsFlush = true;
+  }
+
+  clearAttRefDirty(id: string, name: string, origin: string): void {
+    const ref = this.attrefs.get(attRefKey(id, name));
+    if (ref && ref.dirty && ref.origin === origin) {
+      this.attrefs.set(attRefKey(id, name), { ...ref, dirty: false });
+      this.needsFlush = true;
+    }
+  }
+
+  getAttCheckpoint(key: string): string | undefined {
+    return this.meta.attCheckpoints?.[key];
+  }
+
+  setAttCheckpoint(key: string, cursor: string): void {
+    this.meta = {
+      ...this.meta,
+      attCheckpoints: { ...(this.meta.attCheckpoints ?? {}), [key]: cursor },
+    };
+    this.needsFlush = true;
+  }
+
   /** True if there are unpersisted changes since the last flush. */
   get dirtyForFlush(): boolean {
     return this.needsFlush;
@@ -170,6 +235,8 @@ export class LocalStore {
     const snap: DocsSnapshot = { v: SNAPSHOT_VERSION, docs: this.allDocsRaw() };
     await this.area.write(DOCS_BLOB, utf8Encode(JSON.stringify(snap)));
     await this.area.write(META_BLOB, utf8Encode(JSON.stringify(this.meta)));
+    const attSnap: AttRefsSnapshot = { v: SNAPSHOT_VERSION, attrefs: this.allAttRefs() };
+    await this.area.write(ATTREFS_BLOB, utf8Encode(JSON.stringify(attSnap)));
     this.needsFlush = false;
   }
 
