@@ -8,7 +8,10 @@ export const TOKEN = process.env.BARREL_TOKEN ?? "itest-token";
 let counter = 0;
 export function uniqueDb(prefix = "lit"): string {
   counter += 1;
-  return `${prefix}_${Date.now().toString(36)}_${counter}`;
+  // a random suffix keeps names unique across vitest's isolated files
+  // (each file's counter resets and Date.now() can coincide)
+  const rand = Math.floor(Math.random() * 0xffffff).toString(36);
+  return `${prefix}_${Date.now().toString(36)}_${counter}_${rand}`;
 }
 
 function authHeaders(token = TOKEN): Record<string, string> {
