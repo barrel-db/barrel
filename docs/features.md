@@ -41,6 +41,8 @@ them; each underlying app stays usable on its own.
 | REST/JSON server | Opt-in | `barrel_server` over `livery`, `rebar3 as server`. See [rest-server](guides/rest-server.md). |
 | Agent layer (spaces, capabilities, sessions, handoffs) | Ready | `barrel_spaces`; capability bearers on REST and MCP. See [spaces](guides/spaces.md). |
 | MCP endpoint (tools, resources, live queries) | Opt-in | `/mcp` in `barrel_server`, on by default there. See [mcp](guides/mcp.md). |
+| Browser client (barrel-lite) | Ready | Offline-first TypeScript client (`clients/barrel-lite`): OPFS store, HLC-stamped writes, sync over the wire, multi-tab. Attachments, local BQL, and vectors are later sub-phases. See [barrel-lite](guides/barrel-lite.md). |
+| CORS + capability tokens on `/db` | Ready | CORS middleware and `bsp_` bearers scoped to their space's `/db` routes, so browsers can sync. See [rest-server](guides/rest-server.md). |
 | gRPC, HTTP/3, WebTransport, unix socket, OpenAPI | Planned | Later transports on `barrel_server`. |
 | SQL API, agentfs | Planned | Later. |
 

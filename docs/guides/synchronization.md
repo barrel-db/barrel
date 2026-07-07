@@ -192,6 +192,14 @@ wire). To couple clocks by hand:
 {ok, _Merged} = barrel_docdb:sync_hlc(RemoteHlc).
 ```
 
+## Browser clients
+
+The same `/db/:db/_sync/*` wire drives `barrel-lite`, the TypeScript browser
+client: it keeps an offline-first OPFS store, stamps local mutations with its
+own source id, and pushes and pulls over this protocol (adaptive polling, not
+SSE). Enable CORS and issue a capability token for it. See
+[barrel-lite](barrel-lite.md).
+
 ## What is not covered yet
 
 - **TLS serving.** `barrel_server` listens on plain HTTP; the client can

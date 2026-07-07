@@ -81,10 +81,34 @@ Unconfigured, the server is open. Set bearer tokens to lock it:
 Every route except `/health` then requires `Authorization: Bearer <token>`.
 Two kinds of bearer: global tokens (the list above, full access, a list
 makes rotation possible) and capability tokens (`bsp_...`, issued per space
-by `barrel_caps`), which authenticate only the `/spaces` and `/handoffs`
-routes and are checked per route against their space and rights. `/mcp`
-authenticates through its own provider covering both kinds. See
-[spaces](spaces.md) and [mcp](mcp.md).
+by `barrel_caps`). A capability token authenticates the `/spaces` and
+`/handoffs` routes, and its own space's `/db/:db/*` routes when `:db` is the
+granted space: `read` opens the pull leg (GETs, `changes`, `query`,
+`search`, and the `_sync` reads), `write` adds document writes and the push
+leg (`_sync/doc` PUT, `_sync/local` and `_sync/att` writes). Database
+lifecycle (`PUT`/`DELETE /db/:db`), `_timeline`, and any unmapped route stay
+off-limits to capability tokens (403, fail closed); dead or wrong-space
+tokens answer 401. `/mcp` authenticates through its own provider covering
+both kinds. See [spaces](spaces.md), [mcp](mcp.md), and
+[barrel-lite](barrel-lite.md).
+
+## CORS
+
+Browser clients need CORS. Unconfigured, no CORS headers are sent; set an
+origin policy to enable it:
+
+```erlang
+{barrel_server, [{cors, #{
+    origins => '*',                        %% or [<<"https://app.example">>]
+    expose  => [<<"x-barrel-hlc">>,        %% default; the client folds this
+                <<"x-barrel-digest">>, <<"x-barrel-att-length">>],
+    max_age => 600
+}}]}
+```
+
+Preflight `OPTIONS` requests are answered without a bearer, and error
+responses still carry CORS headers so browser JS can read them. `/mcp` keeps
+its own origin policy. See [barrel-lite](barrel-lite.md).
 
 ## Examples
 
@@ -115,5 +139,7 @@ $ curl localhost:8080/db/mydb/changes
 - Databases open with the default vector store (768-dim, BM25 off). The
   `/search/bm25` and `/search/hybrid` endpoints need BM25 enabled, and hybrid
   needs an embedder.
+- Optimistic concurrency: `PUT /db/:db/doc/:id` with a `_rev` in the body that
+  is not the current winner answers 409 `{"error":"conflict"}`.
 - gRPC, HTTP/3, WebTransport, a unix-socket adapter, OpenAPI, and replication
   over the wire are later phases.

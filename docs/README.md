@@ -16,6 +16,7 @@ Start here.
 - [Audit and provenance](guides/audit-provenance.md): who wrote what, when, and past versions.
 - [Spaces, sessions, and handoffs](guides/spaces.md): the agent layer with capability tokens.
 - [MCP endpoint](guides/mcp.md): tools, resources, and live queries for MCP clients.
+- [barrel-lite (browser client)](guides/barrel-lite.md): an offline-first TypeScript client that syncs over the wire.
 - [Distribute the umbrella apps](guides/distributing-apps.md): Hex packages, git mirrors, and consuming an app elsewhere.
 
 ## Architecture
