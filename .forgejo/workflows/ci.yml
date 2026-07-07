@@ -6,6 +6,7 @@ name: CI
 #               catches hidden cross-app dependencies before publishing
 #   - faiss:    optional FAISS backend leg (needs the FAISS C++ library)
 #   - server:   network server leg (pulls livery + transports)
+#   - barrel-lite: TypeScript client (typecheck, build, unit tests)
 # Dev target is OTP 29; CI pins OTP 28 (image guaranteed, code builds on both).
 
 on:
@@ -102,6 +103,39 @@ jobs:
           path: ~/.cache/rebar3
           key: rebar3-faiss-${{ hashFiles('rebar.lock') }}
       - run: rebar3 as faiss compile
+
+  barrel-lite:
+    name: barrel-lite (TS client)
+    runs-on: ubuntu-latest
+    container:
+      image: erlang:28
+    steps:
+      - uses: actions/checkout@v4
+      # Erlang base image so later stages can boot barrel_server for
+      # integration tests; Node rides on top via nodesource.
+      - name: Node toolchain
+        run: |
+          apt-get update
+          apt-get install -y curl ca-certificates
+          curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+          apt-get install -y nodejs
+          git config --global --add safe.directory '*'
+      - uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: npm-barrel-lite-${{ hashFiles('clients/barrel-lite/package-lock.json') }}
+      - name: Install
+        working-directory: clients/barrel-lite
+        run: npm ci
+      - name: Typecheck
+        working-directory: clients/barrel-lite
+        run: npm run typecheck
+      - name: Build
+        working-directory: clients/barrel-lite
+        run: npm run build
+      - name: Unit tests
+        working-directory: clients/barrel-lite
+        run: npm test
 
   server:
     name: Network server

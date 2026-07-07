@@ -33,6 +33,10 @@ priv/*.dylib
 **/__pycache__/
 *.pyc
 
+# barrel-lite (TS client)
+node_modules/
+clients/barrel-lite/dist/
+
 # Editors / OS
 .DS_Store
 *~
