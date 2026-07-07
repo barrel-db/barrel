@@ -32,7 +32,9 @@ main(_Args) ->
         <<"version_compare">> => version_compare(),
         <<"vv_encode">> => vv_encode(),
         <<"vv_relate">> => vv_relate(),
-        <<"vv_contains">> => vv_contains()
+        <<"vv_contains">> => vv_contains(),
+        <<"bql_local_run">> => bql_local_run(),
+        <<"bql_errors">> => bql_errors()
     },
     io:put_chars(json:encode(Fixtures)),
     io:nl().
@@ -227,6 +229,98 @@ vv_contains_case(VVEntries, {Node, Wall, Logical}) ->
       <<"wall">> => integer_to_binary(Wall),
       <<"logical">> => Logical,
       <<"result">> => Result}.
+
+%%====================================================================
+%% BQL local run (end-to-end parity: query + docs -> ordered rows)
+%%====================================================================
+%%
+%% Runs the real compile pipeline store-free: compile -> the barrel_query
+%% spec is matched per doc, frames_for/residual_match/finalize apply the
+%% post stages. The TS runLocal must produce the same rows in the same
+%% order. Queries with id conditions are excluded on purpose (those
+%% lower to an id scan the store-free path does not model).
+
+bql_docs() ->
+    [#{<<"id">> => <<"d1">>, <<"kind">> => <<"fruit">>, <<"name">> => <<"apple">>,
+       <<"price">> => 3, <<"tags">> => [<<"red">>, <<"sweet">>],
+       <<"meta">> => #{<<"color">> => <<"red">>}},
+     #{<<"id">> => <<"d2">>, <<"kind">> => <<"fruit">>, <<"name">> => <<"pear">>,
+       <<"price">> => 5, <<"tags">> => [<<"green">>]},
+     #{<<"id">> => <<"d3">>, <<"kind">> => <<"tool">>, <<"name">> => <<"hammer">>,
+       <<"price">> => 12, <<"meta">> => #{<<"color">> => <<"gray">>}},
+     #{<<"id">> => <<"d4">>, <<"kind">> => <<"fruit">>, <<"name">> => <<"banana">>,
+       <<"price">> => 2, <<"note">> => null},
+     #{<<"id">> => <<"d5">>, <<"kind">> => <<"veg">>, <<"price">> => 7}].
+
+bql_run_cases() ->
+    [{<<"SELECT * FROM db">>, #{}},
+     {<<"SELECT name, price FROM db WHERE kind = 'fruit'">>, #{}},
+     {<<"SELECT name FROM db WHERE price > 3">>, #{}},
+     {<<"SELECT name FROM db WHERE price >= 3 AND kind = 'fruit'">>, #{}},
+     {<<"SELECT name FROM db WHERE name IN ('apple', 'pear')">>, #{}},
+     {<<"SELECT name FROM db WHERE name != 'apple'">>, #{}},
+     {<<"SELECT name FROM db WHERE name LIKE 'a%'">>, #{}},
+     {<<"SELECT name FROM db WHERE name LIKE '%r'">>, #{}},
+     {<<"SELECT id FROM db WHERE note IS NULL">>, #{}},
+     {<<"SELECT id FROM db WHERE name IS MISSING">>, #{}},
+     {<<"SELECT name FROM db WHERE price BETWEEN 3 AND 6">>, #{}},
+     {<<"SELECT name FROM db WHERE meta.color = 'red'">>, #{}},
+     {<<"SELECT name FROM db WHERE CONTAINS(tags, 'sweet')">>, #{}},
+     {<<"SELECT name FROM db WHERE NOT (kind = 'tool')">>, #{}},
+     {<<"SELECT name, price FROM db WHERE kind = 'fruit' ORDER BY price">>, #{}},
+     {<<"SELECT name FROM db WHERE kind = 'fruit' ORDER BY price DESC">>, #{}},
+     {<<"SELECT name FROM db ORDER BY price LIMIT 2 OFFSET 1">>, #{}},
+     {<<"SELECT name AS n FROM db WHERE kind = 'fruit' ORDER BY name">>, #{}},
+     {<<"SELECT id, name FROM db ORDER BY name">>, #{}},
+     {<<"SELECT tag FROM db, UNNEST(tags) AS tag WHERE kind = 'fruit'">>, #{}},
+     {<<"SELECT name FROM db WHERE price = $p">>, #{<<"p">> => 5}}].
+
+bql_local_run() ->
+    Docs = bql_docs(),
+    [bql_run_case(Q, Params, Docs) || {Q, Params} <- bql_run_cases()].
+
+bql_run_case(Query, Params, Docs) ->
+    {ok, Plan} = barrel_bql:compile(Query, #{params => Params}),
+    Spec = maps:get(spec, Plan),
+    {ok, QPlan} = barrel_query:compile(Spec),
+    Unnest = maps:get(unnest, Plan),
+    Post = maps:get(post, Plan),
+    Residual = maps:get(residual, Post),
+    Sorted = lists:sort(
+        fun(A, B) -> maps:get(<<"id">>, A) =< maps:get(<<"id">>, B) end, Docs),
+    Frames = [F || D <- Sorted,
+                   barrel_query:match(QPlan, D),
+                   F <- barrel_bql_exec:frames_for(D, Unnest),
+                   barrel_bql_exec:residual_match(Residual, F)],
+    Rows = barrel_bql_exec:finalize(Frames, Post, Unnest),
+    #{<<"query">> => Query,
+      <<"params">> => Params,
+      <<"docs">> => Docs,
+      <<"rows">> => Rows}.
+
+%%====================================================================
+%% BQL compile errors (query -> error tag | null)
+%%====================================================================
+
+bql_errors() ->
+    Queries = [<<"SELECT * FROM db WHERE x = null">>,
+               <<"SELECT * FROM db WHERE _foo = 1">>,
+               <<"SELECT * FROM db WHERE 1 = 1">>,
+               <<"SELECT * FROM db ORDER BY a, b">>,
+               <<"SELECT * FROM vector_top_k('q', k => 5)">>,
+               <<"SELECT * FROM db WHERE name = 'ok'">>,
+               <<"SELCT bad syntax">>],
+    [#{<<"query">> => Q, <<"error">> => bql_error_tag(Q)} || Q <- Queries].
+
+bql_error_tag(Query) ->
+    case barrel_bql:compile(Query, #{params => #{}}) of
+        {ok, _} -> null;
+        {error, {parse_error, _, _}} -> <<"parse_error">>;
+        {error, {invalid_query, _, Reason}} when is_tuple(Reason) ->
+            atom_to_binary(element(1, Reason), utf8);
+        {error, {invalid_query, _, Reason}} when is_atom(Reason) ->
+            atom_to_binary(Reason, utf8)
+    end.
 
 %%====================================================================
 %% Helpers

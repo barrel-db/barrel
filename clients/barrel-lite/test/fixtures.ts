@@ -74,6 +74,18 @@ export interface VvContainsCase {
   result: boolean;
 }
 
+export interface BqlRunCase {
+  query: string;
+  params: Record<string, unknown>;
+  docs: Record<string, unknown>[];
+  rows: Record<string, unknown>[];
+}
+
+export interface BqlErrorCase {
+  query: string;
+  error: string | null;
+}
+
 export interface Golden {
   max_logical: number;
   hlc_encode: HlcEncodeCase[];
@@ -84,6 +96,8 @@ export interface Golden {
   vv_encode?: VvEncodeCase[];
   vv_relate?: VvRelateCase[];
   vv_contains?: VvContainsCase[];
+  bql_local_run?: BqlRunCase[];
+  bql_errors?: BqlErrorCase[];
 }
 
 const path = fileURLToPath(new URL("./fixtures/golden.json", import.meta.url));
