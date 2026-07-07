@@ -36,21 +36,30 @@ export interface OpfsAdapterOptions {
   root?: DirectoryHandleLike;
 }
 
-async function opfsRoot(): Promise<DirectoryHandleLike> {
+export async function opfsRoot(): Promise<DirectoryHandleLike> {
   const storage = (navigator as unknown as {
     storage: { getDirectory(): Promise<DirectoryHandleLike> };
   }).storage;
   return storage.getDirectory();
 }
 
+/** Resolve (creating) a slash-separated namespace under a root handle. */
+export async function resolveDir(
+  namespace: string,
+  root?: DirectoryHandleLike,
+): Promise<DirectoryHandleLike> {
+  let dir = root ?? (await opfsRoot());
+  for (const segment of namespace.split("/").filter(Boolean)) {
+    dir = await dir.getDirectoryHandle(segment, { create: true });
+  }
+  return dir;
+}
+
 export class OpfsAdapter implements StorageAdapter {
   constructor(private readonly opts: OpfsAdapterOptions = {}) {}
 
   async open(namespace: string): Promise<StorageArea> {
-    let dir = this.opts.root ?? (await opfsRoot());
-    for (const segment of namespace.split("/").filter(Boolean)) {
-      dir = await dir.getDirectoryHandle(segment, { create: true });
-    }
+    const dir = await resolveDir(namespace, this.opts.root);
     return new OpfsArea(dir);
   }
 }

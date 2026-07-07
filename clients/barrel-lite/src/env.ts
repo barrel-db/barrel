@@ -7,6 +7,7 @@ export interface Env {
   hasWebLocks: boolean;
   hasBroadcastChannel: boolean;
   hasOpfs: boolean;
+  hasSubtleCrypto: boolean;
 }
 
 export function detectEnv(): Env {
@@ -19,5 +20,9 @@ export function detectEnv(): Env {
     nav !== undefined &&
     typeof (nav as { storage?: { getDirectory?: unknown } }).storage
       ?.getDirectory === "function";
-  return { hasWebLocks, hasBroadcastChannel, hasOpfs };
+  const hasSubtleCrypto =
+    typeof crypto !== "undefined" &&
+    typeof (crypto as { subtle?: { digest?: unknown } }).subtle?.digest ===
+      "function";
+  return { hasWebLocks, hasBroadcastChannel, hasOpfs, hasSubtleCrypto };
 }
