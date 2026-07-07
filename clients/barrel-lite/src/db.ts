@@ -18,7 +18,7 @@ import { OpfsAdapter } from "./store/opfs.js";
 import { LocalStore } from "./store/localstore.js";
 import { MemoryBlobStore, OpfsBlobStore, type BlobStore } from "./store/blobstore.js";
 import type { DocRecord, StorageAdapter, StorageArea } from "./store/types.js";
-import { SyncTransport, type FetchLike } from "./wire/transport.js";
+import { SyncTransport, type FetchLike, type QueryMeta } from "./wire/transport.js";
 import type { SyncFilter } from "./wire/filters.js";
 import { pull } from "./sync/puller.js";
 import { push } from "./sync/pusher.js";
@@ -270,6 +270,19 @@ export class Database {
       .filter((r) => r.body !== null)
       .map((r) => ({ ...(r.body as JsonObject), id: r.id }));
     return runLocal(plan, docs);
+  }
+
+  /** Run a BQL query on the server (ndjson), for heavy or global
+   * queries and the table functions the local executor cannot run. */
+  async queryRemote(
+    bql: string,
+    opts: { params?: Record<string, LitValue>; continuation?: string } = {},
+  ): Promise<{ rows: JsonObject[]; meta: QueryMeta }> {
+    const t = this.requireRemote();
+    const q: { params?: Record<string, JsonValue>; continuation?: string } = {};
+    if (opts.params) q.params = opts.params as Record<string, JsonValue>;
+    if (opts.continuation) q.continuation = opts.continuation;
+    return t.queryRemote(bql, q);
   }
 
   //==================================================================

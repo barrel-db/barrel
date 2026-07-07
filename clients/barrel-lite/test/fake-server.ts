@@ -31,6 +31,8 @@ import {
 import type { JsonObject } from "../src/json.js";
 import type { FetchLike } from "../src/wire/transport.js";
 import { sha256Digest } from "../src/attachments/digest.js";
+import { compile, runLocal } from "../src/bql/query.js";
+import type { LitValue } from "../src/bql/lower.js";
 
 interface Stored {
   body: JsonObject | null;
@@ -120,6 +122,11 @@ export class FakeServer {
       if (tail.startsWith("att/")) {
         return this.attBlob(method, tail.slice(4), init);
       }
+      // BQL query endpoint (ndjson): reuse the local executor over the
+      // stored docs so the wire shape can be exercised end to end.
+      if (method === "POST" && u.pathname.endsWith("/query")) {
+        return this.queryNdjson(this.jsonBody(init));
+      }
       // JSON endpoints
       const body = init?.body ? (JSON.parse(init.body as string) as JsonObject) : undefined;
       return this.jsonResponse(this.route(method, u.pathname, body));
@@ -137,6 +144,24 @@ export class FakeServer {
 
   private jsonBody(init: RequestInit | undefined): JsonObject {
     return init?.body ? (JSON.parse(init.body as string) as JsonObject) : {};
+  }
+
+  private queryNdjson(body: JsonObject): Response {
+    const bql = String(body["query"]);
+    const params = (body["params"] ?? {}) as Record<string, LitValue>;
+    const docs = [...this.docs.entries()]
+      .filter(([, d]) => !d.deleted && d.body !== null)
+      .map(([id, d]) => ({ ...(d.body as JsonObject), id }));
+    const rows = runLocal(compile(bql, { params }), docs);
+    const lines = rows.map((r) => JSON.stringify({ row: r }));
+    lines.push(JSON.stringify({ meta: { has_more: false, count: rows.length } }));
+    return new Response(lines.join("\n"), {
+      status: 200,
+      headers: new Headers({
+        "content-type": "application/x-ndjson",
+        "x-barrel-hlc": base64Encode(encodeHlc(this.clock.now()), "standard"),
+      }),
+    });
   }
 
   private route(

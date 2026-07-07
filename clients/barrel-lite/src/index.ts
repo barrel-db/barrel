@@ -50,3 +50,4 @@ export type { Env } from "./env.js";
 export { compile, runLocal } from "./bql/query.js";
 export { BqlError, BqlServerOnlyError } from "./bql/errors.js";
 export type { Plan } from "./bql/lower.js";
+export type { QueryMeta } from "./wire/transport.js";

@@ -79,15 +79,23 @@ export interface ChangesQuery {
 
 const SENTINEL_FIRST = "first";
 
+export interface QueryMeta {
+  hasMore: boolean;
+  count?: number;
+  continuation?: string;
+}
+
 export class SyncTransport {
   private readonly base: string;
+  private readonly dbRoot: string;
   private readonly token?: string;
   private readonly clock: HlcClock;
   private readonly fetchImpl: FetchLike;
 
   constructor(opts: TransportOptions) {
     const root = opts.url.replace(/\/+$/, "");
-    this.base = `${root}/db/${encodeURIComponent(opts.db)}/_sync`;
+    this.dbRoot = `${root}/db/${encodeURIComponent(opts.db)}`;
+    this.base = `${this.dbRoot}/_sync`;
     if (opts.token !== undefined) this.token = opts.token;
     this.clock = opts.clock;
     this.fetchImpl = opts.fetch ?? ((i, init) => fetch(i, init));
@@ -196,6 +204,46 @@ export class SyncTransport {
   /** The current clock (for status/debug). */
   clockState(): HlcClock {
     return this.clock;
+  }
+
+  //==================================================================
+  // Query delegation (POST /db/:db/query, ndjson response)
+  //==================================================================
+
+  async queryRemote(
+    bql: string,
+    opts: { params?: Record<string, JsonValue>; continuation?: string } = {},
+  ): Promise<{ rows: JsonObject[]; meta: QueryMeta }> {
+    const body: JsonObject = { query: bql };
+    if (opts.params !== undefined) body["params"] = opts.params;
+    if (opts.continuation !== undefined) body["continuation"] = opts.continuation;
+    const headers: Record<string, string> = {
+      "x-barrel-hlc": base64Encode(encodeHlc(this.clock.peek()), "standard"),
+      "content-type": "application/json",
+    };
+    if (this.token !== undefined) headers["authorization"] = `Bearer ${this.token}`;
+    let resp: Response;
+    try {
+      resp = await this.fetchImpl(`${this.dbRoot}/query`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+      });
+    } catch (e) {
+      throw new SyncError("network", `request failed: ${String(e)}`);
+    }
+    this.foldClock(resp.headers.get("x-barrel-hlc"));
+    const text = await resp.text();
+    if (resp.status < 200 || resp.status >= 300) {
+      let err: JsonValue = null;
+      try {
+        err = JSON.parse(text) as JsonValue;
+      } catch {
+        err = null;
+      }
+      this.raise(resp.status, err);
+    }
+    return parseNdjson(text);
   }
 
   //==================================================================
@@ -426,6 +474,29 @@ function toAttRow(o: JsonObject): AttRow {
     length: typeof o["length"] === "number" ? o["length"] : 0,
     contentType: typeof o["content_type"] === "string" ? o["content_type"] : "",
   };
+}
+
+function parseNdjson(text: string): { rows: JsonObject[]; meta: QueryMeta } {
+  const rows: JsonObject[] = [];
+  let meta: QueryMeta = { hasMore: false };
+  for (const line of text.split("\n")) {
+    if (line.trim().length === 0) continue;
+    let obj: JsonObject;
+    try {
+      obj = JSON.parse(line) as JsonObject;
+    } catch {
+      continue;
+    }
+    if (obj["row"] !== undefined) {
+      rows.push(obj["row"] as JsonObject);
+    } else if (obj["meta"] !== undefined) {
+      const m = obj["meta"] as JsonObject;
+      meta = { hasMore: m["has_more"] === true };
+      if (typeof m["count"] === "number") meta.count = m["count"];
+      if (typeof m["continuation"] === "string") meta.continuation = m["continuation"];
+    }
+  }
+  return { rows, meta };
 }
 
 async function readJson(resp: Response): Promise<JsonValue> {
