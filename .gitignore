@@ -36,6 +36,9 @@ priv/*.dylib
 # barrel-lite (TS client)
 node_modules/
 clients/barrel-lite/dist/
+clients/barrel-lite/test-results/
+clients/barrel-lite/playwright-report/
+clients/barrel-lite/blob-report/
 
 # Editors / OS
 .DS_Store

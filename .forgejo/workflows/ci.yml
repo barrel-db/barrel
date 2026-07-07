@@ -149,6 +149,19 @@ jobs:
         env:
           BARREL_PORT: '18080'
         run: npm run test:integration
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ hashFiles('clients/barrel-lite/package-lock.json') }}
+      - name: Browser smoke (Playwright chromium)
+        working-directory: clients/barrel-lite
+        env:
+          BARREL_PORT: '18080'
+          STATIC_PORT: '5173'
+          CI: 'true'
+        run: |
+          npx playwright install --with-deps chromium
+          npm run test:browser
 
   server:
     name: Network server

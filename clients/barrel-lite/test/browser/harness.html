@@ -1,0 +1,35 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>barrel-lite browser harness</title>
+  </head>
+  <body>
+    <p>barrel-lite harness</p>
+    <script type="module">
+      import { Database } from "/dist/index.js";
+
+      // Playwright drives a singleton Database stashed on window across
+      // evaluate calls.
+      window.bl = {
+        async open(name, opts) {
+          window.__db = await Database.open(name, opts);
+          window.__changes = [];
+          window.__db.onChange((c) => window.__changes.push(c));
+          return window.__db.isLeader;
+        },
+        put: (doc) => window.__db.put(doc),
+        get: (id) => window.__db.get(id),
+        sync: () => window.__db.sync(),
+        pull: () => window.__db.pull(),
+        live: (opts) => {
+          window.__live = window.__db.liveSync(opts ?? {});
+        },
+        changes: () => window.__changes,
+        isLeader: () => window.__db.isLeader,
+        close: () => window.__db.close(),
+      };
+      window.__ready = true;
+    </script>
+  </body>
+</html>

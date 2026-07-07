@@ -1,0 +1,41 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>barrel-lite demo</title>
+  </head>
+  <body>
+    <h1>barrel-lite</h1>
+    <p>
+      Open two tabs of this page to watch leader election and live sync. Serve
+      the package root over http (OPFS and Web Locks need a real origin), point
+      a barrel_server with CORS enabled at <code>SERVER</code> below, and open
+      the console.
+    </p>
+    <button id="put">put a random doc</button>
+    <pre id="log"></pre>
+    <script type="module">
+      import { Database } from "/dist/index.js";
+
+      const SERVER = "http://127.0.0.1:8080";
+      const DB = "demo";
+      const log = (m) => (document.getElementById("log").textContent += m + "\n");
+
+      const db = await Database.open("demo", {
+        remote: { url: SERVER, db: DB },
+        multiTab: true,
+      });
+      log(`opened; leader=${db.isLeader}`);
+
+      db.onChange((c) => log(`change ${c.id} (${c.source})`));
+      db.onStatus((s) => log(`status ${s.state}${s.error ? " " + s.error : ""}`));
+      db.liveSync();
+
+      document.getElementById("put").addEventListener("click", async () => {
+        const id = "doc-" + Math.floor(Math.random() * 1e6);
+        await db.put({ id, at: new Date().toISOString() });
+        log(`put ${id}`);
+      });
+    </script>
+  </body>
+</html>

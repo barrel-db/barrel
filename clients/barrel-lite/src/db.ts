@@ -13,6 +13,7 @@
 import { HlcClock } from "./codec/hlc.js";
 import type { JsonObject, JsonValue } from "./json.js";
 import { MemoryAdapter } from "./store/memory.js";
+import { OpfsAdapter } from "./store/opfs.js";
 import { LocalStore } from "./store/localstore.js";
 import type { DocRecord, StorageAdapter, StorageArea } from "./store/types.js";
 import { SyncTransport, type FetchLike } from "./wire/transport.js";
@@ -22,9 +23,10 @@ import { push } from "./sync/pusher.js";
 import { LiveSync, type LiveHandle, type LiveTuning } from "./sync/syncer.js";
 import type { DocChange, SyncStatus } from "./sync/status.js";
 import type { OnConflict, PullStats, PushStats } from "./sync/types.js";
+import { detectEnv } from "./env.js";
 import { TabCoordinator } from "./tabs/coordinator.js";
 import type { LockManager } from "./tabs/leader.js";
-import type { Broadcaster } from "./tabs/channel.js";
+import { BroadcastChannelBus, type Broadcaster } from "./tabs/channel.js";
 
 export interface RemoteOptions {
   url: string;
@@ -62,6 +64,23 @@ const FLUSH_DEBOUNCE_MS = 200;
 
 type Listener<T> = (event: T) => void;
 
+/** Resolve tab coordination transports: injected doubles, or the
+ * browser's Web Locks + BroadcastChannel when both are present. */
+function resolveTabs(
+  name: string,
+  injected: TabsOptions | undefined,
+  env: { hasWebLocks: boolean; hasBroadcastChannel: boolean },
+): TabsOptions | undefined {
+  if (injected) return injected;
+  if (env.hasWebLocks && env.hasBroadcastChannel) {
+    return {
+      locks: (navigator as unknown as { locks: LockManager }).locks,
+      bus: new BroadcastChannelBus(`barrel-lite:db:${name}`),
+    };
+  }
+  return undefined;
+}
+
 export class Database {
   private store: LocalStore;
   private live: LiveSync | undefined;
@@ -93,7 +112,9 @@ export class Database {
   static async open(name: string, opts: OpenOptions = {}): Promise<Database> {
     const clockOpts = opts.physClock ? { physClock: opts.physClock } : {};
     const clock = new HlcClock(clockOpts);
-    const adapter = opts.storage ?? new MemoryAdapter();
+    const env = detectEnv();
+    const adapter =
+      opts.storage ?? (env.hasOpfs ? new OpfsAdapter() : new MemoryAdapter());
     const area = await adapter.open(`barrel-lite/${name}`);
     const store = await LocalStore.open(area, clock);
     let transport: SyncTransport | undefined;
@@ -110,12 +131,15 @@ export class Database {
       transport = new SyncTransport(t);
     }
     let coordinator: TabCoordinator | undefined;
-    if (opts.multiTab && opts.tabs) {
-      coordinator = new TabCoordinator({
-        locks: opts.tabs.locks,
-        bus: opts.tabs.bus,
-        lockName: `barrel-lite:db:${name}`,
-      });
+    if (opts.multiTab) {
+      const tabs = resolveTabs(name, opts.tabs, env);
+      if (tabs) {
+        coordinator = new TabCoordinator({
+          locks: tabs.locks,
+          bus: tabs.bus,
+          lockName: `barrel-lite:db:${name}`,
+        });
+      }
     }
     return new Database(
       name,
