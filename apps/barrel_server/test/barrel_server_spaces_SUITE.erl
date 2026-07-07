@@ -115,9 +115,10 @@ t_bsp_outside_agent_layer(Config) ->
     B = ?config(base, Config),
     {201, #{<<"space">> := Sp}} = create_space(B, <<"outside">>),
     {201, #{<<"token">> := T}} = grant(B, Sp, [<<"admin">>]),
-    %% capability tokens never authenticate the database routes
-    {401, _} = req(get, B ++ "/db/somedb", none, auth(T)),
-    {401, _} = req(put, B ++ "/db/somedb", #{}, auth(T)),
+    %% capability tokens reach only their granted space's /db routes:
+    %% another db answers 403 (wrong space), db lifecycle stays off
+    {403, _} = req(get, B ++ "/db/somedb", none, auth(T)),
+    {403, _} = req(put, B ++ "/db/somedb", #{}, auth(T)),
     %% and never manage the space collection itself
     {403, _} = req(post, B ++ "/spaces",
                    #{<<"label">> => <<"nope">>}, auth(T)),

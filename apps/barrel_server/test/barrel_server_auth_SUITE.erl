@@ -14,7 +14,13 @@
     t_health_open/1,
     t_token_rotation_list/1,
     t_transport_endpoint_auth/1,
-    t_transport_env_auth/1
+    t_transport_env_auth/1,
+    t_conflict_409/1,
+    t_capability_read_scope/1,
+    t_capability_write_scope/1,
+    t_capability_wrong_space/1,
+    t_capability_dead_tokens/1,
+    t_capability_fail_closed/1
 ]).
 
 -include_lib("common_test/include/ct.hrl").
@@ -26,7 +32,9 @@
 all() ->
     [t_data_routes_locked, t_sync_routes_locked, t_health_open,
      t_token_rotation_list, t_transport_endpoint_auth,
-     t_transport_env_auth].
+     t_transport_env_auth, t_conflict_409, t_capability_read_scope,
+     t_capability_write_scope, t_capability_wrong_space,
+     t_capability_dead_tokens, t_capability_fail_closed].
 
 init_per_suite(Config) ->
     application:load(barrel_server),
@@ -112,6 +120,107 @@ t_transport_endpoint_auth(Config) ->
     after
         _ = barrel_docdb:delete_db(Local)
     end.
+
+t_conflict_409(Config) ->
+    B = ?config(base, Config),
+    {201, _} = jreq(put, B ++ "/db/authdb/doc/c1", bearer(?TOKEN),
+                    #{<<"v">> => 1}),
+    %% an existing live doc without _rev is a CAS miss, now a 409
+    {409, Body} = jreq(put, B ++ "/db/authdb/doc/c1", bearer(?TOKEN),
+                       #{<<"v">> => 2}),
+    ?assertMatch(#{<<"error">> := <<"conflict">>}, json:decode(Body)),
+    ok.
+
+%%====================================================================
+%% Capability tokens on /db/:db (scoped to the granted space)
+%%====================================================================
+
+t_capability_read_scope(Config) ->
+    B = ?config(base, Config),
+    {Sp, WToken, RToken} = space_with_grants(),
+    Db = B ++ "/db/" ++ binary_to_list(Sp),
+    %% seed a doc through the write grant
+    {201, _} = jreq(put, Db ++ "/doc/a", bearer(WToken), #{<<"v">> => 1}),
+    %% the whole pull leg opens to a read grant
+    {200, _} = req(get, Db, bearer(RToken), <<>>),
+    {200, _} = req(get, Db ++ "/doc/a", bearer(RToken), <<>>),
+    {200, _} = req(get, Db ++ "/changes", bearer(RToken), <<>>),
+    {200, _} = req(get, Db ++ "/_sync/info", bearer(RToken), <<>>),
+    {200, _} = jreq(post, Db ++ "/_sync/changes", bearer(RToken), #{}),
+    {200, _} = req(get, Db ++ "/_sync/doc/a", bearer(RToken), <<>>),
+    %% but nothing that writes
+    {403, _} = jreq(put, Db ++ "/doc/b", bearer(RToken), #{}),
+    {403, _} = jreq(put, Db ++ "/_sync/doc/b", bearer(RToken), #{}),
+    {403, _} = jreq(post, Db ++ "/_bulk_docs", bearer(RToken),
+                    #{<<"docs">> => []}),
+    ok.
+
+t_capability_write_scope(Config) ->
+    B = ?config(base, Config),
+    {Sp, WToken, _RToken} = space_with_grants(),
+    Db = B ++ "/db/" ++ binary_to_list(Sp),
+    {201, _} = jreq(put, Db ++ "/doc/w1", bearer(WToken),
+                    #{<<"v">> => 1}),
+    %% a client-minted version pushes through the sync wire
+    Author = <<"aabbccddeeff0011">>,
+    Hlc = barrel_hlc:decode(<<1:64/big, 0:32/big>>),
+    Token = barrel_version:to_token({Hlc, Author}),
+    VV = barrel_vv:bump(barrel_vv:new(), {Hlc, Author}),
+    {200, Body} = jreq(put, Db ++ "/_sync/doc/w2", bearer(WToken),
+                       #{<<"doc">> => #{<<"v">> => 2},
+                         <<"version">> => Token,
+                         <<"vv">> => base64:encode(barrel_vv:encode(VV))}),
+    ?assertMatch(#{<<"winner">> := _}, json:decode(Body)),
+    %% write does not reach lifecycle or timeline
+    {403, _} = req(delete, Db, bearer(WToken), <<>>),
+    {403, _} = jreq(post, Db ++ "/_timeline/branch", bearer(WToken),
+                    #{<<"name">> => <<"nope">>}),
+    ok.
+
+t_capability_wrong_space(Config) ->
+    B = ?config(base, Config),
+    {_Sp, WToken, RToken} = space_with_grants(),
+    {ok, #{id := Other}} = barrel_spaces:create_space(
+        #{label => <<"other">>}),
+    OtherDb = B ++ "/db/" ++ binary_to_list(Other),
+    {403, _} = req(get, OtherDb, bearer(RToken), <<>>),
+    {403, _} = jreq(put, OtherDb ++ "/doc/x", bearer(WToken), #{}),
+    %% and a non-space db is just as much the wrong space
+    {403, _} = req(get, B ++ "/db/authdb", bearer(RToken), <<>>),
+    ok.
+
+t_capability_dead_tokens(Config) ->
+    B = ?config(base, Config),
+    {Sp, _WToken, RToken} = space_with_grants(),
+    Db = B ++ "/db/" ++ binary_to_list(Sp),
+    {200, _} = req(get, Db, bearer(RToken), <<>>),
+    ok = barrel_caps:revoke(RToken),
+    {401, _} = req(get, Db, bearer(RToken), <<>>),
+    {401, _} = req(get, Db, bearer(<<"bsp_garbage">>), <<>>),
+    ok.
+
+t_capability_fail_closed(Config) ->
+    B = ?config(base, Config),
+    {Sp, WToken, _RToken} = space_with_grants(),
+    Db = B ++ "/db/" ++ binary_to_list(Sp),
+    %% unmapped tails, db lifecycle, and non-db paths all answer 403
+    {403, _} = req(get, Db ++ "/_bogus", bearer(WToken), <<>>),
+    {403, _} = req(put, Db, bearer(WToken), <<>>),
+    {403, _} = req(get, Db ++ "/_timeline", bearer(WToken), <<>>),
+    {403, _} = req(get, B ++ "/", bearer(WToken), <<>>),
+    ok.
+
+space_with_grants() ->
+    {ok, #{id := Sp}} = barrel_spaces:create_space(
+        #{label => <<"caps-auth">>}),
+    {ok, WToken, _} = barrel_caps:grant(Sp, #{rights => [write]}),
+    {ok, RToken, _} = barrel_caps:grant(Sp, #{rights => [read]}),
+    {Sp, WToken, RToken}.
+
+jreq(Method, Url, Headers, JsonTerm) ->
+    req(Method, Url,
+        [{<<"content-type">>, <<"application/json">>} | Headers],
+        json:encode(JsonTerm)).
 
 t_transport_env_auth(Config) ->
     B = ?config(base, Config),

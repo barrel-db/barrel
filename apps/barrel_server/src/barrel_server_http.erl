@@ -950,6 +950,7 @@ error_resp(invalid_name) -> json_resp(400, #{error => <<"invalid_name">>});
 error_resp(bad_json) -> json_resp(400, #{error => <<"bad_json">>});
 error_resp({invalid_provenance, _}) ->
     json_resp(400, #{error => <<"invalid_provenance">>});
+error_resp(conflict) -> json_resp(409, #{error => <<"conflict">>});
 error_resp(bad_since) -> json_resp(400, #{error => <<"bad_since">>});
 error_resp(bad_until) -> json_resp(400, #{error => <<"bad_until">>});
 error_resp(bad_limit) -> json_resp(400, #{error => <<"bad_limit">>});
