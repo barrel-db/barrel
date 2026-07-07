@@ -75,17 +75,24 @@ start_link() ->
         middleware => middleware()
     }).
 
-%% Auth runs after the access log so 401s get logged; unconfigured
-%% auth env means an open server (no middleware installed).
+%% Auth runs after the access log so 401s get logged; CORS runs before
+%% auth so unauthenticated preflights answer 204 and 401s still carry
+%% CORS headers. Unconfigured env means the middleware is not installed
+%% (open server, no CORS headers).
 middleware() ->
     Base = [
         {livery_request_id, undefined},
         {livery_access_log, #{}}
     ],
-    case barrel_server_auth:state_from_env() of
-        undefined -> Base;
-        AuthState -> Base ++ [{barrel_server_auth, AuthState}]
-    end.
+    Cors = case barrel_server_cors:state_from_env() of
+        undefined -> [];
+        CorsState -> [{barrel_server_cors, CorsState}]
+    end,
+    Auth = case barrel_server_auth:state_from_env() of
+        undefined -> [];
+        AuthState -> [{barrel_server_auth, AuthState}]
+    end,
+    Base ++ Cors ++ Auth.
 
 routes() ->
     [
