@@ -12,8 +12,9 @@
 %%% wall_time is emitted as a decimal STRING so values above 2^53
 %%% survive a JSON round-trip in JavaScript.
 %%%
-%%% Step 4 covers the HLC families (encode, compare, clock traces).
-%%% Later steps append version and version-vector families.
+%%% Covers the HLC families (encode, compare, clock traces), the
+%%% version token/compare families, and the version-vector families
+%%% (encode, relate, contains).
 %%%-------------------------------------------------------------------
 -mode(compile).
 
@@ -26,7 +27,12 @@ main(_Args) ->
         <<"max_logical">> => 16#7FFFFFFF,
         <<"hlc_encode">> => hlc_encode(),
         <<"hlc_compare">> => hlc_compare(),
-        <<"hlc_traces">> => hlc_traces()
+        <<"hlc_traces">> => hlc_traces(),
+        <<"version_tokens">> => version_tokens(),
+        <<"version_compare">> => version_compare(),
+        <<"vv_encode">> => vv_encode(),
+        <<"vv_relate">> => vv_relate(),
+        <<"vv_contains">> => vv_contains()
     },
     io:put_chars(json:encode(Fixtures)),
     io:nl().
@@ -130,8 +136,125 @@ record_step(MPid, Clock, {update, Phys, {RW, RL}}) ->
       <<"result">> => Result}.
 
 %%====================================================================
+%% Version tokens
+%%====================================================================
+
+%% Authors chosen to exercise the byte-wise tie-break: equal-length
+%% hex ids and prefix relationships ("a" < "aa" < "b").
+version_tokens() ->
+    Cases = [{0, 0, <<"0000000000000000">>},
+             {1000, 5, <<"aabbccddeeff0011">>},
+             {1000, 5, <<"ffffffffffffffff">>},
+             {(1 bsl 53) + 1, 42, <<"00ff00ff00ff00ff">>},
+             {2000, 0, <<"a">>},
+             {2000, 0, <<"aa">>},
+             {2000, 0, <<"b">>}],
+    [version_token_case(W, L, A) || {W, L, A} <- Cases].
+
+version_token_case(Wall, Logical, Author) ->
+    V = barrel_version:new(mk_ts(Wall, Logical), Author),
+    #{<<"wall">> => integer_to_binary(Wall),
+      <<"logical">> => Logical,
+      <<"author">> => Author,
+      <<"token">> => barrel_version:to_token(V)}.
+
+version_compare() ->
+    Points = [{1000, 0, <<"aaaa">>},
+              {1000, 0, <<"bbbb">>},
+              {1000, 1, <<"aaaa">>},
+              {2000, 0, <<"aaaa">>},
+              {1000, 0, <<"a">>},
+              {1000, 0, <<"aa">>}],
+    [version_compare_case(A, B) || A <- Points, B <- Points].
+
+version_compare_case({W1, L1, A1} = A, {W2, L2, A2} = B) ->
+    VA = barrel_version:new(mk_ts(W1, L1), A1),
+    VB = barrel_version:new(mk_ts(W2, L2), A2),
+    Result = barrel_version:compare(VA, VB),
+    Winner = barrel_version:max(VA, VB),
+    #{<<"a">> => version_json(A),
+      <<"b">> => version_json(B),
+      <<"result">> => atom_to_binary(Result, utf8),
+      <<"winner">> => version_json_v(Winner)}.
+
+%%====================================================================
+%% Version vectors
+%%====================================================================
+
+vv_encode() ->
+    VVs = [[],
+           [{<<"aabbccddeeff0011">>, 1000, 5}],
+           [{<<"b">>, 3000, 0}, {<<"a">>, 1000, 1}, {<<"aa">>, 2000, 2}],
+           [{<<"00">>, 0, 0}, {<<"ff">>, (1 bsl 53) + 1, 42}]],
+    [vv_encode_case(Entries) || Entries <- VVs].
+
+vv_encode_case(Entries) ->
+    VV = mk_vv(Entries),
+    Hex = binary:encode_hex(barrel_vv:encode(VV), lowercase),
+    #{<<"entries">> => [vv_entry_json(E) || E <- Entries],
+      <<"hex">> => Hex}.
+
+vv_relate() ->
+    VVs = [[],
+           [{<<"a">>, 1000, 0}],
+           [{<<"a">>, 1000, 1}],
+           [{<<"a">>, 1000, 0}, {<<"b">>, 2000, 0}],
+           [{<<"a">>, 1000, 1}, {<<"b">>, 2000, 0}],
+           [{<<"b">>, 2000, 0}]],
+    [vv_relate_case(A, B) || A <- VVs, B <- VVs].
+
+vv_relate_case(A, B) ->
+    Result = barrel_vv:compare(mk_vv(A), mk_vv(B)),
+    #{<<"a">> => [vv_entry_json(E) || E <- A],
+      <<"b">> => [vv_entry_json(E) || E <- B],
+      <<"result">> => atom_to_binary(Result, utf8)}.
+
+vv_contains() ->
+    VV = [{<<"a">>, 1000, 5}, {<<"b">>, 2000, 0}],
+    Versions = [{<<"a">>, 1000, 4},
+                {<<"a">>, 1000, 5},
+                {<<"a">>, 1000, 6},
+                {<<"a">>, 999, 0},
+                {<<"c">>, 500, 0},
+                {<<"b">>, 2000, 0}],
+    [vv_contains_case(VV, V) || V <- Versions].
+
+vv_contains_case(VVEntries, {Node, Wall, Logical}) ->
+    Version = barrel_version:new(mk_ts(Wall, Logical), Node),
+    Result = barrel_vv:contains(mk_vv(VVEntries), Version),
+    #{<<"vv">> => [vv_entry_json(E) || E <- VVEntries],
+      <<"node">> => Node,
+      <<"wall">> => integer_to_binary(Wall),
+      <<"logical">> => Logical,
+      <<"result">> => Result}.
+
+%%====================================================================
 %% Helpers
 %%====================================================================
+
+mk_vv(Entries) ->
+    lists:foldl(
+        fun({Node, Wall, Logical}, VV) ->
+            barrel_vv:bump(VV, barrel_version:new(mk_ts(Wall, Logical), Node))
+        end,
+        barrel_vv:new(),
+        Entries).
+
+version_json({Wall, Logical, Author}) ->
+    #{<<"wall">> => integer_to_binary(Wall),
+      <<"logical">> => Logical,
+      <<"author">> => Author}.
+
+version_json_v({Hlc, Author}) ->
+    <<Wall:64/big-unsigned, Logical:32/big-unsigned>> = barrel_hlc:encode(Hlc),
+    #{<<"wall">> => integer_to_binary(Wall),
+      <<"logical">> => Logical,
+      <<"author">> => Author}.
+
+vv_entry_json({Node, Wall, Logical}) ->
+    #{<<"node">> => Node,
+      <<"wall">> => integer_to_binary(Wall),
+      <<"logical">> => Logical}.
 
 mk_ts(Wall, Logical) ->
     barrel_hlc:from_binary(<<Wall:64/big-unsigned, Logical:32/big-unsigned>>).
