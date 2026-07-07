@@ -21,6 +21,7 @@ import type { SyncFilter } from "./wire/filters.js";
 import { pull } from "./sync/puller.js";
 import { push } from "./sync/pusher.js";
 import { LiveSync, type LiveHandle, type LiveTuning } from "./sync/syncer.js";
+import { openChangesStream, type ChangesStreamHandle } from "./sync/changes-stream.js";
 import type { DocChange, SyncStatus } from "./sync/status.js";
 import type { OnConflict, PullStats, PushStats } from "./sync/types.js";
 import { detectEnv } from "./env.js";
@@ -58,7 +59,14 @@ export interface SyncOptions {
   filter?: SyncFilter;
 }
 
-export type LiveOptions = SyncOptions & LiveTuning;
+export type LiveOptions = SyncOptions &
+  LiveTuning & {
+    /** Hold a continuous SSE changes stream instead of polling alone. */
+    continuous?: boolean;
+  };
+
+const STREAM_REOPEN_MIN_MS = 1_000;
+const STREAM_REOPEN_MAX_MS = 60_000;
 
 const FLUSH_DEBOUNCE_MS = 200;
 
@@ -88,6 +96,12 @@ export class Database {
   private readonly changeListeners = new Set<Listener<DocChange>>();
   private readonly statusListeners = new Set<Listener<SyncStatus>>();
   private closed = false;
+  // continuous SSE changes stream (leader-only, additive over the poller)
+  private continuous = false;
+  private changesStream: ChangesStreamHandle | undefined;
+  private changesCursor: string | undefined;
+  private streamReopenTimer: ReturnType<typeof setTimeout> | undefined;
+  private streamBackoffMs = STREAM_REOPEN_MIN_MS;
 
   private constructor(
     readonly name: string,
@@ -256,6 +270,7 @@ export class Database {
   liveSync(opts: LiveOptions = {}): LiveHandle {
     this.requireRemote();
     if (this.live) this.live.stop();
+    this.continuous = opts.continuous === true;
     const syncOpts: SyncOptions = opts.filter ? { filter: opts.filter } : {};
     const live = new LiveSync(
       async () => {
@@ -271,7 +286,64 @@ export class Database {
     );
     this.live = live;
     live.start();
-    return live;
+    // the SSE stream is a wake signal on top of the poller (the floor)
+    if (this.continuous && !this.isFollower()) this.openChangesStream();
+    return {
+      stop: () => {
+        this.continuous = false;
+        this.stopChangesStream();
+        live.stop();
+      },
+    };
+  }
+
+  //==================================================================
+  // Continuous changes stream (leader-only, additive over the poller)
+  //==================================================================
+
+  private openChangesStream(): void {
+    if (this.closed || !this.continuous || this.isFollower() || this.changesStream) {
+      return;
+    }
+    const remote = this.remote as RemoteOptions;
+    const streamOpts: Parameters<typeof openChangesStream>[0] = {
+      url: remote.url,
+      db: remote.db,
+      onChange: () => this.live?.wake(),
+      onError: (e) => this.onStreamError(e),
+      onOpen: () => {
+        this.streamBackoffMs = STREAM_REOPEN_MIN_MS;
+      },
+    };
+    if (remote.token !== undefined) streamOpts.token = remote.token;
+    if (remote.fetch !== undefined) streamOpts.fetch = remote.fetch;
+    if (this.changesCursor !== undefined) streamOpts.since = this.changesCursor;
+    this.changesStream = openChangesStream(streamOpts);
+  }
+
+  private onStreamError(_e: Error): void {
+    this.changesCursor = this.changesStream?.cursor() ?? this.changesCursor;
+    this.changesStream = undefined;
+    if (this.closed || !this.continuous || this.isFollower()) return;
+    // the poller keeps converging; reopen the stream on a backoff
+    const delay = this.streamBackoffMs;
+    this.streamBackoffMs = Math.min(this.streamBackoffMs * 2, STREAM_REOPEN_MAX_MS);
+    this.streamReopenTimer = setTimeout(() => {
+      this.streamReopenTimer = undefined;
+      this.openChangesStream();
+    }, delay);
+  }
+
+  private stopChangesStream(): void {
+    if (this.streamReopenTimer !== undefined) {
+      clearTimeout(this.streamReopenTimer);
+      this.streamReopenTimer = undefined;
+    }
+    if (this.changesStream) {
+      this.changesCursor = this.changesStream.cursor() ?? this.changesCursor;
+      this.changesStream.close();
+      this.changesStream = undefined;
+    }
   }
 
   //==================================================================
@@ -291,6 +363,8 @@ export class Database {
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
+    this.continuous = false;
+    this.stopChangesStream();
     if (this.live) this.live.stop();
     await this.flushNow();
     if (this.coordinator) this.coordinator.stop();
@@ -314,6 +388,8 @@ export class Database {
     if (this.closed) return;
     this.store = await LocalStore.open(this.area, this.clock);
     (this.coordinator as TabCoordinator).serve((m, a) => this.dispatch(m, a));
+    // a promoted leader takes over the continuous stream too
+    if (this.continuous) this.openChangesStream();
   }
 
   private async dispatch(method: string, args: JsonValue[]): Promise<JsonValue> {
