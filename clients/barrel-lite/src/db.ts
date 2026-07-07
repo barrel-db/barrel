@@ -32,6 +32,8 @@ import {
   type AttInfo,
 } from "./attachments/att.js";
 import { pullAttachments, pushAttachments } from "./attachments/att-sync.js";
+import { compile, runLocal } from "./bql/query.js";
+import type { LitValue } from "./bql/lower.js";
 import { LiveSync, type LiveHandle, type LiveTuning } from "./sync/syncer.js";
 import { openChangesStream, type ChangesStreamHandle } from "./sync/changes-stream.js";
 import type { DocChange, SyncStatus } from "./sync/status.js";
@@ -243,6 +245,31 @@ export class Database {
       return (await this.callLeader("allDocs", [opts as JsonValue])) as unknown as DocRecord[];
     }
     return this.store.allDocs(opts);
+  }
+
+  //==================================================================
+  // Query (local BQL over the synced cache)
+  //==================================================================
+
+  /** Run a BQL query locally over the cached documents. Throws
+   * BqlServerOnlyError for table functions / SUBSCRIBE; use the server
+   * query endpoint for those. */
+  async query(
+    bql: string,
+    opts: { params?: Record<string, LitValue> } = {},
+  ): Promise<JsonObject[]> {
+    if (this.isFollower()) {
+      return (await this.callLeader("query", [
+        bql,
+        (opts.params ?? {}) as JsonValue,
+      ])) as unknown as JsonObject[];
+    }
+    const plan = compile(bql, opts.params ? { params: opts.params } : {});
+    const docs = this.store
+      .allDocs()
+      .filter((r) => r.body !== null)
+      .map((r) => ({ ...(r.body as JsonObject), id: r.id }));
+    return runLocal(plan, docs);
   }
 
   //==================================================================
@@ -513,6 +540,10 @@ export class Database {
         return (await this.pull((args[0] as SyncOptions) ?? {})) as unknown as JsonValue;
       case "sync":
         return (await this.sync((args[0] as SyncOptions) ?? {})) as unknown as JsonValue;
+      case "query":
+        return (await this.query(args[0] as string, {
+          params: (args[1] as Record<string, LitValue>) ?? {},
+        })) as unknown as JsonValue;
       case "putAttachment": {
         const bytes = base64Decode(args[2] as string);
         const info = await putAttachmentLocal(

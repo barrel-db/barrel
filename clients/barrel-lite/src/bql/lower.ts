@@ -107,7 +107,14 @@ export function compilePlan(ast: Ast, params: Record<string, LitValue> = {}): Pl
     empty: limit === 0,
   };
   if (ast.from.unnest) {
-    plan.unnest = { comps: ast.from.unnest.path.comps, alias: ast.from.unnest.alias };
+    const cp = canonPath(ast.from.unnest.path, ctx);
+    if (cp.tag === "u") {
+      throw new BqlError("invalid_unnest_path", "UNNEST cannot reference itself");
+    }
+    if (cp.comps.length === 0) {
+      throw new BqlError("invalid_unnest_path", "UNNEST needs a document array path");
+    }
+    plan.unnest = { comps: cp.comps, alias: ast.from.unnest.alias };
   }
   if (limit !== undefined) plan.limit = limit;
   if (ast.orderBy.length === 1) {
