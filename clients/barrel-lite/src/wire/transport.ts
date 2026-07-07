@@ -199,8 +199,130 @@ export class SyncTransport {
   }
 
   //==================================================================
+  // Attachment wire (streamed; separate feed + LWW on origin HLC)
+  //==================================================================
+
+  /** The attachment feed since a cursor (exclusive). 501 => unsupported. */
+  async attChanges(
+    since: string,
+    limit: number,
+  ): Promise<{ changes: AttRow[]; lastSeq: string; unsupported: boolean }> {
+    const q = `?since=${encodeURIComponent(since || SENTINEL_FIRST)}&limit=${limit}`;
+    const resp = await this.rawFetch("GET", `/att_changes${q}`, {});
+    if (resp.status === 501) {
+      return { changes: [], lastSeq: since || SENTINEL_FIRST, unsupported: true };
+    }
+    const json = await readJson(resp);
+    if (resp.status < 200 || resp.status >= 300) this.raise(resp.status, json);
+    const obj = asObject(json);
+    const rows = Array.isArray(obj["changes"]) ? obj["changes"] : [];
+    return {
+      changes: rows.map((r) => toAttRow(asObject(r))),
+      lastSeq: String(obj["last_seq"] ?? SENTINEL_FIRST),
+      unsupported: false,
+    };
+  }
+
+  /** Digest diff: which (id,name) the server already has. */
+  async attDiff(
+    entries: { id: string; name: string; digest: string }[],
+  ): Promise<{ id: string; name: string; status: "have" | "missing" }[]> {
+    const { json } = await this.request("POST", "/att_diff", {
+      attachments: entries as unknown as JsonValue,
+    });
+    const rows = Array.isArray(asObject(json)["diff"])
+      ? (asObject(json)["diff"] as JsonValue[])
+      : [];
+    return rows.map((r) => {
+      const o = asObject(r);
+      return {
+        id: String(o["id"]),
+        name: String(o["name"]),
+        status: o["status"] === "have" ? "have" : "missing",
+      };
+    });
+  }
+
+  /** Download a blob; undefined on 404. Bytes are NOT digest-verified here. */
+  async getAtt(id: string, name: string): Promise<AttBlob | undefined> {
+    const resp = await this.rawFetch("GET", attPath(id, name), {});
+    if (resp.status === 404) return undefined;
+    if (resp.status < 200 || resp.status >= 300) {
+      this.raise(resp.status, await readJson(resp));
+    }
+    const bytes = new Uint8Array(await resp.arrayBuffer());
+    const lengthHeader = resp.headers.get("x-barrel-att-length");
+    return {
+      bytes,
+      digest: resp.headers.get("x-barrel-digest") ?? "",
+      length: lengthHeader ? Number(lengthHeader) : bytes.length,
+      contentType: resp.headers.get("content-type") ?? "application/octet-stream",
+    };
+  }
+
+  /** Upload a blob (LWW on origin). 400 bad_origin throws; others map. */
+  async putAtt(
+    id: string,
+    name: string,
+    body: Uint8Array | Blob,
+    meta: { contentType: string; digest: string; origin: string },
+  ): Promise<PutAttResult> {
+    const resp = await this.rawFetch("PUT", attPath(id, name), {
+      headers: {
+        "content-type": meta.contentType,
+        "x-barrel-digest": meta.digest,
+        "x-barrel-att-origin": meta.origin,
+      },
+      body,
+    });
+    if (resp.status === 200) {
+      const json = await readJson(resp);
+      const ok = asObject(json)["ok"];
+      return ok === "ignored" ? "ignored" : "written";
+    }
+    if (resp.status === 422) return "digest_mismatch";
+    if (resp.status === 413) return "too_large";
+    this.raise(resp.status, await readJson(resp));
+  }
+
+  async deleteAtt(id: string, name: string, origin: string): Promise<void> {
+    const resp = await this.rawFetch("DELETE", attPath(id, name), {
+      headers: { "x-barrel-att-origin": origin },
+    });
+    if (resp.status < 200 || resp.status >= 300) {
+      this.raise(resp.status, await readJson(resp));
+    }
+  }
+
+  //==================================================================
   // Internals
   //==================================================================
+
+  /** A raw request that streams a binary body/response but still sets
+   * and folds the x-barrel-hlc clock header (attachments are not JSON). */
+  private async rawFetch(
+    method: string,
+    path: string,
+    opts: { headers?: Record<string, string>; body?: Uint8Array | Blob },
+  ): Promise<Response> {
+    const headers: Record<string, string> = {
+      "x-barrel-hlc": base64Encode(encodeHlc(this.clock.peek()), "standard"),
+      ...(opts.headers ?? {}),
+    };
+    if (this.token !== undefined) {
+      headers["authorization"] = `Bearer ${this.token}`;
+    }
+    const init: RequestInit = { method, headers };
+    if (opts.body !== undefined) init.body = opts.body as BodyInit;
+    let resp: Response;
+    try {
+      resp = await this.fetchImpl(this.base + path, init);
+    } catch (e) {
+      throw new SyncError("network", `request failed: ${String(e)}`);
+    }
+    this.foldClock(resp.headers.get("x-barrel-hlc"));
+    return resp;
+  }
 
   private async request(
     method: string,
@@ -266,6 +388,53 @@ export class SyncTransport {
     if (status === 404) throw new SyncError("not_found", err, status);
     if (status >= 500) throw new SyncError("server_error", err, status);
     throw new SyncError("bad_request", err, status);
+  }
+}
+
+export interface AttRow {
+  seq: string;
+  origin: string;
+  op: "put" | "delete";
+  id: string;
+  name: string;
+  digest: string;
+  length: number;
+  contentType: string;
+}
+
+export interface AttBlob {
+  bytes: Uint8Array;
+  digest: string;
+  length: number;
+  contentType: string;
+}
+
+export type PutAttResult = "written" | "ignored" | "digest_mismatch" | "too_large";
+
+function attPath(id: string, name: string): string {
+  return `/att/${encodeURIComponent(id)}/${encodeURIComponent(name)}`;
+}
+
+function toAttRow(o: JsonObject): AttRow {
+  return {
+    seq: String(o["seq"]),
+    origin: String(o["origin"]),
+    op: o["op"] === "delete" ? "delete" : "put",
+    id: String(o["id"]),
+    name: String(o["name"]),
+    digest: typeof o["digest"] === "string" ? o["digest"] : "",
+    length: typeof o["length"] === "number" ? o["length"] : 0,
+    contentType: typeof o["content_type"] === "string" ? o["content_type"] : "",
+  };
+}
+
+async function readJson(resp: Response): Promise<JsonValue> {
+  const text = await resp.text();
+  if (text.length === 0) return null;
+  try {
+    return JSON.parse(text) as JsonValue;
+  } catch {
+    return null;
   }
 }
 
