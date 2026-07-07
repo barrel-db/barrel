@@ -29,10 +29,16 @@ const db = await Database.open("notes", {
 await db.put({ id: "n1", title: "hello" });
 const doc = await db.get("n1");
 
-db.onChange((c) => console.log("changed", c.id, c.source));
-db.liveSync(); // adaptive polling; local writes push on a short debounce
+// query the synced set locally (same BQL text runs on the server)
+const rows = await db.query("SELECT title FROM notes WHERE pinned = true");
 
-await db.sync(); // or one-shot: push then pull
+// attachments (content-addressed blobs on their own feed)
+await db.putAttachment("n1", "cover.png", bytes, { contentType: "image/png" });
+
+db.onChange((c) => console.log("changed", c.id, c.source));
+db.liveSync({ continuous: true }); // SSE stream, falls back to polling
+
+await db.sync(); // push then pull (documents + attachments)
 ```
 
 In the browser, storage defaults to OPFS and `multiTab` uses Web Locks plus
@@ -65,5 +71,7 @@ The escript writes only to stdout; redirect it yourself. Never hand-edit
 
 ## Scope
 
-This is phase 9a: document sync, local store, leader election, live pull.
-Attachments, a local BQL subset, and vector search land in later phases.
+Phases 9a and 9b: document sync, local store, leader election, live sync
+(polling and continuous SSE), a local BQL subset matching the server (with
+`queryRemote` delegation for vector/keyword search), and attachment sync.
+Browser vector search lands in a later phase.

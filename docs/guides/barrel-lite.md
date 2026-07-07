@@ -65,11 +65,16 @@ and immediate; they reach the server on the next push.
 ```ts
 await db.push();                    // send local writes
 await db.pull();                    // apply server changes
-await db.sync();                    // push then pull, one shot
+await db.sync();                    // push then pull (docs + attachments)
 
-const handle = db.liveSync();       // keep converging (adaptive polling)
+const handle = db.liveSync();               // adaptive polling
+const live = db.liveSync({ continuous: true }); // hold an SSE stream
 handle.stop();
 ```
+
+`continuous: true` opens a `GET /db/:db/changes?feed=continuous` stream and
+re-pulls on each change, falling back to polling if the stream drops. The
+stream needs the server's continuous mode (built into `barrel_server`).
 
 Pull with a filter to hold a subset (the filter joins the sync identity, so it
 keeps its own cursor):
@@ -78,6 +83,48 @@ keeps its own cursor):
 await db.pull({ filter: { query: { where: [["path", ["type"], "note"]] } } });
 await db.pull({ filter: { channel: "mobile" } });   // a declared channel
 ```
+
+## How (query)
+
+Query the synced set locally with BQL; the same text runs on the server. The
+local executor matches the server's document subset (SELECT/WHERE/ORDER BY/
+LIMIT/OFFSET, paths, UNNEST, IN/LIKE/IS NULL/IS MISSING/BETWEEN/CONTAINS).
+
+```ts
+const rows = await db.query(
+  "SELECT name, price FROM db WHERE kind = 'fruit' ORDER BY price DESC LIMIT 10",
+);
+const scoped = await db.query("SELECT * FROM db WHERE org = $org", {
+  params: { org: "acme" },
+});
+```
+
+Vector and keyword search (`vector_top_k`, `bm25_top_k`, `hybrid_top_k`) and
+`SUBSCRIBE` need the server; they throw `BqlServerOnlyError` locally. Send
+those, or any heavy or global query, to the server:
+
+```ts
+const { rows, meta } = await db.queryRemote(
+  "SELECT * FROM bm25_top_k('outage', k => 20) AS s",
+);
+```
+
+## How (attachments)
+
+Attachments are content-addressed blobs synced on their own feed, correlated
+to a document by name.
+
+```ts
+await db.putAttachment("doc1", "photo.jpg", bytes, { contentType: "image/jpeg" });
+const got = await db.getAttachment("doc1", "photo.jpg"); // { bytes, info }
+const info = await db.getAttachmentInfo("doc1", "photo.jpg"); // digest/length/type
+await db.removeAttachment("doc1", "photo.jpg");
+await db.gcAttachments(); // reclaim unreferenced blobs
+```
+
+Blobs stream over the `_sync/att*` endpoints, deduplicate by SHA-256 digest,
+and resolve last-write-wins on an origin timestamp (no version vectors). A
+server without an attachment feed degrades the phase to skipped.
 
 ## How (events)
 
@@ -123,5 +170,11 @@ sibling); the winner arrives on the next pull.
 - The client mints and persists its own 16-hex source id. Do not clear browser
   storage expecting a clean slate mid-sync: a new source id changes the
   authorship of future writes.
-- Attachments, a local BQL subset, and vector search are later phases; the
-  transport reserves the endpoint names.
+- Local BQL matches the server's document subset, with two documented
+  divergences: JSON collapses `1` and `1.0` (the CBOR-backed server keeps them
+  distinct), and ORDER BY across mixed types follows a fixed total order
+  (number, then boolean/null, then object, then array, then string).
+- Vector search in the browser is a later phase; for now `search` runs on the
+  server through `queryRemote`.
+- Live sync polls by default; `continuous: true` holds one SSE stream per
+  database (leader-only) and consumes one of the origin's HTTP connections.

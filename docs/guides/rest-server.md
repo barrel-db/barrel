@@ -134,8 +134,10 @@ $ curl localhost:8080/db/mydb/changes
 ## Notes
 
 - The changes feed returns JSON by default. Request `Accept: text/event-stream`
-  (or `?feed=sse`) for Server-Sent Events. `?since=<cursor>` takes a cursor from a
-  prior response's `last` field.
+  (or `?feed=sse`) for Server-Sent Events (one-shot: the current window then
+  close). `?feed=continuous` holds the SSE stream open, pushing each change as a
+  data line with a 30s heartbeat, until the client disconnects. `?since=<cursor>`
+  takes a cursor from a prior response's `last` field (or a change's `hlc`).
 - Databases open with the default vector store (768-dim, BM25 off). The
   `/search/bm25` and `/search/hybrid` endpoints need BM25 enabled, and hybrid
   needs an embedder.
