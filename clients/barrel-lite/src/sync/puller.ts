@@ -12,7 +12,7 @@ import { vvContains, vvDecode } from "../codec/vv.js";
 import type { LocalStore } from "../store/localstore.js";
 import type { SyncFilter } from "../wire/filters.js";
 import type { SyncTransport } from "../wire/transport.js";
-import { applyRemote } from "./apply.js";
+import { applyRemote, type ApplyOutcome } from "./apply.js";
 import { checkpointKey } from "./checkpoint.js";
 import type { OnConflict, PullStats } from "./types.js";
 
@@ -25,6 +25,8 @@ export interface PullOptions {
   filter?: SyncFilter;
   limit?: number;
   onConflict?: OnConflict;
+  /** Called for each applied document (for change fan-out). */
+  onApply?: (id: string, outcome: ApplyOutcome, deleted: boolean) => void;
 }
 
 export async function pull(
@@ -52,7 +54,8 @@ export async function pull(
         continue; // already covered locally
       }
       const doc = await transport.getDoc(row.id);
-      applyRemote(store, row.id, doc, opts.onConflict);
+      const outcome = applyRemote(store, row.id, doc, opts.onConflict);
+      opts.onApply?.(row.id, outcome, doc.deleted);
       stats.applied++;
     }
 
