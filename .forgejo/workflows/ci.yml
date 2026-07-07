@@ -124,6 +124,10 @@ jobs:
         with:
           path: ~/.npm
           key: npm-barrel-lite-${{ hashFiles('clients/barrel-lite/package-lock.json') }}
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/rebar3
+          key: rebar3-server-${{ hashFiles('rebar.lock') }}
       - name: Install
         working-directory: clients/barrel-lite
         run: npm ci
@@ -136,6 +140,15 @@ jobs:
       - name: Unit tests
         working-directory: clients/barrel-lite
         run: npm test
+      - name: System dependencies (server boot)
+        run: |
+          apt-get install -y cmake build-essential libssl-dev zlib1g-dev \
+            libsnappy-dev liblz4-dev libzstd-dev python3 python3-venv
+      - name: Integration tests (boots barrel_server)
+        working-directory: clients/barrel-lite
+        env:
+          BARREL_PORT: '18080'
+        run: npm run test:integration
 
   server:
     name: Network server
