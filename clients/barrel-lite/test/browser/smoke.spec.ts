@@ -72,6 +72,20 @@ test("OPFS persists a write across a page reload", async ({ page }) => {
   expect(got).toMatchObject({ v: 1 });
 });
 
+test("OPFS persists an attachment across a page reload", async ({ page }) => {
+  const name = uniqueName();
+  const db = uniqueName();
+  await createDb(db);
+
+  await open(page, name, db, false);
+  await call(page, "putAttText", "doc1", "note.txt", "attachment body");
+  await call(page, "close");
+
+  await open(page, name, db, false);
+  const text = await call<string | null>(page, "getAttText", "doc1", "note.txt");
+  expect(text).toBe("attachment body");
+});
+
 test("two tabs elect one leader; the follower proxies writes", async ({ context }) => {
   const name = uniqueName();
   const db = uniqueName();

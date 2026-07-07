@@ -11,15 +11,27 @@
  * store and takes over.
  */
 import { HlcClock } from "./codec/hlc.js";
+import { base64Decode, base64Encode } from "./codec/base64.js";
 import type { JsonObject, JsonValue } from "./json.js";
 import { MemoryAdapter } from "./store/memory.js";
 import { OpfsAdapter } from "./store/opfs.js";
 import { LocalStore } from "./store/localstore.js";
+import { MemoryBlobStore, OpfsBlobStore, type BlobStore } from "./store/blobstore.js";
 import type { DocRecord, StorageAdapter, StorageArea } from "./store/types.js";
 import { SyncTransport, type FetchLike } from "./wire/transport.js";
 import type { SyncFilter } from "./wire/filters.js";
 import { pull } from "./sync/puller.js";
 import { push } from "./sync/pusher.js";
+import { checkpointKey } from "./sync/checkpoint.js";
+import {
+  getAttachmentInfoLocal,
+  getAttachmentLocal,
+  putAttachmentLocal,
+  reachableDigests,
+  removeAttachmentLocal,
+  type AttInfo,
+} from "./attachments/att.js";
+import { pullAttachments, pushAttachments } from "./attachments/att-sync.js";
 import { LiveSync, type LiveHandle, type LiveTuning } from "./sync/syncer.js";
 import { openChangesStream, type ChangesStreamHandle } from "./sync/changes-stream.js";
 import type { DocChange, SyncStatus } from "./sync/status.js";
@@ -68,6 +80,11 @@ export type LiveOptions = SyncOptions &
 const STREAM_REOPEN_MIN_MS = 1_000;
 const STREAM_REOPEN_MAX_MS = 60_000;
 
+async function toBytes(data: Uint8Array | Blob): Promise<Uint8Array> {
+  if (data instanceof Uint8Array) return data;
+  return new Uint8Array(await data.arrayBuffer());
+}
+
 const FLUSH_DEBOUNCE_MS = 200;
 
 type Listener<T> = (event: T) => void;
@@ -113,6 +130,7 @@ export class Database {
     private readonly onConflict: OnConflict | undefined,
     private readonly flushDebounceMs: number,
     private readonly coordinator: TabCoordinator | undefined,
+    private readonly blobs: BlobStore,
   ) {
     this.store = store;
     if (coordinator) {
@@ -131,6 +149,10 @@ export class Database {
       opts.storage ?? (env.hasOpfs ? new OpfsAdapter() : new MemoryAdapter());
     const area = await adapter.open(`barrel-lite/${name}`);
     const store = await LocalStore.open(area, clock);
+    const blobs: BlobStore =
+      opts.storage === undefined && env.hasOpfs
+        ? await OpfsBlobStore.open(`barrel-lite/${name}`)
+        : new MemoryBlobStore();
     let transport: SyncTransport | undefined;
     if (opts.remote) {
       const t: {
@@ -165,6 +187,7 @@ export class Database {
       opts.onConflict,
       opts.flushDebounceMs ?? FLUSH_DEBOUNCE_MS,
       coordinator,
+      blobs,
     );
   }
 
@@ -223,6 +246,73 @@ export class Database {
   }
 
   //==================================================================
+  // Attachments (leader-owns the blob store; a follower proxies)
+  //==================================================================
+
+  async putAttachment(
+    id: string,
+    name: string,
+    data: Uint8Array | Blob,
+    opts: { contentType?: string } = {},
+  ): Promise<{ digest: string }> {
+    const bytes = await toBytes(data);
+    const contentType =
+      opts.contentType ??
+      (typeof Blob !== "undefined" && data instanceof Blob && data.type ? data.type : "application/octet-stream");
+    if (this.isFollower()) {
+      const r = await this.callLeader("putAttachment", [
+        id,
+        name,
+        base64Encode(bytes, "standard"),
+        contentType,
+      ]);
+      return { digest: String((r as JsonObject)["digest"]) };
+    }
+    const info = await putAttachmentLocal(this.store, this.blobs, id, name, bytes, contentType);
+    this.afterMutation();
+    return { digest: info.digest };
+  }
+
+  async getAttachment(
+    id: string,
+    name: string,
+  ): Promise<{ bytes: Uint8Array; info: AttInfo } | undefined> {
+    if (this.isFollower()) {
+      const r = await this.callLeader("getAttachment", [id, name]);
+      if (r === null) return undefined;
+      const o = r as JsonObject;
+      return {
+        bytes: base64Decode(String(o["bytes"])),
+        info: o["info"] as unknown as AttInfo,
+      };
+    }
+    return getAttachmentLocal(this.store, this.blobs, id, name);
+  }
+
+  async getAttachmentInfo(id: string, name: string): Promise<AttInfo | undefined> {
+    if (this.isFollower()) {
+      const r = await this.callLeader("getAttachmentInfo", [id, name]);
+      return r === null ? undefined : (r as unknown as AttInfo);
+    }
+    return getAttachmentInfoLocal(this.store, id, name);
+  }
+
+  async removeAttachment(id: string, name: string): Promise<void> {
+    if (this.isFollower()) {
+      await this.callLeader("removeAttachment", [id, name]);
+      return;
+    }
+    removeAttachmentLocal(this.store, id, name);
+    this.afterMutation();
+  }
+
+  /** Reclaim blob files no longer referenced by any live attref. */
+  async gcAttachments(): Promise<void> {
+    if (this.isFollower()) return;
+    await this.blobs.gc(reachableDigests(this.store));
+  }
+
+  //==================================================================
   // Sync (leader-only work; a follower proxies the request)
   //==================================================================
 
@@ -264,7 +354,19 @@ export class Database {
   async sync(opts: SyncOptions = {}): Promise<{ push: PushStats; pull: PullStats }> {
     const pushStats = await this.push();
     const pullStats = await this.pull(opts);
+    await this.syncAttachments();
     return { push: pushStats, pull: pullStats };
+  }
+
+  /** The attachment phase: push then pull the separate feed. Leader-only;
+   * degrades silently when the server has no attachment feed (501). */
+  private async syncAttachments(): Promise<number> {
+    if (this.isFollower() || !this.transport) return 0;
+    const remote = this.remote as RemoteOptions;
+    const key = checkpointKey(remote.url, remote.db);
+    const pushed = await pushAttachments(this.transport, this.store, this.blobs);
+    const pulled = await pullAttachments(this.transport, this.store, this.blobs, key);
+    return pushed.pushed + pulled.applied;
   }
 
   liveSync(opts: LiveOptions = {}): LiveHandle {
@@ -279,7 +381,10 @@ export class Database {
         if (this.isFollower()) return { changed: false };
         const pushStats = await this.push();
         const pullStats = await this.pull(syncOpts);
-        return { changed: pushStats.pushed > 0 || pullStats.applied > 0 };
+        const attChanged = await this.syncAttachments();
+        return {
+          changed: pushStats.pushed > 0 || pullStats.applied > 0 || attChanged > 0,
+        };
       },
       opts,
       (s) => this.fireStatus(s),
@@ -408,6 +513,34 @@ export class Database {
         return (await this.pull((args[0] as SyncOptions) ?? {})) as unknown as JsonValue;
       case "sync":
         return (await this.sync((args[0] as SyncOptions) ?? {})) as unknown as JsonValue;
+      case "putAttachment": {
+        const bytes = base64Decode(args[2] as string);
+        const info = await putAttachmentLocal(
+          this.store,
+          this.blobs,
+          args[0] as string,
+          args[1] as string,
+          bytes,
+          args[3] as string,
+        );
+        this.afterMutation();
+        return { digest: info.digest } as unknown as JsonValue;
+      }
+      case "getAttachment": {
+        const got = await getAttachmentLocal(this.store, this.blobs, args[0] as string, args[1] as string);
+        if (!got) return null;
+        return {
+          bytes: base64Encode(got.bytes, "standard"),
+          info: got.info as unknown as JsonValue,
+        };
+      }
+      case "getAttachmentInfo":
+        return (getAttachmentInfoLocal(this.store, args[0] as string, args[1] as string) ??
+          null) as unknown as JsonValue;
+      case "removeAttachment":
+        removeAttachmentLocal(this.store, args[0] as string, args[1] as string);
+        this.afterMutation();
+        return null;
       default:
         throw new Error(`unknown method ${method}`);
     }

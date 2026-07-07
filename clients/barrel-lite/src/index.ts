@@ -28,7 +28,10 @@ export type {
   StorageAdapter,
   StorageArea,
   DocRecord,
+  AttRef,
 } from "./store/types.js";
+export type { AttInfo } from "./attachments/att.js";
+export type { BlobStore } from "./store/blobstore.js";
 
 export type { SyncFilter, WireCond } from "./wire/filters.js";
 export { SyncError } from "./wire/errors.js";

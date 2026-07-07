@@ -20,6 +20,14 @@
         },
         put: (doc) => window.__db.put(doc),
         get: (id) => window.__db.get(id),
+        putAttText: (id, name, text) =>
+          window.__db.putAttachment(id, name, new TextEncoder().encode(text), {
+            contentType: "text/plain",
+          }),
+        getAttText: (id, name) =>
+          window.__db
+            .getAttachment(id, name)
+            .then((r) => (r ? new TextDecoder().decode(r.bytes) : null)),
         sync: () => window.__db.sync(),
         pull: () => window.__db.pull(),
         live: (opts) => {
