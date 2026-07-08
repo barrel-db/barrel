@@ -15,12 +15,14 @@ import { randomSourceId, utf8Decode, utf8Encode } from "../codec/bytes.js";
 import { compareHlc, encodeHlc, type HlcClock } from "../codec/hlc.js";
 import { versionFromToken, versionToToken } from "../codec/version.js";
 import { vvBump, vvDecode, vvEncode, vvNew } from "../codec/vv.js";
+import { base64ToFloat32, float32ToBase64 } from "../codec/float32.js";
 import type { JsonObject } from "../json.js";
 import type { AttRef, DbMeta, DocRecord, StorageArea } from "./types.js";
 
 const DOCS_BLOB = "docs.json";
 const META_BLOB = "meta.json";
 const ATTREFS_BLOB = "attrefs.json";
+const VECTORS_BLOB = "vectors.json";
 const SNAPSHOT_VERSION = 1;
 
 interface DocsSnapshot {
@@ -33,6 +35,12 @@ interface AttRefsSnapshot {
   attrefs: AttRef[];
 }
 
+interface VectorsSnapshot {
+  v: number;
+  dim: number;
+  vectors: { id: string; vec: string }[];
+}
+
 function attRefKey(id: string, name: string): string {
   return `${encodeURIComponent(id)}/${encodeURIComponent(name)}`;
 }
@@ -42,6 +50,8 @@ export class LocalStore {
   private readonly clock: HlcClock;
   private readonly docs = new Map<string, DocRecord>();
   private readonly attrefs = new Map<string, AttRef>();
+  private readonly vectors = new Map<string, Float32Array>();
+  private vectorDimValue: number | undefined;
   private meta: DbMeta;
   private needsFlush = false;
 
@@ -77,6 +87,14 @@ export class LocalStore {
       const snap = JSON.parse(utf8Decode(attrefsBytes)) as AttRefsSnapshot;
       for (const ref of snap.attrefs) {
         store.attrefs.set(attRefKey(ref.id, ref.name), ref);
+      }
+    }
+    const vectorsBytes = await area.read(VECTORS_BLOB);
+    if (vectorsBytes) {
+      const snap = JSON.parse(utf8Decode(vectorsBytes)) as VectorsSnapshot;
+      store.vectorDimValue = snap.dim;
+      for (const { id, vec } of snap.vectors) {
+        store.vectors.set(id, base64ToFloat32(vec));
       }
     }
     return store;
@@ -220,6 +238,44 @@ export class LocalStore {
     this.needsFlush = true;
   }
 
+  //==================================================================
+  // Vector index (per-doc embeddings, single dimension)
+  //==================================================================
+
+  vectorDim(): number | undefined {
+    return this.vectorDimValue;
+  }
+
+  getVector(id: string): Float32Array | undefined {
+    return this.vectors.get(id);
+  }
+
+  vectorIds(): string[] {
+    return [...this.vectors.keys()];
+  }
+
+  allVectors(): IterableIterator<[string, Float32Array]> {
+    return this.vectors.entries();
+  }
+
+  /** Store a doc's vector. The first put fixes the dimension; a
+   * wrong-length vector is rejected so the index stays rectangular.
+   * Returns true if stored. */
+  putVector(id: string, vec: Float32Array): boolean {
+    if (this.vectorDimValue === undefined) {
+      this.vectorDimValue = vec.length;
+    } else if (vec.length !== this.vectorDimValue) {
+      return false;
+    }
+    this.vectors.set(id, vec);
+    this.needsFlush = true;
+    return true;
+  }
+
+  removeVector(id: string): void {
+    if (this.vectors.delete(id)) this.needsFlush = true;
+  }
+
   /** True if there are unpersisted changes since the last flush. */
   get dirtyForFlush(): boolean {
     return this.needsFlush;
@@ -237,6 +293,15 @@ export class LocalStore {
     await this.area.write(META_BLOB, utf8Encode(JSON.stringify(this.meta)));
     const attSnap: AttRefsSnapshot = { v: SNAPSHOT_VERSION, attrefs: this.allAttRefs() };
     await this.area.write(ATTREFS_BLOB, utf8Encode(JSON.stringify(attSnap)));
+    const vecSnap: VectorsSnapshot = {
+      v: SNAPSHOT_VERSION,
+      dim: this.vectorDimValue ?? 0,
+      vectors: [...this.vectors.entries()].map(([id, vec]) => ({
+        id,
+        vec: float32ToBase64(vec),
+      })),
+    };
+    await this.area.write(VECTORS_BLOB, utf8Encode(JSON.stringify(vecSnap)));
     this.needsFlush = false;
   }
 

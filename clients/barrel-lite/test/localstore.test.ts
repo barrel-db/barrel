@@ -105,6 +105,36 @@ describe("local store", () => {
     expect(reopened.getCheckpoint("absent")).toBeUndefined();
   });
 
+  it("stores vectors, fixes the dimension, and rejects a wrong length", async () => {
+    const area = await freshArea();
+    const store = await LocalStore.open(area, clockAt(1000));
+    expect(store.vectorDim()).toBeUndefined();
+    expect(store.putVector("a", Float32Array.from([1, 2, 3]))).toBe(true);
+    expect(store.vectorDim()).toBe(3);
+    expect(store.putVector("b", Float32Array.from([4, 5, 6]))).toBe(true);
+    // wrong dimension is rejected, index stays rectangular
+    expect(store.putVector("c", Float32Array.from([1, 2]))).toBe(false);
+    expect(store.getVector("c")).toBeUndefined();
+    expect(store.vectorIds().sort()).toEqual(["a", "b"]);
+    store.removeVector("a");
+    expect(store.getVector("a")).toBeUndefined();
+  });
+
+  it("reloads vectors byte-exact across a reopen", async () => {
+    const area = await freshArea();
+    const store = await LocalStore.open(area, clockAt(1000));
+    const v = Float32Array.from([0.1, -0.2, 0.3, 0.4]);
+    store.putVector("a", v);
+    await store.flush();
+
+    const reopened = await LocalStore.open(area, clockAt(0));
+    expect(reopened.vectorDim()).toBe(4);
+    const back = reopened.getVector("a");
+    expect(back).toBeDefined();
+    // f32-exact round trip
+    expect(Array.from(back as Float32Array)).toEqual(Array.from(v));
+  });
+
   it("clearDirty only clears when the version still matches", async () => {
     const area = await freshArea();
     const store = await LocalStore.open(area, clockAt(1000));
