@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.0 (2026-07-08)
+
+Coordinated umbrella release. Added tests for the sidecar response decoder.
+See the umbrella [CHANGELOG](../../CHANGELOG.md).
+
 ## 0.1.1 (2026-04-02)
 
 - Fix edoc documentation syntax

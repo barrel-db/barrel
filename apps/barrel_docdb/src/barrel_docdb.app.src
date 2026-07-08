@@ -25,7 +25,7 @@
     {licenses, ["Apache-2.0"]},
     {doc, "https://docs.barrel-db.eu/docdb"},
     {links, [
-        {"GitHub", "https://github.com/barrel-db/barrel_docdb"},
+        {"GitHub", "https://github.com/barrel-db/barrel"},
         {"Documentation", "https://docs.barrel-db.eu/docdb"}
     ]}
 ]}.

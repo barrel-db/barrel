@@ -12,7 +12,7 @@
   {modules, []},
   {licenses, ["Apache-2.0"]},
   {links, [
-    {"GitHub", "https://github.com/barrel-db/barrel_embed"},
+    {"GitHub", "https://github.com/barrel-db/barrel"},
     {"Documentation", "https://docs.barrel-db.eu/embed/"}
   ]},
   {files, [

@@ -25,5 +25,5 @@
     ]},
     {modules, []},
     {licenses, ["Apache-2.0"]},
-    {links, [{"GitHub", "https://github.com/barrel-db/barrel_vectordb"}]}
+    {links, [{"GitHub", "https://github.com/barrel-db/barrel"}]}
 ]}.
