@@ -343,8 +343,8 @@ put_doc(Req) ->
 get_doc(Req) ->
     with_db(Req, fun(Db) ->
         Id = livery_req:binding(<<"id">>, Req),
-        case barrel:get_doc(Db, Id) of
-            {ok, Doc} -> json_resp(200, Doc);
+        case barrel:get_doc(Db, Id, embedding_opts_qs(Req)) of
+            {ok, Doc} -> json_resp(200, encode_embedding_field(Doc));
             Err -> error_resp(Err)
         end
     end).
@@ -490,8 +490,10 @@ bulk_get(Req) ->
     with_db(Req, fun(Db) ->
         with_json(Req, fun(Body) ->
             Ids = maps:get(<<"ids">>, Body, []),
-            Results = barrel:get_docs(Db, Ids),
-            json_resp(200, #{results => [batch_result(R) || R <- Results]})
+            Results = barrel:get_docs(Db, Ids, embedding_opts_body(Body)),
+            json_resp(200,
+                      #{results => [batch_result(embed_result(R))
+                                    || R <- Results]})
         end)
     end).
 
@@ -918,6 +920,36 @@ read_body(Req) ->
 batch_result({ok, Map}) when is_map(Map) -> jsonable(Map);
 batch_result({ok, Other}) -> #{ok => true, result => Other};
 batch_result({error, Reason}) -> #{error => err_bin(Reason)}.
+
+%% Vectors are opt-in reads. The reader returns _embedding as a float
+%% list; the wire form is base64 of the float32 LE blob plus its dim.
+embedding_opts_qs(Req) ->
+    case param(<<"include_embedding">>, Req) of
+        undefined -> #{};
+        <<"false">> -> #{};
+        _ -> #{include_embedding => true}
+    end.
+
+embedding_opts_body(Body) ->
+    case maps:get(<<"include_embedding">>, Body, false) of
+        true -> #{include_embedding => true};
+        <<"true">> -> #{include_embedding => true};
+        _ -> #{}
+    end.
+
+embed_result({ok, Doc}) when is_map(Doc) -> {ok, encode_embedding_field(Doc)};
+embed_result(Other) -> Other.
+
+%% Re-encode the reader's float-list vector to the wire form, shared by
+%% get_doc and bulk_get so the base64/dim shape lives in one place.
+encode_embedding_field(#{<<"_embedding">> :=
+                             #{<<"vector">> := Vec} = Emb} = Doc)
+        when is_list(Vec) ->
+    Doc#{<<"_embedding">> => Emb#{
+        <<"vector">> => base64:encode(barrel_doc:encode_embedding(Vec)),
+        <<"dim">> => length(Vec)}};
+encode_embedding_field(Doc) ->
+    Doc.
 
 err_bin(Atom) when is_atom(Atom) -> atom_to_binary(Atom, utf8);
 err_bin(Other) -> iolist_to_binary(io_lib:format("~p", [Other])).

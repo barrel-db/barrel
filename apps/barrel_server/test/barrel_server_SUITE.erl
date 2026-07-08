@@ -19,6 +19,7 @@
     t_changes_json/1,
     t_changes_sse/1,
     t_changes_continuous/1,
+    t_embedding/1,
     t_query_ndjson/1,
     t_query_get/1,
     t_query_params_json/1,
@@ -37,7 +38,7 @@
 all() ->
     [t_db_lifecycle, t_doc_crud, t_bulk, t_attachment,
      t_vector_search, t_changes_json, t_changes_sse,
-     t_changes_continuous,
+     t_changes_continuous, t_embedding,
      t_query_ndjson, t_query_get, t_query_params_json,
      t_query_parse_error, t_query_subscribe_requires_sse,
      t_query_subscribe_sse, t_not_found, t_no_atom_leak].
@@ -152,6 +153,29 @@ t_changes_continuous(Config) ->
                         #{<<"n">> => 1}),
     ok = wait_sse(Client, <<"\"id\":\"c1\"">>, <<>>),
     hackney:close(Client),
+    ok.
+
+t_embedding(Config) ->
+    B = base(Config),
+    Vec = [0.1, -0.2, 0.3, 0.4],
+    {201, _} = req_json(put, url("/doc/emb1", B),
+                        #{<<"kind">> => <<"note">>,
+                          <<"_embedding">> => Vec}),
+    %% off by default
+    {200, Plain} = req(get, url("/doc/emb1", B), <<>>),
+    ?assertNot(maps:is_key(<<"_embedding">>, Plain)),
+    %% include_embedding=true returns base64 float32 + dim
+    {200, WithEmb} = req(get, url("/doc/emb1?include_embedding=true", B), <<>>),
+    #{<<"_embedding">> := #{<<"vector">> := B64, <<"dim">> := Dim,
+                            <<"source">> := <<"client">>}} = WithEmb,
+    ?assertEqual(4, Dim),
+    ?assertEqual(Dim * 4, byte_size(base64:decode(B64))),
+    %% same over _bulk_get
+    {200, Bulk} = req_json(post, url("/_bulk_get", B),
+                           #{<<"ids">> => [<<"emb1">>],
+                             <<"include_embedding">> => true}),
+    [#{<<"_embedding">> := #{<<"dim">> := 4}}] =
+        maps:get(<<"results">>, Bulk),
     ok.
 
 t_query_ndjson(Config) ->
