@@ -17,6 +17,7 @@ export type {
   TabsOptions,
   SyncOptions,
   LiveOptions,
+  LocalHit,
 } from "./db.js";
 
 export { BroadcastChannelBus, LeaderChangedError } from "./tabs/channel.js";
@@ -50,4 +51,13 @@ export type { Env } from "./env.js";
 export { compile, runLocal } from "./bql/query.js";
 export { BqlError, BqlServerOnlyError } from "./bql/errors.js";
 export type { Plan } from "./bql/lower.js";
-export type { QueryMeta } from "./wire/transport.js";
+export type { QueryMeta, ServerHit } from "./wire/transport.js";
+
+// Vector search primitives (browser brute-force cosine top-k).
+export {
+  encodeFloat32LE,
+  decodeFloat32LE,
+  float32ToBase64,
+  base64ToFloat32,
+} from "./codec/float32.js";
+export { cosine, dot, norm } from "./vectors/cosine.js";

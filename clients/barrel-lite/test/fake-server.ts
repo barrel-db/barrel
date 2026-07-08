@@ -34,6 +34,7 @@ import { sha256Digest } from "../src/attachments/digest.js";
 import { compile, runLocal } from "../src/bql/query.js";
 import type { LitValue } from "../src/bql/lower.js";
 import { float32ToBase64 } from "../src/codec/float32.js";
+import { cosine } from "../src/vectors/cosine.js";
 
 interface Stored {
   body: JsonObject | null;
@@ -85,6 +86,7 @@ export class FakeServer {
   private readonly docs = new Map<string, Stored>();
   private readonly atts = new Map<string, StoredAtt>();
   private readonly embeddings = new Map<string, number[]>();
+  private readonly searchText_ = new Map<string, { text: string; metadata?: JsonObject }>();
   private seq = 0;
   private attSeq = 0;
   private readonly clock = new HlcClock({ physClock: () => 1_700_000_000_000 });
@@ -131,6 +133,15 @@ export class FakeServer {
       }
       if (method === "POST" && u.pathname.endsWith("/_bulk_get")) {
         return this.jsonResponse(this.bulkGet(this.jsonBody(init)));
+      }
+      if (method === "POST" && u.pathname.endsWith("/search/vector")) {
+        return this.jsonResponse(this.searchVector(this.jsonBody(init)));
+      }
+      if (
+        method === "POST" &&
+        (u.pathname.endsWith("/search/bm25") || u.pathname.endsWith("/search/hybrid"))
+      ) {
+        return this.jsonResponse(this.searchText(this.jsonBody(init)));
       }
       // JSON endpoints
       const body = init?.body ? (JSON.parse(init.body as string) as JsonObject) : undefined;
@@ -181,6 +192,41 @@ export class FakeServer {
       return doc;
     });
     return { status: 200, json: { results } };
+  }
+
+  /** Seed the server's text-search corpus (bm25/hybrid). */
+  seedSearchText(key: string, text: string, metadata?: JsonObject): void {
+    this.searchText_.set(key, metadata === undefined ? { text } : { text, metadata });
+  }
+
+  /** Fake ANN vector search: rank the seeded emb corpus by cosine. */
+  private searchVector(body: JsonObject): { status: number; json?: unknown } {
+    const query = Array.isArray(body["vector"])
+      ? Float32Array.from(body["vector"] as number[])
+      : new Float32Array();
+    const k = typeof body["k"] === "number" ? body["k"] : 10;
+    const hits = [...this.embeddings.entries()]
+      .map(([key, vec]) => ({ key, score: cosine(query, Float32Array.from(vec)) }))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, k);
+    return { status: 200, json: { hits } };
+  }
+
+  /** Fake text search: substring match, score by occurrence count. */
+  private searchText(body: JsonObject): { status: number; json?: unknown } {
+    const q = String(body["query"] ?? "").toLowerCase();
+    const k = typeof body["k"] === "number" ? body["k"] : 10;
+    const hits = [...this.searchText_.entries()]
+      .map(([key, { text, metadata }]) => {
+        const n = q.length === 0 ? 0 : text.toLowerCase().split(q).length - 1;
+        const hit: JsonObject = { key, score: n, text };
+        if (metadata !== undefined) hit["metadata"] = metadata;
+        return hit;
+      })
+      .filter((h) => (h["score"] as number) > 0)
+      .sort((a, b) => (b["score"] as number) - (a["score"] as number))
+      .slice(0, k);
+    return { status: 200, json: { hits } };
   }
 
   private queryNdjson(body: JsonObject): Response {

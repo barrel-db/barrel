@@ -246,6 +246,38 @@ export class SyncTransport {
   }
 
   //==================================================================
+  // Server search delegation (POST /db/:db/search/{vector|bm25|hybrid})
+  //==================================================================
+
+  /** ANN vector search on the server's index (a separate corpus from
+   * the per-doc emb column that searchLocal ranks). Query vector is a
+   * raw JSON float array on this wire, not base64. */
+  async searchVector(
+    vector: number[] | Float32Array,
+    opts: { k?: number } = {},
+  ): Promise<ServerHit[]> {
+    const body: JsonObject = { vector: Array.from(vector) };
+    if (opts.k !== undefined) body["k"] = opts.k;
+    const { json } = await this.dbRootRequest("POST", "/search/vector", body);
+    return parseHits(json);
+  }
+
+  /** Text search on the server: "bm25" (default) or "hybrid". */
+  async searchText(
+    query: string,
+    opts: { k?: number; mode?: "bm25" | "hybrid" } = {},
+  ): Promise<ServerHit[]> {
+    const body: JsonObject = { query };
+    if (opts.k !== undefined) body["k"] = opts.k;
+    const { json } = await this.dbRootRequest(
+      "POST",
+      `/search/${opts.mode ?? "bm25"}`,
+      body,
+    );
+    return parseHits(json);
+  }
+
+  //==================================================================
   // Query delegation (POST /db/:db/query, ndjson response)
   //==================================================================
 
@@ -503,6 +535,32 @@ export class SyncTransport {
     if (status >= 500) throw new SyncError("server_error", err, status);
     throw new SyncError("bad_request", err, status);
   }
+}
+
+/** A hit from a server /search endpoint. */
+export interface ServerHit {
+  key: string;
+  score: number;
+  text?: string;
+  metadata?: JsonObject;
+}
+
+function parseHits(json: JsonValue): ServerHit[] {
+  const rows = Array.isArray(asObject(json)["hits"])
+    ? (asObject(json)["hits"] as JsonValue[])
+    : [];
+  return rows.map((r) => {
+    const o = asObject(r);
+    const hit: ServerHit = {
+      key: String(o["key"]),
+      score: typeof o["score"] === "number" ? o["score"] : 0,
+    };
+    if (typeof o["text"] === "string") hit.text = o["text"];
+    if (typeof o["metadata"] === "object" && o["metadata"] !== null && !Array.isArray(o["metadata"])) {
+      hit.metadata = o["metadata"] as JsonObject;
+    }
+    return hit;
+  });
 }
 
 export interface AttRow {

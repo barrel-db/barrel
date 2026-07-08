@@ -18,7 +18,13 @@ import { OpfsAdapter } from "./store/opfs.js";
 import { LocalStore } from "./store/localstore.js";
 import { MemoryBlobStore, OpfsBlobStore, type BlobStore } from "./store/blobstore.js";
 import type { DocRecord, StorageAdapter, StorageArea } from "./store/types.js";
-import { SyncTransport, type FetchLike, type QueryMeta } from "./wire/transport.js";
+import {
+  SyncTransport,
+  type FetchLike,
+  type QueryMeta,
+  type ServerHit,
+} from "./wire/transport.js";
+import { cosine } from "./vectors/cosine.js";
 import type { SyncFilter } from "./wire/filters.js";
 import { pull } from "./sync/puller.js";
 import { push } from "./sync/pusher.js";
@@ -72,6 +78,13 @@ export interface OpenOptions {
 
 export interface SyncOptions {
   filter?: SyncFilter;
+}
+
+/** A local vector-search result: the doc, its cosine score, and id. */
+export interface LocalHit {
+  id: string;
+  score: number;
+  doc: JsonObject;
 }
 
 export type LiveOptions = SyncOptions &
@@ -431,6 +444,70 @@ export class Database {
     return fetched;
   }
 
+  //==================================================================
+  // Search
+  //==================================================================
+
+  /** Brute-force cosine top-k over the locally synced vectors. The
+   * query is a precomputed embedding (same model/dim as the stored
+   * vectors); an optional BQL WHERE filter narrows candidates first.
+   * Leader-owned (a follower proxies with the query as a number[]). */
+  async searchLocal(
+    query: number[] | Float32Array,
+    opts: { k?: number; filter?: string } = {},
+  ): Promise<LocalHit[]> {
+    if (this.isFollower()) {
+      const proxied: JsonObject = {};
+      if (opts.k !== undefined) proxied["k"] = opts.k;
+      if (opts.filter !== undefined) proxied["filter"] = opts.filter;
+      return (await this.callLeader("searchLocal", [
+        Array.from(query) as JsonValue,
+        proxied,
+      ])) as unknown as LocalHit[];
+    }
+    const q = query instanceof Float32Array ? query : Float32Array.from(query);
+    const k = opts.k ?? 10;
+
+    let allowed: Set<string> | undefined;
+    if (opts.filter !== undefined) {
+      const plan = compile(`SELECT id FROM db WHERE ${opts.filter}`);
+      const docs = this.store
+        .allDocs()
+        .filter((r) => r.body !== null)
+        .map((r) => ({ ...(r.body as JsonObject), id: r.id }));
+      allowed = new Set(runLocal(plan, docs).map((row) => String(row["id"])));
+    }
+
+    const hits: LocalHit[] = [];
+    for (const id of this.store.vectorIds()) {
+      if (allowed && !allowed.has(id)) continue;
+      const doc = this.store.getBody(id);
+      if (doc === undefined) continue; // tombstoned or gone
+      const vec = this.store.getVector(id);
+      if (vec === undefined) continue;
+      hits.push({ id, score: cosine(q, vec), doc });
+    }
+    hits.sort((a, b) => b.score - a.score);
+    return hits.slice(0, k);
+  }
+
+  /** ANN vector search on the server's index (a separate corpus from
+   * the emb column searchLocal ranks). Works on either tab. */
+  async searchVector(
+    vector: number[] | Float32Array,
+    opts: { k?: number } = {},
+  ): Promise<ServerHit[]> {
+    return this.requireRemote().searchVector(vector, opts);
+  }
+
+  /** Text search on the server: "bm25" (default) or "hybrid". */
+  async searchText(
+    query: string,
+    opts: { k?: number; mode?: "bm25" | "hybrid" } = {},
+  ): Promise<ServerHit[]> {
+    return this.requireRemote().searchText(query, opts);
+  }
+
   liveSync(opts: LiveOptions = {}): LiveHandle {
     this.requireRemote();
     if (this.live) this.live.stop();
@@ -584,6 +661,11 @@ export class Database {
       case "syncEmbeddings":
         return (await this.syncEmbeddings(
           (args[0] as { refetchAll?: boolean }) ?? {},
+        )) as unknown as JsonValue;
+      case "searchLocal":
+        return (await this.searchLocal(
+          args[0] as number[],
+          (args[1] as { k?: number; filter?: string }) ?? {},
         )) as unknown as JsonValue;
       case "query":
         return (await this.query(args[0] as string, {
