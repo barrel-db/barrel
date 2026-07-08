@@ -39,8 +39,9 @@
 %%% <ol>
 %%%   <li>Read checkpoint to find last replicated sequence</li>
 %%%   <li>Fetch changes from source since that sequence</li>
-%%%   <li>For each change, use revsdiff to find missing revisions</li>
-%%%   <li>Fetch and transfer missing revisions with history</li>
+%%%   <li>For each batch, diff versions by vector containment to find what
+%%%       the target is missing</li>
+%%%   <li>Fetch and transfer the missing versions with history</li>
 %%%   <li>Write checkpoint after each batch</li>
 %%% </ol>
 %%%

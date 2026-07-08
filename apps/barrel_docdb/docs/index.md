@@ -60,7 +60,7 @@ Sync anywhere. Query anything. Your data, wherever you need it.
 
 Barrel DocDB is a production-ready document database built on Erlang/OTP that provides:
 
-- **Document CRUD** with MVCC revision trees and automatic conflict resolution
+- **Document CRUD** with HLC version-vector MVCC and last-write-wins conflict handling
 - **Declarative Queries** with automatic path indexing - no manual index creation needed
 - **Real-time Subscriptions** via MQTT-style path patterns and query subscriptions
 - **Peer-to-Peer Replication** (one-shot or continuous) with pluggable transports
@@ -80,40 +80,8 @@ Barrel DocDB is a production-ready document database built on Erlang/OTP that pr
 
 ## Quick Example
 
-Barrel DocDB can run as a **standalone server** accessible via HTTP from any language, or be **embedded** directly into your Erlang/OTP application.
-
-=== "Standalone (HTTP API)"
-
-    Run Barrel as a standalone server and access it from any language via REST:
-
-    ```bash
-    # Health check
-    curl http://localhost:8080/health
-
-    # Create database
-    curl -X PUT http://localhost:8080/db/mydb
-
-    # Create document (auto-generated ID)
-    curl -X POST http://localhost:8080/db/mydb \
-      -H "Content-Type: application/json" \
-      -d '{"type": "user", "name": "Alice"}'
-
-    # Or with specific ID
-    curl -X PUT http://localhost:8080/db/mydb/doc1 \
-      -H "Content-Type: application/json" \
-      -d '{"type": "user", "name": "Alice"}'
-
-    # Get document
-    curl http://localhost:8080/db/mydb/doc1
-
-    # Query documents
-    curl -X POST http://localhost:8080/db/mydb/_find \
-      -H "Content-Type: application/json" \
-      -d '{"where": [{"path": ["type"], "value": "user"}]}'
-
-    # Stream changes (SSE)
-    curl http://localhost:8080/db/mydb/_changes/stream
-    ```
+Barrel DocDB is **embedded** directly into your Erlang/OTP application. For an
+HTTP (REST/JSON) surface over the same data, run `barrel_server`.
 
 === "Embedded (Erlang API)"
 
@@ -149,7 +117,7 @@ Barrel DocDB can run as a **standalone server** accessible via HTTP from any lan
 
 ### :brain: Documents with MVCC
 
-Every document maintains a revision tree, enabling automatic conflict detection and resolution during replication. No data loss, even in distributed scenarios.
+Every write is an HLC version and every document carries a version vector. Replication diffs by vector containment and resolves concurrent writes with a deterministic last-write-wins winner, retaining the losing versions as conflict siblings. No silent data loss, even in distributed scenarios.
 
 ### :mag: Declarative Queries
 
@@ -180,25 +148,24 @@ Query documents using path-based conditions with automatic indexing. No need to 
 
     ```erlang
     {deps, [
-        {barrel_docdb, "0.7.7"}
+        {barrel_docdb, "~> 0.9"}
     ]}.
     ```
 
--   :material-api: __HTTP API__
+-   :material-api: __HTTP surface__
 
     ---
 
-    Full REST API for any language
+    Run `barrel_server` for a REST/JSON and MCP API over the same data
 
-    ```bash
-    # Start server on port 8080
-    curl http://localhost:8080/health
+    ```erlang
+    {deps, [{barrel_server, "~> 0.2"}]}.
     ```
 
 </div>
 
 ## Community & Support
 
-- [:fontawesome-brands-github: GitHub Repository](https://github.com/barrel-db/barrel_docdb)
-- [:material-file-document: API Reference](api/http.md)
-- [:material-bug: Report Issues](https://github.com/barrel-db/barrel_docdb/issues)
+- [:fontawesome-brands-github: GitHub Repository](https://github.com/barrel-db/barrel)
+- [:material-file-document: API Reference](api/erlang.md)
+- [:material-bug: Report Issues](https://github.com/barrel-db/barrel/issues)

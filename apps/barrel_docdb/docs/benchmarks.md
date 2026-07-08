@@ -140,39 +140,8 @@ Barrel's value is in the **combination** of:
 
 If you only need single-node storage without replication, simpler tools exist. Choose Barrel when you need **sync**, **real-time**, and **architectural flexibility**.
 
-## HTTP API vs Direct Erlang API
-
-The HTTP API provides remote access but adds overhead from network I/O, JSON serialization, and authentication.
-
-### Regular Database (Non-Sharded)
-
-| Operation | Direct API (ops/s) | HTTP API (ops/s) | HTTP Overhead |
-|-----------|-------------------|------------------|---------------|
-| Insert | 8,223 | 1,206 | 85% |
-| Read | 18,900 | 790 | 96% |
-| Update | 38,066 | 1,124 | 97% |
-
-!!! tip "HTTP API Usage Guidelines"
-    **Use the direct Erlang API when possible.** The HTTP API is best for:
-
-    - Cross-language access (Python, JavaScript, etc.)
-    - External service integration
-    - Administrative operations from CLI tools
-    - Distributed deployments where HTTP is required
-
-    For Erlang applications running on the same node, always prefer the direct API (100-200x faster for simple operations).
-
-### Connection Pooling
-
-The benchmarks above use single connections. In production, use HTTP connection pooling:
-
-```erlang
-%% With hackney pool
-Options = [{pool, my_barrel_pool}],
-hackney:request(get, Url, Headers, Body, Options).
-```
-
-Connection pooling can improve HTTP throughput by 3-5x by reusing TCP connections.
+!!! note "Remote access"
+    These numbers are for the embedded Erlang API, which is how barrel_docdb is used. To reach a database over HTTP, run the `barrel_server` app; network I/O and JSON serialization add overhead on top of the figures above.
 
 ## Running Benchmarks
 
@@ -180,9 +149,10 @@ Run the benchmark suite on your hardware:
 
 ```bash
 cd bench
-./run_bench.sh              # Default: 10,000 docs, 10,000 iterations
-./run_bench.sh 5000 100     # Custom: 5,000 docs, 100 iterations
-./run_bench.sh http 1000 100 # HTTP API vs Direct API comparison
+./run_bench.sh                 # Default: 10,000 docs, 10,000 iterations
+./run_bench.sh 5000 100        # Custom: 5,000 docs, 100 iterations
+./run_bench.sh doc_types       # Document type comparison
+./run_bench.sh doc_types 500 200  # Doc types with custom docs and iterations
 ```
 
 Or from Erlang:
@@ -194,7 +164,6 @@ barrel_bench:run(#{num_docs => 5000, iterations => 100}).
 barrel_bench:run_crud(#{num_docs => 1000}).
 barrel_bench:run_query(#{num_docs => 5000, iterations => 100}).
 barrel_bench:run_changes(#{num_docs => 1000}).
-barrel_bench:run_http(#{num_docs => 1000, iterations => 100}).
 ```
 
 Results are saved to `bench/results/` as JSON with timestamps.

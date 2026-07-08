@@ -8,7 +8,7 @@ barrel_docdb is an embeddable document database for Erlang applications. It prov
 
 1. **Embeddable**: Run as part of your Erlang application, no external services
 2. **Reliable**: ACID transactions via RocksDB, crash-safe operations
-3. **Replication-ready**: CouchDB-compatible revision model for sync
+3. **Replication-ready**: HLC version-vector model for conflict-free sync
 4. **Distributed**: HLC-based ordering for decentralized deployments
 5. **Efficient**: Optimized storage for documents and large attachments
 6. **Reactive**: Real-time subscriptions for document changes
@@ -72,8 +72,8 @@ Each database runs as a separate `gen_server` process:
 
 **Responsibilities:**
 - Document CRUD operations
-- Revision management
-- Sequence number generation
+- Version and conflict management
+- HLC change-sequence generation
 - Coordination with views and changes
 
 **Process Registry:**
@@ -84,7 +84,7 @@ persistent_term:put({barrel_db, DbName}, Pid)
 
 ### 2. Document Model
 
-Documents use a CouchDB-compatible revision model:
+Documents are versioned with Hybrid Logical Clocks, not revision trees. Each write is a **version** `{HLC, Author}` whose API token is `<hex(hlc)>@<author>` (the value in `<<"_rev">>`). Each document carries a **version vector** tracking the highest HLC seen from each author. Concurrent writes are resolved by last-write-wins with the losing versions retained.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -93,27 +93,21 @@ Documents use a CouchDB-compatible revision model:
 │ id          : <<"user:alice">>                                  │
 │ body        : #{<<"name">> => <<"Alice">>, ...}                 │
 ├─────────────────────────────────────────────────────────────────┤
-│                       Revision Tree                              │
-│                                                                  │
-│         1-aaa (root)                                            │
-│            │                                                     │
-│         2-bbb                                                    │
-│        ╱     ╲                                                   │
-│     3-ccc   3-ddd  (conflict)                                   │
-│                                                                  │
+│ version     : 0000018abc...@f1e0...   (winner)                  │
+│ vv          : #{f1e0... => hlc1, a2b3... => hlc2}               │
+│ nconflicts  : 1                                                  │
+│ deleted     : false                                             │
 ├─────────────────────────────────────────────────────────────────┤
-│ Current Rev : 3-ccc (winning)                                   │
-│ Deleted     : false                                             │
-│ Sequence    : {0, 42}                                           │
+│ version chain (0x1D): retained superseded + conflict siblings   │
+│   0000018def...@a2b3...   (conflict, live)                      │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-**Revision Format:** `<generation>-<sha256_hex>`
+**Version token:** `<hex(hlc)>@<author>`
 
-The hash is computed from:
-```erlang
-crypto:hash(sha256, term_to_binary({DocBody, ParentRev, Deleted}))
-```
+- The HLC (fixed-width hex) gives causally meaningful ordering, so token order equals causal order.
+- The author is the writing database's stable source id (per-database, 8 random bytes; see `barrel_version` and `barrel_db_server:ensure_source_id/2`). Authorship is per-database, not per-node, so two databases on one node detect each other's writes as concurrent.
+- The winner among siblings is the maximum under `barrel_version:compare/2` (HLC first, author as tie-break), a commutative rule: any replica seeing the same version set picks the same winner.
 
 ### 3. Storage Layer
 
@@ -132,38 +126,64 @@ Each barrel database uses two separate RocksDB instances:
 
 ```
 Document Store Keys:
-├── doc_info/{db}/{docid}              → DocInfo (metadata + revtree)
-├── doc_rev/{db}/{docid}/{rev}         → Document body
+├── doc_entity/{db}/{docid}            → Wide-column entity (version, vv,
+│                                         nconflicts, deleted, hlc, body cols)
+├── doc_version/{db}/{docid}:{version} → Version chain sibling (superseded
+│                                         or conflict) + archived body
+├── history/{db}/{hlc}                 → Retained history log entry
 ├── doc_hlc/{db}/{hlc}                 → Change entry (HLC-ordered)
 ├── path_hlc/{db}/{topic}/{hlc}        → Path-indexed change (exact match)
 ├── local/{db}/{docid}                 → Local document (not replicated)
-├── ars/{db}/{path}                    → Path index for queries
 ├── view_meta/{db}/{viewid}            → View metadata
-├── view_hlc/{db}/{viewid}             → View indexed HLC
 ├── view_index/{db}/{viewid}:{key}:{docid} → View index entry
 └── view_by_docid/{db}/{viewid}:{docid}    → Reverse index
 
 Posting CF Keys (posting_cf):
-├── ars_posting/{db}/{field}/{value}   → DocId posting list
+├── path_posting/{db}/{field}/{value}     → DocId posting list
 └── prefix_changes/{db}/{prefix}/{bucket} → HLC-ordered changes posting list
 
 Attachment Store Keys:
-└── att/{db}/{docid}/{attname}         → Attachment binary data
+└── att/{db}/{docid}/{attname}         → Attachment (content-addressed blob)
 ```
 
-Keys are designed for efficient range scans and prefix matching.
+Keys are designed for efficient range scans and prefix matching. The document body and its version metadata live together in one wide-column entity; older revision-tree keys (`doc_info`, `doc_rev`, `doc_tree`) are gone.
 
 **Key Prefixes:**
 | Prefix | Hex | Description |
 |--------|-----|-------------|
-| DOC_INFO | 0x01 | Document metadata |
-| DOC_REV | 0x02 | Document body by revision |
+| DOC_ENTITY | 0x18 | Wide-column document entity (current version) |
 | DOC_HLC | 0x0D | Changes ordered by HLC |
 | PATH_HLC | 0x0E | Path-indexed changes (exact match) |
 | PREFIX_CHANGES | 0x1B | Sharded prefix changes (wildcard) |
-| ARS | 0x09 | Path index for queries |
-| LOCAL | 0x03 | Local documents |
-| VIEW_* | 0x04-0x08 | View storage |
+| HISTORY | 0x1C | Retained history log |
+| DOC_VERSION | 0x1D | Per-doc version chain (superseded + conflict siblings) |
+| LOCAL | 0x05 | Local documents |
+| PATH_POSTING | 0x14 | Path index posting lists for queries |
+
+#### Entity Codec (v4)
+
+The document entity (`DOC_ENTITY`, 0x18) is a fixed positional binary. Columns:
+
+```
+<<VerLen:16, Version/binary,        %% COL_VERSION: encoded {HLC, Author}
+  Deleted:8,                        %% COL_DELETED
+  HlcLen:16, Hlc/binary,            %% COL_HLC: change-sequence HLC
+  VVLen:32, VV/binary,              %% COL_VV: encoded version vector
+  CreatedAtLen:16, CreatedAt/binary,%% COL_CREATED_AT (reserved for tiering)
+  ExpiresAt:64,                     %% COL_EXPIRES_AT (TTL)
+  Tier:8,                           %% COL_TIER (hot/warm/cold)
+  NConflicts:16,                    %% COL_NCONFLICTS: live conflict siblings
+  Ext/binary>>                      %% optional extension tail
+```
+
+The `COL_VERSION` / `COL_VV` / `COL_NCONFLICTS` columns replaced the old `COL_REV` / `COL_REVTREE`. The extension tail is backward compatible: an embedding appends `<<EmbLen:32, Emb/binary, Src:8>>`; entities also carrying provenance switch to a tagged form (sentinel `16#FFFFFFFF`, then `(Tag:8, Len:32, Value)*`). Old readers ignore the tail without crashing.
+
+#### Retained History and the Version Chain
+
+Two structures give the version model its durability and conflict retention:
+
+- **Version chain** (`DOC_VERSION`, 0x1D): per document, one row per non-winning version. Each entry is `<<Flag:8, Deleted:8, VV/binary>>` where flag 0 = superseded (covered by the current winner, e.g. an old winner after a fast-forward) and 1 = conflict (a live concurrent sibling). The version's body is archived under its version token so any retained version stays resolvable within the retention window.
+- **Retained history log** (`HISTORY`, 0x1C): an append-only, HLC-ordered log of every write the database applies (local writes, replicated versions including losing siblings, and conflict resolutions). Entries carry identity only (doc id, version, deleted, cause, version vector), never bodies, and are written in the same atomic batch as the document. A retention sweep (`sweep_retention/1`) prunes both structures below the history floor.
 
 #### RocksDB Optimizations
 
@@ -262,9 +282,9 @@ Every document modification generates an HLC-timestamped change entry:
 #{
     id => DocId,
     hlc => HlcTimestamp,
-    rev => RevId,
+    rev => VersionToken,           %% <hex(hlc)>@<author>
     deleted => boolean(),
-    changes => [RevId]
+    changes => [#{rev => VersionToken}]
 }
 ```
 
@@ -401,7 +421,7 @@ prefix_changes/mydb/status/active/482345     → [<< hlc1, "doc1", ... >>]
 
 ### 9. Replication
 
-Replication follows the CouchDB protocol with HLC-based ordering:
+Replication is a version-vector protocol: one diff round-trip per batch of changes, then a read plus apply per missing document. All conflict handling lives in the target's `put_version`, so the algorithm needs no ancestor negotiation.
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
@@ -412,48 +432,72 @@ Replication follows the CouchDB protocol with HLC-based ordering:
 │                     │                                         │
 │                     ▼                                         │
 │  2. Get changes from source since last_hlc                   │
-│     (optionally filtered by paths/query)                     │
+│     (optionally filtered by paths/query; each change          │
+│      carries the doc's current version token)                 │
 │                     │                                         │
 │                     ▼                                         │
-│  3. Sync target HLC with source timestamps                   │
+│  3. Sync target HLC past the newest source change            │
 │                     │                                         │
 │                     ▼                                         │
-│  4. For each change:                                         │
-│     ├── Call revsdiff(target, docid, revs)                   │
-│     ├── Get missing revisions from source with history       │
-│     └── Put to target using put_rev(doc, history, deleted)   │
+│  4. diff_versions(target, #{DocId => Token})                 │
+│     → per doc: have (vv contains it) | missing               │
 │                     │                                         │
 │                     ▼                                         │
-│  5. Write checkpoint with new last_hlc                       │
+│  5. For each missing doc:                                     │
+│     ├── get_doc_for_replication(source, docid)               │
+│     │     → {doc, version, vv, deleted}                       │
+│     └── put_version(target, doc, version, vv, deleted)       │
 │                     │                                         │
 │                     ▼                                         │
-│  6. Repeat until no more changes                             │
+│  6. Write checkpoint, repeat until no more changes           │
 │                                                               │
 └──────────────────────────────────────────────────────────────┘
 ```
 
+**Applying a version (`do_put_version`):**
+- `contains` (already covered): idempotent no-op.
+- remote VV `dominates`: fast-forward; the old winner joins the version chain as superseded.
+- `concurrent`: an optional per-db `conflict_merger` may merge; otherwise last-write-wins by version keeps a winner and retains the loser as a live conflict sibling. Vectors merge either way.
+
+**Diffing (`do_diff_versions`):** batch `have`/`missing` by version-vector containment; no per-document ancestor negotiation.
+
 **Filtered Replication:**
-Replicate only documents matching filters:
+Replicate only documents matching filters (path AND query when combined):
 ```erlang
 barrel_rep:replicate(Source, Target, #{
     filter => #{
-        paths => [<<"users/#">>],           %% Path pattern filter
-        query => #{where => [...]}          %% Query filter
+        paths => [<<"users/#">>],
+        query => #{where => [...]}
     }
 }).
-%% Both filters use AND logic when combined
 ```
 
 **Transport Abstraction:**
 The `barrel_rep_transport` behaviour allows pluggable transports:
-- `barrel_rep_transport_local` - Same Erlang VM
-- Custom HTTP, TCP, or other transports
+- `barrel_rep_transport_local` - same Erlang VM
+- `barrel_rep_transport_http` - remote over the `/db/:db/_sync/*` wire (hackney)
+- Custom transports for other protocols
+
+`barrel_rep_tasks` layers persistent one-shot and continuous tasks over `barrel_rep`.
 
 **Checkpoints:**
-Stored as local documents (not replicated):
+Stored as local documents (not replicated), keyed by a replication id derived from the endpoints and any filter:
 ```erlang
 Key: <<"replication-checkpoint-{rep_id}">>
 Value: #{<<"history">> => [#{<<"source_last_hlc">> => ...}]}
+```
+
+### 9b. Timeline (Branch and Merge)
+
+`barrel_timeline` forks a database into a branch and merges it back:
+
+- **Branch** (`branch_db/3`): an instant fork. Both RocksDB stores (docs and attachments) are checkpointed into the branch's directory via hard links (O(1) in data size, copy-on-write at the file level). The branch opens as a normal database; its storage keys keep the parent's name through keyspace indirection (`barrel_keyspace`), but it mints its own author id so its writes are attributable and detected as concurrent with the parent's. Lineage is linear (branching a branch is rejected).
+- **Merge** (`merge_branch/2`): replays the branch's writes back into the parent through the same version protocol, so divergent edits land as fast-forwards or retained conflict siblings, never silent overwrites.
+
+```erlang
+{ok, _} = barrel_docdb:branch_db(<<"mydb">>, <<"mydb-exp">>, #{}),
+%% ... write on the branch ...
+{ok, _Stats} = barrel_docdb:merge_branch(<<"mydb-exp">>, #{}).
 ```
 
 ### 10. Query Parallelization
@@ -520,12 +564,12 @@ Queries return results in chunks with continuation tokens for memory-efficient i
 4. **BlobDB**: Efficient large value storage
 5. **Snapshots**: Consistent reads during iteration
 
-### Why Revision Trees?
+### Why Version Vectors?
 
-1. **Conflict detection**: Multiple concurrent updates create branches
-2. **Replication**: Only transfer missing revisions
-3. **History**: Track document evolution
-4. **Deterministic winners**: Same data = same winning revision
+1. **Conflict detection**: version vectors distinguish causal updates (fast-forward) from concurrent ones without a rev-tree
+2. **Replication**: the target diffs by vector containment and pulls only what it is missing, no ancestor negotiation
+3. **Deterministic winners**: the max-version rule is commutative, so every replica converges on the same winner
+4. **No revision-tree bookkeeping**: bounded per-doc metadata; retained siblings and the history log are pruned by the retention sweep
 
 ### Why Separate Attachment Store?
 
@@ -554,21 +598,17 @@ put_doc(Db, Doc)
     │
     ├── Validate document
     ├── Generate/validate ID
-    ├── Compute new revision hash
+    ├── CAS check: _rev must equal the current winner's token
+    │   (a create, or recreate over a tombstone, needs no token)
     │
-    ├── If update:
-    │   ├── Check existing doc exists
-    │   ├── Verify _rev matches current
-    │   └── Extend revision tree
-    │
-    ├── Get next sequence number
+    ├── Mint version {NextHlc, source_id(Db)}, bump the version vector
     │
     ├── Atomic batch write:
-    │   ├── doc_info (metadata + revtree)
-    │   ├── doc_rev (body at new revision)
-    │   └── doc_seq (change entry)
+    │   ├── doc_entity (body cols + version, vv, nconflicts, deleted)
+    │   ├── change entry (doc_hlc) + path/prefix change indexes
+    │   └── retained history log entry (0x1C)
     │
-    └── Return {ok, #{id, rev, ok}}
+    └── Return {ok, #{<<"id">> => Id, <<"rev">> => Token}}
 ```
 
 ### Replicate
@@ -576,18 +616,16 @@ put_doc(Db, Doc)
 ```
 replicate(Source, Target)
     │
-    ├── Generate replication ID
+    ├── Derive replication ID (endpoints + filter)
     ├── Read checkpoint (get last_seq)
     │
-    ├── Loop:
-    │   ├── Get changes batch from source
-    │   │
-    │   ├── For each change:
-    │   │   ├── revsdiff(target, docid, revs)
-    │   │   ├── If missing revs:
-    │   │   │   ├── get_doc(source, docid, {history: true})
-    │   │   │   └── put_rev(target, doc, history, deleted)
-    │   │
+    ├── Loop per batch:
+    │   ├── Get changes batch from source (each carries a version token)
+    │   ├── Sync target HLC past the newest change
+    │   ├── diff_versions(target, #{docid => token}) → missing docs
+    │   ├── For each missing doc:
+    │   │   ├── get_doc_for_replication(source, docid)
+    │   │   └── put_version(target, doc, version, vv, deleted)
     │   ├── Write checkpoint
     │   └── Continue until no changes
     │
@@ -649,7 +687,7 @@ rather than baked in:
 
 - Custom storage backends (via behaviour)
 - Custom replication transports (via the `barrel_rep_transport` behaviour)
-- Cluster/tiering substrate: changes feed, revision primitives (`put_rev`/`revsdiff`), HLC, system and local documents, and store/index introspection (`get_db_size`, range scans, snapshots)
+- Cluster/tiering substrate: changes feed, version primitives (`put_version`/`diff_versions`/`get_doc_for_replication`), HLC, system and local documents, and store/index introspection (range scans, snapshots)
 
 ## File Structure
 
@@ -663,7 +701,10 @@ src/
 ├── barrel_db_sup.erl           # Database supervisor
 │
 ├── barrel_doc.erl              # Document utilities
-├── barrel_revtree_bin.erl      # Revision tree (compact binary encoding)
+├── barrel_version.erl          # Version {HLC, Author} + token codec
+├── barrel_vv.erl               # Version vectors (compare, contains, merge)
+├── barrel_history.erl          # Retained history log
+├── barrel_timeline.erl         # Branch / merge (keyspace forks)
 │
 ├── barrel_hlc.erl              # HLC clock management
 │
@@ -686,20 +727,23 @@ src/
 ├── barrel_doc_body_store.erl   # Batch document body operations
 │
 ├── barrel_cache.erl            # Shared RocksDB block cache
-├── barrel_store_rocksdb.erl    # RocksDB storage (optimized)
-├── barrel_store_keys.erl       # Key encoding (doc_hlc, path_hlc, ars)
+├── barrel_store_rocksdb.erl    # RocksDB storage + v4 entity codec
+├── barrel_store_keys.erl       # Key encoding (entity, version chain, history)
+├── barrel_docdb_reader.erl     # Caller-side reads (get_doc, replication reads)
 ├── barrel_docdb_codec_cbor.erl # CBOR encoding/decoding
 │
 ├── barrel_rep.erl              # Replication API (filtered)
-├── barrel_rep_alg.erl          # Replication algorithm (HLC sync)
+├── barrel_rep_alg.erl          # Replication algorithm (diff + apply)
+├── barrel_rep_tasks.erl        # Persistent one-shot / continuous tasks
 ├── barrel_rep_checkpoint.erl   # Checkpoint management (HLC-based)
 ├── barrel_rep_transport.erl    # Transport behaviour
-└── barrel_rep_transport_local.erl  # Local transport
+├── barrel_rep_transport_local.erl # Local transport
+└── barrel_rep_transport_http.erl  # HTTP transport (/db/:db/_sync/*)
 ```
 
 ## References
 
-- [CouchDB Replication Protocol](https://docs.couchdb.org/en/stable/replication/protocol.html)
+- [Version Vectors (Wikipedia)](https://en.wikipedia.org/wiki/Version_vector)
 - [RocksDB Documentation](https://rocksdb.org/docs/)
 - [RocksDB BlobDB](https://rocksdb.org/blog/2021/05/26/integrated-blob-db.html)
 - [Hybrid Logical Clocks](https://cse.buffalo.edu/tech-reports/2014-04.pdf)

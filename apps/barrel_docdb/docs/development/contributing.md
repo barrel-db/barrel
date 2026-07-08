@@ -13,9 +13,9 @@ Thank you for your interest in contributing to Barrel DocDB!
 ### Building from Source
 
 ```bash
-# Clone the repository
-git clone https://github.com/barrel-db/barrel_docdb.git
-cd barrel_docdb
+# Clone the umbrella repository
+git clone https://github.com/barrel-db/barrel.git
+cd barrel/apps/barrel_docdb
 
 # Compile
 rebar3 compile
@@ -85,7 +85,7 @@ When reporting issues, please include:
 
 ## Questions?
 
-- Open an issue on [GitHub](https://github.com/barrel-db/barrel_docdb/issues)
+- Open an issue on [GitHub](https://github.com/barrel-db/barrel/issues)
 - Check existing documentation
 
 ## License

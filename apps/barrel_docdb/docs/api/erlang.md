@@ -70,12 +70,16 @@ Get database information.
 **Example:**
 ```erlang
 {ok, Info} = barrel_docdb:db_info(<<"mydb">>).
-%% #{doc_count => 1234, update_seq => <<"1-abc123">>}
+%% #{name => <<"mydb">>, keyspace => ..., config => ..., db_path => ...,
+%%   retention_period => ..., history_floor => Hlc, att_floor => ...}
+%% Branches also carry parent and fork_hlc.
 ```
 
 ---
 
 ## Document Operations
+
+The concurrency token is the `<<"_rev">>` key. It is a version, not a revision-tree revision: the format is `<hex(hlc)>@<author>`, where the HLC gives causal last-write-wins ordering and the author is the id of the database that made the write. Pass the current token back as `rev` (or `<<"_rev">>` in the body) to update a live document.
 
 ### barrel_docdb:put_doc/2,3
 
@@ -98,9 +102,9 @@ Create or update a document.
 
 | Option | Type | Description |
 |--------|------|-------------|
-| `rev` | binary() | Required revision for updates |
-| `replicate` | sync | Wait for replication |
-| `wait_for` | [binary()] | Nodes to wait for |
+| `rev` | binary() | Current version token, required to update a live document |
+| `replicate` | `sync` | Wait for the write to reach replicas before returning |
+| `wait_for` | [binary()] | Targets to wait for (with `replicate => sync`) |
 
 **Example:**
 ```erlang
@@ -146,16 +150,16 @@ Get a document by ID.
 
 | Option | Type | Description |
 |--------|------|-------------|
-| `rev` | binary() | Get specific revision |
-| `revs` | boolean() | Include revision history |
-| `conflicts` | boolean() | Include conflicts |
+| `rev` | binary() | Get a specific version token instead of the winner |
+| `conflicts` | boolean() | Add `<<"_conflicts">>` (a list of live sibling tokens) to the result |
+| `include_deleted` | boolean() | Return the document even if it is a tombstone |
 
 **Example:**
 ```erlang
 {ok, Doc} = barrel_docdb:get_doc(<<"mydb">>, <<"user1">>).
 
-%% With revision history
-{ok, Doc} = barrel_docdb:get_doc(<<"mydb">>, <<"user1">>, #{revs => true}).
+%% Surface conflicting sibling versions
+{ok, Doc} = barrel_docdb:get_doc(<<"mydb">>, <<"user1">>, #{conflicts => true}).
 ```
 
 ### barrel_docdb:delete_doc/2,3
@@ -340,76 +344,148 @@ Get changes since an HLC timestamp.
 
 ---
 
+## Conflicts
+
+Concurrent writes to the same document (from replication) do not fail. The database keeps a deterministic last-write-wins winner and retains the losing versions as live conflict siblings. Use these functions to surface and resolve them.
+
+### barrel_docdb:get_conflicts/2
+
+List the tokens of the live siblings that conflict with the current winner. An empty list means no conflicts.
+
+```erlang
+-spec get_conflicts(Db, DocId) -> {ok, [binary()]} | {error, term()}
+    when Db :: binary() | pid(),
+         DocId :: binary().
+```
+
+**Example:**
+```erlang
+{ok, Conflicts} = barrel_docdb:get_conflicts(<<"mydb">>, <<"doc1">>).
+%% Conflicts = [<<"0000018abc...@f1e0...">>]
+```
+
+### barrel_docdb:resolve_conflict/4
+
+Resolve a conflict by either choosing one existing sibling or writing a merged body. `BaseRev` is the current winning token (optimistic lock).
+
+```erlang
+-spec resolve_conflict(Db, DocId, BaseRev, Resolution) -> {ok, map()} | {error, term()}
+    when Db :: binary() | pid(),
+         DocId :: binary(),
+         BaseRev :: binary(),
+         Resolution :: {choose, binary()} | {merge, map()}.
+```
+
+**Example:**
+```erlang
+%% Keep one existing version, drop the others
+{ok, _} = barrel_docdb:resolve_conflict(<<"mydb">>, <<"doc1">>,
+    Winner, {choose, ConflictToken}).
+
+%% Write a merged body that supersedes all siblings
+{ok, _} = barrel_docdb:resolve_conflict(<<"mydb">>, <<"doc1">>,
+    Winner, {merge, #{<<"name">> => <<"Merged">>}}).
+```
+
+---
+
+## Branches
+
+A branch is an instant fork of a database (both stores checkpointed via hard links). The branch opens as a normal database with its own author id; merging replays the branch's writes back into the parent through the version protocol.
+
+### barrel_docdb:branch_db/3
+
+```erlang
+-spec branch_db(Parent, BranchName, Opts) -> {ok, pid()} | {error, term()}
+    when Parent :: binary(),
+         BranchName :: binary(),
+         Opts :: map().
+```
+
+**Example:**
+```erlang
+{ok, _Pid} = barrel_docdb:branch_db(<<"mydb">>, <<"mydb-exp">>, #{}).
+```
+
+### barrel_docdb:list_branches/1
+
+List the open branches of a database.
+
+```erlang
+-spec list_branches(Parent :: binary()) -> [binary()].
+```
+
+### barrel_docdb:merge_branch/2
+
+Merge a branch's edits back into its parent.
+
+```erlang
+-spec merge_branch(Branch :: binary(), Opts :: map()) -> {ok, map()} | {error, term()}.
+```
+
+---
+
 ## Replication Primitives
 
-These low-level functions are used by replication transports. Most users should use `barrel_rep:replicate/2,3` instead.
+These low-level functions implement the version-vector replication protocol used by transports. Most users should use `barrel_rep:replicate/2,3` instead.
 
-### barrel_docdb:put_rev/4
+### barrel_docdb:get_doc_for_replication/2
 
-Put a document with explicit revision history (for replication).
+Read the current version of a document (tombstones included) with the metadata a transport needs to ship it.
 
 ```erlang
--spec put_rev(Db, Doc, History, Deleted) -> {ok, DocId, RevId} | {error, term()}
+-spec get_doc_for_replication(Db, DocId) ->
+    {ok, #{doc := map(), version := binary(), vv := binary(), deleted := boolean()}}
+    | {error, term()}
+    when Db :: binary(),
+         DocId :: binary().
+```
+
+- `version` - the version token (`<hex(hlc)>@<author>`)
+- `vv` - the document's encoded version vector
+- `deleted` - whether this version is a tombstone
+
+### barrel_docdb:diff_versions/2
+
+The replication diff. Given `#{DocId => VersionToken}`, answer which offered versions this database does not already cover. `have` means the document's version vector contains the offered version.
+
+```erlang
+-spec diff_versions(Db, TokenMap) -> {ok, #{binary() => missing | have}} | {error, term()}
+    when Db :: binary() | pid(),
+         TokenMap :: #{binary() => binary()}.
+```
+
+**Example:**
+```erlang
+{ok, Diff} = barrel_docdb:diff_versions(<<"target">>, #{
+    <<"doc1">> => <<"0000018abc...@f1e0...">>,
+    <<"doc2">> => <<"0000018def...@a2b3...">>
+}).
+%% Diff = #{<<"doc1">> => have, <<"doc2">> => missing}
+```
+
+### barrel_docdb:put_version/5
+
+Apply a replicated version. The source's token and vector are preserved; only the change-sequence HLC is issued locally. Outcomes: an already-covered version is an idempotent no-op, a dominating version fast-forwards the document, and a concurrent version creates a conflict sibling with a deterministic last-write-wins winner.
+
+```erlang
+-spec put_version(Db, Doc, VersionToken, VVBin, Deleted) ->
+    {ok, DocId, WinnerToken} | {error, term()}
     when Db :: binary() | pid(),
          Doc :: map(),
-         History :: [binary()],
+         VersionToken :: binary(),
+         VVBin :: binary(),
          Deleted :: boolean(),
          DocId :: binary(),
-         RevId :: binary().
+         WinnerToken :: binary().
 ```
 
 **Example:**
 ```erlang
-Doc = #{<<"id">> => <<"doc1">>, <<"value">> => <<"replicated">>},
-History = [<<"2-abc123">>, <<"1-def456">>],
-{ok, DocId, Rev} = barrel_docdb:put_rev(<<"mydb">>, Doc, History, false).
-```
-
-### barrel_docdb:revsdiff/3
-
-Find missing revisions for a single document.
-
-```erlang
--spec revsdiff(Db, DocId, RevIds) -> {ok, Missing, PossibleAncestors} | {error, term()}
-    when Db :: binary() | pid(),
-         DocId :: binary(),
-         RevIds :: [binary()],
-         Missing :: [binary()],
-         PossibleAncestors :: [binary()].
-```
-
-**Example:**
-```erlang
-{ok, Missing, Ancestors} = barrel_docdb:revsdiff(<<"mydb">>,
-    <<"doc1">>,
-    [<<"3-abc">>, <<"2-def">>, <<"1-ghi">>]
-).
-%% Missing = revisions we don't have
-%% Ancestors = our revisions that could be ancestors
-```
-
-### barrel_docdb:revsdiff_batch/2
-
-Find missing revisions for multiple documents (batch).
-
-```erlang
--spec revsdiff_batch(Db, RevsMap) -> {ok, ResultMap}
-    when Db :: binary() | pid(),
-         RevsMap :: #{binary() => [binary()]},
-         ResultMap :: #{binary() => #{missing => [binary()], possible_ancestors => [binary()]}}.
-```
-
-**Example:**
-```erlang
-RevsMap = #{
-    <<"doc1">> => [<<"1-abc123">>],
-    <<"doc2">> => [<<"1-def456">>, <<"2-ghi789">>]
-},
-{ok, Results} = barrel_docdb:revsdiff_batch(<<"mydb">>, RevsMap).
-%% Results = #{
-%%     <<"doc1">> => #{missing => [<<"1-abc123">>], possible_ancestors => []},
-%%     <<"doc2">> => #{missing => [], possible_ancestors => [<<"1-def456">>]}
-%% }
+{ok, Doc, #{version := Token, vv := VVBin, deleted := Del}} =
+    barrel_docdb:get_doc_for_replication(<<"source">>, <<"doc1">>),
+{ok, _DocId, _Winner} =
+    barrel_docdb:put_version(<<"target">>, Doc, Token, VVBin, Del).
 ```
 
 ---

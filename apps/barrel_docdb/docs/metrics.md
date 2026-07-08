@@ -3,20 +3,18 @@
 !!! note "See also: Observability Guide"
     For a complete guide covering tracing, metrics, and logging with exporters, see the [Observability Guide](observability.md).
 
-Barrel DocDB exposes metrics in Prometheus format for monitoring and alerting.
+Barrel DocDB records metrics in-process using the [instrument](https://github.com/benoitc/instrument) library and can render them in Prometheus text format.
 
-## Endpoint
+## Reading Metrics
 
-Metrics are available at:
+barrel_docdb has no built-in HTTP server. Render the current metrics in Prometheus text format in-process:
 
+```erlang
+Text = barrel_metrics:export_text().
+%% Prometheus exposition format, ready to serve or log
 ```
-GET /metrics
-```
 
-**Example:**
-```bash
-curl http://localhost:8080/metrics
-```
+To expose metrics over HTTP for a Prometheus scrape, run the `barrel_server` app, which serves this output on its metrics endpoint. See the umbrella REST server guide (`docs/guides/rest-server.md`). Metrics can also be pushed to an OTLP collector; see [Observability](observability.md).
 
 ## Available Metrics
 
@@ -24,15 +22,15 @@ curl http://localhost:8080/metrics
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
-| `barrel_doc_operations_total` | Counter | db, operation | Total document operations |
+| `barrel_doc_operations` | Counter | db, operation | Total document operations |
 | `barrel_doc_operation_duration_seconds` | Histogram | db, operation | Operation latency |
 
 **Operations:** `put`, `get`, `delete`
 
 **Example:**
 ```
-barrel_doc_operations_total{db="mydb",operation="put"} 1234
-barrel_doc_operations_total{db="mydb",operation="get"} 5678
+barrel_doc_operations{db="mydb",operation="put"} 1234
+barrel_doc_operations{db="mydb",operation="get"} 5678
 barrel_doc_operation_duration_seconds_bucket{db="mydb",operation="get",le="0.001"} 5000
 ```
 
@@ -40,12 +38,13 @@ barrel_doc_operation_duration_seconds_bucket{db="mydb",operation="get",le="0.001
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
-| `barrel_query_operations_total` | Counter | db | Total query operations |
+| `barrel_query_operations` | Counter | db | Total query operations |
 | `barrel_query_duration_seconds` | Histogram | db | Query latency |
+| `barrel_query_results_count` | Histogram | db | Results per query |
 
 **Example:**
 ```
-barrel_query_operations_total{db="mydb"} 500
+barrel_query_operations{db="mydb"} 500
 barrel_query_duration_seconds_bucket{db="mydb",le="0.01"} 450
 ```
 
@@ -53,47 +52,39 @@ barrel_query_duration_seconds_bucket{db="mydb",le="0.01"} 450
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
-| `barrel_replication_docs_total` | Counter | source, target | Documents replicated |
-| `barrel_replication_errors_total` | Counter | source, target | Replication errors |
+| `barrel_replication_docs` | Counter | direction | Documents replicated |
+| `barrel_replication_errors` | Counter | task_id | Replication errors |
+| `barrel_replication_lag_seconds` | Gauge | task_id | Replication lag |
+| `barrel_replication_active` | Gauge | task_id | Active status (1/0) |
 
 **Example:**
 ```
-barrel_replication_docs_total{source="mydb",target="http://remote:8080/mydb"} 10000
-barrel_replication_errors_total{source="mydb",target="http://remote:8080/mydb"} 2
+barrel_replication_docs{direction="push"} 10000
+barrel_replication_errors{task_id="rep-123"} 2
 ```
 
-### HTTP Server
+### Storage
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
-| `barrel_http_requests_total` | Counter | method, path, status | HTTP requests |
-| `barrel_http_request_duration_seconds` | Histogram | method, path | Request latency |
+| `barrel_db_documents_total` | Gauge | db | Document count |
+| `barrel_db_size_bytes` | Gauge | db | Database size |
+| `barrel_db_attachments_total` | Gauge | db | Attachment count |
 
-**Example:**
-```
-barrel_http_requests_total{method="GET",path="/db/:db/:doc_id",status="200"} 5000
-barrel_http_requests_total{method="POST",path="/db/:db/_find",status="200"} 500
-```
+!!! note "HTTP request metrics"
+    Metrics for HTTP requests (method, path, status, latency) are produced by `barrel_server`, not barrel_docdb, since barrel_docdb has no HTTP surface of its own.
 
 ## Grafana Dashboard
 
 Example queries for common dashboards:
 
-### Request Rate
+### Document Operation Rate
 
 ```promql
-rate(barrel_http_requests_total[5m])
+rate(barrel_doc_operations[5m])
 ```
 
-### Error Rate
-
-```promql
-sum(rate(barrel_http_requests_total{status=~"5.."}[5m]))
-/
-sum(rate(barrel_http_requests_total[5m]))
-```
-
-### P99 Latency
+### P99 Document Latency
 
 ```promql
 histogram_quantile(0.99, rate(barrel_doc_operation_duration_seconds_bucket[5m]))
@@ -102,43 +93,22 @@ histogram_quantile(0.99, rate(barrel_doc_operation_duration_seconds_bucket[5m]))
 ### Documents per Second
 
 ```promql
-rate(barrel_doc_operations_total{operation="put"}[5m])
+rate(barrel_doc_operations{operation="put"}[5m])
 ```
 
-### Replication Lag
+### Query Throughput
 
 ```promql
-increase(barrel_replication_docs_total[1m])
+rate(barrel_query_operations[5m])
+```
+
+### Replication Throughput
+
+```promql
+increase(barrel_replication_docs[1m])
 ```
 
 ## Alerting Examples
-
-### High Error Rate
-
-```yaml
-- alert: BarrelHighErrorRate
-  expr: |
-    sum(rate(barrel_http_requests_total{status=~"5.."}[5m]))
-    /
-    sum(rate(barrel_http_requests_total[5m])) > 0.01
-  for: 5m
-  labels:
-    severity: warning
-  annotations:
-    summary: "High error rate on Barrel DocDB"
-```
-
-### Replication Errors
-
-```yaml
-- alert: BarrelReplicationErrors
-  expr: increase(barrel_replication_errors_total[5m]) > 0
-  for: 1m
-  labels:
-    severity: warning
-  annotations:
-    summary: "Replication errors detected"
-```
 
 ### High Latency
 
@@ -151,6 +121,18 @@ increase(barrel_replication_docs_total[1m])
     severity: warning
   annotations:
     summary: "High P99 latency on Barrel DocDB"
+```
+
+### Replication Errors
+
+```yaml
+- alert: BarrelReplicationErrors
+  expr: increase(barrel_replication_errors[5m]) > 0
+  for: 1m
+  labels:
+    severity: warning
+  annotations:
+    summary: "Replication errors detected"
 ```
 
 ## Configuration
@@ -166,3 +148,4 @@ out. See [Observability](observability.md) for details.
     ]}
 ]}.
 ```
+</content>

@@ -6,7 +6,10 @@ Barrel DocDB provides observability through three pillars using the [instrument]
 - **Metrics** - Prometheus-compatible metrics for monitoring
 - **Logging** - Structured logging with trace context correlation
 
-All three signals are automatically correlated via trace context, enabling end-to-end debugging across distributed requests.
+All three signals are automatically correlated via trace context, enabling end-to-end debugging across distributed operations.
+
+!!! note "HTTP surface"
+    barrel_docdb has no built-in HTTP server. Metrics are collected in-process and can be rendered as Prometheus text with `barrel_metrics:export_text/0`. To scrape them over HTTP, or to trace incoming HTTP requests, run the `barrel_server` app (see the umbrella REST server guide `docs/guides/rest-server.md`). OTLP endpoints below refer to an OpenTelemetry collector, not to barrel_docdb.
 
 ## Quick Start
 
@@ -33,7 +36,7 @@ All three signals are automatically correlated via trace context, enabling end-t
         {exporter, otlp},
         {otlp_endpoint, "http://localhost:4318"}
     ]},
-    %% Metrics - push to OTLP (in addition to /metrics endpoint)
+    %% Metrics - push to OTLP (in addition to in-process export)
     {metrics, [
         {exporter, otlp},
         {otlp_endpoint, "http://localhost:4318"},
@@ -47,17 +50,19 @@ All three signals are automatically correlated via trace context, enabling end-t
 ]}
 ```
 
-### Scrape Metrics (Pull Model)
+### Render Metrics In-Process
 
-```bash
-curl http://localhost:8080/metrics
+```erlang
+Text = barrel_metrics:export_text().
 ```
+
+Run `barrel_server` to expose this over HTTP for a Prometheus scrape.
 
 ---
 
 ## Tracing
 
-Barrel DocDB implements OpenTelemetry-compatible distributed tracing, enabling you to trace requests across HTTP handlers, document operations, queries, replication, and cross-node communication.
+Barrel DocDB implements OpenTelemetry-compatible distributed tracing, enabling you to trace document operations, queries, replication, and cross-node communication. When barrel_docdb runs behind `barrel_server`, HTTP request spans are added by that layer.
 
 ### Configuration
 
@@ -98,14 +103,14 @@ Prints spans to stdout. Useful for development and debugging.
 
 **Example output (text format):**
 ```
-[span] GET /db/mydb/doc/doc123 (12.5ms)
+[span] get mydb (0.4ms)
   trace_id: 0af7651916cd43dd8448eb211c80319c
   span_id: b7ad6b7169203331
   attributes:
-    http.request.method: GET
-    url.path: /db/mydb/doc/doc123
-    http.response.status_code: 200
     db.system.name: barrel
+    db.namespace: mydb
+    db.operation.name: get
+    db.document.id: doc123
 ```
 
 #### OTLP Exporter
@@ -166,17 +171,15 @@ Use any module implementing the `instrument_exporter` behaviour:
 
 Barrel DocDB automatically propagates trace context using W3C Trace Context headers (`traceparent`, `tracestate`).
 
-**Incoming requests:** Trace context is extracted from HTTP headers and attached to the request span.
-
 **Outgoing requests:** During replication, trace context is injected into HTTP headers for cross-node correlation.
 
-**Response headers:** The `traceparent` header is included in responses for client-side correlation.
+**Incoming HTTP requests:** When barrel_docdb runs behind `barrel_server`, that layer extracts trace context from request headers and adds the `traceparent` header to responses.
 
 ### Instrumented Operations
 
 | Component | Span Name | Kind | Attributes |
 |-----------|-----------|------|------------|
-| HTTP Handler | `{METHOD} {PATH}` | server | http.request.method, url.path, http.response.status_code |
+| HTTP Handler (via `barrel_server`) | `{METHOD} {PATH}` | server | http.request.method, url.path, http.response.status_code |
 | Document Put | `put {db}` | internal | db.system.name, db.namespace, db.operation.name, db.document.id |
 | Document Get | `get {db}` | internal | db.system.name, db.namespace, db.operation.name, db.document.id |
 | Document Delete | `delete {db}` | internal | db.system.name, db.namespace, db.operation.name, db.document.id |
@@ -208,7 +211,7 @@ Barrel DocDB follows [OpenTelemetry Database Semantic Conventions](https://opent
 ## Metrics
 
 Barrel DocDB supports two modes for metrics export:
-- **Pull model** - Prometheus scrapes the `/metrics` endpoint
+- **Pull model** - `barrel_server` exposes the in-process metrics for Prometheus to scrape
 - **Push model** - Metrics are pushed to an OTLP collector
 
 ### Configuration
@@ -227,11 +230,13 @@ Barrel DocDB supports two modes for metrics export:
 
 ### Pull Model (Prometheus Scraping)
 
-Metrics are always available at the `/metrics` endpoint regardless of push configuration:
+Metrics are always recorded in-process regardless of push configuration. Render them in Prometheus text format:
 
-```bash
-curl http://localhost:8080/metrics
+```erlang
+Text = barrel_metrics:export_text().
 ```
+
+Run `barrel_server` to serve this output on its metrics endpoint for a Prometheus scrape.
 
 ### Available Metrics
 
@@ -275,19 +280,17 @@ barrel_doc_operation_duration_seconds_bucket{db="mydb",operation="get",le="0.01"
 | `barrel_db_size_bytes` | Gauge | db | Database size |
 | `barrel_db_attachments_total` | Gauge | db | Attachment count |
 
-#### HTTP Server
-
-| Metric | Type | Labels | Description |
-|--------|------|--------|-------------|
-| `barrel_http_requests` | Counter | method, path, status | HTTP requests |
-| `barrel_http_request_duration_seconds` | Histogram | method, path | Request latency |
+!!! note "HTTP request metrics"
+    Metrics for HTTP requests (method, path, status, latency) are produced by `barrel_server`, not barrel_docdb, since barrel_docdb has no HTTP surface of its own.
 
 ### Prometheus Configuration (Pull)
+
+Point Prometheus at the `barrel_server` listener that exposes the metrics:
 
 ```yaml
 # prometheus.yml
 scrape_configs:
-  - job_name: 'barrel_docdb'
+  - job_name: 'barrel'
     static_configs:
       - targets: ['localhost:8080']
     metrics_path: /metrics
@@ -348,16 +351,14 @@ service:
 
 ### Grafana Dashboard Queries
 
-#### Request Rate
+#### Document Operation Rate
 ```promql
-rate(barrel_http_requests[5m])
+rate(barrel_doc_operations[5m])
 ```
 
-#### Error Rate
+#### Replication Throughput
 ```promql
-sum(rate(barrel_http_requests{status=~"5.."}[5m]))
-/
-sum(rate(barrel_http_requests[5m]))
+increase(barrel_replication_docs[1m])
 ```
 
 #### P99 Document Latency
@@ -382,16 +383,6 @@ rate(barrel_query_operations[5m])
 groups:
   - name: barrel_docdb
     rules:
-      - alert: BarrelHighErrorRate
-        expr: |
-          sum(rate(barrel_http_requests{status=~"5.."}[5m]))
-          / sum(rate(barrel_http_requests[5m])) > 0.01
-        for: 5m
-        labels:
-          severity: warning
-        annotations:
-          summary: "High error rate on Barrel DocDB"
-
       - alert: BarrelHighLatency
         expr: |
           histogram_quantile(0.99, rate(barrel_doc_operation_duration_seconds_bucket[5m])) > 0.1
@@ -609,6 +600,8 @@ Use the trace ID from logs to find the corresponding trace in your tracing backe
 
 ## Complete Example Setup
 
+The `barrel` service below runs the `barrel_server` app, which embeds barrel_docdb and exposes both the REST API and the metrics scrape endpoint.
+
 ### Docker Compose with Full Observability
 
 ```yaml
@@ -616,7 +609,7 @@ version: '3.8'
 
 services:
   barrel:
-    image: barrel/barrel_docdb
+    image: barrel/barrel_server
     ports:
       - "8080:8080"
     volumes:
@@ -666,7 +659,6 @@ volumes:
 [
     {barrel_docdb, [
         {data_dir, "/data/barrel"},
-        {http_port, 8080},
 
         %% Tracing - push spans to OTLP
         {tracing, [
@@ -675,7 +667,7 @@ volumes:
             {otlp_endpoint, "http://otel-collector:4318"}
         ]},
 
-        %% Metrics - push to OTLP (also available via /metrics)
+        %% Metrics - push to OTLP (also rendered in-process)
         {metrics, [
             {exporter, otlp},
             {otlp_endpoint, "http://otel-collector:4318"},
@@ -748,8 +740,8 @@ global:
   scrape_interval: 15s
 
 scrape_configs:
-  # Scrape barrel directly (pull model)
-  - job_name: 'barrel_docdb'
+  # Scrape the barrel_server listener (pull model)
+  - job_name: 'barrel'
     static_configs:
       - targets: ['barrel:8080']
     metrics_path: /metrics
