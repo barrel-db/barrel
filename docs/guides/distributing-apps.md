@@ -7,22 +7,34 @@ can use all of them at once: publish to Hex (a versioned package), mirror a
 per-app git repo (a browsable standalone repo), and consume an app from another
 project. Read this before cutting a release or wiring a downstream dependency.
 
+## Prerequisites
+
+Before publishing an app:
+
+- Bump its `vsn` in `apps/<app>/src/<app>.app.src` (Hex refuses to overwrite a
+  released version), and bump the coupled pins in lockstep: `barrel_docdb`'s
+  `deps` pin `{barrel_crypto, ...}`, and the `~>` sibling pins in the `hex`
+  profiles of `barrel`, `barrel_vectordb`, and `barrel_server`.
+- Ensure the app has a `README.md`, a `LICENSE`, a `CHANGELOG.md`, an `ex_doc`
+  block, and `rebar3_hex` in its `project_plugins`.
+- Tag the release: per app `<app>-v<version>` (e.g. `barrel_docdb-v0.9.0`), and
+  the umbrella `v<version>`. CI recognizes both tag globs.
+
 ## Publish order
 
 The apps depend on each other, so publish leaves first and work up. A package
-can only be published after every sibling it depends on is already available.
+can only be published after every sibling it depends on is already on Hex.
+Current versions and order:
 
-```
-barrel_docdb (0.8.0)   barrel_embed (2.2.1)   barrel_rerank (0.1.1)   barrel_faiss (0.2.1)
-                              |
-                       barrel_vectordb (2.0.0)
-                              |
-            barrel_docdb + barrel_vectordb
-                              |
-                         barrel (0.1.0)
-                              |
-                      barrel_server (0.1.0)
-```
+1. `barrel_crypto` 0.3.0
+2. `barrel_embed` 2.3.0
+3. `barrel_docdb` 0.9.0 (needs barrel_crypto)
+4. `barrel_rerank` 0.2.0
+5. `barrel_faiss` 0.3.0 (optional; needs the FAISS C++ library to build)
+6. `barrel_vectordb` 2.1.0 (needs barrel_embed, barrel_crypto)
+7. `barrel` 0.2.0 (needs barrel_docdb, barrel_vectordb, barrel_crypto)
+8. `barrel_spaces` 0.2.0 (needs barrel, barrel_docdb, barrel_crypto)
+9. `barrel_server` 0.2.0 (needs barrel, barrel_spaces)
 
 ## Publish to Hex
 
@@ -40,29 +52,39 @@ For an app with siblings, the `hex` profile already lists them. For example
 `apps/barrel_vectordb/rebar.config`:
 
 ```erlang
-{hex, [
-    {deps, [
-        {barrel_embed, "~> 2.2"}
+{profiles, [
+    {hex, [
+        {deps, [
+            {barrel_embed, "~> 2.3"}
+        ]}
     ]}
 ]}.
 ```
 
+`barrel_server` similarly declares `{barrel, "~> 0.2"}` and
+`{barrel_spaces, "~> 0.2"}` in its `hex` profile.
+
 Publish in dependency order:
 
 ```console
-$ for app in barrel_docdb barrel_embed barrel_rerank barrel_faiss \
-             barrel_vectordb barrel barrel_server; do
+$ for app in barrel_crypto barrel_embed barrel_docdb barrel_rerank \
+             barrel_faiss barrel_vectordb barrel barrel_spaces barrel_server; do
     (cd apps/$app && rebar3 as hex hex publish --yes)
   done
 ```
+
+Before publishing, dry-run each tarball with `rebar3 as hex hex build` and check
+its contents (especially the NIF apps `barrel_vectordb`/`barrel_faiss`, whose
+`.app.src` `{files, [...]}` must carry `c_src` and the root `do_cmake.sh` /
+`do_faiss.sh` build scripts).
 
 Notes:
 
 - The `{files, [...]}` list in each `.app.src` controls what ships in the
   tarball. Keep it current when you add `priv/` assets or includes.
 - Every dependency resolves from Hex, including `barrel_server`'s `livery`
-  (0.4.4). Hex rejects git deps, so keep it that way: do not reintroduce a
-  `{git, ...}` dep in an app you intend to publish.
+  (0.5.1) and `barrel_mcp` (2.2.4). Hex rejects git deps, so keep it that way:
+  do not reintroduce a `{git, ...}` dep in an app you intend to publish.
 - `barrel_faiss` ships an NIF that needs the FAISS C++ library at build time.
   The package builds only where that toolchain is present.
 - Bump the `vsn` in `.app.src` before publishing; Hex refuses to overwrite a
@@ -96,9 +118,9 @@ Notes:
 
 - Prefer `subtree split` for ongoing mirrors and `filter-repo` for the initial
   carve-out.
-- Replace the example remote with your forge. The `links` in each `.app.src`
-  still point at old per-repo GitHub URLs; update them to the real mirror or the
-  umbrella.
+- Replace the example remote with your forge. Package `links` in each
+  `.app.src` point at the umbrella repo; per-app mirrors are optional (the
+  umbrella is the source of truth).
 - Drive the mirrors from a release job keyed on the `barrel_*-v*` tags that CI
   already recognizes, so a tagged release fans out to the standalone repos.
 
