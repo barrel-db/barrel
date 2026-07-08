@@ -86,6 +86,8 @@
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
+%% exposed for unit tests: the pure decoder of the python sidecar protocol
+-export([decode_response/1]).
 
 -define(DEFAULT_PYTHON, "python3").
 -define(DEFAULT_MODEL, "cross-encoder/ms-marco-MiniLM-L-6-v2").
