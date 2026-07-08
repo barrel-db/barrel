@@ -33,6 +33,7 @@ import type { FetchLike } from "../src/wire/transport.js";
 import { sha256Digest } from "../src/attachments/digest.js";
 import { compile, runLocal } from "../src/bql/query.js";
 import type { LitValue } from "../src/bql/lower.js";
+import { float32ToBase64 } from "../src/codec/float32.js";
 
 interface Stored {
   body: JsonObject | null;
@@ -83,6 +84,7 @@ async function bodyBytes(body: unknown): Promise<Uint8Array> {
 export class FakeServer {
   private readonly docs = new Map<string, Stored>();
   private readonly atts = new Map<string, StoredAtt>();
+  private readonly embeddings = new Map<string, number[]>();
   private seq = 0;
   private attSeq = 0;
   private readonly clock = new HlcClock({ physClock: () => 1_700_000_000_000 });
@@ -127,6 +129,9 @@ export class FakeServer {
       if (method === "POST" && u.pathname.endsWith("/query")) {
         return this.queryNdjson(this.jsonBody(init));
       }
+      if (method === "POST" && u.pathname.endsWith("/_bulk_get")) {
+        return this.jsonResponse(this.bulkGet(this.jsonBody(init)));
+      }
       // JSON endpoints
       const body = init?.body ? (JSON.parse(init.body as string) as JsonObject) : undefined;
       return this.jsonResponse(this.route(method, u.pathname, body));
@@ -144,6 +149,38 @@ export class FakeServer {
 
   private jsonBody(init: RequestInit | undefined): JsonObject {
     return init?.body ? (JSON.parse(init.body as string) as JsonObject) : {};
+  }
+
+  /** Seed a doc's embedding (as the server's emb column). */
+  seedEmbedding(id: string, vector: number[]): void {
+    this.embeddings.set(id, vector);
+  }
+
+  private bulkGet(body: JsonObject): { status: number; json?: unknown } {
+    const ids = Array.isArray(body["ids"]) ? (body["ids"] as string[]) : [];
+    const includeEmb = body["include_embedding"] === true;
+    const results = ids.map((id) => {
+      const stored = this.docs.get(String(id));
+      const vec = this.embeddings.get(String(id));
+      // a client asks for embeddings of docs it holds; the server has the
+      // vector even when this fake was not also seeded with the doc body
+      if ((!stored || stored.deleted || stored.body === null) && vec === undefined) {
+        return { error: "not_found" };
+      }
+      const doc: JsonObject =
+        stored && stored.body
+          ? { ...(stored.body as JsonObject), id, _rev: stored.version }
+          : { id };
+      if (includeEmb && vec) {
+        doc["_embedding"] = {
+          vector: float32ToBase64(vec),
+          dim: vec.length,
+          source: "computed",
+        };
+      }
+      return doc;
+    });
+    return { status: 200, json: { results } };
   }
 
   private queryNdjson(body: JsonObject): Response {

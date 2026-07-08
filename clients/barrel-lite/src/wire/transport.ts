@@ -10,6 +10,7 @@
  * client (they need the write right).
  */
 import { base64Decode, base64Encode } from "../codec/base64.js";
+import { base64ToFloat32 } from "../codec/float32.js";
 import { decodeHlc, encodeHlc, HlcClock } from "../codec/hlc.js";
 import type { JsonObject, JsonValue } from "../json.js";
 import { SyncError } from "./errors.js";
@@ -207,6 +208,44 @@ export class SyncTransport {
   }
 
   //==================================================================
+  // Embeddings (POST /db/:db/_bulk_get with include_embedding)
+  //==================================================================
+
+  /** Fetch per-doc vectors for a batch of ids. Ids without a stored
+   * vector are absent from the result map. */
+  async bulkGetEmbeddings(
+    ids: string[],
+  ): Promise<Map<string, { vector: Float32Array; dim: number; source: string }>> {
+    const out = new Map<string, { vector: Float32Array; dim: number; source: string }>();
+    if (ids.length === 0) return out;
+    const { json } = await this.dbRootRequest("POST", "/_bulk_get", {
+      ids,
+      include_embedding: true,
+    });
+    const results = Array.isArray(asObject(json)["results"])
+      ? (asObject(json)["results"] as JsonValue[])
+      : [];
+    for (const r of results) {
+      const doc = asObject(r);
+      const id = typeof doc["id"] === "string" ? doc["id"] : undefined;
+      const emb = doc["_embedding"];
+      if (id === undefined || typeof emb !== "object" || emb === null || Array.isArray(emb)) {
+        continue;
+      }
+      const e = emb as JsonObject;
+      if (typeof e["vector"] !== "string" || typeof e["dim"] !== "number") continue;
+      const vector = base64ToFloat32(e["vector"]);
+      if (vector.length !== e["dim"]) continue;
+      out.set(id, {
+        vector,
+        dim: e["dim"],
+        source: typeof e["source"] === "string" ? e["source"] : "client",
+      });
+    }
+    return out;
+  }
+
+  //==================================================================
   // Query delegation (POST /db/:db/query, ndjson response)
   //==================================================================
 
@@ -380,6 +419,33 @@ export class SyncTransport {
     const res = await this.send(method, path, body);
     if (res.status < 200 || res.status >= 300) this.raise(res.status, res.json);
     return res;
+  }
+
+  /** A JSON request against the db root (not the _sync base). */
+  private async dbRootRequest(
+    method: string,
+    path: string,
+    body?: JsonValue,
+  ): Promise<{ status: number; json: JsonValue }> {
+    const headers: Record<string, string> = {
+      "x-barrel-hlc": base64Encode(encodeHlc(this.clock.peek()), "standard"),
+    };
+    if (this.token !== undefined) headers["authorization"] = `Bearer ${this.token}`;
+    const init: RequestInit = { method, headers };
+    if (body !== undefined) {
+      headers["content-type"] = "application/json";
+      init.body = JSON.stringify(body);
+    }
+    let resp: Response;
+    try {
+      resp = await this.fetchImpl(this.dbRoot + path, init);
+    } catch (e) {
+      throw new SyncError("network", `request failed: ${String(e)}`);
+    }
+    this.foldClock(resp.headers.get("x-barrel-hlc"));
+    const json = await readJson(resp);
+    if (resp.status < 200 || resp.status >= 300) this.raise(resp.status, json);
+    return { status: resp.status, json };
   }
 
   private async send(
