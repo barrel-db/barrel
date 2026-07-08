@@ -119,6 +119,35 @@ test("two tabs elect one leader; the follower proxies writes", async ({ context 
   expect(onFollower).toMatchObject({ v: 7 });
 });
 
+test("OPFS persists synced vectors; searchLocal ranks nearest-first", async ({ page }) => {
+  const name = uniqueName();
+  const db = uniqueName();
+  await createDb(db);
+
+  // seed docs whose _embedding lands in the server's per-doc emb column
+  await restPut(db, "a", { id: "a", _embedding: [1, 0, 0, 0] });
+  await restPut(db, "b", { id: "b", _embedding: [0.8, 0.6, 0, 0] });
+  await restPut(db, "c", { id: "c", _embedding: [0, 0, 1, 0] });
+
+  // first session: pull docs + vectors, then close (flushes OPFS)
+  await open(page, name, db, false);
+  await call(page, "pull");
+  const fetched = await call<number>(page, "syncEmbeddings");
+  expect(fetched).toBe(3);
+  await call(page, "close");
+
+  // second session: NO re-pull. Vectors must come from the OPFS snapshot.
+  await open(page, name, db, false);
+  const hits = await call<{ id: string; score: number }[]>(
+    page,
+    "searchLocal",
+    [1, 0, 0, 0],
+    { k: 3 },
+  );
+  expect(hits.map((h) => h.id)).toEqual(["a", "b", "c"]);
+  expect(hits[0]!.score).toBeGreaterThan(hits[1]!.score);
+});
+
 test("a live pull propagates a server doc to the leader tab", async ({ page }) => {
   const name = uniqueName();
   const db = uniqueName();
