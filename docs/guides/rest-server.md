@@ -143,5 +143,6 @@ $ curl localhost:8080/db/mydb/changes
   needs an embedder.
 - Optimistic concurrency: `PUT /db/:db/doc/:id` with a `_rev` in the body that
   is not the current winner answers 409 `{"error":"conflict"}`.
-- gRPC, HTTP/3, WebTransport, a unix-socket adapter, OpenAPI, and replication
-  over the wire are later phases.
+- Replication over the wire ships today (the `/db/:db/_sync/*` endpoints; see
+  [synchronization](synchronization.md)). gRPC, HTTP/3, WebTransport, a
+  unix-socket adapter, and OpenAPI are later phases.

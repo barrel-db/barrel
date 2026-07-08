@@ -198,8 +198,9 @@ sibling); the winner arrives on the next pull.
 - The client keeps its checkpoints itself, so a pull-only deployment needs
   only a `read` grant. It never writes server-side checkpoints.
 - Live sync polls `_sync/changes` (500 ms after activity, backing off to 30 s
-  when idle; a local write wakes it). The plain SSE changes feed is one-shot
-  and cannot carry a bearer, so polling is the browser story for now.
+  when idle; a local write wakes it). Polling is the floor; `continuous: true`
+  adds a fetch-based SSE stream (which carries the bearer) that wakes the poller
+  and degrades back to polling on drop.
 - The client mints and persists its own 16-hex source id. Do not clear browser
   storage expecting a clean slate mid-sync: a new source id changes the
   authorship of future writes.
@@ -207,7 +208,9 @@ sibling); the winner arrives on the next pull.
   divergences: JSON collapses `1` and `1.0` (the CBOR-backed server keeps them
   distinct), and ORDER BY across mixed types follows a fixed total order
   (number, then boolean/null, then object, then array, then string).
-- Vector search in the browser is a later phase; for now `search` runs on the
-  server through `queryRemote`.
+- Vector search runs in the browser: `searchLocal` ranks the synced per-doc
+  vectors by brute-force cosine (pull them with `syncEmbeddings`). Text and ANN
+  queries delegate to the server via `searchText` / `searchVector`. See the
+  "How (vector search)" section above.
 - Live sync polls by default; `continuous: true` holds one SSE stream per
   database (leader-only) and consumes one of the origin's HTTP connections.
