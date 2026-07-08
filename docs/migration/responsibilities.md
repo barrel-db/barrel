@@ -1,40 +1,36 @@
-# Planned responsibility moves
+# Responsibility map
 
-This note records which responsibilities may move between applications later,
-and what is deliberately left in place for now. Read it before proposing a
-refactor that crosses app boundaries, so the first import stays mechanical and
-the later moves stay intentional.
+This note records which application owns which responsibility today, and the one
+move still planned. Read it before proposing a refactor that crosses app
+boundaries.
 
-## Not moved in this import
+## Where responsibilities live
 
-The first import is an organization change only. The following stay exactly
-where they are today:
+| Responsibility | App | Status |
+|----------------|-----|--------|
+| Document metadata, MVCC, changes, replication, history | `barrel_docdb` | exists |
+| Object bytes (blobs) | `barrel_docdb` attachments (`barrel_att_backend`) | exists |
+| Vector segments, ANN, BM25, hybrid search | `barrel_vectordb` | exists |
+| Embedding generation | `barrel_embed` | exists |
+| Reranking | `barrel_rerank` | exists |
+| Encryption at rest | `barrel_crypto` | exists |
+| Facade (one id over docs + blobs + vectors), record mode, timeline | `barrel` | exists |
+| Agent layer: spaces, capabilities, sessions, handoffs | `barrel_spaces` | exists |
+| Transports (REST/JSON, MCP) | `barrel_server` | exists |
+| Durability, placement, replication orchestration, query routing across nodes | `barrel_fabric` | future |
 
-- BM25 and hybrid search stay in `barrel_vectordb`.
-- Cluster and remote APIs stay where they are.
-- Storage internals (RocksDB usage, on-disk formats, NIFs) stay in their
-  current apps.
+## Settled decisions
 
-No public API changes. No code logic moves.
+- Object storage is not a separate app. Blobs are `barrel_docdb` attachments
+  with a pluggable backend per database (`barrel_att_backend`): a document owns
+  its blob, matching how vectors and metadata attach to the same id. See
+  [../architecture/overview.md](../architecture/overview.md).
+- The agent layer shipped as `barrel_spaces` plus the MCP surface in
+  `barrel_server`, not as a separate `barrel_agents` app.
 
-## May move later
+## Still planned
 
-As the fabric takes shape, these responsibilities are candidates to move. None
-of this happens in this import.
-
-| Responsibility | Target app | Status |
-|----------------|------------|--------|
-| Metadata / catalog truth | `barrel_docdb` | exists |
-| Object bytes | `barrel_object` | future |
-| Vector segments | `barrel_vectordb` | exists |
-| Durability and query-routing agents | `barrel_fabric` | future |
-
-## Why defer
-
-Moving a responsibility means changing app boundaries and possibly public APIs.
-Doing that in the same step as the import would make the change hard to review
-and risk breaking standalone and local users. Keeping the import mechanical lets
-each later move be its own reviewable change with its own tests.
-
-See [../architecture/overview.md](../architecture/overview.md) for the intended
-split between `docdb`, `vectordb`, future `object`, and future `fabric`.
+- `barrel_fabric`: dataset agents, durability, placement, replication
+  orchestration, and query routing across nodes. Moving cross-node concerns
+  there is its own reviewable change with its own tests, not folded into any
+  other app.

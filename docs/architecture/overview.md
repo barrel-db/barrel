@@ -23,12 +23,18 @@ a clear responsibility and its own public API.
 - **barrel_faiss**: Erlang NIF bindings for FAISS. Optional backend for
   `barrel_vectordb`. Needs the FAISS C++ library, so it is excluded from the
   default build.
-- **barrel**: the embeddable facade. Composes `barrel_docdb` and
-  `barrel_vectordb` so a document, its attachments (blobs), and its vector share
-  one id. Pulls no transports. The hex "edge" package.
-- **barrel_server**: the network server. Exposes `barrel` over HTTP/1.1 and
-  HTTP/2 (REST/JSON) using `livery`. Opt-in behind the `server` profile; not part
-  of the default embeddable build.
+- **barrel_crypto**: encryption-at-rest primitives. AES-256-GCM envelope,
+  offset-addressable CTR, HKDF key derivation, and pluggable key providers. Used
+  by docdb and vectordb for encrypted databases.
+- **barrel**: the embeddable facade. Composes `barrel_docdb`,
+  `barrel_vectordb`, and `barrel_crypto` so a document, its attachments (blobs),
+  and its vector share one id. Adds record mode and the timeline
+  (branch/PITR/merge). Pulls no transports. The hex "edge" package.
+- **barrel_spaces**: the agent layer. Spaces (shared context databases),
+  capability tokens, sessions with TTL, and handoffs, built on the facade.
+- **barrel_server**: the network server. Exposes `barrel` and `barrel_spaces`
+  over HTTP (REST/JSON) and MCP using `livery`. Opt-in behind the `server`
+  profile; not part of the default embeddable build.
 
 ## Intended split
 
@@ -43,10 +49,10 @@ The longer-term shape of the stack separates these concerns:
   database (`barrel_att_backend`: RocksDB BlobDB today; local filesystem and S3
   planned as additional backends). There is no separate object-store app; a
   document owns its blob, matching how vectors and metadata attach to the same id.
+- **agent layer** (exists, `barrel_spaces` + MCP): spaces, capability tokens,
+  sessions, and handoffs over the facade; exposed through `barrel_server`.
 - **fabric** (future, `barrel_fabric`): dataset agents, durability, placement,
   replication orchestration, and query routing across nodes.
-
-A separate `barrel_agents` application is expected to build on the fabric later.
 
 ## Boundary rules
 
