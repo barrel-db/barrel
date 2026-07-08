@@ -1,6 +1,6 @@
 {application, barrel_faiss,
  [{description, "Erlang NIF bindings for FAISS vector similarity search"},
-  {vsn, "0.2.1"},
+  {vsn, "0.3.0"},
   {registered, []},
   {applications, [kernel, stdlib]},
   {env, []},

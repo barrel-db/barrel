@@ -1,6 +1,6 @@
 {application, barrel_server, [
     {description, "Multi-protocol server for the barrel edge database (REST/JSON over livery)"},
-    {vsn, "0.1.0"},
+    {vsn, "0.2.0"},
     {registered, [barrel_server_sup]},
     {mod, {barrel_server_app, []}},
     {applications, [

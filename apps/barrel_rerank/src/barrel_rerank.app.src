@@ -1,6 +1,6 @@
 {application, barrel_rerank, [
     {description, "Cross-encoder reranking for Erlang"},
-    {vsn, "0.1.1"},
+    {vsn, "0.2.0"},
     {registered, []},
     {mod, {barrel_rerank_app, []}},
     {applications, [kernel, stdlib]},

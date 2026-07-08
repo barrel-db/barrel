@@ -1,6 +1,6 @@
 {application, barrel_spaces, [
     {description, "Barrel agent layer: spaces (shared context databases), capability tokens, sessions with TTL, and handoffs"},
-    {vsn, "0.1.0"},
+    {vsn, "0.2.0"},
     {registered, [barrel_spaces_sup]},
     {mod, {barrel_spaces_app, []}},
     {applications, [
