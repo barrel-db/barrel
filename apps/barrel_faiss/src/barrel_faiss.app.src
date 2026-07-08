@@ -6,5 +6,19 @@
   {env, []},
   {modules, []},
   {licenses, ["Apache-2.0"]},
-  {links, [{"GitHub", "https://github.com/barrel-db/barrel"}]}
+  {links, [{"GitHub", "https://github.com/barrel-db/barrel"}]},
+  %% the NIF is built from c_src via these root scripts; the default hex
+  %% file set omits them, so list the build inputs explicitly
+  {files, [
+    "src",
+    "c_src",
+    "do_cmake.sh",
+    "do_faiss.sh",
+    "Makefile",
+    "rebar.config",
+    "rebar.lock",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ]}
  ]}.
