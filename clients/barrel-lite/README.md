@@ -45,6 +45,47 @@ In the browser, storage defaults to OPFS and `multiTab` uses Web Locks plus
 BroadcastChannel (one tab per origin owns the store; others proxy to it). In
 Node and tests, storage defaults to memory and there is a single instance.
 
+## Vector search
+
+Pull each document's embedding to the browser and run brute-force cosine
+top-k over the synced set. Use this when you already have a query vector
+(precomputed, or from a model you load yourself) and want ranking without a
+round trip.
+
+```ts
+// pull per-doc vectors for the docs you hold (a dedicated pass; vectors
+// never ride the doc feed). Call it after a sync, or fold it into liveSync.
+await db.syncEmbeddings();
+db.liveSync({ vectors: true }); // pull vectors each cycle too
+
+// rank the synced set by cosine against a query vector
+const hits = await db.searchLocal(queryVector, { k: 10 });
+//   [{ id, score, doc }], sorted by descending cosine
+
+// narrow candidates first with a BQL WHERE filter
+const recent = await db.searchLocal(queryVector, {
+  k: 10,
+  filter: "kind = 'note' AND pinned = true",
+});
+```
+
+The vectors come from each document's per-document `emb` column, pulled
+losslessly as float32. This is a different corpus from the server's ANN index
+(`db.searchVector` / `db.searchText` delegate to the server `/search`
+endpoints): the ANN store is bound to the embedding model's dimension and
+rebuilds server-side, while `searchLocal` ranks exactly the vectors you have
+synced. For text queries without a local vector, delegate to the server:
+
+```ts
+const vhits = await db.searchVector(queryVector, { k: 10 }); // server ANN
+const thits = await db.searchText("quarterly revenue", { k: 10 }); // bm25
+```
+
+No model is bundled. To embed text in the browser, load a model yourself (for
+example transformers.js) and pass the resulting `Float32Array` to
+`searchLocal`; the dimension must match the stored vectors. See
+`examples/vector-search.html`.
+
 ## Test
 
 ```console
@@ -71,7 +112,8 @@ The escript writes only to stdout; redirect it yourself. Never hand-edit
 
 ## Scope
 
-Phases 9a and 9b: document sync, local store, leader election, live sync
-(polling and continuous SSE), a local BQL subset matching the server (with
-`queryRemote` delegation for vector/keyword search), and attachment sync.
-Browser vector search lands in a later phase.
+Document sync, local store, leader election, live sync (polling and continuous
+SSE), a local BQL subset matching the server (with `queryRemote` delegation for
+table functions), attachment sync, and browser vector search (embedding pull
+plus brute-force cosine top-k, with server `/search` delegation). No ANN index
+runs in the browser; the server owns that.

@@ -109,6 +109,39 @@ const { rows, meta } = await db.queryRemote(
 );
 ```
 
+## How (vector search)
+
+Pull each document's embedding to the browser and rank the synced set by
+cosine against a query vector you supply. Vectors ride a dedicated pass (they
+never travel on the document feed), so pull them after a sync or fold them into
+`liveSync`.
+
+```ts
+await db.syncEmbeddings();          // pull vectors for the docs you hold
+db.liveSync({ vectors: true });     // or pull them each live cycle
+
+const hits = await db.searchLocal(queryVector, { k: 10 });
+//   [{ id, score, doc }], sorted by descending cosine
+
+const filtered = await db.searchLocal(queryVector, {
+  k: 10,
+  filter: "kind = 'note'",          // a BQL WHERE narrows candidates first
+});
+```
+
+`searchLocal` ranks the per-document `emb` vectors you have synced. That is a
+different corpus from the server's ANN index, which is bound to the embedding
+model's dimension; reach it with `db.searchVector` / `db.searchText`:
+
+```ts
+const vhits = await db.searchVector(queryVector, { k: 10 }); // server ANN
+const thits = await db.searchText("outage", { k: 10, mode: "bm25" });
+```
+
+No model is bundled. To embed text in the browser, load a model yourself (for
+example transformers.js) and pass the `Float32Array` to `searchLocal`; its
+dimension must match the stored vectors. See `examples/vector-search.html`.
+
 ## How (attachments)
 
 Attachments are content-addressed blobs synced on their own feed, correlated

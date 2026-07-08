@@ -1,0 +1,58 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>barrel-lite vector search</title>
+  </head>
+  <body>
+    <h1>barrel-lite vector search</h1>
+    <p>
+      Type a query, embed it in the browser with transformers.js, and rank the
+      synced documents by cosine with <code>searchLocal</code>. No model is
+      bundled: transformers.js is loaded here from a CDN as an optional adapter,
+      never by the library. Serve the package root over http, point a
+      barrel_server with CORS enabled at <code>SERVER</code>, and seed some docs
+      whose <code>_embedding</code> uses the same model dimension.
+    </p>
+    <input id="q" placeholder="search query" size="40" />
+    <button id="go">search</button>
+    <pre id="log"></pre>
+    <script type="module">
+      import { Database } from "/dist/index.js";
+      // optional, lazily loaded adapter; not a dependency of barrel-lite
+      import { pipeline } from "https://cdn.jsdelivr.net/npm/@xenova/transformers";
+
+      const SERVER = "http://127.0.0.1:8080";
+      const DB = "demo";
+      const log = (m) => (document.getElementById("log").textContent += m + "\n");
+
+      const db = await Database.open("vsearch", {
+        remote: { url: SERVER, db: DB },
+      });
+
+      // pull docs, then their vectors (a dedicated pass)
+      await db.sync();
+      const fetched = await db.syncEmbeddings();
+      log(`synced ${fetched} vectors`);
+
+      // feature-extraction with mean pooling; do NOT normalize, cosine
+      // divides by both norms itself
+      const embed = await pipeline("feature-extraction", "Xenova/all-MiniLM-L6-v2");
+      async function embedText(text) {
+        const out = await embed(text, { pooling: "mean", normalize: false });
+        return new Float32Array(out.data); // dim must match the stored vectors
+      }
+
+      async function run() {
+        const text = document.getElementById("q").value.trim();
+        if (!text) return;
+        const query = await embedText(text);
+        const hits = await db.searchLocal(query, { k: 5 });
+        log(`\n"${text}"`);
+        for (const h of hits) log(`  ${h.score.toFixed(4)}  ${h.id}`);
+      }
+
+      document.getElementById("go").addEventListener("click", run);
+    </script>
+  </body>
+</html>
