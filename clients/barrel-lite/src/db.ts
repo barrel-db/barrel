@@ -32,6 +32,7 @@ import {
   type AttInfo,
 } from "./attachments/att.js";
 import { pullAttachments, pushAttachments } from "./attachments/att-sync.js";
+import { pullEmbeddings } from "./vectors/emb-sync.js";
 import { compile, runLocal } from "./bql/query.js";
 import type { LitValue } from "./bql/lower.js";
 import { LiveSync, type LiveHandle, type LiveTuning } from "./sync/syncer.js";
@@ -77,6 +78,8 @@ export type LiveOptions = SyncOptions &
   LiveTuning & {
     /** Hold a continuous SSE changes stream instead of polling alone. */
     continuous?: boolean;
+    /** Pull per-doc embeddings each cycle (opt-in). */
+    vectors?: boolean;
   };
 
 const STREAM_REOPEN_MIN_MS = 1_000;
@@ -409,10 +412,30 @@ export class Database {
     return pushed.pushed + pulled.applied;
   }
 
+  /** Pull per-doc vectors for the docs held locally (leader-only;
+   * a follower proxies). Dedicated pass: the async indexer writes a
+   * computed vector with no rev bump, so vectors never ride the doc
+   * feed. Pass refetchAll to re-read vectors already held. */
+  async syncEmbeddings(opts: { refetchAll?: boolean } = {}): Promise<number> {
+    if (this.isFollower()) {
+      return (await this.callLeader("syncEmbeddings", [
+        opts as JsonValue,
+      ])) as unknown as number;
+    }
+    const t = this.requireRemote();
+    const { fetched } = await pullEmbeddings(
+      t,
+      this.store,
+      opts.refetchAll ? { refetchAll: true } : {},
+    );
+    return fetched;
+  }
+
   liveSync(opts: LiveOptions = {}): LiveHandle {
     this.requireRemote();
     if (this.live) this.live.stop();
     this.continuous = opts.continuous === true;
+    const wantVectors = opts.vectors === true;
     const syncOpts: SyncOptions = opts.filter ? { filter: opts.filter } : {};
     const live = new LiveSync(
       async () => {
@@ -422,8 +445,13 @@ export class Database {
         const pushStats = await this.push();
         const pullStats = await this.pull(syncOpts);
         const attChanged = await this.syncAttachments();
+        const vecChanged = wantVectors ? await this.syncEmbeddings() : 0;
         return {
-          changed: pushStats.pushed > 0 || pullStats.applied > 0 || attChanged > 0,
+          changed:
+            pushStats.pushed > 0 ||
+            pullStats.applied > 0 ||
+            attChanged > 0 ||
+            vecChanged > 0,
         };
       },
       opts,
@@ -553,6 +581,10 @@ export class Database {
         return (await this.pull((args[0] as SyncOptions) ?? {})) as unknown as JsonValue;
       case "sync":
         return (await this.sync((args[0] as SyncOptions) ?? {})) as unknown as JsonValue;
+      case "syncEmbeddings":
+        return (await this.syncEmbeddings(
+          (args[0] as { refetchAll?: boolean }) ?? {},
+        )) as unknown as JsonValue;
       case "query":
         return (await this.query(args[0] as string, {
           params: (args[1] as Record<string, LitValue>) ?? {},
