@@ -34,7 +34,8 @@ main(_Args) ->
         <<"vv_relate">> => vv_relate(),
         <<"vv_contains">> => vv_contains(),
         <<"bql_local_run">> => bql_local_run(),
-        <<"bql_errors">> => bql_errors()
+        <<"bql_errors">> => bql_errors(),
+        <<"vector_embedding">> => vector_embedding()
     },
     io:put_chars(json:encode(Fixtures)),
     io:nl().
@@ -321,6 +322,27 @@ bql_error_tag(Query) ->
         {error, {invalid_query, _, Reason}} when is_atom(Reason) ->
             atom_to_binary(Reason, utf8)
     end.
+
+%%====================================================================
+%% Vector embeddings (float32 LE -> base64, the wire form)
+%%====================================================================
+
+vector_embedding() ->
+    Vectors = [[],
+               [0.0],
+               [1.0, -1.0, 0.5],
+               [0.1, 0.2, 0.3, 0.4],
+               [1.0e-8, 3.4028235e38, 0.3333333432674408],
+               to_floats(lists:seq(1, 16))],
+    [vector_embedding_case(V) || V <- Vectors].
+
+vector_embedding_case(Vec) ->
+    #{<<"vector">> => Vec,
+      <<"dim">> => length(Vec),
+      <<"base64">> => base64:encode(barrel_doc:encode_embedding(Vec))}.
+
+to_floats(Ints) ->
+    [float(I) || I <- Ints].
 
 %%====================================================================
 %% Helpers

@@ -86,6 +86,12 @@ export interface BqlErrorCase {
   error: string | null;
 }
 
+export interface VectorEmbeddingCase {
+  vector: number[];
+  dim: number;
+  base64: string;
+}
+
 export interface Golden {
   max_logical: number;
   hlc_encode: HlcEncodeCase[];
@@ -98,6 +104,7 @@ export interface Golden {
   vv_contains?: VvContainsCase[];
   bql_local_run?: BqlRunCase[];
   bql_errors?: BqlErrorCase[];
+  vector_embedding?: VectorEmbeddingCase[];
 }
 
 const path = fileURLToPath(new URL("./fixtures/golden.json", import.meta.url));
