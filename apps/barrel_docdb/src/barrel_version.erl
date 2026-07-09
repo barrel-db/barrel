@@ -29,7 +29,7 @@
 %% {WriteHlc, AuthorId}
 
 -type token() :: binary().
-%% API form: <<"0000018abc...@f1e061a70714abcd">>
+%% API form: `<<"0000018abc...@f1e061a70714abcd">>'
 
 -export_type([version/0, token/0]).
 

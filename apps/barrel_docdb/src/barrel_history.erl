@@ -210,10 +210,13 @@ history_floor(StoreRef, DbName0) ->
 %% Entry codec
 %%====================================================================
 
-%% Format: <<Cause:8, Deleted:8, DocIdLen:16, DocId/binary,
-%%           VerLen:16, VersionEnc/binary, VV/binary, Tlvs/binary>>
+%% Format:
+%% ```
+%% <<Cause:8, Deleted:8, DocIdLen:16, DocId/binary,
+%%   VerLen:16, VersionEnc/binary, VV/binary, Tlvs/binary>>
+%% '''
 %% The VV codec is self-delimiting; an optional TLV tail follows it:
-%% <<Tag:8, Len:16, Value:Len/binary>>* with tag 1 = provenance CBOR.
+%% `<<Tag:8, Len:16, Value:Len/binary>>' repeated, tag 1 = provenance CBOR.
 %% Unknown tags are skipped, and entries written before the tail
 %% existed decode unchanged (empty tail).
 

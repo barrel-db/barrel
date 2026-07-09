@@ -99,14 +99,14 @@ open(Path, Options) ->
 
 %% @doc Close the attachment store
 -spec close(att_ref()) -> ok.
+close(#{ref := Ref}) ->
+    rocksdb:close(Ref).
+
 %% @doc Hard-link snapshot into Path (timeline forks); the target
 %% must not exist.
 -spec checkpoint(att_ref(), string()) -> ok | {error, term()}.
 checkpoint(#{ref := Ref}, Path) ->
     rocksdb:checkpoint(Ref, Path).
-
-close(#{ref := Ref}) ->
-    rocksdb:close(Ref).
 
 %% @doc Store an attachment (async by default)
 %% Small attachments are stored as single values.
@@ -284,7 +284,9 @@ get(#{ref := Ref} = AttRef, DbName, DocId, AttName) ->
 %% Erlang term (binary_to_term used to crash and could allocate
 %% arbitrary terms / create atoms). New format:
 %%
+%% ```
 %%   <<"BARREL_CHUNK_V1:", JsonMeta/binary>>
+%% '''
 %%
 %% where JsonMeta is `json:encode/1` of the metadata map. Old chunked
 %% attachments (written by 0.6.3 and earlier as `term_to_binary/1`)

@@ -5,9 +5,11 @@
 %% Keys are tagged 0xFF, provably disjoint from blob keys (their first
 %% byte is the high byte of a 16-bit db-name length, always 0x00):
 %%
+%% ```
 %%   feed   <<16#FF, $C, DbNameLen:16, DbName, LocalHlc:12>>
 %%   index  <<16#FF, $A, DbNameLen:16, DbName, DocIdLen:16, DocId, $:, Name>>
 %%   meta   <<16#FF, $M, DbNameLen:16, DbName, "att_floor">>
+%% '''
 %%
 %% Invariant: ONE feed row per (DocId, AttName), moved on every write
 %% (doc-feed style, not history style), so a full resync is one bounded

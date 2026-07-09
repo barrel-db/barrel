@@ -322,7 +322,7 @@ encode_topic(Topic) when is_binary(Topic) ->
 
 %% @doc Outbox key for a tagged entry.
 %% Key format: prefix | db_name | tag (null-terminated) | hlc
-%% The tag is an opaque binary chosen by the producer (e.g. <<"embed">>);
+%% The tag is an opaque binary chosen by the producer (e.g. `<<"embed">>');
 %% the HLC gives time-ordered scans per tag and exact-key acks.
 -spec outbox_key(db_name(), binary(), barrel_hlc:timestamp()) -> binary().
 outbox_key(DbName, Tag, Hlc) ->

@@ -1187,8 +1187,8 @@ get_changes_by_path(StoreRef, DbName, PathPattern, Since, Opts) ->
     end.
 
 %% @private Parse path pattern to determine scan type
-%% - Exact: "users/123/name" -> {exact, <<"users/123/name">>}
-%% - Prefix: "users/#" -> {prefix, <<"users/">>}
+%% - Exact: "users/123/name" -> `{exact, <<"users/123/name">>}'
+%% - Prefix: "users/#" -> `{prefix, <<"users/">>}'
 parse_path_pattern(Pattern) ->
     case binary:last(Pattern) of
         $# ->
@@ -1242,7 +1242,7 @@ scan_path_hlc(StoreRef, DbName, Topic, Since, Limit) ->
 
 %% @private Scan prefix_changes posting lists for wildcard queries (# pattern)
 %% Uses sharded posting lists: one posting list per (prefix, time_bucket)
-%% Each entry in the posting list is << HLC:12, Change/binary >> sorted by HLC.
+%% Each entry in the posting list is `<<HLC:12, Change/binary>>' sorted by HLC.
 %% Uses range scan on posting_cf to find actual bucket keys (avoids scanning empty buckets).
 scan_path_hlc_prefix(StoreRef, DbName, TopicPrefix, Since, Limit) ->
     SinceHlc = case Since of
