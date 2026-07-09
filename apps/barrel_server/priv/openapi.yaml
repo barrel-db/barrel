@@ -1,0 +1,1645 @@
+openapi: 3.1.0
+info:
+  title: Barrel Server API
+  version: 0.2.0
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0
+  description: |
+    REST/JSON surface for the Barrel edge database. Databases, documents,
+    attachments, vectors, search, timelines (branch/merge), a changes feed
+    (JSON or SSE), the BQL query endpoint, and the agent layer (spaces,
+    capability grants, sessions, handoffs).
+
+    ## Authentication
+
+    Auth is optional. When the server runs open (no auth configured) no token
+    is required. When auth is configured, send a bearer token:
+
+    - a **global server token** authorizes every endpoint, including
+      management operations (create/drop a space, create a handoff);
+    - a **`bsp_...` capability token** is scoped to one space and is checked
+      per method through the capability layer (reads need `read`, mutations
+      need `write`, grant administration needs `admin`).
+
+    `GET /` and `GET /health` are always public.
+
+    ## Not covered here
+
+    The replication wire (`/db/{db}/_sync/*`) and the MCP endpoint (`/mcp`)
+    are separate protocols, not part of this REST surface, and are documented
+    elsewhere.
+servers:
+  - url: http://localhost:8080
+    description: Local server. The port is configurable (barrel_server http_port).
+security:
+  - bearerAuth: []
+tags:
+  - name: Health
+    description: Liveness and server info.
+  - name: Databases
+    description: Create, inspect, and drop databases.
+  - name: Timeline
+    description: Lineage, branching, and merge.
+  - name: Documents
+    description: Read and write documents, history, and versions.
+  - name: Query
+    description: Structured find and the BQL query endpoint.
+  - name: Changes
+    description: The changes feed (JSON snapshot or SSE).
+  - name: Attachments
+    description: Binary blobs attached to documents.
+  - name: Search
+    description: Vector, BM25, and hybrid search.
+  - name: Spaces
+    description: Agent-layer spaces and capability grants.
+  - name: Sessions
+    description: Per-space working memory sessions.
+  - name: Handoffs
+    description: Agent-to-agent task handoffs.
+paths:
+  /:
+    get:
+      tags: [Health]
+      summary: Server info
+      description: Public. Returns a short text banner.
+      security: []
+      responses:
+        '200':
+          description: Server banner.
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: "barrel edge database\n"
+  /health:
+    get:
+      tags: [Health]
+      summary: Health check
+      description: Public. Reports liveness.
+      security: []
+      responses:
+        '200':
+          description: The server is up.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+
+  /db/{db}:
+    parameters:
+      - $ref: '#/components/parameters/Db'
+    put:
+      tags: [Databases]
+      summary: Create database
+      responses:
+        '201':
+          description: Created (idempotent; also returned if it already exists).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  db:
+                    type: string
+        '400':
+          $ref: '#/components/responses/BadRequest'
+    get:
+      tags: [Databases]
+      summary: Database info
+      responses:
+        '200':
+          description: Database metadata (counts, cursors, lineage).
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [Databases]
+      summary: Drop database
+      description: Closes the database. Pass `purge=true` to delete it on disk.
+      parameters:
+        - name: purge
+          in: query
+          required: false
+          schema:
+            type: boolean
+          description: When true, destroy the database instead of just closing it.
+      responses:
+        '200':
+          description: Dropped or closed.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  db:
+                    type: string
+                  purged:
+                    type: boolean
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /db/{db}/_timeline:
+    parameters:
+      - $ref: '#/components/parameters/Db'
+    get:
+      tags: [Timeline]
+      summary: Lineage info
+      description: Branches of this database, plus parent and fork cursor for a branch.
+      responses:
+        '200':
+          description: Lineage.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  db:
+                    type: string
+                  branches:
+                    type: array
+                    items:
+                      type: string
+                  parent:
+                    type: string
+                  fork_hlc:
+                    type: string
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /db/{db}/_timeline/branch:
+    parameters:
+      - $ref: '#/components/parameters/Db'
+    post:
+      tags: [Timeline]
+      summary: Branch
+      description: |
+        Fork a new branch. Provide `at` (a changes cursor) or `at_time`
+        (RFC3339) to fork at a point in time; omit both to fork at now.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+                  description: Branch name.
+                at:
+                  type: string
+                  description: A changes cursor to fork at.
+                at_time:
+                  type: string
+                  format: date-time
+                  description: RFC3339 wall time to fork at.
+      responses:
+        '201':
+          description: Branch created.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  branch:
+                    type: string
+                  parent:
+                    type: string
+                  fork_hlc:
+                    type: string
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /db/{db}/_timeline/merge:
+    parameters:
+      - $ref: '#/components/parameters/Db'
+    post:
+      tags: [Timeline]
+      summary: Merge
+      description: Merge a branch back into its parent.
+      responses:
+        '200':
+          description: Merge report.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /db/{db}/doc/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Db'
+      - $ref: '#/components/parameters/Id'
+    put:
+      tags: [Documents]
+      summary: Put document
+      description: |
+        Create or update a document. To update, include the current `_rev`;
+        a stale `_rev` is a conflict. Provenance may be supplied through the
+        `X-Barrel-Actor`, `X-Barrel-Session`, and `X-Barrel-Source` headers.
+      parameters:
+        - name: X-Barrel-Actor
+          in: header
+          required: false
+          schema:
+            type: string
+        - name: X-Barrel-Session
+          in: header
+          required: false
+          schema:
+            type: string
+        - name: X-Barrel-Source
+          in: header
+          required: false
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Document'
+      responses:
+        '201':
+          description: Written. Returns the new revision.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: string
+                  _rev:
+                    type: string
+                additionalProperties: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          description: Conflict on a stale `_rev`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: conflict
+    get:
+      tags: [Documents]
+      summary: Get document
+      parameters:
+        - name: include_embedding
+          in: query
+          required: false
+          schema:
+            type: boolean
+          description: When true, include the stored embedding (base64 float32 + dim).
+      responses:
+        '200':
+          description: The document.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Document'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [Documents]
+      summary: Delete document
+      responses:
+        '200':
+          description: Deleted. Returns the tombstone revision.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /db/{db}/_history:
+    parameters:
+      - $ref: '#/components/parameters/Db'
+    get:
+      tags: [Documents]
+      summary: Change history
+      description: Retained change log across documents.
+      parameters:
+        - name: since
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Start cursor (exclusive).
+        - name: until
+          in: query
+          required: false
+          schema:
+            type: string
+          description: End cursor (inclusive).
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+        - name: id
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Restrict to one document id.
+      responses:
+        '200':
+          description: History entries.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  history:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /db/{db}/doc/{id}/_versions:
+    parameters:
+      - $ref: '#/components/parameters/Db'
+      - $ref: '#/components/parameters/Id'
+    get:
+      tags: [Documents]
+      summary: List versions
+      responses:
+        '200':
+          description: Retained versions for the document.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: string
+                  versions:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /db/{db}/doc/{id}/_versions/{rev}:
+    parameters:
+      - $ref: '#/components/parameters/Db'
+      - $ref: '#/components/parameters/Id'
+      - $ref: '#/components/parameters/Rev'
+    get:
+      tags: [Documents]
+      summary: Read a past version body
+      responses:
+        '200':
+          description: The document body at that revision.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Document'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /db/{db}/_bulk_docs:
+    parameters:
+      - $ref: '#/components/parameters/Db'
+    post:
+      tags: [Documents]
+      summary: Bulk write
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BulkDocsRequest'
+      responses:
+        '201':
+          description: Per-document results, in request order.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /db/{db}/_bulk_get:
+    parameters:
+      - $ref: '#/components/parameters/Db'
+    post:
+      tags: [Documents]
+      summary: Bulk read
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids]
+              properties:
+                ids:
+                  type: array
+                  items:
+                    type: string
+                include_embedding:
+                  type: boolean
+      responses:
+        '200':
+          description: Per-id results, in request order.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /db/{db}/find:
+    parameters:
+      - $ref: '#/components/parameters/Db'
+    post:
+      tags: [Query]
+      summary: Structured query
+      description: Query documents with a structured `where` clause.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                where:
+                  type: array
+                  items:
+                    type: object
+                    additionalProperties: true
+                  description: Structured predicates.
+              additionalProperties: true
+      responses:
+        '200':
+          description: Matching rows and query metadata.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  rows:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+                  meta:
+                    type: object
+                    additionalProperties: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /db/{db}/query:
+    parameters:
+      - $ref: '#/components/parameters/Db'
+    post:
+      tags: [Query]
+      summary: BQL query (streaming)
+      description: |
+        Run a BQL statement. The response streams NDJSON: one `{"row":...}`
+        line per row, then a final `{"meta":...}` line. A failure after the
+        200 is committed appears as an in-band `{"error":...}` line.
+
+        A `SUBSCRIBE` statement needs the `Accept: text/event-stream` header
+        (or `?feed=sse`) and upgrades the response to Server-Sent Events,
+        emitting `row` / `ready` / `change` / `error` events with a 30s ping.
+
+        The body is either raw BQL text (`text/plain`) or a JSON object with
+        `query`, and optionally `params` and a `continuation` cursor.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [query]
+              properties:
+                query:
+                  type: string
+                params:
+                  type: object
+                  additionalProperties: true
+                continuation:
+                  type: string
+                  description: Opaque continuation cursor from a prior response.
+          text/plain:
+            schema:
+              type: string
+              description: Raw BQL text.
+      responses:
+        '200':
+          description: |
+            NDJSON stream (one JSON object per line). For a `SUBSCRIBE`
+            statement with an SSE Accept header, the stream is
+            `text/event-stream` instead.
+          content:
+            application/x-ndjson:
+              schema:
+                type: string
+            text/event-stream:
+              schema:
+                type: string
+        '400':
+          $ref: '#/components/responses/BadRequest'
+    get:
+      tags: [Query]
+      summary: BQL query over query string
+      description: |
+        Same as the POST form but takes the statement in `?q=`, for browser
+        `EventSource` (SSE). Typically used with `SUBSCRIBE`.
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+          description: The BQL statement.
+      responses:
+        '200':
+          description: NDJSON stream, or `text/event-stream` for a subscription.
+          content:
+            application/x-ndjson:
+              schema:
+                type: string
+            text/event-stream:
+              schema:
+                type: string
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /db/{db}/changes:
+    parameters:
+      - $ref: '#/components/parameters/Db'
+    get:
+      tags: [Changes]
+      summary: Changes feed
+      description: |
+        A one-shot JSON snapshot of the change window by default. With an SSE
+        Accept header (or `?feed=sse`) it streams the same window as
+        Server-Sent Events. With `?feed=continuous` it holds an SSE stream
+        open and pushes changes as they land (30s ping heartbeat).
+      parameters:
+        - name: since
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Cursor to start from. `first` (or omitted) means the beginning.
+        - name: feed
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [sse, continuous]
+          description: Request an SSE snapshot or a continuous SSE stream.
+      responses:
+        '200':
+          description: |
+            The change window and the last cursor (JSON), or an SSE stream
+            when SSE is requested.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  changes:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+                  last:
+                    type: string
+            text/event-stream:
+              schema:
+                type: string
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /db/{db}/doc/{id}/att/{name}:
+    parameters:
+      - $ref: '#/components/parameters/Db'
+      - $ref: '#/components/parameters/Id'
+      - $ref: '#/components/parameters/AttName'
+    put:
+      tags: [Attachments]
+      summary: Upload blob
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        '201':
+          description: Stored. Returns the attachment revision.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+    get:
+      tags: [Attachments]
+      summary: Download blob
+      responses:
+        '200':
+          description: The blob, with its stored content type.
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [Attachments]
+      summary: Delete blob
+      responses:
+        '200':
+          description: Deleted.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /db/{db}/vector:
+    parameters:
+      - $ref: '#/components/parameters/Db'
+    post:
+      tags: [Search]
+      summary: Add a vector
+      description: |
+        Index a vector. Supply your own `vector`, or omit it and provide
+        `text` for the server to embed.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id]
+              properties:
+                id:
+                  type: string
+                text:
+                  type: string
+                metadata:
+                  type: object
+                  additionalProperties: true
+                vector:
+                  type: array
+                  items:
+                    type: number
+      responses:
+        '201':
+          description: Indexed.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  id:
+                    type: string
+                additionalProperties: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /db/{db}/search/vector:
+    parameters:
+      - $ref: '#/components/parameters/Db'
+    post:
+      tags: [Search]
+      summary: Vector search
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [vector]
+              properties:
+                vector:
+                  type: array
+                  items:
+                    type: number
+                k:
+                  type: integer
+                  default: 10
+      responses:
+        '200':
+          description: Ranked hits.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SearchResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /db/{db}/search/bm25:
+    parameters:
+      - $ref: '#/components/parameters/Db'
+    post:
+      tags: [Search]
+      summary: BM25 search
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [query]
+              properties:
+                query:
+                  type: string
+                k:
+                  type: integer
+                  default: 10
+      responses:
+        '200':
+          description: Ranked hits.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SearchResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /db/{db}/search/hybrid:
+    parameters:
+      - $ref: '#/components/parameters/Db'
+    post:
+      tags: [Search]
+      summary: Hybrid search
+      description: Combines vector and BM25 ranking.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [query]
+              properties:
+                query:
+                  type: string
+                k:
+                  type: integer
+                  default: 10
+      responses:
+        '200':
+          description: Ranked hits.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SearchResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /spaces:
+    post:
+      tags: [Spaces]
+      summary: Create space
+      description: Management operation. Requires the global server token.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                label:
+                  type: string
+                purpose:
+                  type: string
+                owner:
+                  type: string
+              additionalProperties: true
+      responses:
+        '201':
+          description: Created.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  space:
+                    type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    get:
+      tags: [Spaces]
+      summary: List spaces
+      description: Management operation. Requires the global server token.
+      responses:
+        '200':
+          description: All spaces.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  spaces:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /spaces/{space}:
+    parameters:
+      - $ref: '#/components/parameters/Space'
+    get:
+      tags: [Spaces]
+      summary: Space info
+      description: Needs `read` on the space.
+      responses:
+        '200':
+          description: Public space info.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [Spaces]
+      summary: Drop space
+      description: Management operation. Requires the global server token.
+      responses:
+        '200':
+          description: Dropped.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /spaces/{space}/grants:
+    parameters:
+      - $ref: '#/components/parameters/Space'
+    post:
+      tags: [Spaces]
+      summary: Issue capability
+      description: Mint a `bsp_...` token scoped to this space. Needs `admin`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                rights:
+                  type: array
+                  items:
+                    type: string
+                    enum: [read, write, admin]
+                  default: [read]
+                subject:
+                  type: string
+                label:
+                  type: string
+                issued_by:
+                  type: string
+                expires_at:
+                  type: integer
+                  description: Expiry as a unix timestamp.
+      responses:
+        '201':
+          description: The token and its grant record.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token:
+                    type: string
+                    example: bsp_...
+                  grant:
+                    type: object
+                    additionalProperties: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    get:
+      tags: [Spaces]
+      summary: List grants
+      description: Needs `admin`.
+      responses:
+        '200':
+          description: Grants for the space.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  grants:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /spaces/{space}/grants/{token_id}:
+    parameters:
+      - $ref: '#/components/parameters/Space'
+      - $ref: '#/components/parameters/TokenId'
+    delete:
+      tags: [Spaces]
+      summary: Revoke grant
+      description: Needs `admin`.
+      responses:
+        '200':
+          description: Revoked.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /spaces/{space}/sessions:
+    parameters:
+      - $ref: '#/components/parameters/Space'
+    post:
+      tags: [Sessions]
+      summary: Create session
+      description: Needs `write`.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                agent:
+                  type: string
+                ttl:
+                  type: integer
+                data:
+                  type: object
+                  additionalProperties: true
+                metadata:
+                  type: object
+                  additionalProperties: true
+      responses:
+        '201':
+          description: Created.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  session:
+                    type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    get:
+      tags: [Sessions]
+      summary: List sessions
+      description: Needs `read`. Filter by `?agent=`.
+      parameters:
+        - name: agent
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Sessions.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sessions:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /spaces/{space}/sessions/{sid}:
+    parameters:
+      - $ref: '#/components/parameters/Space'
+      - $ref: '#/components/parameters/Sid'
+    get:
+      tags: [Sessions]
+      summary: Get session
+      description: Needs `read`.
+      responses:
+        '200':
+          description: The session.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [Sessions]
+      summary: Delete session
+      description: Needs `write`.
+      responses:
+        '200':
+          description: Deleted.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /spaces/{space}/sessions/{sid}/touch:
+    parameters:
+      - $ref: '#/components/parameters/Space'
+      - $ref: '#/components/parameters/Sid'
+    post:
+      tags: [Sessions]
+      summary: Extend TTL
+      description: Needs `write`.
+      responses:
+        '200':
+          description: Extended. Returns the new expiry.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  expires_at:
+                    type: integer
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /spaces/{space}/sessions/{sid}/messages:
+    parameters:
+      - $ref: '#/components/parameters/Space'
+      - $ref: '#/components/parameters/Sid'
+    post:
+      tags: [Sessions]
+      summary: Append message
+      description: Needs `write`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [role, content]
+              properties:
+                role:
+                  type: string
+                content: {}
+                metadata:
+                  type: object
+                  additionalProperties: true
+      responses:
+        '201':
+          description: Appended.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  message:
+                    type: string
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    get:
+      tags: [Sessions]
+      summary: List messages
+      description: Needs `read`. Range with `since` / `before` / `limit` / `order`.
+      parameters:
+        - name: since
+          in: query
+          required: false
+          schema:
+            type: integer
+        - name: before
+          in: query
+          required: false
+          schema:
+            type: integer
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+        - name: order
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [asc, desc]
+      responses:
+        '200':
+          description: Messages.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  messages:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /spaces/{space}/sessions/{sid}/data/{key}:
+    parameters:
+      - $ref: '#/components/parameters/Space'
+      - $ref: '#/components/parameters/Sid'
+      - $ref: '#/components/parameters/Key'
+    put:
+      tags: [Sessions]
+      summary: Set data
+      description: Needs `write`. Stores a value under `key`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                value: {}
+      responses:
+        '200':
+          description: Stored.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    get:
+      tags: [Sessions]
+      summary: Get data
+      description: Needs `read`.
+      responses:
+        '200':
+          description: The stored value.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  value: {}
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /handoffs:
+    post:
+      tags: [Handoffs]
+      summary: Create handoff
+      description: |
+        Create an agent-to-agent handoff. Needs `admin` on the target space
+        (named in the body). Returns the handoff id and an accept token.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [space, task_name]
+              properties:
+                space:
+                  type: string
+                task_name:
+                  type: string
+                from_agent:
+                  type: string
+                to_agent:
+                  type: string
+                from_session:
+                  type: string
+                priority:
+                  type: string
+                completed:
+                  type: array
+                  items: {}
+                pending:
+                  type: array
+                  items: {}
+                blockers:
+                  type: array
+                  items: {}
+                files:
+                  type: array
+                  items: {}
+                context: {}
+                expires_at:
+                  type: integer
+                rights:
+                  type: array
+                  items:
+                    type: string
+                    enum: [read, write, admin]
+                  default: [read, write]
+      responses:
+        '201':
+          description: Created.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  handoff:
+                    type: string
+                  token:
+                    type: string
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    get:
+      tags: [Handoffs]
+      summary: List handoffs
+      description: |
+        List handoffs. A capability caller sees only its own space's handoffs.
+        Filter by `space`, `status`, `to_agent`, `from_agent`.
+      parameters:
+        - name: space
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: to_agent
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: from_agent
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Handoffs.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  handoffs:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /handoffs/accept:
+    post:
+      tags: [Handoffs]
+      summary: Accept handoff
+      description: Accept a handoff by its token. Binds a receiving agent and session.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token:
+                  type: string
+                agent:
+                  type: string
+      responses:
+        '200':
+          description: Accepted.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  handoff:
+                    type: object
+                    additionalProperties: true
+                  space:
+                    type: string
+                  session:
+                    type: string
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /handoffs/complete:
+    post:
+      tags: [Handoffs]
+      summary: Complete handoff
+      description: Complete a handoff by its token. Optionally revoke its capability.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token:
+                  type: string
+                result: {}
+                notes: {}
+                revoke:
+                  type: boolean
+                  default: true
+      responses:
+        '200':
+          description: Completed.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  handoff:
+                    type: object
+                    additionalProperties: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: |
+        A global server token, or a `bsp_...` capability token scoped to one
+        space. Omit entirely when the server runs open (no auth configured).
+  parameters:
+    Db:
+      name: db
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Database name.
+    Id:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Document id.
+    Rev:
+      name: rev
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Revision identifier.
+    AttName:
+      name: name
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Attachment name.
+    Space:
+      name: space
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Space id.
+    TokenId:
+      name: token_id
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Grant token id.
+    Sid:
+      name: sid
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Session id.
+    Key:
+      name: key
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Session data key.
+  responses:
+    BadRequest:
+      description: Bad request.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Unauthorized:
+      description: Missing or invalid token.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Forbidden:
+      description: The token lacks the required right.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFound:
+      description: Not found.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Conflict:
+      description: Conflict.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+  schemas:
+    Document:
+      type: object
+      description: |
+        A JSON document. `id` and `_rev` are server-managed; every other
+        field is your own.
+      properties:
+        id:
+          type: string
+        _rev:
+          type: string
+      additionalProperties: true
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+      required: [error]
+    SearchHit:
+      type: object
+      properties:
+        key:
+          type: string
+        score:
+          type: number
+        text:
+          type: string
+        metadata:
+          type: object
+          additionalProperties: true
+      required: [key, score]
+    SearchResponse:
+      type: object
+      properties:
+        hits:
+          type: array
+          items:
+            $ref: '#/components/schemas/SearchHit'
+      required: [hits]
+    BulkDocsRequest:
+      type: object
+      properties:
+        docs:
+          type: array
+          items:
+            $ref: '#/components/schemas/Document'
+      required: [docs]
