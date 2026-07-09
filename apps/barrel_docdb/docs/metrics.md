@@ -1,7 +1,8 @@
 # Prometheus Metrics
 
-!!! note "See also: Observability Guide"
-    For a complete guide covering tracing, metrics, and logging with exporters, see the [Observability Guide](observability.md).
+> #### See also: Observability Guide
+>
+> For a complete guide covering tracing, metrics, and logging with exporters, see the [Observability Guide](observability.md).
 
 Barrel DocDB records metrics in-process using the [instrument](https://github.com/benoitc/instrument) library and can render them in Prometheus text format.
 
@@ -71,8 +72,9 @@ barrel_replication_errors{task_id="rep-123"} 2
 | `barrel_db_size_bytes` | Gauge | db | Database size |
 | `barrel_db_attachments_total` | Gauge | db | Attachment count |
 
-!!! note "HTTP request metrics"
-    Metrics for HTTP requests (method, path, status, latency) are produced by `barrel_server`, not barrel_docdb, since barrel_docdb has no HTTP surface of its own.
+> #### HTTP request metrics
+>
+> Metrics for HTTP requests (method, path, status, latency) are produced by `barrel_server`, not barrel_docdb, since barrel_docdb has no HTTP surface of its own.
 
 ## Grafana Dashboard
 

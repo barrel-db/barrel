@@ -355,7 +355,7 @@ iterate_loop(StoreRef, DbName, Plan, Opts, Acc) ->
 
 ## API Reference
 
-See the [Erlang API Reference](api/erlang.md) for complete function documentation.
+See the [API reference](api-reference.html) for complete function documentation.
 
 - `barrel_docdb:find/2,3` - Execute a query
 - `barrel_docdb:explain/2` - Explain query plan

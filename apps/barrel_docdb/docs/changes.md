@@ -272,7 +272,7 @@ handle_info({barrel_query_change, _, #{id := Id}}, State = #{cache := Cache}) ->
 
 ## API Reference
 
-See the [Erlang API Reference](api/erlang.md) for complete function documentation.
+See the [API reference](api-reference.html) for complete function documentation.
 
 ### Changes Feed
 - `barrel_docdb:get_changes/2,3` - Get changes since timestamp

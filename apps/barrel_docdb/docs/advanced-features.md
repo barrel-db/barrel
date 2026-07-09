@@ -2,8 +2,9 @@
 
 This guide gives practical Erlang examples for two of Barrel DocDB's advanced features: replication and clock synchronization. All calls run in-process against the `barrel_docdb`, `barrel_rep`, and `barrel_rep_tasks` modules.
 
-!!! note "HTTP access"
-    barrel_docdb has no built-in HTTP server. To drive replication or reach a database over the wire, run the `barrel_server` app. For the sync wire and over-the-network setup, see the umbrella guides `docs/guides/synchronization.md` and `docs/guides/rest-server.md`, and this app's [Replication Guide](replication.md).
+> #### HTTP access
+>
+> barrel_docdb has no built-in HTTP server. To drive replication or reach a database over the wire, run the `barrel_server` app. For the sync wire and over-the-network setup, see the umbrella guides `docs/guides/synchronization.md` and `docs/guides/rest-server.md`, and this app's [Replication Guide](replication.md).
 
 ---
 

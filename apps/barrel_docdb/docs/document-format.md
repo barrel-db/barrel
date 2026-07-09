@@ -306,4 +306,4 @@ Rev3 = maps:get(<<"rev">>, R3).
 
 - [Getting Started](getting-started.md) - Basic usage guide
 - [Replication](replication.md) - How versions enable replication
-- [Erlang API Reference](api/erlang.md) - Complete API documentation
+- [API reference](api-reference.html) - Complete API documentation

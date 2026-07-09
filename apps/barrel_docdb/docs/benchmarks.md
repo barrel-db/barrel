@@ -2,11 +2,12 @@
 
 Performance benchmarks for Barrel DocDB operations using the built-in benchmark suite.
 
-!!! note "Test Environment"
-    - **Hardware**: Apple M1, 16GB RAM, SSD
-    - **Erlang/OTP**: 27
-    - **Dataset**: 5,000 documents (~500 bytes each)
-    - **Database**: Single node, default configuration
+> #### Test Environment
+>
+> - **Hardware**: Apple M1, 16GB RAM, SSD
+> - **Erlang/OTP**: 27
+> - **Dataset**: 5,000 documents (~500 bytes each)
+> - **Database**: Single node, default configuration
 
 ## CRUD Operations
 
@@ -55,20 +56,21 @@ Paginated queries with continuation tokens deliver excellent performance:
 | 100 docs/page | 4,906 pages/s | 187 us |
 | 500 docs/page | 3,163 pages/s | 347 us |
 
-!!! tip "Pagination is Essential"
-    **Always paginate large result sets.** Fetching thousands of documents in a single query is slow and memory-intensive. Use `limit` and continuation tokens to stream results efficiently:
-
-    ```erlang
-    %% First page
-    {ok, Results, #{continuation := Token}} =
-        barrel_docdb:find(Db, #{where => Query, limit => 100}).
-
-    %% Next pages
-    {ok, More, #{continuation := NextToken}} =
-        barrel_docdb:find(Db, #{where => Query, limit => 100, continuation => Token}).
-    ```
-
-    Paginated queries run in **microseconds per page** vs **hundreds of milliseconds** for unbounded queries.
+> #### Pagination is Essential
+>
+> **Always paginate large result sets.** Fetching thousands of documents in a single query is slow and memory-intensive. Use `limit` and continuation tokens to stream results efficiently:
+>
+> ```erlang
+> %% First page
+> {ok, Results, #{continuation := Token}} =
+>     barrel_docdb:find(Db, #{where => Query, limit => 100}).
+>
+> %% Next pages
+> {ok, More, #{continuation := NextToken}} =
+>     barrel_docdb:find(Db, #{where => Query, limit => 100, continuation => Token}).
+> ```
+>
+> Paginated queries run in **microseconds per page** vs **hundreds of milliseconds** for unbounded queries.
 
 ## Changes Feed
 
@@ -140,8 +142,9 @@ Barrel's value is in the **combination** of:
 
 If you only need single-node storage without replication, simpler tools exist. Choose Barrel when you need **sync**, **real-time**, and **architectural flexibility**.
 
-!!! note "Remote access"
-    These numbers are for the embedded Erlang API, which is how barrel_docdb is used. To reach a database over HTTP, run the `barrel_server` app; network I/O and JSON serialization add overhead on top of the figures above.
+> #### Remote access
+>
+> These numbers are for the embedded Erlang API, which is how barrel_docdb is used. To reach a database over HTTP, run the `barrel_server` app; network I/O and JSON serialization add overhead on top of the figures above.
 
 ## Running Benchmarks
 

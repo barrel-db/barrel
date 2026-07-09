@@ -8,8 +8,9 @@ Barrel DocDB provides observability through three pillars using the [instrument]
 
 All three signals are automatically correlated via trace context, enabling end-to-end debugging across distributed operations.
 
-!!! note "HTTP surface"
-    barrel_docdb has no built-in HTTP server. Metrics are collected in-process and can be rendered as Prometheus text with `barrel_metrics:export_text/0`. To scrape them over HTTP, or to trace incoming HTTP requests, run the `barrel_server` app (see the umbrella REST server guide `docs/guides/rest-server.md`). OTLP endpoints below refer to an OpenTelemetry collector, not to barrel_docdb.
+> #### HTTP surface
+>
+> barrel_docdb has no built-in HTTP server. Metrics are collected in-process and can be rendered as Prometheus text with `barrel_metrics:export_text/0`. To scrape them over HTTP, or to trace incoming HTTP requests, run the `barrel_server` app (see the umbrella REST server guide `docs/guides/rest-server.md`). OTLP endpoints below refer to an OpenTelemetry collector, not to barrel_docdb.
 
 ## Quick Start
 
@@ -280,8 +281,9 @@ barrel_doc_operation_duration_seconds_bucket{db="mydb",operation="get",le="0.01"
 | `barrel_db_size_bytes` | Gauge | db | Database size |
 | `barrel_db_attachments_total` | Gauge | db | Attachment count |
 
-!!! note "HTTP request metrics"
-    Metrics for HTTP requests (method, path, status, latency) are produced by `barrel_server`, not barrel_docdb, since barrel_docdb has no HTTP surface of its own.
+> #### HTTP request metrics
+>
+> Metrics for HTTP requests (method, path, status, latency) are produced by `barrel_server`, not barrel_docdb, since barrel_docdb has no HTTP surface of its own.
 
 ### Prometheus Configuration (Pull)
 

@@ -383,7 +383,7 @@ A resolution is an ordinary write, so it replicates like any other.
 
 ## API Reference
 
-See the [Erlang API Reference](api/erlang.md) for complete function documentation.
+See the [API reference](api-reference.html) for complete function documentation.
 
 - `barrel_rep` - Replication public API (`replicate/2,3`, `replicate_one_shot/1,2`)
 - `barrel_rep_tasks` - Continuous / persistent replication tasks
