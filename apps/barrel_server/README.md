@@ -162,6 +162,10 @@ $ curl localhost:8080/db/mydb/changes
 {"last":"AAABn0a0wIkAAAAA","changes":[{"id":"a","rev":"0000019f46b4c089...",
  "hlc":"AAABn0a0wIkAAAAA","changes":[{"rev":"0000019f46b4c089..."}],
  "num_conflicts":0}]}
+
+$ curl localhost:8080/db/mydb
+{"name":"mydb","config":{},"db_path":"/var/lib/barrel/mydb","att_floor":null,
+ "history_floor":null,"keyspace":"mydb","retention_period":2592000}
 ```
 
 A `rev` is a version token, `<hex(hlc)>@<author>`: the HLC of the write and the

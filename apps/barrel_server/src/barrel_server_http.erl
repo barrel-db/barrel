@@ -50,7 +50,7 @@
     with_json/2,
     param/2,
     jsonable/1,
-    encode_hlcs/1,
+    encode_db_info/1,
     merge_report/1,
     sanitize_change/1
 ]).
@@ -177,25 +177,29 @@ create_db(Req) ->
 db_info(Req) ->
     with_db(Req, fun(Db) ->
         case barrel:info(Db) of
-            {ok, Info} -> json_resp(200, jsonable(encode_hlcs(Info)));
+            {ok, Info} -> json_resp(200, jsonable(encode_db_info(Info)));
             Err -> error_resp(Err)
         end
     end).
 
-%% HLC tuples are not JSON-encodable and jsonable/1 would drop them
-%% silently; render them as cursors.
-encode_hlcs(Map) ->
-    maps:map(
-        fun(K, V) when K =:= fork_hlc; K =:= history_floor;
-                       K =:= att_floor ->
-                case V of
-                    undefined -> V;
-                    _ -> barrel:hlc_encode(V)
-                end;
-           (_, V) ->
-                V
-        end,
-        Map).
+%% Render a db_info map for JSON. Three values do not survive the encoder
+%% as they come out of barrel:info/1: HLC tuples, which jsonable/1 would
+%% drop silently; `undefined', which encodes as the string "undefined"
+%% rather than null; and db_path, a charlist, which encodes as an array
+%% of integers.
+encode_db_info(Map) ->
+    maps:map(fun encode_db_info_value/2, Map).
+
+encode_db_info_value(db_path, Path) when is_list(Path) ->
+    unicode:characters_to_binary(Path);
+encode_db_info_value(K, undefined)
+        when K =:= fork_hlc; K =:= history_floor; K =:= att_floor ->
+    null;
+encode_db_info_value(K, V)
+        when K =:= fork_hlc; K =:= history_floor; K =:= att_floor ->
+    barrel:hlc_encode(V);
+encode_db_info_value(_K, V) ->
+    V.
 
 drop_db(Req) ->
     Name = livery_req:binding(<<"db">>, Req),

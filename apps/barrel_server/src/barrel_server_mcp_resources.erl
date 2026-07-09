@@ -78,7 +78,7 @@ db_resource(#{<<"db">> := Name}) ->
             case barrel:info(Db) of
                 {ok, Info} ->
                     barrel_server_http:jsonable(
-                        barrel_server_http:encode_hlcs(Info));
+                        barrel_server_http:encode_db_info(Info));
                 {error, Reason} ->
                     #{error => err_bin(Reason)}
             end;

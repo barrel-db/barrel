@@ -195,7 +195,7 @@ db_info(#{<<"db">> := Name}, Ctx) ->
         case barrel:info(Db) of
             {ok, Info} ->
                 reply(barrel_server_http:jsonable(
-                    barrel_server_http:encode_hlcs(Info)));
+                    barrel_server_http:encode_db_info(Info)));
             Err ->
                 err(Err)
         end

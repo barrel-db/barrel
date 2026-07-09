@@ -74,6 +74,13 @@ t_db_lifecycle(Config) ->
     B = base(Config),
     {200, Info} = req(get, B ++ "/db/" ++ ?DB, <<>>),
     ?assert(is_map(Info)),
+    %% db_path is a charlist on the Erlang side: it must render as a JSON
+    %% string, not an array of character codes. An absent floor is null,
+    %% not the string "undefined".
+    #{<<"db_path">> := DbPath} = Info,
+    ?assert(is_binary(DbPath)),
+    ?assertEqual(null, maps:get(<<"att_floor">>, Info)),
+    ?assertEqual(null, maps:get(<<"history_floor">>, Info)),
     %% A fresh db opens on demand and can be closed.
     {201, _} = req(put, B ++ "/db/tmpdb", <<>>),
     {200, #{<<"ok">> := true}} = req(delete, B ++ "/db/tmpdb", <<>>),
