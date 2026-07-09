@@ -2,7 +2,7 @@
 %%% @doc FAISS backend wrapper for barrel_vectordb_index behaviour
 %%%
 %%% Wraps barrel_faiss (Facebook FAISS NIF bindings) with:
-%%% - ID mapping: binary IDs <-> sequential integer labels
+%%% - ID mapping: binary IDs `<->' sequential integer labels
 %%% - Soft delete: deleted IDs filtered from search results
 %%% - Metric normalization: cosine via normalized inner product
 %%% - Combined serialization: FAISS binary + Erlang state
@@ -10,7 +10,7 @@
 %%% == Delete Strategy ==
 %%% FAISS doesn't support deletion natively. This backend uses soft delete:
 %%% deleted IDs are added to a set and filtered from search results.
-%%% Use `compact/1` to rebuild the index without deleted vectors.
+%%% Use `compact/1' to rebuild the index without deleted vectors.
 %%%
 %%% @end
 %%%-------------------------------------------------------------------
@@ -166,7 +166,7 @@ info(#faiss_state{dimension = Dim, distance_fn = DistFn, metric = Metric,
     }.
 
 %% @doc Serialize index to binary.
-%% Format: <<Version, FAISSLen, FAISSBin, StateLen, StateBin>>
+%% Format: `<<Version, FAISSLen, FAISSBin, StateLen, StateBin>>'
 -spec serialize(#faiss_state{}) -> binary().
 serialize(#faiss_state{index = Index} = State) ->
     {ok, IndexBin} = barrel_faiss:serialize(Index),

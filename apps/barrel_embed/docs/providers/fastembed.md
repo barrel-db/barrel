@@ -27,19 +27,9 @@ FastEmbed is a lighter alternative to sentence-transformers:
 ## Configuration
 
 ```erlang
-%% Using virtualenv (recommended)
 {ok, State} = barrel_embed:init(#{
     embedder => {fastembed, #{
-        venv => "/absolute/path/to/.venv",
-        model => "BAAI/bge-small-en-v1.5",     % default
-        timeout => 120000                       % default, ms
-    }}
-}).
-
-%% Using system Python
-{ok, State} = barrel_embed:init(#{
-    embedder => {fastembed, #{
-        python => "python3",                    % default
+        python => "python3",                    % default, fallback only
         model => "BAAI/bge-small-en-v1.5",     % default
         timeout => 120000                       % default, ms
     }}
@@ -50,10 +40,13 @@ FastEmbed is a lighter alternative to sentence-transformers:
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `venv` | string | `undefined` | Path to virtualenv (recommended) |
-| `python` | string | `"python3"` | Python executable (if no venv) |
+| `python` | string | `"python3"` | Python executable, used only if the managed venv could not be created |
 | `model` | string | `"BAAI/bge-small-en-v1.5"` | Model name |
 | `timeout` | integer | `120000` | Timeout in milliseconds |
+
+barrel_embed manages its own Python virtualenv automatically and installs
+`fastembed` into it on first use. See
+[Python Virtualenv Setup](venv-setup.md) for the managed venv API.
 
 ## Supported Models
 

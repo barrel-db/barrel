@@ -15,19 +15,9 @@ pip install sentence-transformers
 ## Configuration
 
 ```erlang
-%% Using virtualenv (recommended)
 {ok, State} = barrel_embed:init(#{
     embedder => {local, #{
-        venv => "/absolute/path/to/.venv",
-        model => "BAAI/bge-base-en-v1.5",      % default
-        timeout => 120000                       % default, ms
-    }}
-}).
-
-%% Using system Python
-{ok, State} = barrel_embed:init(#{
-    embedder => {local, #{
-        python => "python3",                    % default
+        python => "python3",                    % default, fallback only
         model => "BAAI/bge-base-en-v1.5",      % default
         timeout => 120000                       % default, ms
     }}
@@ -38,12 +28,14 @@ pip install sentence-transformers
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `venv` | string | `undefined` | Path to virtualenv (recommended) |
-| `python` | string | `"python3"` | Python executable (if no venv) |
+| `python` | string | `"python3"` | Python executable, used only if the managed venv could not be created |
 | `model` | string | `"BAAI/bge-base-en-v1.5"` | Model name |
 | `timeout` | integer | `120000` | Timeout in milliseconds |
 
-When `venv` is specified, the provider properly activates the virtualenv by setting `VIRTUAL_ENV`, `PATH`, and `PYTHONPATH` environment variables.
+barrel_embed manages its own Python virtualenv automatically and installs
+`sentence-transformers` into it on first use. See
+[Python Virtualenv Setup](venv-setup.md) for the managed venv API and how to
+change its location.
 
 ## Supported Models
 
@@ -80,34 +72,26 @@ Any model from HuggingFace that works with sentence-transformers:
 
 ## Python Environment
 
-### Using Virtual Environment (Recommended)
+### Managed Virtualenv (Default)
 
-The `venv` option properly activates the virtualenv environment:
+barrel_embed creates a venv under its `priv` directory on application
+startup and installs `sentence-transformers` there automatically:
 
 ```erlang
 {ok, State} = barrel_embed:init(#{
     embedder => {local, #{
-        venv => "/absolute/path/to/.venv"
+        model => "BAAI/bge-base-en-v1.5"
     }}
 }).
 ```
 
-This sets the correct environment variables (`VIRTUAL_ENV`, `PATH`) so Python packages are discovered correctly.
+Set a custom venv location via the `venv_dir` application env (see
+[Python Virtualenv Setup](venv-setup.md)).
 
-### Quick Setup
+### Using a Different Python Interpreter
 
-```bash
-# Using uv (fast)
-./scripts/setup_venv.sh
-
-# Or manually with uv
-uv venv .venv
-uv pip install -r priv/requirements.txt --python .venv/bin/python
-```
-
-### Using Conda
-
-For Conda environments, use the `python` option:
+If the managed venv could not be created, barrel_embed falls back to the
+`python` option. This is also useful for Conda environments:
 
 ```erlang
 {ok, State} = barrel_embed:init(#{
@@ -115,17 +99,6 @@ For Conda environments, use the `python` option:
         python => "/path/to/conda/envs/myenv/bin/python"
     }}
 }).
-```
-
-## Resource Management
-
-The local provider uses a Python subprocess. barrel_embed includes rate limiting to prevent resource exhaustion:
-
-```erlang
-%% sys.config
-{barrel_embed, [
-    {python_max_concurrent, 4}  % default: schedulers * 2 + 1
-]}
 ```
 
 ## First Request Latency

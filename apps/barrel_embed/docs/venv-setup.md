@@ -38,7 +38,9 @@ barrel_embed:refresh_venv().
 
 ## Custom Python Executable
 
-By default, barrel_embed uses `python3`. To use a different Python:
+The `python` option is only used as a fallback when the managed venv could
+not be created. When the managed venv exists (the default), its own
+interpreter is always used:
 
 ```erlang
 {ok, State} = barrel_embed:init(#{
@@ -47,8 +49,6 @@ By default, barrel_embed uses `python3`. To use a different Python:
     }}
 }).
 ```
-
-This is useful when you have multiple Python versions installed or need a specific interpreter.
 
 ## Custom Venv Location
 

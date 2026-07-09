@@ -2,6 +2,9 @@
 
 Erlang NIF bindings for [FAISS](https://github.com/facebookresearch/faiss) (Facebook AI Similarity Search).
 
+[HexDocs](https://hexdocs.pm/barrel_faiss) |
+[Repository](https://github.com/barrel-db/barrel)
+
 FAISS is a library for efficient similarity search and clustering of dense vectors.
 
 ## Requirements

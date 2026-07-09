@@ -2,10 +2,10 @@
 
 # barrel_embed
 
-**Lightweight embedding generation for Erlang with 15+ provider backends**
+**Lightweight embedding generation for Erlang with 14 provider backends**
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-2.0.1-green.svg)]()
+[![Version](https://img.shields.io/badge/Version-2.3.0-green.svg)]()
 
 [Documentation](https://docs.barrel-db.eu/embed) |
 [Examples](./examples) |
@@ -31,8 +31,15 @@ A standalone library for generating text and image embeddings with multiple prov
 |----------|------|--------------|-------------|
 | `local` | Dense | Python + sentence-transformers | Local CPU inference |
 | `ollama` | Dense | Ollama server | Local Ollama API |
-| `openai` | Dense | API key | OpenAI Embeddings API |
 | `fastembed` | Dense | Python + fastembed | ONNX-based, lighter than sentence-transformers |
+| `openai` | Dense | API key | OpenAI Embeddings API |
+| `cohere` | Dense | API key | Cohere Embed API with input type optimization |
+| `voyage` | Dense | API key | Voyage AI for RAG and domain-specific embeddings |
+| `jina` | Dense | API key | Jina AI, 8K context, free tier |
+| `mistral` | Dense | API key | Mistral AI, EU data residency |
+| `azure` | Dense | Azure subscription | Azure OpenAI for enterprise compliance |
+| `bedrock` | Dense | AWS credentials | AWS Bedrock (Titan, Cohere models) |
+| `vertex` | Dense | GCP project | Google Vertex AI |
 | `splade` | Sparse | Python + transformers + torch | Neural sparse embeddings for hybrid search |
 | `colbert` | Multi-vector | Python + transformers + torch | Token-level embeddings for fine-grained matching |
 | `clip` | Cross-modal | Python + transformers + torch + pillow | Image/text embeddings in same space |
@@ -43,7 +50,7 @@ Add to your `rebar.config`:
 
 ```erlang
 {deps, [
-    {barrel_embed, "2.0.1"}
+    {barrel_embed, "~> 2.3"}
 ]}.
 ```
 
@@ -211,39 +218,36 @@ Score = barrel_embed_colbert:maxsim_score(QueryVecs, DocVecs).
 
 ## Application Configuration
 
-Configure the managed venv path in `sys.config`:
+barrel_embed creates and manages its own Python virtualenv automatically on
+startup (default location: `priv/barrel_embed/.venv`). Configure a custom
+location in `sys.config`:
 
 ```erlang
 %% sys.config
 [
     {barrel_embed, [
-        {managed_venv_path, "/path/to/.venv"}  %% Optional: custom venv path
+        {venv_dir, "/path/to/.venv"}  %% Optional: custom venv location
     ]}
 ].
 ```
 
 ## Python Setup
 
-### Using Virtual Environment (Recommended)
+### Managed Virtualenv (Default)
 
-```bash
-# Quick setup with uv (fast)
-./scripts/setup_venv.sh
-
-# Or manually
-uv venv .venv
-uv pip install -r priv/requirements.txt --python .venv/bin/python
-```
-
-Then use the venv in your Erlang code:
+No manual setup is required. barrel_embed creates the venv on application
+start and installs each provider's dependencies the first time it is used:
 
 ```erlang
+%% Venv created and configured automatically
 {ok, State} = barrel_embed:init(#{
     embedder => {local, #{
-        venv => "/absolute/path/to/.venv"
+        model => "BAAI/bge-base-en-v1.5"
     }}
 }).
 ```
+
+See [venv-setup](docs/venv-setup.md) for the full venv management API.
 
 ### Manual Installation
 
@@ -269,7 +273,7 @@ See [venv-setup](https://docs.barrel-db.eu/embed/venv-setup/) for detailed virtu
 
 | Channel | For |
 |---------|-----|
-| [GitHub Issues](https://github.com/barrel-db/barrel_embed/issues) | Bug reports, feature requests |
+| [GitHub Issues](https://github.com/barrel-db/barrel/issues) | Bug reports, feature requests |
 | [Email](mailto:support@barrel-db.eu) | Commercial inquiries |
 
 ## License

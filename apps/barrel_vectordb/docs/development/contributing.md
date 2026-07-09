@@ -13,8 +13,8 @@ Guidelines for contributing to Barrel VectorDB.
 ### Clone and Build
 
 ```bash
-git clone https://gitlab.enki.io/barrel-db/barrel_vectordb.git
-cd barrel_vectordb
+git clone https://github.com/barrel-db/barrel.git
+cd barrel/apps/barrel_vectordb
 rebar3 compile
 ```
 
@@ -118,8 +118,8 @@ Use clear, descriptive commit messages:
 ```
 Add support for new embedding provider
 
-- Add barrel_vectordb_embed_newprovider.erl
-- Update embed module to support new provider
+- Add barrel_embed_newprovider.erl in apps/barrel_embed
+- Update barrel_embed to support new provider
 - Add unit tests
 ```
 
@@ -130,7 +130,7 @@ Add support for new embedding provider
 - **barrel_vectordb.erl**: Main API module
 - **barrel_vectordb_store.erl**: Store process (gen_batch_server)
 - **barrel_vectordb_hnsw.erl**: HNSW index implementation
-- **barrel_vectordb_embed.erl**: Embedding provider abstraction
+- **barrel_embed.erl** (apps/barrel_embed): Embedding provider abstraction
 
 ### Storage
 
@@ -140,9 +140,9 @@ Add support for new embedding provider
 
 ## Reporting Issues
 
-Use the GitLab issue tracker:
+Use the GitHub issue tracker:
 
-- [:material-bug: Report Issues](https://gitlab.enki.io/barrel-db/barrel_vectordb/-/issues)
+- [Report Issues](https://github.com/barrel-db/barrel/issues)
 
 Include:
 

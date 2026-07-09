@@ -22,19 +22,9 @@ pip install transformers torch
 ## Configuration
 
 ```erlang
-%% Using virtualenv (recommended)
 {ok, State} = barrel_embed:init(#{
     embedder => {colbert, #{
-        venv => "/absolute/path/to/.venv",
-        model => "colbert-ir/colbertv2.0",     % default
-        timeout => 120000                       % default, ms
-    }}
-}).
-
-%% Using system Python
-{ok, State} = barrel_embed:init(#{
-    embedder => {colbert, #{
-        python => "python3",                    % default
+        python => "python3",                    % default, fallback only
         model => "colbert-ir/colbertv2.0",     % default
         timeout => 120000                       % default, ms
     }}
@@ -45,10 +35,13 @@ pip install transformers torch
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `venv` | string | `undefined` | Path to virtualenv (recommended) |
-| `python` | string | `"python3"` | Python executable (if no venv) |
+| `python` | string | `"python3"` | Python executable, used only if the managed venv could not be created |
 | `model` | string | `"colbert-ir/colbertv2.0"` | Model name |
 | `timeout` | integer | `120000` | Timeout in milliseconds |
+
+barrel_embed manages its own Python virtualenv automatically and installs
+`transformers` and `torch` into it on first use. See
+[Python Virtualenv Setup](venv-setup.md) for the managed venv API.
 
 ## Supported Models
 
@@ -107,8 +100,9 @@ For compatibility, ColBERT can return a single vector via mean pooling:
 {ok, Vec} = barrel_embed:embed(<<"text">>, State).
 ```
 
-!!! note
-    Mean pooling loses the fine-grained matching capability. Use `embed_multi/2` for best results.
+> #### Note
+>
+> Mean pooling loses the fine-grained matching capability. Use `embed_multi/2` for best results.
 
 ## Example: Passage Retrieval
 

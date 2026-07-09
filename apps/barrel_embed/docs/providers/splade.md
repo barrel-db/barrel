@@ -24,19 +24,9 @@ pip install transformers torch
 ## Configuration
 
 ```erlang
-%% Using virtualenv (recommended)
 {ok, State} = barrel_embed:init(#{
     embedder => {splade, #{
-        venv => "/absolute/path/to/.venv",
-        model => "prithivida/Splade_PP_en_v1",     % default
-        timeout => 120000                           % default, ms
-    }}
-}).
-
-%% Using system Python
-{ok, State} = barrel_embed:init(#{
-    embedder => {splade, #{
-        python => "python3",                        % default
+        python => "python3",                        % default, fallback only
         model => "prithivida/Splade_PP_en_v1",     % default
         timeout => 120000                           % default, ms
     }}
@@ -47,10 +37,13 @@ pip install transformers torch
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `venv` | string | `undefined` | Path to virtualenv (recommended) |
-| `python` | string | `"python3"` | Python executable (if no venv) |
+| `python` | string | `"python3"` | Python executable, used only if the managed venv could not be created |
 | `model` | string | `"prithivida/Splade_PP_en_v1"` | Model name |
 | `timeout` | integer | `120000` | Timeout in milliseconds |
+
+barrel_embed manages its own Python virtualenv automatically and installs
+`transformers` and `torch` into it on first use. See
+[Python Virtualenv Setup](venv-setup.md) for the managed venv API.
 
 ## Supported Models
 
@@ -92,8 +85,9 @@ For compatibility with dense search, SPLADE can convert to dense vectors:
 {ok, DenseVec} = barrel_embed:embed(<<"text">>, State).
 ```
 
-!!! warning
-    Dense conversion is memory-intensive for large vocabularies (~30k dimensions). Use native sparse API when possible.
+> #### Warning
+>
+> Dense conversion is memory-intensive for large vocabularies (~30k dimensions). Use native sparse API when possible.
 
 ## Example: Hybrid Search
 

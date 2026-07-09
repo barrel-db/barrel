@@ -145,7 +145,7 @@ Neural sparse embeddings with term expansion for hybrid search.
     }}
 }).
 
-{ok, SparseVec} = barrel_vectordb_embed_splade:embed_sparse(<<"query text">>, Config).
+{ok, SparseVec} = barrel_embed_splade:embed_sparse(<<"query text">>, Config).
 %% => #{indices => [1, 42, 156], values => [0.5, 0.3, 0.8]}
 ```
 
@@ -166,10 +166,10 @@ Multi-vector embeddings for fine-grained token-level matching.
     }}
 }).
 
-{ok, MultiVec} = barrel_vectordb_embed_colbert:embed_multi(<<"query text">>, Config).
+{ok, MultiVec} = barrel_embed_colbert:embed_multi(<<"query text">>, Config).
 %% => [[0.1, 0.2, ...], [0.3, 0.4, ...], ...]
 
-Score = barrel_vectordb_embed_colbert:maxsim_score(QueryVecs, DocVecs).
+Score = barrel_embed_colbert:maxsim_score(QueryVecs, DocVecs).
 ```
 
 ### CLIP (Image Embeddings)
@@ -183,8 +183,8 @@ Cross-modal embeddings for image-text search.
     }}
 }).
 
-{ok, TextVec} = barrel_vectordb_embed_clip:embed(<<"a photo of a cat">>, Config).
-{ok, ImageVec} = barrel_vectordb_embed_clip:embed_image(Base64Image, Config).
+{ok, TextVec} = barrel_embed_clip:embed(<<"a photo of a cat">>, Config).
+{ok, ImageVec} = barrel_embed_clip:embed_image(Base64Image, Config).
 ```
 
 **Setup:**
@@ -210,8 +210,8 @@ Add `barrel_rerank` to your dependencies:
 ```erlang
 %% rebar.config
 {deps, [
-    {barrel_vectordb, "1.4.0"},
-    {barrel_rerank, "0.1.1"}
+    {barrel_vectordb, "2.1.0"},
+    {barrel_rerank, "0.2.0"}
 ]}.
 ```
 
@@ -252,9 +252,10 @@ Index = barrel_vectordb_bm25:new().
 Index1 = barrel_vectordb_bm25:add(Index, <<"doc1">>, <<"The quick brown fox">>).
 Index2 = barrel_vectordb_bm25:add(Index1, <<"doc2">>, <<"The lazy dog">>).
 
-{ok, Results} = barrel_vectordb_bm25:search(Index2, <<"quick fox">>, 10).
+Results = barrel_vectordb_bm25:search(Index2, <<"quick fox">>, 10).
 %% => [{<<"doc1">>, 2.45}, ...]
 ```
 
-!!! note
-    BM25 index is in-memory and not persisted. Rebuild from documents on startup.
+> #### Note
+>
+> BM25 index is in-memory and not persisted. Rebuild from documents on startup.

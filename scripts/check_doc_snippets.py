@@ -5,12 +5,18 @@ Usage: check_snippets.py <umbrella_root> <markdown_file>...
 
 Extracts every `mod:fun(Args)` call from erlang code fences, resolves the arity
 by balanced-paren scanning, and confirms mod:fun/arity is exported by
-apps/*/src/mod.erl (or is a known OTP/stdlib module, which we skip).
+apps/*/src/mod.erl.
+
+Skipped: known OTP and dependency modules; remote types (`mod:type()` written
+after a `::`, a type reference rather than a call); and the placeholder modules
+of illustrative snippets, named `my_*`, `your_*`, or `example_*`.
 """
 import re
 import sys
 import glob
 import os
+
+PLACEHOLDER = re.compile(r"^(my|your|example)_")
 
 OTP = {
     "application", "erlang", "io", "io_lib", "lists", "maps", "sets", "dict",
@@ -72,7 +78,8 @@ def exports_of(path):
 def main():
     root, files = sys.argv[1], sys.argv[2:]
     srcs = {}
-    for pat in ("apps/*/src/*.erl", "apps/*/src/*/*.erl", "apps/*/bench/src/*.erl"):
+    for pat in ("apps/*/src/*.erl", "apps/*/src/*/*.erl",
+                "apps/*/bench/*.erl", "apps/*/bench/src/*.erl"):
         for p in glob.glob(os.path.join(root, pat)):
             srcs.setdefault(os.path.basename(p)[:-4], p)
 
@@ -85,7 +92,11 @@ def main():
             base = text[: fence.start()].count("\n") + 1
             for call in re.finditer(r"\b([a-z_][a-zA-Z0-9_]*):([a-z_][a-zA-Z0-9_]*)\(", code):
                 mod, fun = call.group(1), call.group(2)
-                if mod in OTP:
+                if mod in OTP or PLACEHOLDER.match(mod):
+                    continue
+                # A remote type, e.g. `shards :: #{_ => barrel_faiss:index()}`.
+                line_start = code.rfind("\n", 0, call.start()) + 1
+                if "::" in code[line_start : call.start()]:
                     continue
                 line = base + code[: call.start()].count("\n") + 1
                 if mod not in srcs:

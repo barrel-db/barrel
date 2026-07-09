@@ -50,3 +50,9 @@ apps/*/src/barrel_bql_parser.erl
 
 # per-app lock files (umbrella root rebar.lock is authoritative)
 apps/*/rebar.lock
+
+# ex_doc output (regenerate with `rebar3 ex_doc`)
+apps/*/doc/
+
+# rebar3 sibling-app overrides (created by CI and the docs script)
+apps/*/_checkouts/

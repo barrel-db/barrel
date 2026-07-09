@@ -20,9 +20,10 @@ Embedding generation using Azure OpenAI's Embeddings API. Provides enterprise-gr
 }).
 ```
 
-!!! note "Endpoint Format"
-    Your endpoint may use either `*.openai.azure.com` or `*.cognitiveservices.azure.com`
-    depending on your Azure configuration. Check Azure Portal for the exact URL.
+> #### Endpoint Format
+>
+> Your endpoint may use either `*.openai.azure.com` or `*.cognitiveservices.azure.com`
+> depending on your Azure configuration. Check Azure Portal for the exact URL.
 
 ### Options
 

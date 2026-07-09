@@ -11,8 +11,8 @@
 %%% - bm25.meta: Header + global stats (4KB)
 %%% - bm25.postings: Compressed posting blocks (4KB aligned)
 %%% - bm25.blockmax: Block-max index (mmap'd)
-%%% - bm25.terms/: RocksDB for term <-> int mapping
-%%% - bm25.docs/: RocksDB for doc <-> int mapping
+%%% - bm25.terms/: RocksDB for term `<->' int mapping
+%%% - bm25.docs/: RocksDB for doc `<->' int mapping
 %%%
 %%% @end
 %%%-------------------------------------------------------------------

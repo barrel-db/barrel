@@ -2,6 +2,10 @@
 
 Cross-encoder reranking for Erlang.
 
+[Documentation](https://docs.barrel-db.eu/rerank/) |
+[HexDocs](https://hexdocs.pm/barrel_rerank) |
+[Repository](https://github.com/barrel-db/barrel)
+
 A gen_server that manages communication with a Python cross-encoder server. Supports concurrent requests by tracking request IDs and routing responses back to the correct callers.
 
 Cross-encoders score query-document pairs directly, providing more accurate relevance scores than bi-encoder similarity for reranking candidate results.
@@ -12,7 +16,7 @@ Add to your `rebar.config`:
 
 ```erlang
 {deps, [
-    {barrel_rerank, "0.1.0"}
+    {barrel_rerank, "0.2.0"}
 ]}.
 ```
 

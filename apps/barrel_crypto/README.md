@@ -6,6 +6,10 @@ offset-addressable AES-256-CTR for sector-encrypted flat files, key-check
 tokens for fail-closed wrong-key detection, and the `barrel_keyprovider`
 behaviour that maps a database keyspace to its 256-bit key.
 
+[Documentation](https://docs.barrel-db.eu/crypto/) |
+[HexDocs](https://hexdocs.pm/barrel_crypto) |
+[Repository](https://github.com/barrel-db/barrel)
+
 Encryption is off by default. Databases opt in with an encryption spec at
 open: `default` resolves keys through `barrel_keyprovider_env`
 (`BARREL_ENCRYPTION_KEY` as 32 raw bytes, 64 hex chars, or a passphrase;

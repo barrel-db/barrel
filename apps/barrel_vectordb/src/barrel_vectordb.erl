@@ -267,12 +267,6 @@ start_link(Config) ->
     }, maps:without([name, dimensions, path], Config)),
     barrel_vectordb_server:start_link(Name, StoreConfig).
 
-%% @doc Stop a vector store.
-%%
-%% Gracefully shuts down the store, persisting any pending data.
-%%
-%% @param Store Store name or pid
-%% @returns `ok'
 %% @doc Destroy a store: close every handle (RocksDB, index, disk
 %% BM25) and remove the storage directory. The store stops.
 -spec destroy(store()) -> ok | {error, term()}.
@@ -285,6 +279,12 @@ destroy(Store) ->
         {error, _} = Err -> Err
     end.
 
+%% @doc Stop a vector store.
+%%
+%% Gracefully shuts down the store, persisting any pending data.
+%%
+%% @param Store Store name or pid
+%% @returns `ok'
 -spec stop(store()) -> ok.
 stop(Store) ->
     barrel_vectordb_server:stop(Store).

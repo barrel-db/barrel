@@ -10,7 +10,7 @@
 %%% Architecture:
 %%% - Hot layer (RAM): Recent documents, sub-ms write latency
 %%% - Disk layer (SSD): Compressed postings with block-max index
-%%% - RocksDB: term string <-> int ID, doc string <-> int ID mapping
+%%% - RocksDB: term string `<->' int ID, doc string `<->' int ID mapping
 %%% - ETS: Doc lengths and stats (small, hot)
 %%%
 %%% @end
@@ -676,7 +676,7 @@ create_index(BasePathBin, Config, HotMaxSize, HotThreshold, Crypto) ->
             Error
     end.
 
-%% none | #{key := <<_:256>>, env => Env}: the key encrypts the flat
+%% `none | #{key := <<_:256>>, env => Env}': the key encrypts the flat
 %% files, the EncryptedEnv covers the bm25.ids RocksDB (terms and doc
 %% ids are plaintext content otherwise). A standalone caller passing
 %% only the key gets an env minted here.

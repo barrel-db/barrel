@@ -312,8 +312,8 @@ barrel_vectordb:stop(Store),
 ### From External Search Engine
 
 ```erlang
-%% Export documents and index them
-Documents = external_search:export_all(),
+%% Export {Id, Text, Meta} tuples from your existing search engine, then
+%% index them the same way as any other document:
 lists:foreach(fun({Id, Text, Meta}) ->
     barrel_vectordb:add(Store, Id, Text, Meta)
 end, Documents).

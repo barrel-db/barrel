@@ -8,7 +8,8 @@
         stdlib,
         barrel_crypto,
         barrel_docdb,
-        barrel_vectordb
+        barrel_vectordb,
+        barrel_embed
     ]},
     {env, []},
     {modules, []},

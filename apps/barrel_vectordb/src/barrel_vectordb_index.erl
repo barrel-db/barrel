@@ -53,7 +53,7 @@
 %% Behaviour Callbacks
 %%====================================================================
 
-%% @doc Create a new empty index.
+%% Create a new empty index.
 %% Config may include:
 %% - dimension: Vector dimension (required)
 %% - distance_fn: cosine | euclidean (default: cosine)
@@ -61,40 +61,40 @@
 %% - ef_construction: HNSW build-time beam width (default: 200)
 -callback new(Config :: map()) -> {ok, index()} | {error, term()}.
 
-%% @doc Insert a vector with the given ID.
+%% Insert a vector with the given ID.
 %% Returns updated index on success.
 -callback insert(Index :: index(), Id :: binary(), Vector :: [float()]) ->
     {ok, index()} | {error, term()}.
 
-%% @doc Search for K nearest neighbors.
+%% Search for K nearest neighbors.
 %% Returns list of {Id, Distance} tuples sorted by distance (ascending).
 -callback search(Index :: index(), Query :: [float()], K :: pos_integer()) ->
     [{binary(), float()}].
 
-%% @doc Search with options.
+%% Search with options.
 %% Options may include:
 %% - ef_search: Search beam width (HNSW)
 -callback search(Index :: index(), Query :: [float()], K :: pos_integer(), Opts :: map()) ->
     [{binary(), float()}].
 
-%% @doc Delete a vector by ID.
+%% Delete a vector by ID.
 %% Returns updated index on success.
 -callback delete(Index :: index(), Id :: binary()) ->
     {ok, index()} | {error, term()}.
 
-%% @doc Get the number of vectors in the index.
+%% Get the number of vectors in the index.
 -callback size(Index :: index()) -> non_neg_integer().
 
-%% @doc Get index information and statistics.
+%% Get index information and statistics.
 -callback info(Index :: index()) -> map().
 
-%% @doc Serialize index to binary for persistence.
+%% Serialize index to binary for persistence.
 -callback serialize(Index :: index()) -> binary().
 
-%% @doc Deserialize index from binary.
+%% Deserialize index from binary.
 -callback deserialize(Binary :: binary()) -> {ok, index()} | {error, term()}.
 
-%% @doc Close and release index resources.
+%% Close and release index resources.
 %% Optional callback - only needed for backends with external resources (e.g., NIF).
 -callback close(Index :: index()) -> ok.
 

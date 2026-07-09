@@ -5,7 +5,6 @@
 **High-performance vector database for Erlang with HNSW, FAISS, DiskANN, and BM25 backends**
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
-[![Status](https://img.shields.io/badge/Status-Alpha-orange.svg)]()
 
 [Documentation](https://docs.barrel-db.eu/vectordb) |
 [Examples](./examples) |
@@ -14,8 +13,6 @@
 </div>
 
 ---
-
-> **Alpha Software** - API may change. Feedback welcome via [GitLab Issues](https://gitlab.enki.io/barrel-db/barrel_vectordb/-/issues).
 
 ## Quick Start
 
@@ -61,7 +58,7 @@ Add to your `rebar.config`:
 
 ```erlang
 {deps, [
-    {barrel_vectordb, "1.4.0"}
+    {barrel_vectordb, "2.1.0"}
 ]}.
 ```
 
@@ -73,8 +70,8 @@ For cross-encoder reranking, add barrel_rerank:
 
 ```erlang
 {deps, [
-    {barrel_vectordb, "1.4.0"},
-    {barrel_rerank, "0.1.1"}
+    {barrel_vectordb, "2.1.0"},
+    {barrel_rerank, "0.2.0"}
 ]}.
 ```
 
@@ -188,7 +185,7 @@ Pure Erlang HNSW implementation. No external dependencies.
 
 ### FAISS
 
-High-performance FAISS backend via [barrel_faiss](https://gitlab.enki.io/barrel-db/barrel_faiss) NIF.
+High-performance FAISS backend via [barrel_faiss](https://github.com/barrel-db/barrel) NIF.
 Typically 2-6x faster than pure Erlang HNSW for insert and search operations.
 
 **Installation:**
@@ -199,13 +196,13 @@ Add to your `rebar.config`:
 {profiles, [
     {faiss, [
         {deps, [
-            {barrel_faiss, {git, "https://gitlab.enki.io/barrel-db/barrel_faiss.git", {branch, "main"}}}
+            {barrel_faiss, {git, "https://github.com/barrel-db/barrel.git", {branch, "main"}}}
         ]}
     ]}
 ]}.
 ```
 
-Requires FAISS library installed on your system. See [barrel_faiss README](https://gitlab.enki.io/barrel-db/barrel_faiss) for installation instructions.
+Requires FAISS library installed on your system. See [barrel_faiss README](https://github.com/barrel-db/barrel) for installation instructions.
 
 **Usage:**
 
@@ -450,7 +447,7 @@ Neural sparse embeddings with term expansion. Produces sparse vectors for hybrid
 }).
 
 %% Get sparse vectors directly
-{ok, SparseVec} = barrel_vectordb_embed_splade:embed_sparse(<<"query text">>, Config).
+{ok, SparseVec} = barrel_embed_splade:embed_sparse(<<"query text">>, Config).
 %% => #{indices => [1, 42, 156], values => [0.5, 0.3, 0.8]}
 ```
 
@@ -473,11 +470,11 @@ Multi-vector embeddings for fine-grained token-level matching.
 }).
 
 %% Get multi-vector embeddings
-{ok, MultiVec} = barrel_vectordb_embed_colbert:embed_multi(<<"query text">>, Config).
+{ok, MultiVec} = barrel_embed_colbert:embed_multi(<<"query text">>, Config).
 %% => [[0.1, 0.2, ...], [0.3, 0.4, ...], ...]  %% One vector per token
 
 %% MaxSim scoring between query and document
-Score = barrel_vectordb_embed_colbert:maxsim_score(QueryVecs, DocVecs).
+Score = barrel_embed_colbert:maxsim_score(QueryVecs, DocVecs).
 ```
 
 **Setup:**
@@ -499,10 +496,10 @@ Cross-modal embeddings for image-text search. Images and text share the same vec
 }).
 
 %% Embed text (for cross-modal search)
-{ok, TextVec} = barrel_vectordb_embed_clip:embed(<<"a photo of a cat">>, Config).
+{ok, TextVec} = barrel_embed_clip:embed(<<"a photo of a cat">>, Config).
 
 %% Embed image (base64 encoded)
-{ok, ImageVec} = barrel_vectordb_embed_clip:embed_image(Base64Image, Config).
+{ok, ImageVec} = barrel_embed_clip:embed_image(Base64Image, Config).
 
 %% TextVec and ImageVec are in the same space - compare with cosine similarity!
 ```
@@ -530,9 +527,9 @@ Cross-encoder reranking for improved search relevance. Use after initial vector 
 ```erlang
 %% Add barrel_rerank to your deps
 {deps, [
-    {barrel_vectordb, "1.4.0"},
-    {barrel_embed, "2.2.1"},
-    {barrel_rerank, "0.1.1"}
+    {barrel_vectordb, "2.1.0"},
+    {barrel_embed, "2.3.0"},
+    {barrel_rerank, "0.2.0"}
 ]}.
 ```
 
@@ -588,7 +585,7 @@ Index1 = barrel_vectordb_bm25:add(Index, <<"doc1">>, <<"The quick brown fox">>).
 Index2 = barrel_vectordb_bm25:add(Index1, <<"doc2">>, <<"The lazy dog">>).
 
 %% Search
-{ok, Results} = barrel_vectordb_bm25:search(Index2, <<"quick fox">>, 10).
+Results = barrel_vectordb_bm25:search(Index2, <<"quick fox">>, 10).
 %% => [{<<"doc1">>, 2.45}, ...]
 
 %% Get sparse vector for a document
@@ -705,7 +702,7 @@ See the API documentation for detailed architecture information.
 
 | Channel | For |
 |---------|-----|
-| [GitLab Issues](https://gitlab.enki.io/barrel-db/barrel_vectordb/-/issues) | Bug reports, feature requests |
+| [GitHub Issues](https://github.com/barrel-db/barrel/issues) | Bug reports, feature requests |
 | [Email](mailto:support@barrel-db.eu) | Commercial inquiries |
 
 ## License

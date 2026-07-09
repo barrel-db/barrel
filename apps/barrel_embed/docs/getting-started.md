@@ -6,7 +6,7 @@ Add barrel_embed to your `rebar.config`:
 
 ```erlang
 {deps, [
-    {barrel_embed, {git, "https://github.com/barrel-db/barrel_embed.git", {tag, "v2.2.0"}}}
+    {barrel_embed, "~> 2.3"}
 ]}.
 ```
 
@@ -139,5 +139,5 @@ cosine_similarity(V1, V2) ->
 
 ## Next Steps
 
-- Explore [provider-specific features](providers/index.md)
-- See the complete [API reference](api.md)
+- Explore [provider-specific features](providers/overview.md)
+- See the complete [API reference](api-reference.html)

@@ -25,19 +25,9 @@ pip install transformers torch pillow
 ## Configuration
 
 ```erlang
-%% Using virtualenv (recommended)
 {ok, State} = barrel_embed:init(#{
     embedder => {clip, #{
-        venv => "/absolute/path/to/.venv",
-        model => "openai/clip-vit-base-patch32",   % default
-        timeout => 120000                           % default, ms
-    }}
-}).
-
-%% Using system Python
-{ok, State} = barrel_embed:init(#{
-    embedder => {clip, #{
-        python => "python3",                        % default
+        python => "python3",                        % default, fallback only
         model => "openai/clip-vit-base-patch32",   % default
         timeout => 120000                           % default, ms
     }}
@@ -48,10 +38,13 @@ pip install transformers torch pillow
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `venv` | string | `undefined` | Path to virtualenv (recommended) |
-| `python` | string | `"python3"` | Python executable (if no venv) |
+| `python` | string | `"python3"` | Python executable, used only if the managed venv could not be created |
 | `model` | string | `"openai/clip-vit-base-patch32"` | Model name |
 | `timeout` | integer | `120000` | Timeout in milliseconds |
+
+barrel_embed manages its own Python virtualenv automatically and installs
+`transformers`, `torch`, and `pillow` into it on first use. See
+[Python Virtualenv Setup](venv-setup.md) for the managed venv API.
 
 ## Supported Models
 

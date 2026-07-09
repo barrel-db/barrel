@@ -172,7 +172,7 @@ Pure Erlang HNSW implementation. No external dependencies.
 
 ### FAISS
 
-High-performance FAISS backend via [barrel_faiss](https://gitlab.enki.io/barrel-db/barrel_faiss) NIF.
+High-performance FAISS backend via [barrel_faiss](https://github.com/barrel-db/barrel) NIF.
 
 ```erlang
 {ok, _} = barrel_vectordb:start_link(#{
@@ -226,4 +226,4 @@ See [DiskANN documentation](features.md#diskann-index) for detailed configuratio
 
 - [Embedding Models](embeddings.md) - Configure embedding providers
 - [BM25 Text Search](bm25-disk.md) - Lexical and hybrid search
-- [Erlang API](api/erlang.md) - Full API reference
+- [API reference](api-reference.html) - Full API reference

@@ -10,7 +10,7 @@
 %%% - No training required (preserves data-oblivious property)
 %%%
 %%% Storage format:
-%%%   Header: <<Version:8, Bits:8, M:8, Flags:8>>
+%%%   Header: `<<Version:8, Bits:8, M:8, Flags:8>>'
 %%%   Body: [SubspaceCode_1, ..., SubspaceCode_M]
 %%%   Each subspace code contains radii, angles, and QJL signs
 %%%

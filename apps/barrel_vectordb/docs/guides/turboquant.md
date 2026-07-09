@@ -247,20 +247,18 @@ TurboQuant integrates with barrel_vectordb's HNSW index for compressed vector se
 
 ```erlang
 %% Create HNSW index with TurboQuant compression
-{ok, Index} = barrel_vectordb_hnsw:new(#{
+Index = barrel_vectordb_hnsw:new(#{
     dimension => 768,
-    metric => l2,
-    quantization => #{
-        type => turboquant,
-        bits => 3
-    }
+    distance_fn => cosine,
+    quantization => turboquant,
+    tq_bits => 3
 }).
 
 %% Add vectors (automatically quantized)
-barrel_vectordb_hnsw:add(Index, Id, Vector).
+Index1 = barrel_vectordb_hnsw:insert(Index, Id, Vector).
 
 %% Search (uses ADC for distance computation)
-{ok, Results} = barrel_vectordb_hnsw:search(Index, Query, 10).
+Results = barrel_vectordb_hnsw:search(Index1, Query, 10).
 ```
 
 ### When Quantization Happens
