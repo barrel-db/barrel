@@ -78,6 +78,33 @@ its contents (especially the NIF apps `barrel_vectordb`/`barrel_faiss`, whose
 `.app.src` `{files, [...]}` must carry `c_src` and the root `do_cmake.sh` /
 `do_faiss.sh` build scripts).
 
+## Check the declared dependencies first
+
+rebar3_hex builds the package's `requirements` from `rebar.lock`, not from
+`rebar.config`. Two things silently drop a dependency from the tarball:
+
+- **`_checkouts/`.** A sibling resolved through a checkout never enters the
+  lock, so it disappears from `requirements`. The package publishes and installs
+  cleanly, and the consumer hits an `undef` at runtime.
+- **A stale `apps/<app>/rebar.lock`.** It is gitignored, so it is whatever your
+  last local build left behind. A dep locked at a transitive level does not
+  become a requirement even when `rebar.config` names it directly.
+
+Publishing is irreversible: a version cannot be re-cut. So for each app, in
+order, remove both, rebuild, and check:
+
+```console
+$ cd apps/<app>
+$ rm -rf _checkouts rebar.lock
+$ rebar3 as hex hex build            # resolves every dep from Hex
+$ cd ../..
+$ python3 scripts/check_hex_requirements.py apps/<app>
+```
+
+The script compares the tarball's `requirements` against the app's `rebar.config`
+deps and exits non-zero on any omission. It only passes once every sibling the
+app depends on is already on Hex, which is exactly the publish order above.
+
 Notes:
 
 - The `{files, [...]}` list in each `.app.src` controls what ships in the

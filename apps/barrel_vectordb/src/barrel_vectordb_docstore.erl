@@ -13,7 +13,7 @@
 %% @end
 -module(barrel_vectordb_docstore).
 
--callback init(Name :: atom(), Config :: map()) ->
+-callback init(Name :: atom() | binary(), Config :: map()) ->
     {ok, Ctx :: term()} | {error, term()}.
 
 -callback put(Ctx :: term(), Id :: binary(), Text :: binary(), Metadata :: map()) ->

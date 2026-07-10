@@ -18,7 +18,10 @@
 
 %% @private
 init(Name, Config) ->
-    DbName = maps:get(db, Config, atom_to_binary(Name, utf8)),
+    %% The store normalises its name to a binary before reaching the seam, and
+    %% maps:get/3 evaluates its default eagerly, so atom_to_binary/2 here used
+    %% to crash on every start, even when `db' was supplied.
+    DbName = maps:get(db, Config, name_to_binary(Name)),
     DocOpts = maps:get(docdb_opts, Config, #{}),
     case ensure_db(DbName, DocOpts) of
         {ok, _Pid} -> {ok, #{db => DbName}};
@@ -79,6 +82,9 @@ terminate(#{db := Db}) ->
 %%====================================================================
 %% Internal
 %%====================================================================
+
+name_to_binary(Name) when is_binary(Name) -> Name;
+name_to_binary(Name) when is_atom(Name) -> atom_to_binary(Name, utf8).
 
 ensure_db(DbName, DocOpts) ->
     case barrel_docdb:open_db(DbName) of

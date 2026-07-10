@@ -135,6 +135,35 @@ Results = barrel_vectordb_diskann:search(Index1, Query, 10).
   diskann.idmap    # ID to offset mapping
 ```
 
+## Document Backend (docstore)
+
+By default a store keeps each vector's text and metadata in its own RocksDB
+column families, written in the same atomic batch as the vector. Set `docstore`
+to move them somewhere else, so documents and vectors can share one source of
+truth. Vectors always stay local.
+
+`barrel_vectordb_docdb_backend` stores them as documents in a `barrel_docdb`
+database:
+
+```erlang
+{ok, _} = barrel_vectordb:start_link(#{
+    name => docs,
+    dimension => 768,
+    docstore => {barrel_vectordb_docdb_backend, #{db => <<"docs">>}}
+}).
+```
+
+Options: `db` (the docdb database name, default the store name) and `docdb_opts`
+(passed to `barrel_docdb:create_db/2`). Metadata round-trips through
+`term_to_binary`, so atom keys and nested terms survive exactly.
+
+The backend is optional and resolved at runtime from this config, so
+`barrel_vectordb` does not depend on `barrel_docdb`. Add `barrel_docdb` to your
+own application to use it. Writes are vector-first, doc-second: the vector batch
+commits, then text and metadata are written.
+
+Implement `barrel_vectordb_docstore` to route them anywhere else.
+
 ## Benchmarks
 
 barrel_vectordb includes a comprehensive benchmark suite for measuring performance.
