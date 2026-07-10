@@ -1,0 +1,34 @@
+# Two barrel_server instances on one network, each in its own container. Unlike
+# barrel_server_rep_SUITE, which runs both peers in one VM (the server is a
+# registered singleton), these are genuinely separate OS processes replicating
+# over a real network.
+
+services:
+  peer-a:
+    build:
+      context: ../..
+      dockerfile: test/e2e/Dockerfile
+    image: barrel-server-e2e
+    container_name: barrel-e2e-peer-a
+    ports:
+      - "8091:8080"
+    healthcheck:
+      test: ["CMD", "barrel_server", "ping"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+
+  peer-b:
+    # Reuse the image peer-a builds.
+    image: barrel-server-e2e
+    container_name: barrel-e2e-peer-b
+    depends_on:
+      peer-a:
+        condition: service_started
+    ports:
+      - "8092:8080"
+    healthcheck:
+      test: ["CMD", "barrel_server", "ping"]
+      interval: 3s
+      timeout: 5s
+      retries: 20

@@ -15,6 +15,9 @@ on:
     # 'barrel-v*' has no underscore, so 'barrel_*-v*' does not match it.
     tags: ['barrel-v*', 'barrel_*-v*', 'v*']
   pull_request:
+  # The e2e job builds a Docker image and runs two containers, so it is opt-in
+  # (manual dispatch) rather than on every push.
+  workflow_dispatch:
 
 env:
   OTP_VERSION: '28'
@@ -188,3 +191,13 @@ jobs:
       # run every server suite (REST, sync/rep/convergence, att, auth, spaces,
       # cors, audit, encryption, timeline, and the MCP suites), not just the base
       - run: rebar3 as server ct
+
+  e2e-replication:
+    name: E2E replication (two containers)
+    # Opt-in: needs a Docker-capable runner and builds the server image.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Replication across two peers
+        run: bash test/e2e/replication.sh

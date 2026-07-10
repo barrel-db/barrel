@@ -1,0 +1,11 @@
+_build
+node_modules
+.git
+doc
+apps/*/doc
+apps/*/_build
+apps/*/_checkouts
+clients/*/node_modules
+clients/*/dist
+*.beam
+erl_crash.dump
