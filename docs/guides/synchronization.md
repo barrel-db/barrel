@@ -207,7 +207,7 @@ SSE). Enable CORS and issue a capability token for it. See
 - **Vectors.** Vector indexes are not shipped; with record mode the text and
   metadata replicate as documents and the index rebuilds locally. Quantized
   vector sync is planned with the TypeScript client.
-- **Facade.** `barrel` (the embeddable facade) does not expose replication;
+- **Barrel API.** `barrel` (the full embeddable database) does not expose replication;
   call `barrel_rep` and `barrel_rep_tasks` on the underlying docdb name.
 - **Provenance.** The actor/session/source a write carries (see
   [audit-provenance](audit-provenance.md)) does not travel on the wire.

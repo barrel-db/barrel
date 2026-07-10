@@ -1,7 +1,7 @@
 # barrel_server
 
 The multi-protocol server for the barrel edge database. It exposes the `barrel`
-facade (documents, attachments, vectors, search, changes, timeline) as a
+API (documents, attachments, vectors, search, changes, timeline) as a
 REST/JSON API over HTTP/1.1 and HTTP/2 using `livery`, and the same data as an
 MCP endpoint for agents. It holds no database logic: every handler calls
 `barrel` through a database lifecycle manager.

@@ -27,7 +27,7 @@ ok = barrel_spaces:close_space(Space),
 {ok, _} = barrel_spaces:open_space(Space).
 ```
 
-Space databases open through the facade lifecycle manager
+Space databases open through Barrel's database lifecycle manager
 (`barrel_dbs`), so idle spaces close automatically and hundreds of
 ephemeral spaces stay cheap. Per-space `encryption` specs give each
 space its own key (agent isolation); like all barrel runtime config,

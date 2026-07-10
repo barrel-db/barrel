@@ -1401,7 +1401,7 @@ explain(Db, QuerySpec) ->
 
 %% @doc Run a BQL query (see barrel_bql) against document indexes.
 %%
-%% Table-function sources and SUBSCRIBE need the barrel facade: this
+%% Table-function sources and SUBSCRIBE need the barrel module: this
 %% entry point is documents only.
 %%
 %% == Example ==

@@ -19,7 +19,7 @@
 %%% to persist.
 %%%
 %%% docdb knows nothing about what tags mean; producers (for example the
-%%% barrel facade's embedding indexer) define the semantics.
+%%% barrel's embedding indexer) define the semantics.
 %%% @end
 %%%-------------------------------------------------------------------
 -module(barrel_outbox).

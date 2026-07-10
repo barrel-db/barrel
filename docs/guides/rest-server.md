@@ -2,7 +2,7 @@
 
 `barrel_server` exposes the `barrel` database over HTTP/1.1 and HTTP/2 (REST/JSON)
 using `livery`. It holds no database logic: every handler calls the `barrel`
-facade through a database lifecycle manager. Read this when you want to reach a
+module through a database lifecycle manager. Read this when you want to reach a
 barrel database over the network instead of embedding it.
 
 ## When to use it
@@ -28,7 +28,7 @@ example in `sys.config`.
 
 ## Endpoints
 
-Databases open lazily on first use through the facade's lifecycle manager
+Databases open lazily on first use through Barrel's database lifecycle manager
 (`barrel_dbs`): handles are cached by name, idle databases close after
 `dbs_idle_timeout` (barrel app env, default 5 minutes, 0 disables), and
 `dbs_max_open` evicts the least recently used past a cap.

@@ -1,5 +1,5 @@
 %%%-------------------------------------------------------------------
-%%% @doc Barrel facade: the embeddable edge database.
+%%% @doc Barrel: the embeddable edge database.
 %%%
 %%% Composes the document layer (`barrel_docdb') and the vector layer
 %%% (`barrel_vectordb') behind one API. A barrel database is a docdb database
@@ -9,7 +9,7 @@
 %%% via the docdb `barrel_att_backend' seam.
 %%%
 %%% {@link open/2} returns a handle used by the rest of this module. Each
-%%% underlying application stays usable on its own; this facade adds no storage
+%%% underlying application stays usable on its own; barrel adds no storage
 %%% of its own, it only coordinates the layers.
 %%% @end
 %%%-------------------------------------------------------------------
@@ -129,7 +129,7 @@
 %% normalized, so dynamic database names never grow the atom table).
 %% The optional `embedding', `embed', and `dimensions' fields are
 %% present on record-mode databases (opened with the `embedding'
-%% option): the validated policy, the facade's barrel_embed state, and
+%% option): the validated policy, barrel's barrel_embed state, and
 %% the resolved vector dimension. `encryption' carries the spec the
 %% database was opened with (branches inherit it).
 
@@ -164,7 +164,7 @@ open(Name) ->
 %%
 %% `encryption => disabled | default | #{provider => Mod}' encrypts the
 %% WHOLE logical database at rest under one key: the docdb stores take
-%% it as-is, and the facade resolves the key once (on the docdb
+%% it as-is, and barrel resolves the key once (on the docdb
 %% keyspace, so a branch resolves its parent's key) and hands it to the
 %% vector store. Runtime config: pass it again on every open. Branches
 %% inherit the spec from the parent handle.
@@ -205,7 +205,7 @@ open_plain(DbBin, Opts) ->
     end.
 
 %% @private Record-mode open: validate the policy, resolve the vector
-%% dimension, init the facade's embedder, persist the policy, and start
+%% dimension, init barrel's embedder, persist the policy, and start
 %% the vector store with the read-through docstore adapter.
 open_record(DbBin, Opts, PolicyMap) ->
     case barrel_embedding_policy:validate(PolicyMap) of
@@ -331,7 +331,7 @@ branch(#{docdb := ParentBin} = Db, BranchName, Opts)
             Err
     end.
 
-%% @private The branch's facade side: a fresh vector store; record
+%% @private The branch's barrel side: a fresh vector store; record
 %% mode re-applies the parent's policy and backfills the index from
 %% the embeddings stored in doc bodies (see barrel_record_backfill).
 open_branch(#{embedding := Policy} = Db, BranchBin, Opts) ->
@@ -853,7 +853,7 @@ vector_delete(#{vstore := Store}, Id) ->
 %% @doc Semantic search over the vector store.
 -spec search(db(), binary(), map()) -> term().
 search(#{embedding := _, embed := Embed, vstore := Store}, Query, Opts) ->
-    %% Record mode: the facade owns embedding (the store has none)
+    %% Record mode: barrel owns embedding (the store has none)
     case embed_one(Query, Embed) of
         {ok, Vector} -> barrel_vectordb:search_vector(Store, Vector, Opts);
         {error, Reason} -> {error, {embed_failed, Reason}}
@@ -872,7 +872,7 @@ search_bm25(#{vstore := Store}, Query, Opts) ->
     barrel_vectordb:search_bm25(Store, Query, Opts).
 
 %% @doc Hybrid (vector + BM25) search.
-%% On record-mode databases the facade embeds the query itself and
+%% On record-mode databases barrel embeds the query itself and
 %% passes it as `query_vector' (the store has no embedder).
 -spec search_hybrid(db(), binary(), map()) -> term().
 search_hybrid(#{embedding := _, embed := Embed, vstore := Store}, Query, Opts) ->
@@ -1262,7 +1262,7 @@ resolve_dimension(Policy, VecConfig) ->
         {P, V} -> {error, {dimension_mismatch, P, V}}
     end.
 
-%% @private Initialise the facade's embedder from the policy. A policy
+%% @private Initialise barrel's embedder from the policy. A policy
 %% without an embedder still yields a state; embedding then fails at
 %% write time and is handled by the indexer (or an explicit vector).
 -spec init_embed(barrel_embedding_policy:policy(), pos_integer()) ->

@@ -359,7 +359,7 @@ init_stores(Name, Config, DbPath, Dimension, Docstore, IndexModule,
             {stop, {db_open_failed, Reason}}
     end.
 
-%% Encryption: the facade resolves one key per logical database and
+%% Encryption: barrel resolves one key per logical database and
 %% passes it as crypto => #{key => <<_:256>>}. The disk BM25 backend
 %% and DiskANN encrypt their flat files with the same key.
 init_crypto(Config, DbPath) ->

@@ -4,7 +4,7 @@
 %%% One indexer runs per record-mode database. Each round it folds a
 %%% batch of pending outbox entries, re-reads the CURRENT state of each
 %%% document (never the state captured in the entry), applies the
-%%% embedding policy, embeds through the facade's barrel_embed state,
+%%% embedding policy, embeds through barrel's barrel_embed state,
 %%% writes vectors with the index-only vectordb path, deletes vectors of
 %%% deleted or non-matching documents, and acks the processed entries by
 %%% exact HLC key.
@@ -23,7 +23,7 @@
 %%%     entries stay un-acked and the round retries later.</li>
 %%% </ul>
 %%%
-%%% Scheduling: a `nudge' cast (sent by the facade after tagged writes)
+%%% Scheduling: a `nudge' cast (sent by barrel after tagged writes)
 %%% triggers an immediate round; otherwise the indexer polls with
 %%% backoff (?POLL_MIN up to ?POLL_MAX when idle).
 %%% @end

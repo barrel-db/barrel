@@ -14,7 +14,7 @@ boundaries.
 | Embedding generation | `barrel_embed` | exists |
 | Reranking | `barrel_rerank` | exists |
 | Encryption at rest | `barrel_crypto` | exists |
-| Facade (one id over docs + blobs + vectors), record mode, timeline | `barrel` | exists |
+| One id over docs + blobs + vectors, record mode, timeline | `barrel` | exists |
 | Agent layer: spaces, capabilities, sessions, handoffs | `barrel_spaces` | exists |
 | Transports (REST/JSON, MCP) | `barrel_server` | exists |
 | Durability, placement, replication orchestration, query routing across nodes | `barrel_fabric` | future |

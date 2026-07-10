@@ -2,7 +2,7 @@
 %%% @doc REST/JSON HTTP surface for the barrel edge database.
 %%%
 %%% One livery router served over HTTP/1.1 and HTTP/2. Every handler reads
-%%% path bindings and the request body, calls the {@link barrel} facade through
+%%% path bindings and the request body, calls the {@link barrel} module through
 %%% {@link barrel_server_dbs}, and renders JSON. Documents, attachments,
 %%% vectors, search, and the changes feed (JSON or SSE) are exposed.
 %%% @end
@@ -548,7 +548,7 @@ query_decision(Req) ->
     end.
 
 %% Resolve the database, read the statement, and compile it once for
-%% admission (the producers re-drive the facade with the raw text).
+%% admission (the producers re-drive barrel with the raw text).
 prepare_query(Req) ->
     Name = livery_req:binding(<<"db">>, Req),
     case barrel_server_dbs:ensure(Name) of

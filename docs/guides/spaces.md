@@ -17,7 +17,7 @@ accept. Read this when you coordinate several agents over shared context.
 
 A space is a database with a generated name (`sp_` + 16 chars) plus a
 registry document in the `_barrel_spaces` system database. Space databases
-open through the facade's lifecycle manager, so idle spaces close themselves
+open through Barrel's database lifecycle manager, so idle spaces close themselves
 and hundreds of ephemeral spaces stay cheap.
 
 ```erlang

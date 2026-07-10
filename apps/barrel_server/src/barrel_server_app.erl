@@ -4,7 +4,7 @@
 %%% Maps server config onto the underlying apps (data_dir), then
 %%% starts the supervision tree: the HTTP service
 %%% ({@link barrel_server_http}). All request handlers call the `barrel'
-%%% facade only; open handles live in the facade's {@link barrel_dbs}
+%%% module only; open handles live in barrel's {@link barrel_dbs}
 %%% manager, reached through the {@link barrel_server_dbs} shim.
 %%% @end
 %%%-------------------------------------------------------------------

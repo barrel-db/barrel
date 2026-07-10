@@ -2,7 +2,7 @@
 %%
 %% Pipeline: lex -> parse -> canonicalize -> validate -> lower. The
 %% resulting plan carries a barrel_query spec for the document scan, an
-%% optional table-function source (executed by the barrel facade, never
+%% optional table-function source (executed by the barrel module, never
 %% here), an optional unnest, and per-row post stages.
 %%
 %% ```

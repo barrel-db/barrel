@@ -11,7 +11,7 @@
 %%% (`sp_' + 16 base32 chars) so the human label never constrains the
 %%% database name rules; the label lives in the registry doc.
 %%%
-%%% Space databases open through the facade's lifecycle manager
+%%% Space databases open through Barrel's database lifecycle manager
 %%% (barrel_dbs), so idle spaces close automatically and hundreds of
 %%% ephemeral spaces stay cheap. Runtime config (the encryption spec of
 %%% an encrypted space) must be supplied again on every open, exactly

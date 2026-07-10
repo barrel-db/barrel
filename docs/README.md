@@ -6,7 +6,7 @@ Start here.
 
 ## Guides
 
-- [Embed barrel in an Erlang app](guides/embedding.md): the `barrel` facade.
+- [Embed barrel in an Erlang app](guides/embedding.md): the `barrel` API.
 - [Record mode](guides/record-mode.md): policy-driven vector indexing over documents.
 - [Query with BQL](guides/query-bql.md): one query language over documents, vectors, and keyword search.
 - [Run the REST server](guides/rest-server.md): `barrel_server` over HTTP.

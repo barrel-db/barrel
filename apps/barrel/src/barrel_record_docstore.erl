@@ -16,7 +16,7 @@
 %%%     store, and it fails loudly.</li>
 %%% <li>`delete': a no-op. Deleting a vector must never delete the
 %%%     document.</li>
-%%% <li>`terminate': a no-op. The facade owns the database lifecycle.</li>
+%%% <li>`terminate': a no-op. The barrel module owns the database lifecycle.</li>
 %%% </ul>
 %%% @end
 %%%-------------------------------------------------------------------
@@ -26,7 +26,7 @@
 -export([init/2, put/4, multi_put/2, get/2, multi_get/2, delete/2, terminate/1]).
 
 %% @private Config: #{db := binary(), policy := barrel_embedding_policy:policy()}.
-%% Does not open or own the database; the facade opened it already.
+%% Does not open or own the database; barrel opened it already.
 init(_Name, #{db := DbBin, policy := Policy}) when is_binary(DbBin) ->
     {ok, #{db => DbBin, policy => Policy}}.
 
@@ -74,6 +74,6 @@ multi_get(#{db := Db, policy := Policy}, Ids) ->
 delete(_Ctx, _Id) ->
     ok.
 
-%% @private The facade owns the database lifecycle.
+%% @private The barrel module owns the database lifecycle.
 terminate(_Ctx) ->
     ok.

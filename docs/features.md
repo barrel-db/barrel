@@ -14,7 +14,7 @@ row links to a guide where one exists.
 
 A barrel record is one id with three faces: a JSON document, its attachments
 (blobs), and its vector. Documents live in `barrel_docdb`, vectors in
-`barrel_vectordb`, blobs are document attachments. The `barrel` facade composes
+`barrel_vectordb`, blobs are document attachments. The `barrel` API composes
 them; each underlying app stays usable on its own.
 
 ## Capabilities

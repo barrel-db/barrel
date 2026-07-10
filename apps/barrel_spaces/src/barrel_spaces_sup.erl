@@ -1,6 +1,6 @@
 %%%-------------------------------------------------------------------
 %%% @doc Top supervisor for the agent layer. Spaces are plain barrel
-%%% databases owned by the facade's lifecycle manager; the only static
+%%% databases owned by Barrel's database lifecycle manager; the only static
 %%% child (added with sessions) is the janitor that garbage-collects
 %%% orphaned session messages.
 %%% @end

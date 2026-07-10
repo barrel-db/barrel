@@ -71,7 +71,7 @@ window is the retention window: a T below the history floor fails with
 `pitr_window_exceeded`, as does a doc whose pre-T history was already
 swept (the fork aborts cleanly, nothing is left behind).
 
-## How (facade, incl. record mode)
+## How (the `barrel` API, incl. record mode)
 
 ```erlang
 {ok, Db} = barrel:open(main, #{embedding => #{fields => [<<"title">>]},
@@ -139,7 +139,7 @@ Branches ride the whole existing API, including replication under
   an expired tombstone, and a forgotten delete never ships.
 - A PITR rewind itself is not merged (restored versions predate the
   fork); "revert the parent to T" is a different operation and not in v1.
-- Plain (non-record) facade branches do not carry vectors: they live only
+- Plain (non-record) `barrel` branches do not carry vectors: they live only
   in the vector store, which the branch gets fresh. Re-add them or use
   record mode.
 - The parent's conflict_merger is database-open-time config; there is no

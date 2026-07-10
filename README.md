@@ -10,7 +10,7 @@ together, while each stays a standalone OTP application with its own public API.
 
 | App | Path | Responsibility |
 |-----|------|----------------|
-| `barrel` | `apps/barrel` | The embeddable facade. Composes docdb + vectordb + crypto so a document, its blobs, and its vector share one id. Record mode, timeline (branch/PITR/merge), BQL. Pulls no transports. |
+| `barrel` | `apps/barrel` | The embeddable database. Composes docdb + vectordb + crypto so a document, its blobs, and its vector share one id. Record mode, timeline (branch/PITR/merge), BQL. Pulls no transports. |
 | `barrel_docdb` | `apps/barrel_docdb` | The document layer. HLC version-vector MVCC, changes feed, replication, attachments (blobs), TTL, retained history, BQL query. Standalone embedded document database. |
 | `barrel_vectordb` | `apps/barrel_vectordb` | The vector layer. Local ANN indexes (HNSW, DiskANN, FAISS), BM25, hybrid search, quantization. Standalone embedded vector database. |
 | `barrel_embed` | `apps/barrel_embed` | Embedding generation across providers (local Python, Ollama, OpenAI, and more). Used by `barrel_vectordb` for text and hybrid search. |
@@ -63,7 +63,7 @@ rebar3 as server shell   # starts barrel_server
 ## Standalone use
 
 Each application stays a valid OTP application usable on its own. You can embed
-`barrel` (the facade) directly with no transports, or use `barrel_docdb` and
+`barrel` (the full database) directly with no transports, or use `barrel_docdb` and
 `barrel_vectordb` as standalone embedded databases, without a server, remote
 replication, or any cluster fabric.
 

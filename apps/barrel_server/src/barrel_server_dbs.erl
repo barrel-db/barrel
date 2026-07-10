@@ -1,6 +1,6 @@
 %%%-------------------------------------------------------------------
-%%% @doc Server-side database access: a thin, stateless shim over the
-%%% facade's lifecycle manager ({@link barrel_dbs}), which owns the
+%%% @doc Server-side database access: a thin, stateless shim over
+%%% Barrel's database lifecycle manager ({@link barrel_dbs}), which owns the
 %%% open handles, touches them on use, closes idle ones, and bounds
 %%% the open set. This module adds only the HTTP concerns: name
 %%% validation and the server-wide open options from the app env.

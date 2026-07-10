@@ -1,7 +1,7 @@
 %%%-------------------------------------------------------------------
 %%% @doc barrel application module.
 %%%
-%%% barrel is the embeddable edge database facade. It composes the
+%%% barrel is the embeddable edge database. It composes the
 %%% document layer (barrel_docdb) and the vector layer (barrel_vectordb)
 %%% behind one API. Databases are opened on demand via {@link barrel:open/2},
 %%% so the top supervisor has no static children.

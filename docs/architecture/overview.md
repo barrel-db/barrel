@@ -26,12 +26,12 @@ a clear responsibility and its own public API.
 - **barrel_crypto**: encryption-at-rest primitives. AES-256-GCM envelope,
   offset-addressable CTR, HKDF key derivation, and pluggable key providers. Used
   by docdb and vectordb for encrypted databases.
-- **barrel**: the embeddable facade. Composes `barrel_docdb`,
+- **barrel**: the embeddable database. Composes `barrel_docdb`,
   `barrel_vectordb`, and `barrel_crypto` so a document, its attachments (blobs),
   and its vector share one id. Adds record mode and the timeline
   (branch/PITR/merge). Pulls no transports. The hex "edge" package.
 - **barrel_spaces**: the agent layer. Spaces (shared context databases),
-  capability tokens, sessions with TTL, and handoffs, built on the facade.
+  capability tokens, sessions with TTL, and handoffs, built on `barrel`.
 - **barrel_server**: the network server. Exposes `barrel` and `barrel_spaces`
   over HTTP (REST/JSON) and MCP using `livery`. Opt-in behind the `server`
   profile; not part of the default embeddable build.
@@ -43,14 +43,14 @@ The longer-term shape of the stack separates these concerns:
 - **docdb** (exists): the source of truth for document metadata and the
   catalog. MVCC, changes, replication primitives, and attachment (blob) storage.
 - **vectordb** (exists): vector segments and local vector/text/hybrid search.
-- **facade** (exists, `barrel`): composes docdb and vectordb under one id space.
-- **server** (exists, `barrel_server`): transports over the facade.
+- **barrel** (exists): composes docdb and vectordb under one id space.
+- **server** (exists, `barrel_server`): transports over the `barrel` API.
 - **object storage**: blobs are docdb attachments with a pluggable backend per
   database (`barrel_att_backend`: RocksDB BlobDB today; local filesystem and S3
   planned as additional backends). There is no separate object-store app; a
   document owns its blob, matching how vectors and metadata attach to the same id.
 - **agent layer** (exists, `barrel_spaces` + MCP): spaces, capability tokens,
-  sessions, and handoffs over the facade; exposed through `barrel_server`.
+  sessions, and handoffs over the `barrel` API; exposed through `barrel_server`.
 - **fabric** (future, `barrel_fabric`): dataset agents, durability, placement,
   replication orchestration, and query routing across nodes.
 
@@ -75,7 +75,7 @@ These rules keep the umbrella maintainable as it grows:
 
 This umbrella holds the Barrel data-stack libraries (`barrel_docdb`,
 `barrel_vectordb`, `barrel_embed`, `barrel_rerank`, `barrel_faiss`), the
-embeddable facade (`barrel`), and the network server (`barrel_server`). Products
+embeddable database (`barrel`), and the network server (`barrel_server`). Products
 and clients that build on top of the stack stay in their own repositories.
 
 ### What the umbrella buys you
@@ -88,11 +88,11 @@ and clients that build on top of the stack stay in their own repositories.
   its adapters is one commit and one CI run, not tag-and-chase across repos.
 - One build, test, and release surface: shared profiles (the FAISS opt-in), one
   PLT, one `rel/`.
-- A home for the layers that span the stack: `barrel` (the facade) already
+- A home for the layers that span the stack: `barrel` (the full database) already
   unifies docdb and vectordb under one id, and `barrel_fabric` (future) will span
   them across nodes. A layer that unifies two apps needs a repo that holds both.
   `barrel_docdb` shares no code with `barrel_vectordb`, so its place here is
-  justified by the facade and the coming fabric work.
+  justified by `barrel` and the coming fabric work.
 
 ### Out of scope (kept separate on purpose)
 

@@ -13,7 +13,7 @@ A barrel database is a docdb database plus a vectordb store that share a name an
 a single id space: a document, its attachments (blobs), and its vector are all
 addressed by the same id. Blobs are docdb attachments; the storage backend is
 pluggable per database via the docdb `barrel_att_backend` seam (RocksDB BlobDB by
-default). The facade adds no storage of its own; it coordinates the layers. Each
+default). `barrel` adds no storage of its own; it coordinates the layers. Each
 underlying app stays usable on its own.
 
 ## Open and documents

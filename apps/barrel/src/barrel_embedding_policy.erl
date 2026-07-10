@@ -9,7 +9,7 @@
 %%%
 %%% This module is pure: validation, matching, text rendering, and
 %%% metadata projection only. Embedding itself (barrel_embed) and
-%%% persistence of the policy are the facade's concern.
+%%% persistence of the policy are barrel's concern.
 %%%
 %%% Policy map:
 %%% ```

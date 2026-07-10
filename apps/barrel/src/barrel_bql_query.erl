@@ -1,4 +1,4 @@
-%% @doc BQL execution at the facade: collection sources delegate to the
+%% @doc BQL execution in barrel: collection sources delegate to the
 %% docdb executor; table-function sources (vector_top_k, bm25_top_k,
 %% hybrid_top_k) run here, where the vector store and the embedder
 %% live.

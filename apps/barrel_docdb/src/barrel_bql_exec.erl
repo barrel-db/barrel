@@ -4,7 +4,7 @@
 %% offset/limit, projection).
 %%
 %% The frame helpers (frames_for/2, residual_match/2, finalize/3) are
-%% also the reuse surface for the barrel facade, which feeds them
+%% also the reuse surface for the barrel module, which feeds them
 %% table-function hits instead of find rows.
 %%
 %% A frame is #{doc := map() with id merged in, elem := term() |
@@ -17,7 +17,7 @@
     fold/5
 ]).
 
-%% Frame surface reused by the barrel facade for table functions.
+%% Frame surface reused by the barrel module for table functions.
 -export([
     frames_for/2,
     residual_match/2,
@@ -88,7 +88,7 @@ fold(DbName, Plan, Opts, Fun, Acc0) ->
     end.
 
 %%====================================================================
-%% Frame surface (shared with the facade)
+%% Frame surface (shared with barrel)
 %%====================================================================
 
 %% @doc Expand a document into frames: one per unnested array element,

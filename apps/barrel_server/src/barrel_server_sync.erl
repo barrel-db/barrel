@@ -4,7 +4,7 @@
 %%%
 %%% These handlers call barrel_docdb directly (a documented layering
 %%% exception: the replication machinery is deliberately absent from
-%%% the barrel facade); databases still resolve through
+%%% the barrel module); databases still resolve through
 %%% barrel_server_dbs. Wire stance: JSON, base64 for HLCs and version
 %%% vectors, version tokens as-is. Every request/response carries an
 %%% x-barrel-hlc header for passive clock coupling.

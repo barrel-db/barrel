@@ -9,7 +9,7 @@
 %%%       the HTTP service so /mcp never serves an empty registry).</li>
 %%%   <li>{@link barrel_server_http} - the livery HTTP service.</li>
 %%% </ol>
-%%% Open database handles are owned by the facade's lifecycle manager
+%%% Open database handles are owned by Barrel's database lifecycle manager
 %%% ({@link barrel_dbs}, in the barrel application); handlers reach it
 %%% through the {@link barrel_server_dbs} shim.
 %%% @end

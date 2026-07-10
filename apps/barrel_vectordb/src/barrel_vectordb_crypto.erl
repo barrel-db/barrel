@@ -3,7 +3,7 @@
 %% matrix through a cleartext CRYPTO key-check marker inside the store
 %% directory.
 %%
-%% The store never resolves keys itself: the barrel facade resolves one
+%% The store never resolves keys itself: the barrel module resolves one
 %% key per logical database (the docdb keyspace) and passes it as
 %% `crypto => #{key := <<_:256>>}'; standalone users pass a key the same
 %% way. The returned env handle must stay referenced for the whole store

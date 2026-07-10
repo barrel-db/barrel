@@ -1644,7 +1644,7 @@ do_put_version(StoreRef, DbName, Config, Doc, Version, RemoteVV, Deleted) ->
         error -> erlang:error({missing_id, DocMap})
     end,
     DocBody = barrel_doc:doc_without_meta(DocMap),
-    %% Generic tags appended to replication-applied writes (the facade
+    %% Generic tags appended to replication-applied writes (barrel
     %% sets [<<"embed">>] on record-mode databases so replicated docs
     %% reach the indexer; docdb stays ignorant of why).
     Tags = maps:get(outbox_tags_on_replication, Config, []),
