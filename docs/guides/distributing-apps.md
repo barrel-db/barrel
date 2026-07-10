@@ -100,10 +100,16 @@ order, remove both, rebuild, and check:
 ```console
 $ cd apps/<app>
 $ rm -rf _checkouts rebar.lock
-$ rebar3 as hex hex build            # resolves every dep from Hex
+$ rebar3 compile                     # regenerate rebar.lock from Hex
+$ rebar3 hex build                   # for an app with siblings: rebar3 as hex hex build
 $ cd ../..
 $ python3 scripts/check_hex_requirements.py apps/<app>
 ```
+
+`rebar3 hex build` needs a lockfile, so run `rebar3 compile` first (removing
+`rebar.lock` without regenerating it makes the build error with "No lockfile
+detected"). Use the plain `hex build` for a leaf app (no sibling deps) and
+`as hex hex build` for one whose `hex` profile re-declares siblings.
 
 The script compares the tarball's `requirements` against the app's `rebar.config`
 deps and exits non-zero on any omission. It only passes once every sibling the
