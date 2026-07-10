@@ -7,7 +7,7 @@
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Version](https://img.shields.io/badge/Version-2.3.0-green.svg)]()
 
-[Documentation](https://docs.barrel-db.eu/embed) |
+[Documentation](https://barrel-db.eu/docs/lib/embed/) |
 [Examples](./examples) |
 [barrel-db.eu](https://barrel-db.eu)
 
@@ -267,7 +267,7 @@ pip install transformers torch
 pip install transformers torch pillow
 ```
 
-See [venv-setup](https://docs.barrel-db.eu/embed/venv-setup/) for detailed virtualenv instructions.
+See [venv-setup](https://barrel-db.eu/docs/lib/embed/venv-setup.html) for detailed virtualenv instructions.
 
 ## Support
 

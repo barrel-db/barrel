@@ -6,7 +6,7 @@
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
-[Documentation](https://docs.barrel-db.eu/vectordb) |
+[Documentation](https://barrel-db.eu/docs/lib/vectordb/) |
 [Examples](./examples) |
 [barrel-db.eu](https://barrel-db.eu)
 
@@ -267,7 +267,7 @@ For large dimensions, use Subspace-TurboQuant:
 }).
 ```
 
-See [TurboQuant Documentation](https://docs.barrel-db.eu/vectordb/guides/turboquant) for details.
+See [TurboQuant Documentation](https://barrel-db.eu/docs/lib/vectordb/turboquant.html) for details.
 
 ## Embedding Providers
 

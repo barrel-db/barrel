@@ -2,7 +2,7 @@
 
 Cross-encoder reranking for Erlang.
 
-[Documentation](https://docs.barrel-db.eu/rerank/) |
+[Documentation](https://barrel-db.eu/docs/lib/rerank/) |
 [HexDocs](https://hexdocs.pm/barrel_rerank) |
 [Repository](https://github.com/barrel-db/barrel)
 

@@ -7,7 +7,7 @@
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Status](https://img.shields.io/badge/Status-Alpha-orange.svg)]()
 
-[Documentation](https://docs.barrel-db.eu/docdb) |
+[Documentation](https://barrel-db.eu/docs/lib/docdb/) |
 [barrel-db.eu](https://barrel-db.eu)
 
 </div>

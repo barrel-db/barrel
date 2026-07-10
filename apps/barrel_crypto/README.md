@@ -6,7 +6,7 @@ offset-addressable AES-256-CTR for sector-encrypted flat files, key-check
 tokens for fail-closed wrong-key detection, and the `barrel_keyprovider`
 behaviour that maps a database keyspace to its 256-bit key.
 
-[Documentation](https://docs.barrel-db.eu/crypto/) |
+[Documentation](https://barrel-db.eu/docs/lib/crypto/) |
 [HexDocs](https://hexdocs.pm/barrel_crypto) |
 [Repository](https://github.com/barrel-db/barrel)
 

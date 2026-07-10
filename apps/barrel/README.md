@@ -5,7 +5,7 @@ The embeddable edge-AI database. `barrel` composes the document layer
 Erlang application can embed a single database that does documents, vectors,
 BM25, hybrid search, attachments (blobs), and a changes feed.
 
-[Documentation](https://docs.barrel-db.eu/barrel/) |
+[Documentation](https://barrel-db.eu/docs/lib/barrel/) |
 [HexDocs](https://hexdocs.pm/barrel) |
 [Repository](https://github.com/barrel-db/barrel)
 

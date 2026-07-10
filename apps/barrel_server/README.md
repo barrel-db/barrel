@@ -10,7 +10,7 @@ You need this when you want to reach a barrel database over the network (other
 languages, remote clients, agents) instead of embedding it in an Erlang
 application. For embedded use, depend on `barrel` directly and skip this app.
 
-[Documentation](https://docs.barrel-db.eu/) |
+[Documentation](https://barrel-db.eu/docs/lib/server/) |
 [HexDocs](https://hexdocs.pm/barrel_server) |
 [Repository](https://github.com/barrel-db/barrel)
 

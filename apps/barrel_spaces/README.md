@@ -13,7 +13,7 @@ You need this when several agents work on the same data and you want to hand
 context between them without copying it, or hand out scoped, revocable access
 to one space.
 
-[Documentation](https://docs.barrel-db.eu/) |
+[Documentation](https://barrel-db.eu/docs/lib/spaces/) |
 [HexDocs](https://hexdocs.pm/barrel_spaces) |
 [Repository](https://github.com/barrel-db/barrel)
 
