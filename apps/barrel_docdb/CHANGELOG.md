@@ -5,7 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.9.0] - 2026-07-08
+## [1.0.0] - 2026-07-10
+
+First stable release. The `barrel_docdb` API is frozen: it will not break
+without a major version.
+
+### Changed (breaking)
+- `barrel_docdb:query/2,3` rejects a table-function source with
+  `{error, {table_fn_requires_barrel, Fn}}`. The atom was
+  `table_fn_requires_facade`; it was never in a published release.
 
 ### Changed
 - Documentation refresh: the doc set now describes the HLC version-vector model

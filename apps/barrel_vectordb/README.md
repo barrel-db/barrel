@@ -71,7 +71,7 @@ For cross-encoder reranking, add barrel_rerank:
 ```erlang
 {deps, [
     {barrel_vectordb, "2.1.0"},
-    {barrel_rerank, "0.2.0"}
+    {barrel_rerank, "1.0.0"}
 ]}.
 ```
 
@@ -529,7 +529,7 @@ Cross-encoder reranking for improved search relevance. Use after initial vector 
 {deps, [
     {barrel_vectordb, "2.1.0"},
     {barrel_embed, "2.3.0"},
-    {barrel_rerank, "0.2.0"}
+    {barrel_rerank, "1.0.0"}
 ]}.
 ```
 

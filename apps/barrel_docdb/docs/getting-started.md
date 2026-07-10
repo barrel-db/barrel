@@ -18,7 +18,7 @@ Add to your `rebar.config`:
 
 ```erlang
 {deps, [
-    {barrel_docdb, "~> 0.9"}
+    {barrel_docdb, "~> 1.0"}
 ]}.
 ```
 

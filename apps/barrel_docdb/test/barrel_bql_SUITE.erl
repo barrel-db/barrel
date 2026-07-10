@@ -350,7 +350,7 @@ deleted_docs_excluded(_Config) ->
 
 query_rejections(_Config) ->
     ?assertEqual(
-        {error, {table_fn_requires_facade, vector_top_k}},
+        {error, {table_fn_requires_barrel, vector_top_k}},
         barrel_docdb:query(?DB, "SELECT * FROM vector_top_k('q') AS v")),
     ?assertEqual(
         {error, {unsupported, subscribe}},

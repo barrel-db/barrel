@@ -16,7 +16,7 @@ Add to your `rebar.config`:
 
 ```erlang
 {deps, [
-    {barrel_rerank, "0.2.0"}
+    {barrel_rerank, "1.0.0"}
 ]}.
 ```
 

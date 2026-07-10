@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.0 (2026-07-08)
+## 1.0.0 (2026-07-10)
 
 Coordinated umbrella release. Added tests for the sidecar response decoder.
 See the umbrella [CHANGELOG](../../CHANGELOG.md).

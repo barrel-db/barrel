@@ -1,6 +1,6 @@
 {application, barrel_docdb, [
     {description, "Erlang document database with MVCC, queries, and replication"},
-    {vsn, "0.9.0"},
+    {vsn, "1.0.0"},
     {registered, [barrel_docdb_sup]},
     {mod, {barrel_docdb_app, []}},
     {applications, [

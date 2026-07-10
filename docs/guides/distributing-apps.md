@@ -17,7 +17,7 @@ Before publishing an app:
   profiles of `barrel`, `barrel_vectordb`, and `barrel_server`.
 - Ensure the app has a `README.md`, a `LICENSE`, a `CHANGELOG.md`, an `ex_doc`
   block, and `rebar3_hex` in its `project_plugins`.
-- Tag the release: per app `<app>-v<version>` (e.g. `barrel_docdb-v0.9.0`), and
+- Tag the release: per app `<app>-v<version>` (e.g. `barrel_docdb-v1.0.0`), and
   the umbrella `v<version>`. CI recognizes both tag globs.
 
 ## Publish order
@@ -26,15 +26,19 @@ The apps depend on each other, so publish leaves first and work up. A package
 can only be published after every sibling it depends on is already on Hex.
 Current versions and order:
 
-1. `barrel_crypto` 0.3.0
+1. `barrel_crypto` 1.0.0
 2. `barrel_embed` 2.3.0
-3. `barrel_docdb` 0.9.0 (needs barrel_crypto)
-4. `barrel_rerank` 0.2.0
-5. `barrel_faiss` 0.3.0 (optional; needs the FAISS C++ library to build)
+3. `barrel_docdb` 1.0.0 (needs barrel_crypto)
+4. `barrel_rerank` 1.0.0
+5. `barrel_faiss` 1.0.0 (optional; needs the FAISS C++ library to build)
 6. `barrel_vectordb` 2.1.0 (needs barrel_embed, barrel_crypto)
-7. `barrel` 0.2.0 (needs barrel_docdb, barrel_vectordb, barrel_crypto)
-8. `barrel_spaces` 0.2.0 (needs barrel, barrel_docdb, barrel_crypto)
-9. `barrel_server` 0.2.0 (needs barrel, barrel_spaces)
+7. `barrel` 1.0.0 (needs barrel_docdb, barrel_vectordb, barrel_crypto)
+8. `barrel_spaces` 1.0.0 (needs barrel, barrel_docdb, barrel_crypto)
+9. `barrel_server` 1.0.0 (needs barrel, barrel_spaces)
+
+`barrel_vectordb` and `barrel_embed` keep their 2.x lines: they were already
+past 1.0, and `barrel_embed` 2.2.1 is on Hex. Everything else moves to 1.0.0,
+which is a promise that its API will not break without a major bump.
 
 ## Publish to Hex
 
@@ -61,8 +65,8 @@ For an app with siblings, the `hex` profile already lists them. For example
 ]}.
 ```
 
-`barrel_server` similarly declares `{barrel, "~> 0.2"}` and
-`{barrel_spaces, "~> 0.2"}` in its `hex` profile.
+`barrel_server` similarly declares `{barrel, "~> 1.0"}` and
+`{barrel_spaces, "~> 1.0"}` in its `hex` profile.
 
 Publish in dependency order:
 

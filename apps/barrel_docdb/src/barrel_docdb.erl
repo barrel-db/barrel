@@ -1431,7 +1431,7 @@ explain(Db, QuerySpec) ->
     Params = maps:get(params, Opts, #{}),
     case barrel_bql:compile(Bql, #{params => Params}) of
         {ok, #{source := {table_fn, Fn, _}}} ->
-            {error, {table_fn_requires_facade, Fn}};
+            {error, {table_fn_requires_barrel, Fn}};
         {ok, #{subscribe := true}} ->
             {error, {unsupported, subscribe}};
         {ok, Plan} ->
