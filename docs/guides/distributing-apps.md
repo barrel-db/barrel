@@ -12,9 +12,9 @@ project. Read this before cutting a release or wiring a downstream dependency.
 Before publishing an app:
 
 - Bump its `vsn` in `apps/<app>/src/<app>.app.src` (Hex refuses to overwrite a
-  released version), and bump the coupled pins in lockstep: `barrel_docdb`'s
-  `deps` pin `{barrel_crypto, ...}`, and the `~>` sibling pins in the `hex`
-  profiles of `barrel`, `barrel_vectordb`, and `barrel_server`.
+  released version), and bump the coupled sibling pins in lockstep in the default `deps` of the
+  apps that depend on it (for example bumping `barrel_vectordb` means updating
+  the `{barrel_vectordb, ...}` pin in `barrel`).
 - Ensure the app has a `README.md`, a `LICENSE`, a `CHANGELOG.md`, an `ex_doc`
   block, and `rebar3_hex` in its `project_plugins`.
 - Tag the release: per app `<app>-v<version>` (e.g. `barrel_docdb-v1.0.0`), and
@@ -31,10 +31,10 @@ Current versions and order:
 3. `barrel_docdb` 1.0.0 (needs barrel_crypto)
 4. `barrel_rerank` 1.0.0
 5. `barrel_faiss` 1.0.0 (optional; needs the FAISS C++ library to build)
-6. `barrel_vectordb` 2.1.1 (needs barrel_embed, barrel_crypto)
-7. `barrel` 1.0.0 (needs barrel_docdb, barrel_vectordb, barrel_crypto)
-8. `barrel_spaces` 1.0.0 (needs barrel, barrel_docdb, barrel_crypto)
-9. `barrel_server` 1.0.0 (needs barrel, barrel_spaces)
+6. `barrel_vectordb` 2.1.2 (needs barrel_embed, barrel_crypto)
+7. `barrel` 1.0.1 (needs barrel_docdb, barrel_vectordb, barrel_crypto)
+8. `barrel_spaces` 1.0.1 (needs barrel, barrel_docdb, barrel_crypto)
+9. `barrel_server` 1.0.1 (needs barrel, barrel_spaces)
 
 `barrel_vectordb` and `barrel_embed` keep their 2.x lines: they were already
 past 1.0, and `barrel_embed` 2.2.1 is on Hex. Everything else moves to 1.0.0,
@@ -42,42 +42,42 @@ which is a promise that its API will not break without a major bump.
 
 ## Publish to Hex
 
-Each publishable app carries a `hex` profile in its `rebar.config` that
-re-declares its sibling apps as Hex dependencies. In the umbrella those siblings
-are discovered as local apps; on Hex they must be versioned packages. Always
-publish with that profile.
+Each publishable app declares its sibling apps as Hex dependencies in the
+**default** `{deps, [...]}` of its `rebar.config`. This is not optional and not
+cosmetic: rebar3_hex builds the package's `requirements` from the default-profile
+lockfile, so a dependency placed in a `hex` (or any other) profile is silently
+dropped from the tarball. The package then publishes and installs cleanly and the
+consumer hits an `undef` at runtime. Do not put sibling deps in a `hex` profile.
 
-```console
-$ cd apps/barrel_embed
-$ rebar3 as hex hex publish
-```
-
-For an app with siblings, the `hex` profile already lists them. For example
-`apps/barrel_vectordb/rebar.config`:
+For example `apps/barrel_spaces/rebar.config`:
 
 ```erlang
-{profiles, [
-    {hex, [
-        {deps, [
-            {barrel_embed, "~> 2.3"}
-        ]}
-    ]}
+{deps, [
+    {barrel_crypto, "~> 1.0"},
+    {barrel_docdb, "~> 1.0"},
+    {barrel, "~> 1.0"}
 ]}.
 ```
 
-`barrel_server` similarly declares `{barrel, "~> 1.0"}` and
-`{barrel_spaces, "~> 1.0"}` in its `hex` profile.
+In the umbrella these resolve as local project apps; on Hex they resolve from
+Hex. Use `~>` pins so a sibling's patch release does not force a re-release of
+every app that depends on it.
+
+```console
+$ cd apps/barrel_embed
+$ rebar3 hex publish
+```
 
 Publish in dependency order:
 
 ```console
 $ for app in barrel_crypto barrel_embed barrel_docdb barrel_rerank \
              barrel_faiss barrel_vectordb barrel barrel_spaces barrel_server; do
-    (cd apps/$app && rebar3 as hex hex publish --yes)
+    (cd apps/$app && rebar3 hex publish --yes)
   done
 ```
 
-Before publishing, dry-run each tarball with `rebar3 as hex hex build` and check
+Before publishing, dry-run each tarball with `rebar3 hex build` and check
 its contents (especially the NIF apps `barrel_vectordb`/`barrel_faiss`, whose
 `.app.src` `{files, [...]}` must carry `c_src` and the root `do_cmake.sh` /
 `do_faiss.sh` build scripts).
@@ -101,15 +101,15 @@ order, remove both, rebuild, and check:
 $ cd apps/<app>
 $ rm -rf _checkouts rebar.lock
 $ rebar3 compile                     # regenerate rebar.lock from Hex
-$ rebar3 hex build                   # for an app with siblings: rebar3 as hex hex build
+$ rebar3 hex build                   # siblings resolve from Hex (default deps)
 $ cd ../..
 $ python3 scripts/check_hex_requirements.py apps/<app>
 ```
 
 `rebar3 hex build` needs a lockfile, so run `rebar3 compile` first (removing
 `rebar.lock` without regenerating it makes the build error with "No lockfile
-detected"). Use the plain `hex build` for a leaf app (no sibling deps) and
-`as hex hex build` for one whose `hex` profile re-declares siblings.
+detected"). Siblings resolve from Hex, so every sibling an app depends on must
+already be published (the publish order above guarantees this).
 
 The script compares the tarball's `requirements` against the app's `rebar.config`
 deps and exits non-zero on any omission. It only passes once every sibling the
