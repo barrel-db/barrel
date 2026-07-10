@@ -41,6 +41,14 @@ were already past 1.0, and `barrel_embed` 2.2.1 is on Hex.
 ### Added
 - `examples/agent_layer.erl`, run by a test suite so it cannot drift.
 
+### Testing and tooling
+- Docker end-to-end replication test (`test/e2e/`): two `barrel_server`
+  containers replicate over a real network, asserting push/pull convergence and
+  delete propagation. Opt-in CI job (`workflow_dispatch`).
+- The `barrel_docdb` benchmark runner no longer depends on the archived per-app
+  git repository; it builds against the umbrella. A reference run is recorded in
+  `test/e2e/BENCHMARKS.md`.
+
 ## [2026-07-08] First coordinated tagged release
 
 First tagged release of every app in the umbrella. Versions:
