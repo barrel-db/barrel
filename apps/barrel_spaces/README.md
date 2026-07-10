@@ -19,12 +19,15 @@ to one space.
 
 ## Spaces
 
+`create_space/1` returns a space handle, `#{id := SpaceId, db := Db}`. The
+lifecycle calls take the id; everything else takes the handle.
+
 ```erlang
-{ok, #{id := Space, db := Db}} =
+{ok, #{id := SpaceId, db := Db} = Space} =
     barrel_spaces:create_space(#{label => <<"experiment-42">>}),
 {ok, _} = barrel:put_doc(Db, #{<<"id">> => <<"note">>, <<"v">> => 1}),
-ok = barrel_spaces:close_space(Space),
-{ok, _} = barrel_spaces:open_space(Space).
+ok = barrel_spaces:close_space(SpaceId),
+{ok, Space} = barrel_spaces:open_space(SpaceId).
 ```
 
 Space databases open through Barrel's database lifecycle manager
@@ -40,15 +43,14 @@ registry. Only a SHA-256 of the token is stored, so nothing on disk can mint
 access, and revoking a grant takes effect immediately.
 
 ```erlang
-{ok, #{token := Token, grant := _}} =
-    barrel_caps:grant(Space, #{rights => [read, write],
-                               subject => <<"agent-b">>,
-                               expires_at => 0}),
+%% The token is returned once, here. Only its SHA-256 is stored.
+{ok, Token, _Grant} = barrel_caps:grant(SpaceId, #{rights => [read, write],
+                                                   subject => <<"agent-b">>}),
 
 %% The bearer proves it holds `write' on this space.
-{ok, _Ctx} = barrel_caps:verify(Token, Space, write),
+{ok, _Ctx} = barrel_caps:verify(Token, SpaceId, write),
 
-{ok, Grants} = barrel_caps:list(Space),
+{ok, _Grants} = barrel_caps:list(SpaceId),
 ok = barrel_caps:revoke(Token).
 ```
 
@@ -65,15 +67,15 @@ key/value data, a summary, and pinned context.
 ```erlang
 {ok, Sid} = barrel_session:create(Space, #{agent => <<"agent-a">>,
                                            ttl => 3600}),
-{ok, _} = barrel_session:add_message(Space, Sid,
-                                     #{role => <<"user">>,
-                                       content => <<"index the corpus">>}),
-{ok, Messages} = barrel_session:get_messages(Space, Sid),
+{ok, _Rev} = barrel_session:add_message(Space, Sid,
+                                        #{role => <<"user">>,
+                                          content => <<"index the corpus">>}),
+{ok, _Messages} = barrel_session:get_messages(Space, Sid),
 
-ok = barrel_session:set_data(Space, Sid, <<"cursor">>, 42),
+{ok, _} = barrel_session:set_data(Space, Sid, <<"cursor">>, 42),
 {ok, 42} = barrel_session:get_data(Space, Sid, <<"cursor">>),
 
-{ok, _} = barrel_session:touch(Space, Sid),
+{ok, _ExpiresAt} = barrel_session:touch(Space, Sid),
 ok = barrel_session:delete(Space, Sid).
 ```
 
@@ -88,7 +90,7 @@ mints a capability for the space, so the acceptor gets access by presenting the
 token, not by being granted anything up front.
 
 ```erlang
-{ok, #{handoff_id := Hid, token := Token}} =
+{ok, #{handoff_id := _Hid, token := HandoffToken}} =
     barrel_handoff:create(Space, #{task_name => <<"reindex">>,
                                    from_agent => <<"agent-a">>,
                                    to_agent => <<"agent-b">>,
@@ -96,15 +98,21 @@ token, not by being granted anything up front.
                                    rights => [read, write]}),
 
 %% On the other side, with only the token:
-{ok, #{space := Space, session := Sid, handoff := H}} =
-    barrel_handoff:accept(Token, #{agent => <<"agent-b">>}),
+{ok, #{space := SharedSpace, session := Sid, handoff := _H}} =
+    barrel_handoff:accept(HandoffToken, #{agent => <<"agent-b">>}),
 
-{ok, _} = barrel_handoff:complete(Hid, #{result => <<"12k docs indexed">>}).
+%% complete/2 takes the token, not the handoff id, and revokes its grant.
+{ok, _} = barrel_handoff:complete(HandoffToken,
+                                  #{result => <<"12k docs indexed">>}).
 ```
 
 `accept/2` opens the shared space and creates a fresh session in it; the
 from-agent's context is read in place, never copied. `chain/2` walks a handoff
 back through the agents that touched it.
+
+A runnable version of this whole flow, compiled and executed by
+`barrel_agent_example_SUITE`, lives at
+[examples/agent_layer.erl](https://github.com/barrel-db/barrel/blob/main/examples/agent_layer.erl).
 
 ## Over HTTP
 
