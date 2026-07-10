@@ -4,6 +4,26 @@ All notable changes to the Barrel umbrella are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and each app
 is versioned independently under [Semantic Versioning](https://semver.org/).
 
+## [2026-07-11] Dependency-metadata fix
+
+Four packages are re-released to correct their declared Hex dependencies. The
+first stable release published `barrel_spaces`, `barrel_server`, and
+`barrel_vectordb` with sibling dependencies missing from the package metadata,
+because those apps declared the siblings in a `hex` profile and `rebar3_hex`
+builds a package's requirements only from the default-profile lock. A consumer
+installing them would fail at runtime with an `undef`.
+
+| App | Version | Fix |
+|-----|---------|-----|
+| barrel_vectordb | 2.1.2 | declare `barrel_embed` |
+| barrel | 1.0.1 | repoint to `barrel_vectordb` 2.1.2; `~>` sibling pins |
+| barrel_spaces | 1.0.1 | declare `barrel`, `barrel_docdb`, `barrel_crypto` |
+| barrel_server | 1.0.1 | declare `barrel`, `barrel_spaces` |
+
+Sibling dependencies now live in the default `deps`, matching `barrel`, which
+published correctly. `barrel_crypto`, `barrel_embed`, `barrel_docdb`,
+`barrel_rerank`, and `barrel_faiss` were already correct and are unchanged.
+
 ## [2026-07-10] First stable release
 
 The 0.x apps move to 1.0.0: their APIs are frozen and will not break without a
