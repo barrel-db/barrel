@@ -12,7 +12,8 @@ name: CI
 on:
   push:
     branches: [main]
-    tags: ['barrel_*-v*', 'v*']
+    # 'barrel-v*' has no underscore, so 'barrel_*-v*' does not match it.
+    tags: ['barrel-v*', 'barrel_*-v*', 'v*']
   pull_request:
 
 env:
