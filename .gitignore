@@ -57,3 +57,6 @@ apps/*/doc/
 # rebar3 sibling-app overrides (created by CI and the docs script)
 apps/*/_checkouts/
 results/
+
+# benchmark output
+apps/*/bench/_bench_ebin/
