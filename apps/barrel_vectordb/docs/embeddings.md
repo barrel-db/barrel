@@ -210,7 +210,7 @@ Add `barrel_rerank` to your dependencies:
 ```erlang
 %% rebar.config
 {deps, [
-    {barrel_vectordb, "2.1.0"},
+    {barrel_vectordb, "2.1.1"},
     {barrel_rerank, "1.0.0"}
 ]}.
 ```

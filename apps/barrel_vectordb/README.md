@@ -58,7 +58,7 @@ Add to your `rebar.config`:
 
 ```erlang
 {deps, [
-    {barrel_vectordb, "2.1.0"}
+    {barrel_vectordb, "2.1.1"}
 ]}.
 ```
 
@@ -70,7 +70,7 @@ For cross-encoder reranking, add barrel_rerank:
 
 ```erlang
 {deps, [
-    {barrel_vectordb, "2.1.0"},
+    {barrel_vectordb, "2.1.1"},
     {barrel_rerank, "1.0.0"}
 ]}.
 ```
@@ -527,7 +527,7 @@ Cross-encoder reranking for improved search relevance. Use after initial vector 
 ```erlang
 %% Add barrel_rerank to your deps
 {deps, [
-    {barrel_vectordb, "2.1.0"},
+    {barrel_vectordb, "2.1.1"},
     {barrel_embed, "2.3.0"},
     {barrel_rerank, "1.0.0"}
 ]}.

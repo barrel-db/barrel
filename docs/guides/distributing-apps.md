@@ -31,7 +31,7 @@ Current versions and order:
 3. `barrel_docdb` 1.0.0 (needs barrel_crypto)
 4. `barrel_rerank` 1.0.0
 5. `barrel_faiss` 1.0.0 (optional; needs the FAISS C++ library to build)
-6. `barrel_vectordb` 2.1.0 (needs barrel_embed, barrel_crypto)
+6. `barrel_vectordb` 2.1.1 (needs barrel_embed, barrel_crypto)
 7. `barrel` 1.0.0 (needs barrel_docdb, barrel_vectordb, barrel_crypto)
 8. `barrel_spaces` 1.0.0 (needs barrel, barrel_docdb, barrel_crypto)
 9. `barrel_server` 1.0.0 (needs barrel, barrel_spaces)

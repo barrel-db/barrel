@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.1] - 2026-07-10
+
+### Fixed
+- `barrel_vectordb_docdb_backend:init/2` raised `badarg` on every start. It
+  called `atom_to_binary/2` on a store name the store had already normalised to
+  a binary, and `maps:get/3` evaluates its default eagerly, so it crashed even
+  when `db` was supplied. The `docstore` seam was unusable.
+
+### Changed
+- The `barrel_vectordb_docstore` `init/2` callback accepts an atom or a binary
+  name, which is what the store passes.
+
+### Added
+- `docstore` is documented in `docs/features.md`, and the docdb-backed backend
+  has tests.
+
 ## [2.1.0] - 2026-07-08
 
 Coordinated umbrella release. See the umbrella [CHANGELOG](../../CHANGELOG.md).

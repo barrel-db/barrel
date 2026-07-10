@@ -15,7 +15,7 @@ were already past 1.0, and `barrel_embed` 2.2.1 is on Hex.
 | barrel | 1.0.0 |
 | barrel_crypto | 1.0.0 |
 | barrel_docdb | 1.0.0 |
-| barrel_vectordb | 2.1.0 |
+| barrel_vectordb | 2.1.1 |
 | barrel_embed | 2.3.0 |
 | barrel_rerank | 1.0.0 |
 | barrel_spaces | 1.0.0 |
