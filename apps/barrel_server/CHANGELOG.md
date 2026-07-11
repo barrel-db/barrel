@@ -6,7 +6,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [1.0.1] - 2026-07-11
 
 ### Fixed
-- Declare the sibling Hex dependencies (barrel, barrel_spaces). 1.0.0 omitted them (they were in a `hex' profile, which rebar3_hex drops).
+- Declare the sibling Hex dependencies (barrel, barrel_spaces). 1.0.0 omitted them (they were in a `hex` profile, which rebar3_hex drops).
 
 ## [1.0.0] - 2026-07-10
 

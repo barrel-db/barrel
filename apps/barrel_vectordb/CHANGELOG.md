@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [2.1.2] - 2026-07-11
 
 ### Fixed
-- Declare barrel_embed as a Hex dependency. It is a hard runtime dependency (in the app's `applications'), but the previous release put the sibling deps in a `hex' profile, which rebar3_hex drops from the package. Moved to the default profile.
+- Declare barrel_embed as a Hex dependency. It is a hard runtime dependency (in the app's `applications`), but the previous release put the sibling deps in a `hex` profile, which rebar3_hex drops from the package. Moved to the default profile.
 
 ## [2.1.1] - 2026-07-10
 
