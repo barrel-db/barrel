@@ -6,7 +6,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [1.0.1] - 2026-07-11
 
 ### Fixed
-- Repoint the barrel_vectordb dependency to 2.1.2 (2.1.1 shipped without its barrel_embed requirement) and use `~>' pins so a sibling patch does not force a re-release here.
+- Repoint the barrel_vectordb dependency to 2.1.2 (2.1.1 shipped without its barrel_embed requirement) and use `~>` pins so a sibling patch does not force a re-release here.
 
 ## [1.0.0] - 2026-07-10
 

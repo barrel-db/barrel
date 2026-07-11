@@ -97,7 +97,7 @@ preserved on the `backup/cluster-http-api` branch.
     `barrel_vectordb_gateway_quotas`, `barrel_vectordb_gateway_rate`,
     `barrel_vectordb_gateway_stores`, `barrel_vectordb_system_db`
   - Docker support with `docker-compose.gateway.yml` and environment variables
-  - See [Gateway Documentation](docs/gateway.md) for full details
+  - Gateway documentation (the gateway was later removed; see 2.0.0)
 
 ## [1.3.1] - 2026-01-10
 

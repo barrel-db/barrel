@@ -214,4 +214,3 @@ Total = length(Changes).
 ```erlang
 {ok, Info} = barrel_docdb:db_info(<<"mydb">>).
 ```
-</content>

@@ -256,5 +256,3 @@ Now that you have Barrel DocDB running, explore these features:
 > #### Serving over HTTP
 >
 > To expose a database over REST/JSON (including TLS), run the `barrel_server` app rather than barrel_docdb on its own. See the umbrella REST server guide (`docs/guides/rest-server.md`).
-</content>
-</invoke>
