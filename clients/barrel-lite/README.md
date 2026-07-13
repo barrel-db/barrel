@@ -45,6 +45,11 @@ In the browser, storage defaults to OPFS and `multiTab` uses Web Locks plus
 BroadcastChannel (one tab per origin owns the store; others proxy to it). In
 Node and tests, storage defaults to memory and there is a single instance.
 
+`remote.url` is the base the client builds every route from, so it may include a
+sub-path when the server is embedded under one (for example
+`url: "https://host/barrel"` when barrel is mounted at `/barrel` in a host livery
+app; see the [embedding guide](../../docs/guides/embedding-barrel-server.md)).
+
 ## Vector search
 
 Pull each document's embedding to the browser and run brute-force cosine

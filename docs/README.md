@@ -10,6 +10,7 @@ Start here.
 - [Record mode](guides/record-mode.md): policy-driven vector indexing over documents.
 - [Query with BQL](guides/query-bql.md): one query language over documents, vectors, and keyword search.
 - [Run the REST server](guides/rest-server.md): `barrel_server` over HTTP.
+- [Embed the barrel server in a livery app](guides/embedding-barrel-server.md): mount barrel's routes into a host livery service, under a sub-path.
 - [Synchronization](guides/synchronization.md): replication between databases.
 - [Timeline](guides/timeline.md): branch a database, work in isolation, merge back (incl. PITR).
 - [Encryption at rest](guides/encryption.md): per-database keys over every store and index file.
