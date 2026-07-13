@@ -96,14 +96,11 @@ and clients that build on top of the stack stay in their own repositories.
 
 ### Out of scope (kept separate on purpose)
 
-- `barrel_memory` and `barrellm`: application/service layers that consume the
-  stack (`barrel_memory` -> `barrel_vectordb`; `barrellm` -> `barrel_docdb` +
-  `barrel_embed`). They have their own HTTP/MCP surfaces, release cadence, and
-  much older pinned deps (for example rocksdb 2.5.0, hackney 1.20.1/2.0.1).
-  Folding them in would invert the layering and drag the stack back to older
-  dependencies.
-- `barrel_memory_macos`: a native macOS (Swift) client. It talks to the memory
-  service over HTTP and cannot be a rebar3 OTP application.
+- `barrellm`: an application/service layer that consumes the stack
+  (`barrellm` -> `barrel_docdb` + `barrel_embed`). It has its own HTTP/MCP
+  surface, release cadence, and much older pinned deps (for example
+  rocksdb 2.5.0, hackney 1.20.1/2.0.1). Folding it in would invert the
+  layering and drag the stack back to older dependencies.
 - `barrel_llm`: an empty placeholder directory. Nothing to import.
 
 ### If products need co-development later

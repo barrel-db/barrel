@@ -77,14 +77,6 @@ replication, or any cluster fabric.
 - Distributing the apps (Hex + git mirrors):
   [docs/guides/distributing-apps.md](docs/guides/distributing-apps.md)
 
-## Roadmap
-
-- `barrel_fabric` (future): dataset agents, durability, placement, replication
-  orchestration, and query routing across nodes.
-
-Products that consume the stack (for example `barrel_memory`) stay in their own
-repositories rather than inside this umbrella.
-
 ## License
 
 Apache-2.0. See the `LICENSE` file at the repository root and in each app

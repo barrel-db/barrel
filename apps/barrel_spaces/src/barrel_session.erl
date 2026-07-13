@@ -1,6 +1,6 @@
 %%%-------------------------------------------------------------------
 %%% @doc Sessions: an agent's working context inside a space, folded
-%%% down from barrel_memory's mechanisms. A session is a regular
+%%% down into barrel primitives. A session is a regular
 %%% document (`session:Sid') in the space database carrying data,
 %%% summary, and pinned context; its messages are separate documents
 %%% (`session:Sid:msg:PaddedTs-Rand') whose ids sort chronologically,

@@ -5,8 +5,8 @@
 %%% by starting stores directly via barrel_vectordb:start_link/1,
 %%% without starting the barrel_vectordb application.
 %%%
-%%% This pattern is used by projects like barrel_memory that embed
-%%% barrel_vectordb in their own supervisor tree.
+%%% This pattern is used by projects that embed barrel_vectordb in their
+%%% own supervisor tree.
 %%% @end
 %%%-------------------------------------------------------------------
 -module(barrel_vectordb_library_tests).
@@ -50,8 +50,8 @@ cleanup(_) ->
 %%====================================================================
 
 %% Test that we can start a store directly via start_link without
-%% starting the barrel_vectordb application. This mimics how barrel_memory
-%% embeds barrel_vectordb in its own supervisor.
+%% starting the barrel_vectordb application. This mimics how an embedding
+%% application embeds barrel_vectordb in its own supervisor.
 test_start_store_directly() ->
     Config = #{
         name => ?TEST_STORE,
@@ -59,7 +59,7 @@ test_start_store_directly() ->
         dimension => 128
     },
 
-    %% Start the store directly - this is how barrel_memory does it
+    %% Start the store directly - this is how an embedding application does it
     {ok, Pid} = barrel_vectordb:start_link(Config),
     ?assert(is_pid(Pid)),
 
@@ -127,8 +127,8 @@ store_pid() ->
 %% Supervisor Integration Test
 %%====================================================================
 
-%% Test that mimics exactly how barrel_memory integrates barrel_vectordb
-%% in its own supervisor tree
+%% Test that mimics exactly how an embedding application integrates
+%% barrel_vectordb in its own supervisor tree
 supervisor_integration_test_() ->
     {setup,
      fun setup_supervisor/0,
@@ -149,7 +149,7 @@ cleanup_supervisor(_) ->
 
 test_supervised_store() ->
     %% Start a simple supervisor that manages the vectordb store
-    %% This is the pattern barrel_memory uses
+    %% This is the pattern an embedding application uses
     Self = self(),
 
     SupPid = spawn_link(fun() ->

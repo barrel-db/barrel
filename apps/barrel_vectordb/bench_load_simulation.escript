@@ -28,7 +28,7 @@ main(Args) ->
     io:format("  Hot layer:       ~p~n~n", [maps:get(hot_layer, Config)]),
 
     %% Setup
-    TmpDir = "/tmp/barrel_memory_bench_" ++ integer_to_list(erlang:unique_integer([positive])),
+    TmpDir = "/tmp/barrel_vectordb_bench_" ++ integer_to_list(erlang:unique_integer([positive])),
     ok = filelib:ensure_dir(filename:join(TmpDir, "dummy")),
 
     try

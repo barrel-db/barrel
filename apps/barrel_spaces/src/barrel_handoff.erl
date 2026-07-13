@@ -2,8 +2,8 @@
 %%% @doc Handoffs: transfer work between agents as a shared space plus
 %%% a capability. Creating a handoff issues a grant for the space and
 %%% returns the token once; POSSESSION OF THE TOKEN IS THE RIGHT TO
-%%% ACCEPT (barrel_memory's handoffs let any authenticated caller
-%%% accept anything; this closes that hole). Accepting flips the
+%%% ACCEPT (a naive design lets any authenticated caller accept
+%%% anything; this closes that hole). Accepting flips the
 %%% handoff doc pending -> accepted with a rev CAS (double accepts
 %%% lose), opens the shared space, and creates a session for the
 %%% acceptor IN it: context is read in place, no snapshot copying.
