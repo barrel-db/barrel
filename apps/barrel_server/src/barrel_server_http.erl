@@ -94,64 +94,12 @@ middleware() ->
     end,
     Base ++ Cors ++ Auth.
 
+%% The standalone service serves every group (DB surface + agent layer +
+%% MCP + `/' and `/health'). The grouped, embeddable table lives in
+%% {@link barrel_server_api}, which host applications mount into their own
+%% livery service.
 routes() ->
-    [
-        {<<"GET">>,    <<"/">>,                          {?MODULE, root}},
-        {<<"GET">>,    <<"/health">>,                    {?MODULE, health}},
-
-        {<<"PUT">>,    <<"/db/:db">>,                    {?MODULE, create_db}},
-        {<<"GET">>,    <<"/db/:db">>,                    {?MODULE, db_info}},
-        {<<"DELETE">>, <<"/db/:db">>,                    {?MODULE, drop_db}},
-
-        %% Timeline (branch, merge, lineage)
-        {<<"GET">>,    <<"/db/:db/_timeline">>,          {?MODULE, timeline_info}},
-        {<<"POST">>,   <<"/db/:db/_timeline/branch">>,   {?MODULE, timeline_branch}},
-        {<<"POST">>,   <<"/db/:db/_timeline/merge">>,    {?MODULE, timeline_merge}},
-
-        {<<"PUT">>,    <<"/db/:db/doc/:id">>,            {?MODULE, put_doc}},
-        {<<"GET">>,    <<"/db/:db/doc/:id">>,            {?MODULE, get_doc}},
-        {<<"DELETE">>, <<"/db/:db/doc/:id">>,            {?MODULE, delete_doc}},
-        {<<"GET">>,    <<"/db/:db/_history">>,           {?MODULE, history}},
-        {<<"GET">>,    <<"/db/:db/doc/:id/_versions">>,  {?MODULE, doc_versions}},
-        {<<"GET">>,    <<"/db/:db/doc/:id/_versions/:rev">>, {?MODULE, version_body}},
-        {<<"POST">>,   <<"/db/:db/_bulk_docs">>,         {?MODULE, bulk_docs}},
-        {<<"POST">>,   <<"/db/:db/_bulk_get">>,          {?MODULE, bulk_get}},
-        {<<"POST">>,   <<"/db/:db/find">>,               {?MODULE, find}},
-        %% GET exists for browser EventSource (SUBSCRIBE over SSE)
-        {<<"POST">>,   <<"/db/:db/query">>,              {?MODULE, query}},
-        {<<"GET">>,    <<"/db/:db/query">>,              {?MODULE, query}},
-        {<<"GET">>,    <<"/db/:db/changes">>,            {?MODULE, changes}},
-
-        %% Replication wire (barrel_rep_transport over HTTP)
-        {<<"GET">>,    <<"/db/:db/_sync/info">>,         {barrel_server_sync, info}},
-        {<<"POST">>,   <<"/db/:db/_sync/hlc">>,          {barrel_server_sync, sync_hlc}},
-        {<<"POST">>,   <<"/db/:db/_sync/changes">>,      {barrel_server_sync, changes}},
-        {<<"POST">>,   <<"/db/:db/_sync/diff">>,         {barrel_server_sync, diff}},
-        {<<"GET">>,    <<"/db/:db/_sync/doc/:id">>,      {barrel_server_sync, get_doc}},
-        {<<"PUT">>,    <<"/db/:db/_sync/doc/:id">>,      {barrel_server_sync, put_version}},
-        {<<"GET">>,    <<"/db/:db/_sync/local/:id">>,    {barrel_server_sync, get_local}},
-        {<<"PUT">>,    <<"/db/:db/_sync/local/:id">>,    {barrel_server_sync, put_local}},
-        {<<"DELETE">>, <<"/db/:db/_sync/local/:id">>,    {barrel_server_sync, delete_local}},
-        {<<"GET">>,    <<"/db/:db/_sync/att_changes">>,  {barrel_server_sync, att_changes}},
-        {<<"POST">>,   <<"/db/:db/_sync/att_diff">>,     {barrel_server_sync, att_diff}},
-        {<<"GET">>,    <<"/db/:db/_sync/att/:id/:name">>,    {barrel_server_sync, get_att}},
-        {<<"PUT">>,    <<"/db/:db/_sync/att/:id/:name">>,    {barrel_server_sync, put_att}},
-        {<<"DELETE">>, <<"/db/:db/_sync/att/:id/:name">>,    {barrel_server_sync, delete_att}},
-
-        {<<"PUT">>,    <<"/db/:db/doc/:id/att/:name">>,  {?MODULE, put_att}},
-        {<<"GET">>,    <<"/db/:db/doc/:id/att/:name">>,  {?MODULE, get_att}},
-        {<<"DELETE">>, <<"/db/:db/doc/:id/att/:name">>,  {?MODULE, delete_att}},
-
-        {<<"POST">>,   <<"/db/:db/vector">>,             {?MODULE, vector_add}},
-        {<<"POST">>,   <<"/db/:db/search/vector">>,      {?MODULE, search_vector}},
-        {<<"POST">>,   <<"/db/:db/search/bm25">>,        {?MODULE, search_bm25}},
-        {<<"POST">>,   <<"/db/:db/search/hybrid">>,      {?MODULE, search_hybrid}}
-
-        %% Agent layer (spaces, grants, sessions, handoffs)
-        | barrel_server_spaces:routes()
-    ]
-    %% MCP endpoint (empty when disabled)
-    ++ barrel_server_mcp:routes().
+    barrel_server_api:routes(#{groups => all}).
 
 %%====================================================================
 %% Meta handlers

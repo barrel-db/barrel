@@ -10,6 +10,10 @@ You need this when you want to reach a barrel database over the network (other
 languages, remote clients, agents) instead of embedding it in an Erlang
 application. For embedded use, depend on `barrel` directly and skip this app.
 
+To serve barrel's routes from your own `livery` service (under a sub-path, with
+your own auth), use `barrel_server_api:routes/router` rather than the standalone
+listener; see the [embedding guide](../../docs/guides/embedding-barrel-server.md).
+
 [Documentation](https://barrel-db.eu/docs/lib/server/) |
 [HexDocs](https://hexdocs.pm/barrel_server) |
 [Repository](https://github.com/barrel-db/barrel)
