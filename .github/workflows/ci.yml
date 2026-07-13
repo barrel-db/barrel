@@ -1,0 +1,203 @@
+name: CI
+
+# Umbrella CI for the barrel monorepo. Jobs:
+#   - umbrella: integrated build + tests (default profile, no FAISS)
+#   - leaf:     each standalone library builds and tests on its own, which
+#               catches hidden cross-app dependencies before publishing
+#   - faiss:    optional FAISS backend leg (needs the FAISS C++ library)
+#   - server:   network server leg (pulls livery + transports)
+#   - barrel-lite: TypeScript client (typecheck, build, unit tests)
+# Dev target is OTP 29; CI pins OTP 28 (image guaranteed, code builds on both).
+
+on:
+  push:
+    branches: [main]
+    # 'barrel-v*' has no underscore, so 'barrel_*-v*' does not match it.
+    tags: ['barrel-v*', 'barrel_*-v*', 'v*']
+  pull_request:
+  # The e2e job builds a Docker image and runs two containers, so it is opt-in
+  # (manual dispatch) rather than on every push.
+  workflow_dispatch:
+
+env:
+  OTP_VERSION: '28'
+
+jobs:
+  umbrella:
+    name: Umbrella (compile, eunit, ct, xref)
+    runs-on: ubuntu-latest
+    container:
+      image: erlang:28
+    steps:
+      - uses: actions/checkout@v4
+      - name: System dependencies
+        run: |
+          apt-get update
+          apt-get install -y cmake build-essential libssl-dev zlib1g-dev \
+            libsnappy-dev liblz4-dev libzstd-dev python3 python3-venv
+          git config --global --add safe.directory '*'
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/rebar3
+          key: rebar3-umbrella-${{ hashFiles('rebar.lock') }}
+      - run: rebar3 compile
+      - run: rebar3 as test eunit --app barrel,barrel_crypto,barrel_docdb,barrel_vectordb,barrel_rerank
+      # barrel_embed's venv/ollama tests need an external backend; run only the
+      # backend-free modules (mocked provider dispatch + request building).
+      - run: rebar3 as test eunit --module=barrel_embed_tests,barrel_embed_provider_tests,barrel_embed_request_tests
+      - run: rebar3 as test ct
+
+  leaf:
+    name: Leaf (${{ matrix.app }})
+    runs-on: ubuntu-latest
+    container:
+      image: erlang:28
+    strategy:
+      fail-fast: false
+      matrix:
+        app: [barrel_crypto, barrel_docdb, barrel_rerank, barrel_embed]
+    steps:
+      - uses: actions/checkout@v4
+      - name: System dependencies
+        run: |
+          apt-get update
+          apt-get install -y cmake build-essential libssl-dev zlib1g-dev \
+            libsnappy-dev liblz4-dev libzstd-dev python3 python3-venv
+          git config --global --add safe.directory '*'
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/rebar3
+          key: rebar3-${{ matrix.app }}-${{ hashFiles(format('apps/{0}/rebar.config', matrix.app)) }}
+      # barrel_docdb depends on the sibling barrel_crypto; isolated builds
+      # resolve it as a checkout dependency
+      - name: Link sibling checkouts
+        if: matrix.app == 'barrel_docdb'
+        run: |
+          mkdir -p apps/barrel_docdb/_checkouts
+          ln -s ../../barrel_crypto apps/barrel_docdb/_checkouts/barrel_crypto
+      - name: Compile (isolated)
+        working-directory: apps/${{ matrix.app }}
+        run: rebar3 compile
+      - name: Xref (isolated)
+        working-directory: apps/${{ matrix.app }}
+        run: rebar3 xref
+      # barrel_embed's tests need a Python model backend; build-only here.
+      - name: EUnit (isolated)
+        if: matrix.app != 'barrel_embed'
+        working-directory: apps/${{ matrix.app }}
+        run: rebar3 eunit
+    # Note: barrel_vectordb, barrel, and barrel_server have sibling deps, so
+    # they are exercised by the umbrella/server jobs. Standalone (hex-resolved)
+    # builds for them land with the publishing workflow.
+
+  faiss:
+    name: FAISS backend
+    runs-on: ubuntu-latest
+    container:
+      image: erlang:28
+    steps:
+      - uses: actions/checkout@v4
+      - name: System dependencies
+        run: |
+          apt-get update
+          apt-get install -y cmake build-essential libssl-dev zlib1g-dev \
+            libsnappy-dev liblz4-dev libzstd-dev libfaiss-dev libomp-dev libopenblas-dev
+          git config --global --add safe.directory '*'
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/rebar3
+          key: rebar3-faiss-${{ hashFiles('rebar.lock') }}
+      - run: rebar3 as faiss compile
+      # the FAISS C++ library is installed above, so run the suite (not just compile)
+      - run: rebar3 as faiss ct --suite apps/barrel_faiss/test/barrel_faiss_SUITE
+
+  barrel-lite:
+    name: barrel-lite (TS client)
+    runs-on: ubuntu-latest
+    container:
+      image: erlang:28
+    steps:
+      - uses: actions/checkout@v4
+      # Erlang base image so later stages can boot barrel_server for
+      # integration tests; Node rides on top via nodesource.
+      - name: Node toolchain
+        run: |
+          apt-get update
+          apt-get install -y curl ca-certificates
+          curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+          apt-get install -y nodejs
+          git config --global --add safe.directory '*'
+      - uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: npm-barrel-lite-${{ hashFiles('clients/barrel-lite/package-lock.json') }}
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/rebar3
+          key: rebar3-server-${{ hashFiles('rebar.lock') }}
+      - name: Install
+        working-directory: clients/barrel-lite
+        run: npm ci
+      - name: Typecheck
+        working-directory: clients/barrel-lite
+        run: npm run typecheck
+      - name: Build
+        working-directory: clients/barrel-lite
+        run: npm run build
+      - name: Unit tests
+        working-directory: clients/barrel-lite
+        run: npm test
+      - name: System dependencies (server boot)
+        run: |
+          apt-get install -y cmake build-essential libssl-dev zlib1g-dev \
+            libsnappy-dev liblz4-dev libzstd-dev python3 python3-venv
+      - name: Integration tests (boots barrel_server)
+        working-directory: clients/barrel-lite
+        env:
+          BARREL_PORT: '18080'
+        run: npm run test:integration
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ hashFiles('clients/barrel-lite/package-lock.json') }}
+      - name: Browser smoke (Playwright chromium)
+        working-directory: clients/barrel-lite
+        env:
+          BARREL_PORT: '18080'
+          STATIC_PORT: '5173'
+          CI: 'true'
+        run: |
+          npx playwright install --with-deps chromium
+          npm run test:browser
+
+  server:
+    name: Network server
+    runs-on: ubuntu-latest
+    container:
+      image: erlang:28
+    steps:
+      - uses: actions/checkout@v4
+      - name: System dependencies
+        run: |
+          apt-get update
+          apt-get install -y cmake build-essential libssl-dev zlib1g-dev \
+            libsnappy-dev liblz4-dev libzstd-dev
+          git config --global --add safe.directory '*'
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/rebar3
+          key: rebar3-server-${{ hashFiles('rebar.lock') }}
+      - run: rebar3 as server compile
+      # run every server suite (REST, sync/rep/convergence, att, auth, spaces,
+      # cors, audit, encryption, timeline, and the MCP suites), not just the base
+      - run: rebar3 as server ct
+
+  e2e-replication:
+    name: E2E replication (two containers)
+    # Opt-in: needs a Docker-capable runner and builds the server image.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Replication across two peers
+        run: bash test/e2e/replication.sh
