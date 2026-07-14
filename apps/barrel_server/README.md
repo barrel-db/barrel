@@ -12,7 +12,7 @@ application. For embedded use, depend on `barrel` directly and skip this app.
 
 To serve barrel's routes from your own `livery` service (under a sub-path, with
 your own auth), use `barrel_server_api:routes/router` rather than the standalone
-listener; see the [embedding guide](../../docs/guides/embedding-barrel-server.md).
+listener; see the [embedding guide](https://github.com/barrel-db/barrel/blob/main/docs/guides/embedding-barrel-server.md).
 
 [Documentation](https://barrel-db.eu/docs/lib/server/) |
 [HexDocs](https://hexdocs.pm/barrel_server) |

@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   application can mount them, optionally under a sub-path, and own auth. Groups:
   `meta`, `db`, `sync`, `timeline`, `search`, `spaces`, `mcp`; the default is the
   DB surface (`db`, `sync`, `timeline`, `search`). See the
-  [embedding guide](../../docs/guides/embedding-barrel-server.md).
+  [embedding guide](https://github.com/barrel-db/barrel/blob/main/docs/guides/embedding-barrel-server.md).
 
 ### Changed
 - `barrel_server_http` assembles its route table from `barrel_server_api`

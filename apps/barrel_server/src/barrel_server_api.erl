@@ -21,7 +21,7 @@
 %%% </ul>
 %%%
 %%% `routes/0' returns the default DB surface (`db', `sync', `timeline',
-%%% `search') that {@link //barrel-lite} needs. The standalone service
+%%% `search') that barrel-lite needs. The standalone service
 %%% ({@link barrel_server_http}) takes `groups => all'.
 %%%
 %%% Embedding (DB surface, host owns auth) needs no barrel_server
