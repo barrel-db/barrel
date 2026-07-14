@@ -4,6 +4,19 @@ All notable changes to the Barrel umbrella are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and each app
 is versioned independently under [Semantic Versioning](https://semver.org/).
 
+## [2026-07-14] Embeddable server + GitHub CI
+
+`barrel_server` gains an embeddable route API: `barrel_server_api` exposes the
+REST/sync routes as a livery route list and compiled router that a host livery
+application can mount under a sub-path and guard with its own auth. The
+standalone server is unchanged. Umbrella CI now runs on GitHub Actions
+(`.github/workflows/ci.yml`), mirroring the Forgejo pipeline.
+
+| App | Version | Change |
+|-----|---------|--------|
+| barrel_server | 1.1.0 | embeddable route API (`barrel_server_api`) |
+| barrel | 1.1.0 | coordinated release; no API changes |
+
 ## [2026-07-11] Dependency-metadata fix
 
 Four packages are re-released to correct their declared Hex dependencies. The
