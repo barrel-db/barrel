@@ -6,16 +6,18 @@ is versioned independently under [Semantic Versioning](https://semver.org/).
 
 ## [2026-07-14] Embeddable server + GitHub CI
 
-`barrel_server` gains an embeddable route API: `barrel_server_api` exposes the
-REST/sync routes as a livery route list and compiled router that a host livery
-application can mount under a sub-path and guard with its own auth. The
-standalone server is unchanged. Umbrella CI now runs on GitHub Actions
-(`.github/workflows/ci.yml`), mirroring the Forgejo pipeline.
+The umbrella is tagged `v1.1.0`. `barrel_server` gains an embeddable route API:
+`barrel_server_api` exposes the REST/sync routes as a livery route list and
+compiled router that a host livery application can mount under a sub-path and
+guard with its own auth. The standalone server is unchanged. Umbrella CI now
+runs on GitHub Actions (`.github/workflows/ci.yml`), mirroring the Forgejo
+pipeline.
 
 | App | Version | Change |
 |-----|---------|--------|
 | barrel_server | 1.1.0 | embeddable route API (`barrel_server_api`) |
-| barrel | 1.1.0 | coordinated release; no API changes |
+
+`barrel` (the library, 1.0.1) and the other apps are unchanged.
 
 ## [2026-07-11] Dependency-metadata fix
 
