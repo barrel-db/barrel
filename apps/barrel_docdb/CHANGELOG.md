@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-07-17
+
+### Added
+- `barrel_sync_sig`: Ed25519 signing helpers for the replication wire (canonical
+  string, sign/verify, `Authorization: Signature` parsing), shared by the server
+  verifier and the client.
+- `barrel_rep_transport_http` endpoints gain optional `signing` (Ed25519 signed
+  requests) and `ssl_options` (mTLS client cert), plus the `sync_signing` and
+  `sync_ssl` app-env equivalents. Bearer auth is unchanged when neither is set.
+
 ## [1.0.0] - 2026-07-10
 
 First stable release. The `barrel_docdb` API is frozen: it will not break

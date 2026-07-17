@@ -3,6 +3,23 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.2.0] - 2026-07-17
+
+### Added
+- Signed-request auth for the sync wire: Ed25519 signatures over
+  `ts|keyId|method|path|sha256(body)`, with replay protection and a skew window.
+  Enabled by `auth => #{accept => [..., signed], signers => #{KeyId => PubKey}}`.
+- mTLS transport gate: TLS listeners with `verify => verify_peer` refuse a client
+  without a CA-signed certificate (`accept => [mtls]`).
+- Multi-protocol serving: `listeners => #{http, https, http3}` serves HTTP/1.1,
+  HTTP/2, and HTTP/3; a shared `tls` config drives the TLS listeners. See the
+  [synchronization guide](https://github.com/barrel-db/barrel/blob/main/docs/guides/synchronization.md).
+
+### Changed
+- The `auth` key is unchanged without an `accept` list (bearer-only, as before);
+  the new methods are opt-in and additive. H3 is TLS-serving but not yet a
+  client-cert gate; mapping a client cert to an identity needs a livery change.
+
 ## [1.1.0] - 2026-07-14
 
 ### Added

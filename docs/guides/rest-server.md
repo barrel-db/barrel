@@ -1,9 +1,11 @@
 # Run the REST server
 
-`barrel_server` exposes the `barrel` database over HTTP/1.1 and HTTP/2 (REST/JSON)
-using `livery`. It holds no database logic: every handler calls the `barrel`
-module through a database lifecycle manager. Read this when you want to reach a
-barrel database over the network instead of embedding it.
+`barrel_server` exposes the `barrel` database as a REST/JSON API using `livery`.
+By default it serves cleartext HTTP/1.1; HTTP/2 and HTTP/3 (over TLS) are opt-in
+via the `listeners` config (see [synchronization](synchronization.md)). It holds
+no database logic: every handler calls the `barrel` module through a database
+lifecycle manager. Read this when you want to reach a barrel database over the
+network instead of embedding it.
 
 ## When to use it
 
@@ -92,6 +94,14 @@ tokens answer 401. `/mcp` authenticates through its own provider covering
 both kinds. See [spaces](spaces.md), [mcp](mcp.md), and
 [barrel-lite](barrel-lite.md).
 
+The bearer behavior above is unchanged and is what you get with no extra
+config. Two stronger methods are **opt-in**, added by an `accept` list on the
+same `auth` key (its absence leaves everything exactly as described above):
+Ed25519 **signed requests** (replay-protected, no TLS required) and an **mTLS**
+transport gate. `accept => [bearer, signed]` accepts either, so a fleet can
+roll over node by node. See the [synchronization guide](synchronization.md) for
+the config and the client side.
+
 ## CORS
 
 Browser clients need CORS. Unconfigured, no CORS headers are sent; set an
@@ -144,5 +154,7 @@ $ curl localhost:8080/db/mydb/changes
 - Optimistic concurrency: `PUT /db/:db/doc/:id` with a `_rev` in the body that
   is not the current winner answers 409 `{"error":"conflict"}`.
 - Replication over the wire ships today (the `/db/:db/_sync/*` endpoints; see
-  [synchronization](synchronization.md)). gRPC, HTTP/3, WebTransport, a
-  unix-socket adapter, and OpenAPI are later phases.
+  [synchronization](synchronization.md)), with bearer, Ed25519 signed-request,
+  and mTLS auth (all opt-in; bearer is the default). HTTP/2 and HTTP/3 serving
+  ship (opt-in via `listeners`); note H3 is TLS-serving but not yet a client-cert
+  gate. gRPC, WebTransport, a unix-socket adapter, and OpenAPI are later phases.

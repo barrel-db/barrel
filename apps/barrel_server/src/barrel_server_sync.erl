@@ -555,15 +555,40 @@ with_json(Req, Fun) ->
     end.
 
 read_json(Req) ->
+    case read_raw(Req) of
+        {ok, Bin} ->
+            case content_hash_ok(Req, Bin) of
+                ok -> decode_json(Bin);
+                {error, _} = Err -> Err
+            end;
+        {error, _} = Err ->
+            Err
+    end.
+
+read_raw(Req) ->
     case livery_req:body(Req) of
         empty ->
-            {ok, #{}};
+            {ok, <<>>};
         {buffered, Io} ->
-            decode_json(iolist_to_binary(Io));
+            {ok, iolist_to_binary(Io)};
         {stream, Reader} ->
             case livery_body:read_all(Reader) of
-                {ok, Bin, _R2} -> decode_json(Bin);
+                {ok, Bin, _R2} -> {ok, Bin};
                 {error, Reason, _R2} -> {error, Reason}
+            end
+    end.
+
+%% End-to-end body binding for signed requests: when the client signed an
+%% `x-barrel-content-sha256' (verified by barrel_server_auth), the body
+%% must hash to it. Absent header = not a signed request; no check.
+content_hash_ok(Req, Bin) ->
+    case livery_req:header(<<"x-barrel-content-sha256">>, Req, undefined) of
+        undefined ->
+            ok;
+        Declared ->
+            case barrel_sync_sig:content_sha256(Bin) of
+                Declared -> ok;
+                _ -> {error, content_hash_mismatch}
             end
     end.
 

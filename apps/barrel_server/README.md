@@ -43,8 +43,22 @@ All keys live in the `barrel_server` app env. Set them in `sys.config`, or with
     {max_body, 1073741824},
     %% Options passed to barrel:open_db/2 when a database opens lazily.
     {open_opts, #{}},
-    %% Bearer auth. Omit the key entirely to leave the server open.
-    {auth, #{tokens => [<<"secret-one">>, <<"secret-two">>]}},
+    %% Auth. Omit the key entirely to leave the server open. Without an
+    %% `accept' key this is bearer-only (unchanged). With `accept' it opts
+    %% into bearer | signed (Ed25519) | mtls; see the synchronization guide.
+    {auth, #{accept  => [bearer, signed],
+             tokens  => [<<"secret-one">>, <<"secret-two">>],
+             signers => #{<<"node1">> => <<"...32 raw bytes...">>},
+             skew_ms => 300000}},
+    %% Listeners. Omit for a single cleartext HTTP/1.1 on http_port; set to
+    %% serve HTTP/2 and HTTP/3 and TLS (https/http3 and `tls => true' on http
+    %% require the `tls' config below).
+    {listeners, #{http => #{port => 8443, tls => true},
+                  https => #{port => 8444},
+                  http3 => #{port => 8444}}},
+    %% Shared TLS for the TLS listeners. `verify => verify_peer' = mTLS gate.
+    {tls, #{certfile => "server.pem", keyfile => "server.key",
+            cacertfile => "ca.pem", verify => verify_peer}},
     %% CORS. Omit to emit no CORS headers.
     {cors, #{origins => '*'}},
     %% MCP endpoint. Enabled by default when the key is absent.

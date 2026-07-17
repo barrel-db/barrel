@@ -41,6 +41,11 @@
 -type endpoint() :: #{
     url := binary(),
     auth => #{token := binary()},
+    %% Ed25519 signed-request auth (see barrel_sync_sig). Takes precedence
+    %% over `auth' when set. priv_key is a 32-byte raw Ed25519 key.
+    signing => #{key_id := binary(), priv_key := binary()},
+    %% hackney ssl_options for mTLS (honored on https URLs).
+    ssl_options => [term()],
     pool => atom(),
     connect_timeout => pos_integer(),
     recv_timeout => pos_integer(),
@@ -269,7 +274,10 @@ get_attachment_stream(Endpoint, DocId, Name) ->
         {ok, ConnPid} ->
             case hackney:send_request(
                      ConnPid,
-                     {get, url_path(Url), base_headers(Endpoint), <<>>}) of
+                     {get, url_path(Url),
+                      base_headers(Endpoint, <<"GET">>, url_path(Url),
+                                   barrel_sync_sig:content_sha256(<<>>)),
+                      <<>>}) of
                 {ok, 200, RespHeaders, ConnPid2} ->
                     ok = barrel_hlc:maybe_sync_from_header(
                         header_value(?HLC_HEADER, RespHeaders)),
@@ -311,12 +319,16 @@ att_read_fun(ClientRef) ->
 put_attachment(Endpoint, DocId, Name, Meta, ReadFun) ->
     #{content_type := ContentType, digest := Digest,
       origin_hlc := Origin} = Meta,
+    AttUrl = att_url(Endpoint, DocId, Name),
+    %% The attachment body is streamed (never in memory here), so its
+    %% content-address `Digest' is the signed content hash; body integrity
+    %% rides the content-addressed store (422 digest_mismatch).
     Headers = [{<<"content-type">>, att_content_type(ContentType)},
                {?DIGEST_HEADER, Digest},
                {?ORIGIN_HEADER,
                 base64:encode(barrel_hlc:encode(Origin))}
-               | base_headers(Endpoint)],
-    case hackney:request(put, att_url(Endpoint, DocId, Name), Headers,
+               | base_headers(Endpoint, <<"PUT">>, url_path(AttUrl), Digest)],
+    case hackney:request(put, AttUrl, Headers,
                          stream, stream_opts(Endpoint)) of
         {ok, ClientRef} ->
             att_send_loop(ReadFun, ClientRef);
@@ -413,12 +425,15 @@ req(Endpoint, Method, PathSuffix, BodyTerm) ->
 req(#{url := BaseUrl} = Endpoint, Method, PathSuffix, BodyTerm,
     ExtraHeaders) ->
     Url = iolist_to_binary([BaseUrl, <<"/_sync">>, PathSuffix]),
-    Headers = [{<<"content-type">>, <<"application/json">>}
-               | ExtraHeaders] ++ base_headers(Endpoint),
     Body = case BodyTerm of
         undefined -> <<>>;
         _ -> iolist_to_binary(json:encode(BodyTerm))
     end,
+    ContentHash = barrel_sync_sig:content_sha256(Body),
+    Headers = [{<<"content-type">>, <<"application/json">>}
+               | ExtraHeaders]
+              ++ base_headers(Endpoint, method_bin(Method), url_path(Url),
+                              ContentHash),
     HttpOpts = [with_body | stream_opts(Endpoint)],
     case hackney:request(Method, Url, Headers, Body, HttpOpts) of
         {ok, Status, RespHeaders, RespBody} ->
@@ -429,25 +444,69 @@ req(#{url := BaseUrl} = Endpoint, Method, PathSuffix, BodyTerm,
             {error, {transport, Reason}}
     end.
 
-base_headers(Endpoint) ->
+%% HLC + auth + endpoint headers. `Method' is the uppercase verb, `Path'
+%% the request path (matching what the server signs), `ContentHash' the
+%% hex SHA-256 of the body (or the attachment digest).
+base_headers(Endpoint, Method, Path, ContentHash) ->
     [{?HLC_HEADER,
       base64:encode(barrel_hlc:encode(barrel_hlc:get_hlc()))}]
-    ++ auth_headers(Endpoint)
+    ++ auth_headers(Endpoint, Method, Path, ContentHash)
     ++ maps:get(headers, Endpoint, []).
 
 stream_opts(Endpoint) ->
-    [{pool, maps:get(pool, Endpoint, barrel_rep)},
-     {connect_timeout, maps:get(connect_timeout, Endpoint, 5000)},
-     {recv_timeout, maps:get(recv_timeout, Endpoint, 30000)}].
+    Base = [{pool, maps:get(pool, Endpoint, barrel_rep)},
+            {connect_timeout, maps:get(connect_timeout, Endpoint, 5000)},
+            {recv_timeout, maps:get(recv_timeout, Endpoint, 30000)}],
+    case ssl_options(Endpoint) of
+        [] -> Base;
+        Opts -> [{ssl_options, Opts} | Base]
+    end.
 
-auth_headers(#{auth := #{token := Token}}) ->
+%% Signed requests take precedence over bearer when configured; otherwise
+%% fall back to the (unchanged) bearer resolution.
+auth_headers(Endpoint, Method, Path, ContentHash) ->
+    case signing_config(Endpoint) of
+        #{key_id := KeyId, priv_key := PrivKey} ->
+            TsMs = erlang:system_time(millisecond),
+            Auth = barrel_sync_sig:sign(KeyId, PrivKey, Method, Path,
+                                        ContentHash, TsMs),
+            [{<<"authorization">>, Auth},
+             {<<"x-barrel-content-sha256">>, ContentHash}];
+        undefined ->
+            bearer_headers(Endpoint)
+    end.
+
+bearer_headers(#{auth := #{token := Token}}) ->
     [{<<"authorization">>, <<"Bearer ", Token/binary>>}];
-auth_headers(#{url := Url}) ->
+bearer_headers(#{url := Url}) ->
     Tokens = application:get_env(barrel_docdb, sync_auth, #{}),
     case maps:get(origin(Url), Tokens, undefined) of
         undefined -> [];
         Token -> [{<<"authorization">>, <<"Bearer ", Token/binary>>}]
     end.
+
+%% Signing config from the endpoint, else the app env
+%% `{barrel_docdb, sync_signing, #{Origin => #{key_id, priv_key}}}'
+%% (mirrors sync_auth; private keys never persist in task configs).
+signing_config(#{signing := Signing}) when is_map(Signing) ->
+    Signing;
+signing_config(#{url := Url}) ->
+    Cfg = application:get_env(barrel_docdb, sync_signing, #{}),
+    maps:get(origin(Url), Cfg, undefined).
+
+%% ssl_options from the endpoint, else app env
+%% `{barrel_docdb, sync_ssl, #{Origin => SslOptions}}'.
+ssl_options(#{ssl_options := Opts}) ->
+    Opts;
+ssl_options(#{url := Url}) ->
+    Cfg = application:get_env(barrel_docdb, sync_ssl, #{}),
+    maps:get(origin(Url), Cfg, []).
+
+method_bin(get) -> <<"GET">>;
+method_bin(post) -> <<"POST">>;
+method_bin(put) -> <<"PUT">>;
+method_bin(delete) -> <<"DELETE">>;
+method_bin(M) when is_binary(M) -> M.
 
 origin(Url) ->
     case binary:match(Url, <<"/db/">>) of

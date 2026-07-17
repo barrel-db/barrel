@@ -4,6 +4,20 @@ All notable changes to the Barrel umbrella are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and each app
 is versioned independently under [Semantic Versioning](https://semver.org/).
 
+## [2026-07-17] Sync-wire auth hardening + multi-protocol serving
+
+`barrel_server` gains opt-in Ed25519 signed-request auth and an mTLS transport
+gate for the replication wire (bearer stays the default and is unchanged), and
+serves HTTP/1.1, HTTP/2, and HTTP/3 via a new `listeners` config. The signing
+helpers ship in `barrel_docdb` (`barrel_sync_sig`), used by both the server
+verifier and the replication client. H3 is TLS-serving but not yet a client-cert
+gate; mapping a client cert to an identity needs a livery change and is deferred.
+
+| App | Version | Change |
+|-----|---------|--------|
+| barrel_server | 1.2.0 | signed-request + mTLS auth (opt-in); H1/H2/H3 serving |
+| barrel_docdb | 1.1.0 | `barrel_sync_sig`; transport signing + `ssl_options` |
+
 ## [2026-07-14] Embeddable server + GitHub CI
 
 The umbrella is tagged `v1.1.0`. `barrel_server` gains an embeddable route API:

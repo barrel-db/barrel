@@ -29,20 +29,57 @@
 -export([call/3]).
 
 %% @doc Middleware state from the app env; undefined = no auth.
+%%
+%% A config WITHOUT an `accept' key is legacy and behaves exactly as
+%% before (bearer only; empty/invalid = open). A config WITH `accept'
+%% opts into the multi-method system (bearer | signed | mtls) and is
+%% always installed (fail-closed on misconfiguration).
 -spec state_from_env() -> map() | undefined.
 state_from_env() ->
     case application:get_env(barrel_server, auth, undefined) of
         undefined ->
             undefined;
-        #{tokens := Tokens} when is_list(Tokens), Tokens =/= [] ->
-            #{hashes => [crypto:hash(sha256, T) || T <- Tokens]};
-        #{token := Token} when is_binary(Token) ->
-            #{hashes => [crypto:hash(sha256, Token)]};
+        Cfg when is_map(Cfg) ->
+            case maps:is_key(accept, Cfg) of
+                false -> legacy_state(Cfg);
+                true -> multi_state(Cfg)
+            end;
         Other ->
             logger:warning("ignoring invalid barrel_server auth config: ~p",
                            [Other]),
             undefined
     end.
+
+%% Legacy bearer-only config: byte-for-byte the previous behavior.
+legacy_state(#{tokens := Tokens}) when is_list(Tokens), Tokens =/= [] ->
+    base_state([crypto:hash(sha256, T) || T <- Tokens], #{}, [bearer], 300000);
+legacy_state(#{token := Token}) when is_binary(Token) ->
+    base_state([crypto:hash(sha256, Token)], #{}, [bearer], 300000);
+legacy_state(Other) ->
+    logger:warning("ignoring invalid barrel_server auth config: ~p", [Other]),
+    undefined.
+
+%% New-style config: accept => [bearer|signed|mtls], optional signers and
+%% skew. Unknown accept methods are dropped; an empty accept locks the
+%% server (every request 401s) rather than falling open.
+multi_state(Cfg) ->
+    Accept = [M || M <- maps:get(accept, Cfg, [bearer]),
+                   lists:member(M, [bearer, signed, mtls])],
+    Hashes = token_hashes(Cfg),
+    Signers = maps:get(signers, Cfg, #{}),
+    SkewMs = maps:get(skew_ms, Cfg, 300000),
+    base_state(Hashes, Signers, Accept, SkewMs).
+
+token_hashes(#{tokens := Tokens}) when is_list(Tokens) ->
+    [crypto:hash(sha256, T) || T <- Tokens];
+token_hashes(#{token := Token}) when is_binary(Token) ->
+    [crypto:hash(sha256, Token)];
+token_hashes(_) ->
+    [].
+
+base_state(Hashes, Signers, Accept, SkewMs) ->
+    #{hashes => Hashes, signers => Signers,
+      accept => Accept, skew_ms => SkewMs}.
 
 %% @doc The configured token hashes (undefined = open server). The
 %% MCP auth provider checks server bearers against the same set.
@@ -50,10 +87,11 @@ state_from_env() ->
 hashes() ->
     case state_from_env() of
         undefined -> undefined;
+        #{hashes := []} -> undefined;
         #{hashes := Hashes} -> Hashes
     end.
 
-call(Req, Next, #{hashes := Hashes}) ->
+call(Req, Next, State) ->
     case livery_req:path(Req) of
         <<"/health">> ->
             Next(Req);
@@ -63,23 +101,67 @@ call(Req, Next, #{hashes := Hashes}) ->
             %% tokens plus capability tokens
             Next(Req);
         Path ->
+            %% Capability tokens (bsp_...) are a scoped principal for the
+            %% agent layer and are handled as before, independent of the
+            %% global `accept' set. Everything else must satisfy one of
+            %% the accepted global methods.
             case livery_ext:bearer_token(Req) of
-                undefined ->
-                    unauthorized();
                 <<"bsp_", _/binary>> = Token ->
                     capability(Req, Next, Token, Path);
-                Token ->
-                    Hash = crypto:hash(sha256, Token),
-                    case lists:any(
-                             fun(Expected) ->
-                                 crypto:hash_equals(Hash, Expected)
-                             end,
-                             Hashes) of
+                _ ->
+                    case authorized(Req, State) of
                         true -> Next(Req);
                         false -> unauthorized()
                     end
             end
     end.
+
+%% True if any accepted global method authenticates the request.
+authorized(Req, #{accept := Accept} = State) ->
+    (lists:member(signed, Accept) andalso try_signed(Req, State))
+        orelse (lists:member(bearer, Accept) andalso try_bearer(Req, State))
+        orelse (lists:member(mtls, Accept) andalso mtls_ok(Req)).
+
+%% Ed25519 signed request: verify the signature, then consume it against
+%% the replay cache. Any failure (no header, unknown key, bad signature,
+%% stale timestamp, replay, or cache down) is a decline.
+try_signed(Req, #{signers := Signers, skew_ms := SkewMs}) ->
+    case barrel_sync_sig:parse_auth(
+             livery_req:header(<<"authorization">>, Req, undefined)) of
+        {ok, #{key_id := KeyId, ts := Ts, sig := Sig} = Parsed} ->
+            Method = livery_req:method(Req),
+            Path = livery_req:path(Req),
+            ContentHash = livery_req:header(<<"x-barrel-content-sha256">>,
+                                            Req, <<>>),
+            case barrel_sync_sig:verify(Method, Path, ContentHash,
+                                          Parsed, Signers, SkewMs) of
+                ok ->
+                    barrel_server_sig_cache:check_and_insert(
+                        {KeyId, Ts, Sig}, 2 * SkewMs) =:= ok;
+                {error, _} ->
+                    false
+            end;
+        _ ->
+            false
+    end.
+
+%% Constant-time global bearer check (bsp_ tokens never reach here).
+try_bearer(Req, #{hashes := Hashes}) ->
+    case livery_ext:bearer_token(Req) of
+        Token when is_binary(Token) ->
+            Hash = crypto:hash(sha256, Token),
+            lists:any(fun(Expected) -> crypto:hash_equals(Hash, Expected) end,
+                      Hashes);
+        _ ->
+            false
+    end.
+
+%% mTLS transport gate: a request that arrived over TLS is authenticated,
+%% relying on the listener's `fail_if_no_peer_cert' so arrival implies a
+%% verified client cert. H1-TLS surfaces `tls => #{}'; H2/H3 surface no
+%% tls today (see the companion livery change), so this is H1-only.
+mtls_ok(Req) ->
+    livery_req:tls(Req) =/= undefined.
 
 %% Capability tokens: agent-layer surface (rights enforced per route
 %% in the handlers), or the /db surface scoped to the granted space.
