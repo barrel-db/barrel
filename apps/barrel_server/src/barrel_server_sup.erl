@@ -25,6 +25,12 @@ start_link() ->
 init([]) ->
     SupFlags = #{strategy => one_for_one, intensity => 5, period => 10},
     Children = [
+        #{id => barrel_server_sig_cache,
+          start => {barrel_server_sig_cache, start_link, []},
+          restart => permanent,
+          shutdown => 5000,
+          type => worker,
+          modules => [barrel_server_sig_cache]},
         #{id => barrel_server_mcp_live,
           start => {barrel_server_mcp_live, start_link, []},
           restart => permanent,

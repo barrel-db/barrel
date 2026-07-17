@@ -33,17 +33,17 @@ them; each underlying app stays usable on its own.
 | FAISS index backend | Opt-in | `barrel_faiss`; needs the FAISS C++ library, excluded from the default build (`rebar3 as faiss`). |
 | Changes feed | Ready | `changes/2`, `subscribe/2`; HLC cursor via `hlc_encode/1`. |
 | BQL queries | Ready | PartiQL dialect over docs, vectors, and BM25; live SUBSCRIBE queries. See [query-bql](guides/query-bql.md). |
-| Synchronization / replication | Ready | Same VM and over HTTP (`/db/:db/_sync/*`); documents, attachments, channels, continuous tasks. Vectors rebuild locally. See [synchronization](guides/synchronization.md). |
+| Synchronization / replication | Ready | Same VM and over HTTP (`/db/:db/_sync/*`); documents, attachments, channels, continuous tasks. Bearer, Ed25519 signed-request, and mTLS auth (opt-in; bearer is the default). Vectors rebuild locally. See [synchronization](guides/synchronization.md). |
 | Timeline (branch, PITR, merge) | Ready | O(1) forks, point-in-time rewind, merge back as sync. See [timeline](guides/timeline.md). |
 | Audit and provenance | Ready | Retained history log; actor/session/source on writes; past bodies by version. See [audit-provenance](guides/audit-provenance.md). |
 | Document TTL | Ready | `expires_at` write option, lazy expiry, opt-in sweeper (`ttl_sweep_interval`). |
 | Encryption at rest | Opt-in | Per-database keys via `barrel_keyprovider`; EncryptedEnv plus a sector cipher for flat files. See [encryption](guides/encryption.md). |
-| REST/JSON server | Opt-in | `barrel_server` over `livery`, `rebar3 as server`. See [rest-server](guides/rest-server.md). |
+| REST/JSON server | Opt-in | `barrel_server` over `livery`, `rebar3 as server`; serves HTTP/1.1 (default) plus opt-in HTTP/2 and HTTP/3 over TLS. See [rest-server](guides/rest-server.md). |
 | Agent layer (spaces, capabilities, sessions, handoffs) | Ready | `barrel_spaces`; capability bearers on REST and MCP. See [spaces](guides/spaces.md). |
 | MCP endpoint (tools, resources, live queries) | Opt-in | `/mcp` in `barrel_server`, on by default there. See [mcp](guides/mcp.md). |
 | Browser client (barrel-lite) | Ready | Offline-first TypeScript client (`clients/barrel-lite`): OPFS store, HLC-stamped writes, sync over the wire (polling or continuous SSE), multi-tab, attachment sync, a local BQL subset matching the server, and vector search (embedding pull + brute-force cosine top-k over the synced set, with server `/search` delegation; no ANN in the browser). See [barrel-lite](guides/barrel-lite.md). |
 | CORS + capability tokens on `/db` | Ready | CORS middleware and `bsp_` bearers scoped to their space's `/db` routes, so browsers can sync. See [rest-server](guides/rest-server.md). |
-| gRPC, HTTP/3, WebTransport, unix socket, OpenAPI | Planned | Later transports on `barrel_server`. |
+| gRPC, WebTransport, unix socket, OpenAPI | Planned | Later transports on `barrel_server`. |
 | SQL API, agentfs | Planned | Later. |
 
 ## Where things run

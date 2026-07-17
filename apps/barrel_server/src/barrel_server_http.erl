@@ -61,16 +61,14 @@
 
 -spec start_link() -> {ok, pid()} | {error, term()}.
 start_link() ->
-    Port = application:get_env(barrel_server, http_port, 8080),
-    %% Request body ceiling (livery >= 0.5.1: one authoritative knob,
-    %% graceful abort past it); must clear the largest attachment
-    %% expected over _sync. JSON handlers stay bounded by
-    %% livery_body:read_all's own 16 MiB cap.
-    MaxBody = application:get_env(barrel_server, max_body,
-                                  1024 * 1024 * 1024),
+    %% Listener map (H1/H2/H3 + TLS/mTLS) from the app env; with no
+    %% `listeners' key this is a single cleartext H1 on `http_port'.
+    %% Request body ceiling (livery >= 0.5.1) rides in each listener; it
+    %% must clear the largest attachment expected over _sync (JSON
+    %% handlers stay bounded by livery_body:read_all's own 16 MiB cap).
     Router = livery_router:compile(routes()),
-    livery:start_service(#{
-        http => #{port => Port, max_body => MaxBody},
+    Listeners = barrel_server_listeners:service_listeners(),
+    livery:start_service(Listeners#{
         router => Router,
         middleware => middleware()
     }).

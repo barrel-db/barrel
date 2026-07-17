@@ -90,6 +90,63 @@ application:set_env(barrel_docdb, sync_auth,
                     #{<<"http://edge-1.example.com:8080">> => <<"s3cret">>}).
 ```
 
+## How (signed requests)
+
+Bearer tokens replay without TLS. For per-request Ed25519 authentication, add
+`accept` (the list of accepted methods) and `signers` (keyId to 32-byte raw
+public key). Each request is signed over `ts|keyId|method|path|sha256(body)`,
+with replay protection and a skew window. `accept => [bearer, signed]` accepts
+both, so a fleet rolls over node by node; `accept => [bearer]` (or no `accept`)
+is exactly the bearer-only behavior above.
+
+```erlang
+%% server: know each peer's public key
+application:set_env(barrel_server, auth,
+                    #{accept  => [bearer, signed],
+                      signers => #{<<"node1">> => PubKey32},
+                      skew_ms => 300000}).
+
+%% client: sign with the matching private key (endpoint or origin env)
+Signed = Endpoint#{signing => #{key_id => <<"node1">>, priv_key => Priv32}},
+%% or
+application:set_env(barrel_docdb, sync_signing,
+                    #{<<"https://edge-1.example.com:8443">> =>
+                          #{key_id => <<"node1">>, priv_key => Priv32}}).
+```
+
+Generate a key pair with `crypto:generate_key(eddsa, ed25519)`. Signing takes
+precedence over a bearer token on the same endpoint. Private keys are never
+written into persisted task configs.
+
+## How (TLS and mTLS)
+
+`barrel_server` serves cleartext HTTP/1.1 by default. Configure listeners to add
+HTTP/2 and HTTP/3, and TLS. Setting `verify => verify_peer` makes a listener a
+mutual-TLS gate: a client without a CA-signed certificate is refused at the
+handshake. The replication client speaks HTTP/1.1, so run the sync gate on an
+H1-over-TLS listener (`tls => true` on the `http` entry).
+
+```erlang
+application:set_env(barrel_server, listeners,
+                    #{http  => #{port => 8443, tls => true},  %% H1 over TLS
+                      https => #{port => 8444},               %% H2
+                      http3 => #{port => 8444}}),             %% H3
+application:set_env(barrel_server, tls,
+                    #{certfile => "server.pem", keyfile => "server.key",
+                      cacertfile => "ca.pem", verify => verify_peer}),
+application:set_env(barrel_server, auth, #{accept => [mtls]}).
+
+%% client: present its cert (endpoint or origin env)
+Mtls = Endpoint#{ssl_options => [{certfile, "client.pem"},
+                                 {keyfile, "client.key"},
+                                 {cacertfile, "ca.pem"}]}.
+```
+
+Notes: H1-TLS and H2 are full mTLS gates (OTP `ssl`). H3 serves over TLS but is
+not yet a client-cert gate (a QUIC-level change is pending); do not rely on H3
+for mTLS. Mapping a client cert to an identity/allowed-db needs a livery change
+and is not available yet.
+
 ## How (selective replication)
 
 Filters apply at the source. Path and query filters compose with AND:
