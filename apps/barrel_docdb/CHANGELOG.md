@@ -20,6 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   silently returns `ok` while leaking the files: the `data_dir` is remembered so
   the files are located and removed after close (#3). Default-`data_dir` deletes
   stay idempotent.
+- `subscribe/2,3`, `subscribe_query/2,3`, `branch_db/3`, `list_branches/1`, and
+  `merge_branch/2` now accept the pid returned by `create_db/2` (resolved to the
+  name), like the document functions, and return `{error, invalid_db_ref}` for a
+  dead or non-database pid instead of silently doing nothing (#4).
 
 ## [1.0.0] - 2026-07-10
 

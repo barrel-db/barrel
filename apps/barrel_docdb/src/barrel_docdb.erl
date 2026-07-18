@@ -257,6 +257,10 @@ create_db(Name) ->
 %% }).
 %% '''
 %%
+%% The returned pid and the database name are interchangeable across the
+%% API (documents, subscriptions, branches, ...); the name is the stable
+%% identity, the pid a convenience.
+%%
 %% @param Name The database name as a binary
 %% @param Opts Configuration options map
 %% @returns `{ok, Pid}' on success, `{error, already_exists}' if database exists
@@ -320,24 +324,38 @@ validate_db_name_chars(_) ->
 open_db(Name) when is_binary(Name) ->
     get_db(Name).
 
-%% @doc Fork a database into a new branch (timeline). See
+%% @doc Fork a database into a new branch (timeline). `Parent' is the
+%% database name or the pid returned by create_db/2. See
 %% barrel_timeline:branch_db/3 for the options.
--spec branch_db(binary(), binary(), map()) ->
+-spec branch_db(binary() | pid(), binary(), map()) ->
     {ok, pid()} | {error, term()}.
 branch_db(Parent, BranchName, Opts) ->
-    barrel_timeline:branch_db(Parent, BranchName, Opts).
+    case resolve_db_name(Parent) of
+        {ok, ParentName} ->
+            barrel_timeline:branch_db(ParentName, BranchName, Opts);
+        {error, _} = Err ->
+            Err
+    end.
 
 %% @doc The OPEN branches of a database (a branch that exists on disk
-%% but is not running is not listed).
--spec list_branches(binary()) -> [binary()].
+%% but is not running is not listed). `Parent' is the database name or
+%% the pid from create_db/2; an unknown reference lists nothing.
+-spec list_branches(binary() | pid()) -> [binary()].
 list_branches(Parent) ->
-    barrel_timeline:list_branches(Parent).
+    case resolve_db_name(Parent) of
+        {ok, ParentName} -> barrel_timeline:list_branches(ParentName);
+        {error, _} -> []
+    end.
 
-%% @doc Merge a branch's edits back into its parent. See
+%% @doc Merge a branch's edits back into its parent. `Branch' is the
+%% branch database name or the pid from create_db/2. See
 %% barrel_timeline:merge_branch/2.
--spec merge_branch(binary(), map()) -> {ok, map()} | {error, term()}.
+-spec merge_branch(binary() | pid(), map()) -> {ok, map()} | {error, term()}.
 merge_branch(Branch, Opts) ->
-    barrel_timeline:merge_branch(Branch, Opts).
+    case resolve_db_name(Branch) of
+        {ok, BranchName} -> barrel_timeline:merge_branch(BranchName, Opts);
+        {error, _} = Err -> Err
+    end.
 
 %% @doc Close a database.
 %%
@@ -2105,9 +2123,10 @@ new_hlc() ->
 %% @param Pattern MQTT-style path pattern to match
 %% @returns `{ok, SubRef}' on success, `{error, invalid_pattern}' if pattern is invalid
 %% @see unsubscribe/1
--spec subscribe(db_name(), binary()) -> {ok, reference()} | {error, term()}.
-subscribe(DbName, Pattern) ->
-    subscribe(DbName, Pattern, #{}).
+-spec subscribe(binary() | pid(), binary()) ->
+    {ok, reference()} | {error, term()}.
+subscribe(Db, Pattern) ->
+    subscribe(Db, Pattern, #{}).
 
 %% @doc Subscribe to document changes with options.
 %%
@@ -2116,15 +2135,19 @@ subscribe(DbName, Pattern) ->
 %% == Options ==
 %% Currently no options are supported (reserved for future use).
 %%
-%% @param DbName The database name
+%% @param Db The database name or the pid returned by create_db/2
 %% @param Pattern MQTT-style path pattern to match
 %% @param Opts Options map (reserved for future use)
 %% @returns `{ok, SubRef}' on success, `{error, invalid_pattern}' if pattern is invalid
 %% @see subscribe/2
 %% @see unsubscribe/1
--spec subscribe(db_name(), binary(), map()) -> {ok, reference()} | {error, term()}.
-subscribe(DbName, Pattern, _Opts) ->
-    barrel_sub:subscribe(DbName, Pattern, self()).
+-spec subscribe(binary() | pid(), binary(), map()) ->
+    {ok, reference()} | {error, term()}.
+subscribe(Db, Pattern, _Opts) ->
+    case resolve_db_name(Db) of
+        {ok, DbName} -> barrel_sub:subscribe(DbName, Pattern, self());
+        {error, _} = Err -> Err
+    end.
 
 %% @doc Unsubscribe from document change notifications.
 %%
@@ -2181,25 +2204,28 @@ unsubscribe(SubRef) ->
 %% @returns `{ok, SubRef}' on success, `{error, Reason}' on failure
 %% @see subscribe_query/3
 %% @see unsubscribe_query/1
--spec subscribe_query(db_name(), barrel_query:query_spec()) ->
+-spec subscribe_query(binary() | pid(), barrel_query:query_spec()) ->
     {ok, reference()} | {error, term()}.
-subscribe_query(DbName, Query) ->
-    subscribe_query(DbName, Query, #{}).
+subscribe_query(Db, Query) ->
+    subscribe_query(Db, Query, #{}).
 
 %% @doc Subscribe to document changes matching a query with options.
 %%
 %% Same as {@link subscribe_query/2} but with additional options.
 %%
-%% @param DbName The database name
+%% @param Db The database name or the pid returned by create_db/2
 %% @param Query Query specification
 %% @param Opts Options (reserved for future use)
 %% @returns `{ok, SubRef}' on success, `{error, Reason}' on failure
 %% @see subscribe_query/2
 %% @see unsubscribe_query/1
--spec subscribe_query(db_name(), barrel_query:query_spec(), map()) ->
+-spec subscribe_query(binary() | pid(), barrel_query:query_spec(), map()) ->
     {ok, reference()} | {error, term()}.
-subscribe_query(DbName, Query, _Opts) ->
-    barrel_query_sub:subscribe(DbName, Query, self()).
+subscribe_query(Db, Query, _Opts) ->
+    case resolve_db_name(Db) of
+        {ok, DbName} -> barrel_query_sub:subscribe(DbName, Query, self());
+        {error, _} = Err -> Err
+    end.
 
 %% @doc Unsubscribe from query-based change notifications.
 %%
@@ -2224,19 +2250,35 @@ unsubscribe_query(SubRef) ->
 %% Internal Functions
 %%====================================================================
 
-%% @private Extract database name from pid or binary
+%% @private Extract a database name from a pid or binary, for metrics
+%% labels. Falls back to <<"unknown">> when a pid cannot be resolved.
 -spec db_name(binary() | pid()) -> binary().
-db_name(Name) when is_binary(Name) ->
-    Name;
-db_name(Pid) when is_pid(Pid) ->
-    %% For pid, we need to look up the name - use unknown for metrics if not found
-    case process_info(Pid, registered_name) of
-        {registered_name, _} ->
-            %% Try to find name from persistent_term
-            <<"unknown">>;
-        _ ->
-            <<"unknown">>
+db_name(Ref) ->
+    case resolve_db_name(Ref) of
+        {ok, Name} -> Name;
+        {error, _} -> <<"unknown">>
     end.
+
+%% @private Resolve a database reference (name or the pid returned by
+%% create_db/2) to its name. A pid is reverse-looked-up in the registry;
+%% a dead or non-database pid yields `{error, invalid_db_ref}' so that
+%% name-only calls (subscribe, branch_db, ...) fail fast instead of
+%% silently no-op'ing (see #4).
+-spec resolve_db_name(binary() | pid()) ->
+    {ok, binary()} | {error, invalid_db_ref}.
+resolve_db_name(Name) when is_binary(Name) ->
+    {ok, Name};
+resolve_db_name(Pid) when is_pid(Pid) ->
+    find_db_name(Pid, persistent_term:get());
+resolve_db_name(_Other) ->
+    {error, invalid_db_ref}.
+
+find_db_name(_Pid, []) ->
+    {error, invalid_db_ref};
+find_db_name(Pid, [{{barrel_db, Name}, Pid} | _]) when is_binary(Name) ->
+    {ok, Name};
+find_db_name(Pid, [_ | Rest]) ->
+    find_db_name(Pid, Rest).
 
 %% @private Get database pid by name
 -spec get_db(binary()) -> {ok, pid()} | {error, not_found}.
