@@ -45,7 +45,8 @@ groups() ->
             replicate_multiple_docs,
             replicate_with_updates,
             replicate_deleted_doc,
-            replicate_checkpoint_persistence
+            replicate_checkpoint_persistence,
+            no_progress_seq_guard
         ]},
         {filtered_replication, [sequence], [
             replicate_with_query_filter,
@@ -470,6 +471,21 @@ replicate_checkpoint_persistence(_Config) ->
     ct:pal("Target has ~p changes", [length(TargetDocs)]),
     ?assert(length(TargetDocs) >= 8),
 
+    ok.
+
+%% The drain-loop progress guard: a non-empty batch must advance the
+%% sequence past what was requested, otherwise the loop would spin forever
+%% re-requesting the same point. `first' precedes every real sequence.
+no_progress_seq_guard(_Config) ->
+    T1 = barrel_hlc:now(),
+    T2 = barrel_hlc:now(),
+    ?assertEqual(gt, barrel_hlc:compare(T2, T1)),
+    ?assert(barrel_rep_checkpoint:seq_advanced(first, T1)),
+    ?assert(barrel_rep_checkpoint:seq_advanced(T1, T2)),
+    ?assertNot(barrel_rep_checkpoint:seq_advanced(T1, T1)),
+    ?assertNot(barrel_rep_checkpoint:seq_advanced(T2, T1)),
+    ?assertNot(barrel_rep_checkpoint:seq_advanced(T1, first)),
+    ?assertNot(barrel_rep_checkpoint:seq_advanced(first, first)),
     ok.
 
 %%====================================================================

@@ -52,6 +52,11 @@
     headers => [{binary(), binary()}]
 }.
 
+%% Overall wall-clock budget for a single request. recv_timeout bounds
+%% each receive but not the whole request, so a slow-trickle peer could
+%% otherwise block a continuous task forever.
+-define(REQUEST_TIMEOUT, 300000).
+
 -define(HLC_HEADER, <<"x-barrel-hlc">>).
 -define(DIGEST_HEADER, <<"x-barrel-digest">>).
 -define(ORIGIN_HEADER, <<"x-barrel-att-origin">>).
@@ -435,13 +440,34 @@ req(#{url := BaseUrl} = Endpoint, Method, PathSuffix, BodyTerm,
               ++ base_headers(Endpoint, method_bin(Method), url_path(Url),
                               ContentHash),
     HttpOpts = [with_body | stream_opts(Endpoint)],
-    case hackney:request(Method, Url, Headers, Body, HttpOpts) of
+    Deadline = maps:get(request_timeout, Endpoint, ?REQUEST_TIMEOUT),
+    case bounded_request(Method, Url, Headers, Body, HttpOpts, Deadline) of
         {ok, Status, RespHeaders, RespBody} ->
             ok = barrel_hlc:maybe_sync_from_header(
                 header_value(?HLC_HEADER, RespHeaders)),
             {ok, Status, decode_body(RespBody)};
         {error, Reason} ->
             {error, {transport, Reason}}
+    end.
+
+%% Run hackney:request under an overall wall-clock deadline. hackney
+%% reclaims the pooled connection when the request process is killed, so a
+%% stalled peer cannot pin the calling task indefinitely.
+bounded_request(Method, Url, Headers, Body, HttpOpts, Deadline) ->
+    Parent = self(),
+    {Pid, Ref} = spawn_monitor(fun() ->
+        Parent ! {self(), hackney:request(Method, Url, Headers, Body, HttpOpts)}
+    end),
+    receive
+        {Pid, Result} ->
+            erlang:demonitor(Ref, [flush]),
+            Result;
+        {'DOWN', Ref, process, Pid, Reason} ->
+            {error, Reason}
+    after Deadline ->
+        exit(Pid, kill),
+        receive {'DOWN', Ref, process, Pid, _} -> ok after 0 -> ok end,
+        {error, request_timeout}
     end.
 
 %% HLC + auth + endpoint headers. `Method' is the uppercase verb, `Path'

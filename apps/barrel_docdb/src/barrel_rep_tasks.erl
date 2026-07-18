@@ -49,7 +49,8 @@
 ]).
 
 %% gen_server callbacks
--export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
+-export([init/1, handle_call/3, handle_cast/2, handle_continue/2,
+         handle_info/2, terminate/2]).
 
 -define(SERVER, ?MODULE).
 -define(TASKS_DB, <<"_replication_tasks">>).
@@ -174,13 +175,26 @@ get_task_pid(TaskId) ->
 %%====================================================================
 
 init([]) ->
-    %% Ensure tasks database exists
-    ensure_tasks_db(),
-    %% Schedule task check
-    erlang:send_after(?CHECK_INTERVAL, self(), check_tasks),
-    %% Restore persisted tasks
-    State = restore_tasks(#state{}),
-    {ok, State}.
+    %% Trap exits so a task crash arrives as {'EXIT',...} (handled below)
+    %% rather than taking the manager down, and so a manager restart tears
+    %% its linked tasks down before restore re-creates them (otherwise old
+    %% tasks orphan and double on every restart).
+    process_flag(trap_exit, true),
+    %% Open the tasks db and restore off the boot path, so a slow or failing
+    %% store open cannot stall or crash the supervisor.
+    {ok, #state{}, {continue, startup}}.
+
+handle_continue(startup, State) ->
+    case ensure_tasks_db() of
+        ok ->
+            erlang:send_after(?CHECK_INTERVAL, self(), check_tasks),
+            {noreply, restore_tasks(State)};
+        {error, Reason} ->
+            logger:warning("barrel_rep_tasks: tasks db unavailable (~p); "
+                           "retrying", [Reason]),
+            erlang:send_after(?CHECK_INTERVAL, self(), startup_retry),
+            {noreply, State}
+    end.
 
 handle_call({start_task, Config}, _From, State) ->
     case do_start_task(Config, State) of
@@ -243,10 +257,6 @@ handle_cast({task_complete, TaskId}, State) ->
     NewRunning = maps:remove(TaskId, State#state.running),
     {noreply, State#state{running = NewRunning}};
 
-handle_cast({task_progress, TaskId, LastSeq}, State) ->
-    _ = update_task_seq(TaskId, LastSeq),
-    {noreply, State};
-
 handle_cast({task_error, TaskId, Reason}, State) ->
     _ = update_task_status(TaskId, failed,
                            #{<<"error">> => format_reason(Reason)}),
@@ -267,7 +277,12 @@ handle_info(check_tasks, State) ->
     erlang:send_after(?CHECK_INTERVAL, self(), check_tasks),
     {noreply, NewState};
 
-handle_info({'DOWN', _Ref, process, Pid, Reason}, State) ->
+handle_info(startup_retry, State) ->
+    {noreply, State, {continue, startup}};
+
+handle_info({'EXIT', Pid, Reason}, State) ->
+    %% A linked task process exited (crash, normal, or shutdown). The
+    %% manager's own supervisor exit is handled by gen_server, not here.
     NewState = handle_task_down(Pid, Reason, State),
     {noreply, NewState};
 
@@ -406,15 +421,13 @@ start_task_process(#{id := TaskId, config := Config} = Task, State) ->
     %% Get last sequence
     LastSeq = maps:get(last_seq, Task, first),
 
-    %% Spawn task process (use spawn + monitor, not spawn_link)
-    %% This prevents a crashing task from bringing down the gen_server
+    %% Link the task to the manager (which traps exits): the task dies
+    %% with the manager, and a task crash arrives as {'EXIT',...} without
+    %% taking the manager down.
     Self = self(),
-    Pid = spawn(fun() ->
+    Pid = spawn_link(fun() ->
         run_task(Self, TaskId, Config, SourceTransport, TargetTransport, LastSeq)
     end),
-
-    %% Monitor the process for crash detection
-    erlang:monitor(process, Pid),
 
     %% Update status
     _ = update_task_status(TaskId, running),
@@ -458,11 +471,13 @@ run_task(Parent, TaskId, Config, SourceTransport, TargetTransport, StartSeq) ->
                 run_direction(Ctx0, Target, Source, TargetTransport,
                               SourceTransport, StartSeq);
             both ->
-                %% Bidirectional: run both push and pull concurrently
-                %% This is simplified - for production we'd want separate checkpoints
-                Self = self(),
+                %% Bidirectional: run both push and pull concurrently.
+                %% Simplified (shared checkpoint). Both directions keep the
+                %% manager as their parent (Ctx0) so their progress/error
+                %% casts are actually read, not sent to this task process
+                %% where nothing receives them.
                 spawn_link(fun() ->
-                    run_direction(Ctx0#{parent := Self}, Source, Target,
+                    run_direction(Ctx0, Source, Target,
                                   SourceTransport, TargetTransport,
                                   StartSeq)
                 end),
@@ -518,15 +533,23 @@ run_task_loop(Ctx, Since) ->
             run_task_loop(wait_for_wake(Ctx), Since);
 
         {ok, Changes, LastSeq} ->
-            case replicate_batch(From, To, FromTransport, ToTransport,
-                                 Changes, WaitFor) of
-                ok ->
-                    %% Update checkpoint
-                    gen_server:cast(Parent,
-                                    {task_progress, TaskId, LastSeq}),
-                    run_task_loop(reset_pacing(Ctx), LastSeq);
-                {error, Reason} ->
-                    handle_loop_error(Ctx, Since, Reason)
+            case barrel_rep_checkpoint:seq_advanced(Since, LastSeq) of
+                false ->
+                    %% Non-empty batch that did not advance the sequence: a
+                    %% non-conforming source. Continuous backs off, one-shot
+                    %% fails, instead of spinning at 100% CPU forever.
+                    handle_loop_error(Ctx, Since, no_progress);
+                true ->
+                    case replicate_batch(From, To, FromTransport, ToTransport,
+                                         Changes, WaitFor) of
+                        ok ->
+                            %% Persist the checkpoint here in the task
+                            %% process, off the manager's message loop.
+                            _ = update_task_seq(TaskId, LastSeq),
+                            run_task_loop(reset_pacing(Ctx), LastSeq);
+                        {error, Reason} ->
+                            handle_loop_error(Ctx, Since, Reason)
+                    end
             end;
         {error, Reason} ->
             handle_loop_error(Ctx, Since, Reason)
@@ -692,8 +715,12 @@ ensure_tasks_db() ->
         {ok, _} ->
             ok;
         {error, not_found} ->
-            {ok, _} = barrel_docdb:create_db(?TASKS_DB),
-            ok
+            case barrel_docdb:create_db(?TASKS_DB) of
+                {ok, _} -> ok;
+                {error, _} = E -> E
+            end;
+        {error, _} = E ->
+            E
     end.
 
 restore_tasks(State) ->
