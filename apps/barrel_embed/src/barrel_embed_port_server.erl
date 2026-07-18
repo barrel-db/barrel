@@ -161,7 +161,7 @@ handle_info(_Info, State) ->
     {noreply, State}.
 
 terminate(_Reason, #state{port = Port}) ->
-    catch port_close(Port),
+    _ = try port_close(Port) catch _:_ -> ok end,
     ok.
 
 %%====================================================================

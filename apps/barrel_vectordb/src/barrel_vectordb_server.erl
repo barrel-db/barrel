@@ -927,7 +927,7 @@ terminate(_Reason, #state{db = Db, index = Index, index_module = Mod, cf_hnsw = 
     %% The disk BM25 backend holds file + nested RocksDB handles
     _ = case {BM25Backend, BM25} of
         {disk, Idx} when Idx =/= undefined ->
-            catch barrel_vectordb_bm25_disk:close(Idx);
+            try barrel_vectordb_bm25_disk:close(Idx) catch _:_ -> ok end;
         _ ->
             ok
     end,

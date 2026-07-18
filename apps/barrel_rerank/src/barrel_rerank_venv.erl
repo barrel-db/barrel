@@ -219,6 +219,6 @@ collect_output(Port, Acc) ->
             Output = iolist_to_binary(lists:reverse(Acc)),
             {error, {exit_code, Code, Output}}
     after 600000 ->
-        catch port_close(Port),
+        _ = try port_close(Port) catch _:_ -> ok end,
         {error, timeout}
     end.
