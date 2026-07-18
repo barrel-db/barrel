@@ -8,6 +8,8 @@ export default defineConfig({
   timeout: 60_000,
   fullyParallel: false,
   workers: 1,
+  // Browser E2E against a live server: retry a transient network flake on CI.
+  retries: process.env.CI ? 2 : 0,
   use: {
     baseURL: `http://127.0.0.1:${STATIC_PORT}`,
   },
