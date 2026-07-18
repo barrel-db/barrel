@@ -1,0 +1,20 @@
+{application, barrel_ngram, [
+    {description, "Trigram substring and regex index over barrel_docdb documents"},
+    {vsn, "0.1.0"},
+    {registered, [barrel_ngram_sup, barrel_ngram_registry]},
+    {mod, {barrel_ngram_app, []}},
+    {applications, [
+        kernel,
+        stdlib,
+        barrel_docdb
+    ]},
+    {env, [
+        {data_dir, "data/barrel_ngram"}
+    ]},
+    {modules, []},
+    {licenses, ["Apache-2.0"]},
+    {doc, "https://docs.barrel-db.eu/ngram"},
+    {links, [
+        {"GitHub", "https://github.com/barrel-db/barrel"}
+    ]}
+]}.
