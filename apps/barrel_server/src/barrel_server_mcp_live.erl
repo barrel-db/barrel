@@ -41,6 +41,9 @@
     barrel_sub :: #{ref := reference(), pid := pid()},
     mref :: reference(),
     rows = #{} :: #{binary() | non_neg_integer() => map()},
+    %% Cached id-sorted rows, so a snapshot poll does not re-sort the whole
+    %% set in the bridge loop. Invalidated (undefined) on any row change.
+    sorted :: [map()] | undefined,
     seq = 0 :: non_neg_integer(),
     ready = false :: boolean(),
     error :: undefined | binary(),
@@ -60,8 +63,17 @@ start_link() ->
 -spec subscribe(binary(), binary(), map(), binary() | undefined) ->
     {ok, binary(), binary()} | {error, term()}.
 subscribe(DbName, Bql, Params, SessionId) ->
-    gen_server:call(?MODULE, {subscribe, DbName, Bql, Params, SessionId},
-                    30000).
+    %% Open the database in the caller's process, not the bridge loop: a
+    %% cold or large open must not block every other subscribe/snapshot/
+    %% unsubscribe call queued on the singleton bridge.
+    case barrel_server_dbs:ensure(DbName) of
+        {ok, Db} ->
+            gen_server:call(?MODULE,
+                            {subscribe, DbName, Db, Bql, Params, SessionId},
+                            30000);
+        {error, _} = Err ->
+            Err
+    end.
 
 -spec unsubscribe(binary()) -> ok | {error, not_found}.
 unsubscribe(SubId) ->
@@ -89,11 +101,11 @@ init([]) ->
     {ok, #{subs => #{}, by_ref => #{}}}.
 
 %% @private
-handle_call({subscribe, DbName, Bql, Params, SessionId}, _From,
+handle_call({subscribe, DbName, Db, Bql, Params, SessionId}, _From,
             #{subs := Subs} = State) ->
     case check_caps(SessionId, Subs) of
         ok ->
-            do_subscribe(DbName, Bql, Params, SessionId, State);
+            do_subscribe(DbName, Db, Bql, Params, SessionId, State);
         {error, _} = Err ->
             {reply, Err, State}
     end;
@@ -107,7 +119,8 @@ handle_call({unsubscribe, SubId}, _From, #{subs := Subs} = State) ->
 handle_call({snapshot, SubId}, _From, #{subs := Subs} = State) ->
     case maps:find(SubId, Subs) of
         {ok, Sub} ->
-            {reply, {ok, snapshot_of(Sub)}, State};
+            {Snap, Sub1} = snapshot_of(Sub),
+            {reply, {ok, Snap}, put_sub(Sub1, State)};
         error ->
             {reply, {error, not_found}, State}
     end;
@@ -180,32 +193,29 @@ terminate(_Reason, #{subs := Subs}) ->
 %% Subscribe / drop
 %%====================================================================
 
-do_subscribe(DbName, Bql, Params, SessionId, State) ->
-    case barrel_server_dbs:ensure(DbName) of
-        {ok, Db} ->
-            SubOpts = #{params => Params, owner => self()},
-            case barrel:subscribe_query(Db, Bql, SubOpts) of
-                {ok, #{ref := Ref, pid := Pid} = BSub} ->
-                    _ = barrel_dbs:pin(DbName),
-                    SubId = new_sub_id(),
-                    Uri = live_uri(DbName, SubId),
-                    Sub = #sub{
-                        id = SubId,
-                        uri = Uri,
-                        db = DbName,
-                        session = SessionId,
-                        barrel_sub = BSub,
-                        mref = erlang:monitor(process, Pid)
-                    },
-                    #{subs := Subs, by_ref := ByRef} = State,
-                    State1 = State#{
-                        subs => Subs#{SubId => Sub},
-                        by_ref => ByRef#{Ref => SubId}
-                    },
-                    {reply, {ok, SubId, Uri}, State1};
-                {error, _} = Err ->
-                    {reply, Err, State}
-            end;
+do_subscribe(DbName, Db, Bql, Params, SessionId, State) ->
+    %% The database is already open (ensured by the caller). subscribe_query
+    %% owns the bridge as the row owner, so it must run here.
+    SubOpts = #{params => Params, owner => self()},
+    case barrel:subscribe_query(Db, Bql, SubOpts) of
+        {ok, #{ref := Ref, pid := Pid} = BSub} ->
+            _ = barrel_dbs:pin(DbName),
+            SubId = new_sub_id(),
+            Uri = live_uri(DbName, SubId),
+            Sub = #sub{
+                id = SubId,
+                uri = Uri,
+                db = DbName,
+                session = SessionId,
+                barrel_sub = BSub,
+                mref = erlang:monitor(process, Pid)
+            },
+            #{subs := Subs, by_ref := ByRef} = State,
+            State1 = State#{
+                subs => Subs#{SubId => Sub},
+                by_ref => ByRef#{Ref => SubId}
+            },
+            {reply, {ok, SubId, Uri}, State1};
         {error, _} = Err ->
             {reply, Err, State}
     end.
@@ -260,25 +270,35 @@ put_sub(#sub{id = SubId} = Sub, #{subs := Subs} = State) ->
 add_row(Row, #sub{rows = Rows, seq = Seq} = Sub) ->
     case Row of
         #{<<"id">> := Id} ->
-            Sub#sub{rows = Rows#{Id => Row}};
+            Sub#sub{rows = Rows#{Id => Row}, sorted = undefined};
         _ ->
-            Sub#sub{rows = Rows#{Seq => Row}, seq = Seq + 1}
+            Sub#sub{rows = Rows#{Seq => Row}, seq = Seq + 1,
+                    sorted = undefined}
     end.
 
 apply_change(#{action := remove, id := Id}, #sub{rows = Rows} = Sub) ->
-    Sub#sub{rows = maps:remove(Id, Rows)};
+    Sub#sub{rows = maps:remove(Id, Rows), sorted = undefined};
 apply_change(#{id := Id, row := Row}, #sub{rows = Rows} = Sub) ->
-    Sub#sub{rows = Rows#{Id => Row}};
+    Sub#sub{rows = Rows#{Id => Row}, sorted = undefined};
 apply_change(_Change, Sub) ->
     Sub.
 
-snapshot_of(#sub{ready = Ready, rows = Rows, error = Error}) ->
-    Sorted = [Row || {_K, Row} <- lists:keysort(1, maps:to_list(Rows))],
+%% Returns the snapshot and the sub with its sorted-rows cache filled, so a
+%% repeated poll with no row changes reuses the sort.
+snapshot_of(#sub{ready = Ready, error = Error} = Sub) ->
+    {Sorted, Sub1} = sorted_rows(Sub),
     Base = #{ready => Ready, count => length(Sorted), rows => Sorted},
-    case Error of
+    Snap = case Error of
         undefined -> Base;
         _ -> Base#{error => Error}
-    end.
+    end,
+    {Snap, Sub1}.
+
+sorted_rows(#sub{sorted = Sorted} = Sub) when Sorted =/= undefined ->
+    {Sorted, Sub};
+sorted_rows(#sub{rows = Rows} = Sub) ->
+    Sorted = [Row || {_K, Row} <- lists:keysort(1, maps:to_list(Rows))],
+    {Sorted, Sub#sub{sorted = Sorted}}.
 
 %%====================================================================
 %% Debounce and sweep
