@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1] - 2026-07-18
+
+### Fixed
+- `search` caps `k` and allocates its result buffers inside the try, so an
+  oversized `k` returns an error instead of aborting the VM across the C ABI.
+- `on_upgrade` re-opens the index resource type; an unknown metric atom is
+  rejected instead of defaulting to L2; `close` runs on a dirty scheduler.
+
 ## [1.0.0] - 2026-07-10
 
 Coordinated umbrella release. See the umbrella [CHANGELOG](../../CHANGELOG.md).

@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.0] - 2026-07-18
+
+### Added
+- `barrel_vectordb:start_supervised/1` and `barrel_vectordb_store_sup`: start a
+  store parented to a supervisor (not the caller), reusing a store already
+  running for the name, so it outlives the process that opened it.
+
+### Fixed
+- The batch subspace-ADC NIF bounds-checks the tables and code binaries before
+  reading, so a truncated or mismatched input is rejected instead of read out of
+  bounds; radii are read through an aligned buffer; the list conversions run on a
+  dirty scheduler; non-finite distances map to a defined value.
+- The RocksDB write batch is released on every add/delete path; the name registry
+  drops a monitor on unregister; a failed BM25 index open deletes the ETS tables
+  it created.
+
 ## [2.1.2] - 2026-07-11
 
 ### Fixed
