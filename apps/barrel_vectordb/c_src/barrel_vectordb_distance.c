@@ -192,7 +192,7 @@ ERL_NIF_TERM nif_dot_product(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[]
 
     double result = do_dot_product(a, b, n);
 
-    return enif_make_double(env, result);
+    return make_finite_double(env, result);
 }
 
 /**
@@ -227,7 +227,7 @@ ERL_NIF_TERM nif_cosine_distance(ErlNifEnv* env, int argc, const ERL_NIF_TERM ar
     double cosine = dot / denom;
     double distance = 1.0 - cosine;
 
-    return enif_make_double(env, distance);
+    return make_finite_double(env, distance);
 }
 
 /**
@@ -253,7 +253,7 @@ ERL_NIF_TERM nif_cosine_distance_normalized(ErlNifEnv* env, int argc, const ERL_
     double dot = do_dot_product(a, b, n);
     double distance = 1.0 - dot;
 
-    return enif_make_double(env, distance);
+    return make_finite_double(env, distance);
 }
 
 /**
@@ -279,7 +279,7 @@ ERL_NIF_TERM nif_euclidean_distance(ErlNifEnv* env, int argc, const ERL_NIF_TERM
     double sq_dist = do_euclidean_distance_sq(a, b, n);
     double distance = sqrt(sq_dist);
 
-    return enif_make_double(env, distance);
+    return make_finite_double(env, distance);
 }
 
 /**

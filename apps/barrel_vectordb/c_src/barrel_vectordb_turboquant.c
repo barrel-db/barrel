@@ -233,12 +233,13 @@ ERL_NIF_TERM nif_tq_adc_distance(ErlNifEnv* env, int argc, const ERL_NIF_TERM ar
 
     int num_pairs = tables_bin.size / table_row_bytes;
 
-    /* Calculate code component sizes */
-    int radius_bytes = num_pairs * 2;
-    int angle_bits = num_pairs * bits;
-    int angle_bytes = (angle_bits + 7) / 8;
+    /* Calculate code component sizes (size_t so large tables cannot
+     * overflow the byte math and defeat the bounds check below) */
+    size_t radius_bytes = (size_t)num_pairs * 2;
+    size_t angle_bits = (size_t)num_pairs * bits;
+    size_t angle_bytes = (angle_bits + 7) / 8;
 
-    if (code_bin.size < TQ_HEADER_SIZE + radius_bytes + angle_bytes) {
+    if (code_bin.size < (size_t)TQ_HEADER_SIZE + radius_bytes + angle_bytes) {
         return enif_make_badarg(env);
     }
 
@@ -259,7 +260,7 @@ ERL_NIF_TERM nif_tq_adc_distance(ErlNifEnv* env, int argc, const ERL_NIF_TERM ar
 
     enif_free(angle_indices);
 
-    return enif_make_double(env, distance);
+    return make_finite_double(env, distance);
 }
 
 /**
@@ -290,10 +291,10 @@ ERL_NIF_TERM nif_tq_batch_adc_distance(ErlNifEnv* env, int argc, const ERL_NIF_T
     }
 
     int num_pairs = tables_bin.size / table_row_bytes;
-    int radius_bytes = num_pairs * 2;
-    int angle_bits = num_pairs * bits;
-    int angle_bytes = (angle_bits + 7) / 8;
-    size_t min_code_size = TQ_HEADER_SIZE + radius_bytes + angle_bytes;
+    size_t radius_bytes = (size_t)num_pairs * 2;
+    size_t angle_bits = (size_t)num_pairs * bits;
+    size_t angle_bytes = (angle_bits + 7) / 8;
+    size_t min_code_size = (size_t)TQ_HEADER_SIZE + radius_bytes + angle_bytes;
 
     const float* tables = (const float*)tables_bin.data;
 
@@ -301,6 +302,12 @@ ERL_NIF_TERM nif_tq_batch_adc_distance(ErlNifEnv* env, int argc, const ERL_NIF_T
     unsigned int list_len;
     if (!enif_get_list_length(env, argv[1], &list_len)) {
         return enif_make_badarg(env);
+    }
+
+    /* Empty batch: return [] without a zero-size alloc (enif_alloc(0)
+     * may return NULL and spuriously raise badarg) */
+    if (list_len == 0) {
+        return enif_make_list(env, 0);
     }
 
     /* Allocate result array */
@@ -339,7 +346,7 @@ ERL_NIF_TERM nif_tq_batch_adc_distance(ErlNifEnv* env, int argc, const ERL_NIF_T
         unpack_bits(angles_packed, bits, num_pairs, angle_indices);
 
         double distance = do_adc_distance(tables, table_row_floats, radii, angle_indices, num_pairs);
-        results[i] = enif_make_double(env, distance);
+        results[i] = make_finite_double(env, distance);
 
         list = tail;
         i++;

@@ -227,31 +227,41 @@ ERL_NIF_TERM nif_tqs_adc_distance(ErlNifEnv* env, int argc, const ERL_NIF_TERM a
         const float* table_data = (const float*)tables_ptr;
         tables_ptr += table_size;
 
-        /* Calculate subspace dimensions */
-        int table_row_bytes = table_row_floats * sizeof(float);
+        /* Calculate subspace dimensions (size_t byte math so a large
+         * table cannot overflow and defeat the bounds check) */
+        size_t table_row_bytes = (size_t)table_row_floats * sizeof(float);
+        if (table_size % table_row_bytes != 0) {
+            return enif_make_badarg(env);
+        }
         int num_pairs = table_size / table_row_bytes;
         int subdim = num_pairs * 2;
 
         /* Calculate code component sizes */
-        int radius_bytes = num_pairs * 2;
-        int angle_bits = num_pairs * bits;
-        int angle_bytes = (angle_bits + 7) / 8;
-        int qjl_bytes = (subdim + 7) / 8;
-        int subspace_code_size = radius_bytes + angle_bytes + qjl_bytes;
+        size_t radius_bytes = (size_t)num_pairs * 2;
+        size_t angle_bits = (size_t)num_pairs * bits;
+        size_t angle_bytes = (angle_bits + 7) / 8;
+        size_t qjl_bytes = ((size_t)subdim + 7) / 8;
+        size_t subspace_code_size = radius_bytes + angle_bytes + qjl_bytes;
 
         if (code_ptr + subspace_code_size > code_bin.data + code_bin.size) {
             return enif_make_badarg(env);
         }
 
-        /* Parse radii and angles */
-        const uint16_t* radii = (const uint16_t*)code_ptr;
+        /* Copy radii into an aligned buffer: code_ptr can land on an odd
+         * offset when subspace_code_size is odd, so a uint16_t* cast would
+         * be an unaligned load (UB) */
         const uint8_t* angles_packed = code_ptr + radius_bytes;
 
-        /* Unpack angle indices */
         uint32_t* angle_indices = enif_alloc(num_pairs * sizeof(uint32_t));
         if (!angle_indices) {
             return enif_make_badarg(env);
         }
+        uint16_t* radii = enif_alloc(num_pairs * sizeof(uint16_t));
+        if (!radii) {
+            enif_free(angle_indices);
+            return enif_make_badarg(env);
+        }
+        memcpy(radii, code_ptr, radius_bytes);
         unpack_bits(angles_packed, bits, num_pairs, angle_indices);
 
         /* Compute squared distance for this subspace */
@@ -259,11 +269,12 @@ ERL_NIF_TERM nif_tqs_adc_distance(ErlNifEnv* env, int argc, const ERL_NIF_TERM a
                                                        radii, angle_indices, num_pairs);
         total_sq += subspace_sq;
 
+        enif_free(radii);
         enif_free(angle_indices);
         code_ptr += subspace_code_size;
     }
 
-    return enif_make_double(env, sqrt(total_sq > 0.0 ? total_sq : 0.0));
+    return make_finite_double(env, sqrt(total_sq > 0.0 ? total_sq : 0.0));
 }
 
 /**
@@ -290,6 +301,12 @@ ERL_NIF_TERM nif_tqs_batch_adc_distance(ErlNifEnv* env, int argc, const ERL_NIF_
         return enif_make_badarg(env);
     }
 
+    /* Empty batch: return [] without a zero-size alloc (enif_alloc(0)
+     * may return NULL and spuriously raise badarg) */
+    if (list_len == 0) {
+        return enif_make_list(env, 0);
+    }
+
     ERL_NIF_TERM* results = enif_alloc(list_len * sizeof(ERL_NIF_TERM));
     if (!results) {
         return enif_make_badarg(env);
@@ -304,9 +321,9 @@ ERL_NIF_TERM nif_tqs_batch_adc_distance(ErlNifEnv* env, int argc, const ERL_NIF_
         uint32_t size;
         int num_pairs;
         int subdim;
-        int radius_bytes;
-        int angle_bytes;
-        int code_size;
+        size_t radius_bytes;
+        size_t angle_bytes;
+        size_t code_size;
     } subspace_info_t;
 
     subspace_info_t* subspace_info = enif_alloc(m * sizeof(subspace_info_t));
@@ -315,36 +332,58 @@ ERL_NIF_TERM nif_tqs_batch_adc_distance(ErlNifEnv* env, int argc, const ERL_NIF_
         return enif_make_badarg(env);
     }
 
+    const uint8_t* tables_end = tables_bin.data + tables_bin.size;
     const uint8_t* tables_ptr = tables_bin.data;
     for (int s = 0; s < m; s++) {
+        /* Bounds-check the size prefix and table body before reading,
+         * as the single-shot path does. Without this a truncated or
+         * mismatched Tables binary reads out of bounds. */
+        if (tables_ptr + 4 > tables_end) {
+            enif_free(subspace_info);
+            enif_free(results);
+            return enif_make_badarg(env);
+        }
         uint32_t table_size = ((uint32_t)tables_ptr[0] << 24) |
                               ((uint32_t)tables_ptr[1] << 16) |
                               ((uint32_t)tables_ptr[2] << 8) |
                               ((uint32_t)tables_ptr[3]);
         tables_ptr += 4;
 
+        if (table_size > (size_t)(tables_end - tables_ptr)) {
+            enif_free(subspace_info);
+            enif_free(results);
+            return enif_make_badarg(env);
+        }
+
+        size_t table_row_bytes = (size_t)table_row_floats * sizeof(float);
+        if (table_size % table_row_bytes != 0) {
+            enif_free(subspace_info);
+            enif_free(results);
+            return enif_make_badarg(env);
+        }
+
         subspace_info[s].data = (const float*)tables_ptr;
         subspace_info[s].size = table_size;
         tables_ptr += table_size;
 
-        int table_row_bytes = table_row_floats * sizeof(float);
         int num_pairs = table_size / table_row_bytes;
         int subdim = num_pairs * 2;
 
         subspace_info[s].num_pairs = num_pairs;
         subspace_info[s].subdim = subdim;
-        subspace_info[s].radius_bytes = num_pairs * 2;
+        subspace_info[s].radius_bytes = (size_t)num_pairs * 2;
 
-        int angle_bits = num_pairs * bits;
+        size_t angle_bits = (size_t)num_pairs * bits;
         subspace_info[s].angle_bytes = (angle_bits + 7) / 8;
 
-        int qjl_bytes = (subdim + 7) / 8;
+        size_t qjl_bytes = ((size_t)subdim + 7) / 8;
         subspace_info[s].code_size = subspace_info[s].radius_bytes +
                                       subspace_info[s].angle_bytes + qjl_bytes;
     }
 
-    /* Find max num_pairs for buffer allocation */
-    int max_pairs = 0;
+    /* Find max num_pairs for buffer allocation (at least 1 so the
+     * scratch allocations below never call enif_alloc(0)) */
+    int max_pairs = 1;
     for (int s = 0; s < m; s++) {
         if (subspace_info[s].num_pairs > max_pairs) {
             max_pairs = subspace_info[s].num_pairs;
@@ -353,6 +392,15 @@ ERL_NIF_TERM nif_tqs_batch_adc_distance(ErlNifEnv* env, int argc, const ERL_NIF_
 
     uint32_t* angle_indices = enif_alloc(max_pairs * sizeof(uint32_t));
     if (!angle_indices) {
+        enif_free(subspace_info);
+        enif_free(results);
+        return enif_make_badarg(env);
+    }
+    /* Aligned radii scratch: code_ptr can land on an odd offset, so read
+     * radii through this buffer instead of an unaligned uint16_t* cast */
+    uint16_t* radii = enif_alloc(max_pairs * sizeof(uint16_t));
+    if (!radii) {
+        enif_free(angle_indices);
         enif_free(subspace_info);
         enif_free(results);
         return enif_make_badarg(env);
@@ -370,17 +418,28 @@ ERL_NIF_TERM nif_tqs_batch_adc_distance(ErlNifEnv* env, int argc, const ERL_NIF_
             code_bin.data[0] != TQS_VERSION ||
             code_bin.data[1] != (uint8_t)bits ||
             code_bin.data[2] != (uint8_t)m) {
+            enif_free(radii);
             enif_free(angle_indices);
             enif_free(subspace_info);
             enif_free(results);
             return enif_make_badarg(env);
         }
 
+        const uint8_t* code_end = code_bin.data + code_bin.size;
         const uint8_t* code_ptr = code_bin.data + TQS_HEADER_SIZE;
         double total_sq = 0.0;
 
         for (int s = 0; s < m; s++) {
-            const uint16_t* radii = (const uint16_t*)code_ptr;
+            /* Bounds-check this subspace's code slice before reading it */
+            if (subspace_info[s].code_size > (size_t)(code_end - code_ptr)) {
+                enif_free(radii);
+                enif_free(angle_indices);
+                enif_free(subspace_info);
+                enif_free(results);
+                return enif_make_badarg(env);
+            }
+
+            memcpy(radii, code_ptr, subspace_info[s].radius_bytes);
             const uint8_t* angles_packed = code_ptr + subspace_info[s].radius_bytes;
 
             unpack_bits(angles_packed, bits, subspace_info[s].num_pairs, angle_indices);
@@ -393,11 +452,12 @@ ERL_NIF_TERM nif_tqs_batch_adc_distance(ErlNifEnv* env, int argc, const ERL_NIF_
             code_ptr += subspace_info[s].code_size;
         }
 
-        results[i] = enif_make_double(env, sqrt(total_sq > 0.0 ? total_sq : 0.0));
+        results[i] = make_finite_double(env, sqrt(total_sq > 0.0 ? total_sq : 0.0));
         list = tail;
         i++;
     }
 
+    enif_free(radii);
     enif_free(angle_indices);
     enif_free(subspace_info);
 

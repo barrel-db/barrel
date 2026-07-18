@@ -190,6 +190,38 @@ split_subvectors_test_() ->
         end}
     ].
 
+%% The batch ADC NIF must reject malformed Tables/Codes with badarg
+%% instead of reading out of bounds, and return [] for an empty batch.
+nif_safety_test_() ->
+    {ok, Config} = barrel_vectordb_turboquant_subspace:new(#{dimension => 768, m => 8}),
+    Query = [rand:uniform() - 0.5 || _ <- lists:seq(1, 768)],
+    Vec = [rand:uniform() - 0.5 || _ <- lists:seq(1, 768)],
+    Tables = barrel_vectordb_turboquant_subspace:precompute_tables(Config, Query),
+    Code = barrel_vectordb_turboquant_subspace:encode(Config, Vec),
+    <<_Ver:8, Bits:8, M:8, _:8, _/binary>> = Code,
+    Nif = fun(T, C) -> barrel_vectordb_nif:tqs_batch_adc_distance(T, C, Bits, M) end,
+    [
+        {"empty batch returns []", fun() ->
+            ?assertEqual([], Nif(Tables, []))
+        end},
+        {"valid batch returns one distance per code", fun() ->
+            [D1, D2] = Nif(Tables, [Code, Code]),
+            ?assert(is_float(D1) andalso is_float(D2)),
+            ?assert(D1 >= 0.0)
+        end},
+        {"truncated tables raise badarg, no crash", fun() ->
+            ?assertError(badarg, Nif(<<>>, [Code])),
+            ?assertError(badarg, Nif(<<0, 0, 0>>, [Code])),
+            ?assertError(badarg, Nif(<<255, 255, 255, 255>>, [Code]))
+        end},
+        {"truncated code raises badarg, no crash", fun() ->
+            HeaderOnly = binary:part(Code, 0, 4),
+            ?assertError(badarg, Nif(Tables, [HeaderOnly])),
+            Half = binary:part(Code, 0, max(4, byte_size(Code) div 2)),
+            ?assertError(badarg, Nif(Tables, [Half]))
+        end}
+    ].
+
 %% Performance comparison test (disabled by default, run manually)
 performance_comparison_test_() ->
     {timeout, 60, fun() ->

@@ -52,6 +52,11 @@ static int on_upgrade(ErlNifEnv* env, void** priv_data, void** old_priv_data, ER
     if (faiss_nif::init_atoms(env) != 0) {
         return -1;
     }
+    // Re-open the resource type (RT_TAKEOVER) so post-upgrade index ops and
+    // destructors resolve into the new library instead of the unloaded one.
+    if (faiss_nif::init_resources(env) != 0) {
+        return -1;
+    }
     return 0;
 }
 
@@ -59,7 +64,7 @@ static ErlNifFunc nif_funcs[] = {
     // Phase 1: Index management
     {"new", 2, faiss_nif::nif_new, 0},
     {"index_factory", 3, faiss_nif::nif_index_factory, 0},
-    {"close", 1, faiss_nif::nif_close, 0},
+    {"close", 1, faiss_nif::nif_close, ERL_NIF_DIRTY_JOB_CPU_BOUND},
     {"dimension", 1, faiss_nif::nif_dimension, 0},
     {"is_trained", 1, faiss_nif::nif_is_trained, 0},
     {"ntotal", 1, faiss_nif::nif_ntotal, 0},
