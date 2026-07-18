@@ -195,7 +195,12 @@ init(Config) ->
                                     #{<<"ok">> := false, <<"error">> := Err} ->
                                         port_close(Port),
                                         {stop, {python_error, Err}}
-                                end
+                                end;
+                            {Port, {exit_status, Status}} ->
+                                %% Python died at startup (import error, OOM,
+                                %% failed model download): fail fast instead
+                                %% of blocking the full timeout.
+                                {stop, {port_exited, Status}}
                         after Timeout ->
                             port_close(Port),
                             {stop, timeout}
