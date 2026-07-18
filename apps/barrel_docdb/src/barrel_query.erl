@@ -392,7 +392,14 @@ execute_chunked_resume(StoreRef, DbName, Plan, Token, Opts) ->
             %% Validate cursor matches current query
             %% Currently validate_cursor_for_plan always returns ok
             ok = validate_cursor_for_plan(QueryType, Plan),
-            execute_chunked_with_snapshot(StoreRef, DbName, Plan, ChunkSize, LastKey, Snapshot);
+            Result = execute_chunked_with_snapshot(
+                       StoreRef, DbName, Plan, ChunkSize, LastKey, Snapshot),
+            %% This chunk either handed the shared snapshot to a successor
+            %% cursor (has_more) or released it (has_more = false). Drop this
+            %% cursor's entry without releasing the snapshot again, so its
+            %% TTL cleanup can't release a snapshot a later chunk still uses.
+            barrel_query_cursor:detach(Token),
+            Result;
         {error, expired} ->
             {error, cursor_expired};
         {error, not_found} ->

@@ -637,6 +637,20 @@ api_fold_docs(_Config) ->
         lists:seq(1, 5)
     ),
 
+    %% id_prefix bounds the fold to matching ids (was ignored, degrading a
+    %% prefix fold into a full scan). Add a differently-prefixed doc.
+    {ok, _} = barrel_docdb:put_doc(DbName,
+        #{<<"id">> => <<"session:1">>, <<"n">> => 99}),
+    {ok, Prefixed} = barrel_docdb:fold_docs(DbName,
+        fun(Doc, Acc) -> {ok, [maps:get(<<"id">>, Doc) | Acc]} end,
+        [], #{id_prefix => <<"doc">>}),
+    ?assertEqual([<<"doc1">>, <<"doc2">>, <<"doc3">>, <<"doc4">>, <<"doc5">>],
+                 lists:sort(Prefixed)),
+    {ok, Sessions} = barrel_docdb:fold_docs(DbName,
+        fun(Doc, Acc) -> {ok, [maps:get(<<"id">>, Doc) | Acc]} end,
+        [], #{id_prefix => <<"session:">>}),
+    ?assertEqual([<<"session:1">>], Sessions),
+
     %% Cleanup
     ok = barrel_docdb:delete_db(DbName),
     os:cmd("rm -rf " ++ TestDir),
