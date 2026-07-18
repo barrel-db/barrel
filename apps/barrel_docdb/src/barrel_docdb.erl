@@ -55,6 +55,10 @@
 
 -include("barrel_docdb.hrl").
 
+%% Durable, node-global control-plane database (node id, per-db data_dir
+%% index, etc.). Not replicated.
+-define(SYSTEM_DB, <<"_barrel_system">>).
+
 %% Database lifecycle
 -export([
     create_db/1,
@@ -264,7 +268,13 @@ create_db(Name, Opts) when is_binary(Name) ->
                 {ok, _Pid} ->
                     {error, already_exists};
                 {error, not_found} ->
-                    barrel_db_sup:start_db(Name, Opts)
+                    case barrel_db_sup:start_db(Name, Opts) of
+                        {ok, _Pid} = Ok ->
+                            register_db_dir(Name, Opts),
+                            Ok;
+                        Err ->
+                            Err
+                    end
             end;
         {error, _} = Err ->
             Err
@@ -370,9 +380,14 @@ close_db(Pid) when is_pid(Pid) ->
 delete_db(Name) when is_binary(Name) ->
     delete_db(Name, #{}).
 
-%% @doc Delete a database, locating a CLOSED database's files under
-%% `data_dir' (the option, else the app env default). Open databases
-%% are stopped first, using their actual path.
+%% @doc Delete a database, locating a CLOSED database's files under its
+%% `data_dir'. Resolution order: the `data_dir' option, else the dir
+%% remembered when the db was created with a per-db `data_dir' (see
+%% {@link create_db/2}), else the app env default. Open databases are
+%% stopped first, using their actual path.
+%%
+%% Databases created before per-db `data_dir' was remembered have no
+%% record; pass their `data_dir' explicitly via this function.
 -spec delete_db(binary(), map()) -> ok | {error, term()}.
 delete_db(Name, Opts) when is_binary(Name), is_map(Opts) ->
     case validate_db_name(Name) of
@@ -383,7 +398,7 @@ delete_db(Name, Opts) when is_binary(Name), is_map(Opts) ->
     end.
 
 do_delete_db(Name, Opts) ->
-    case get_db(Name) of
+    Result = case get_db(Name) of
         {ok, Pid} ->
             {ok, Info} = barrel_db_server:info(Pid),
             DbPath = maps:get(db_path, Info),
@@ -391,15 +406,13 @@ do_delete_db(Name, Opts) ->
             %% Remove data directory via stdlib (no shell, no injection).
             del_db_dir(DbPath);
         {error, not_found} ->
-            %% Not open: remove the on-disk files where they would
-            %% live. Databases created under a data_dir that is
-            %% neither the option nor the app env cannot be located;
-            %% pass delete_db/2 with their data_dir.
-            DefaultDataDir = application:get_env(barrel_docdb, data_dir,
-                                                 "/tmp/barrel_data"),
-            DataDir = maps:get(data_dir, Opts, DefaultDataDir),
+            %% Not open: resolve the on-disk location from the option,
+            %% the remembered per-db data_dir, or the app env default.
+            DataDir = closed_db_data_dir(Name, Opts),
             del_db_dir(filename:join(DataDir, binary_to_list(Name)))
-    end.
+    end,
+    forget_db_dir(Name),
+    Result.
 
 del_db_dir(DbPath) ->
     case file:del_dir_r(DbPath) of
@@ -407,6 +420,101 @@ del_db_dir(DbPath) ->
         {error, enoent} -> ok;
         {error, _} = Err -> Err
     end.
+
+%%====================================================================
+%% Per-db data_dir index (#3)
+%%
+%% A database can live in any directory (the `data_dir' option is
+%% arbitrary), so once it is closed its files cannot be found from the
+%% name alone. We remember `name -> data_dir' in the durable, node-global
+%% ?SYSTEM_DB so delete_db/1 can still locate and remove the files. The
+%% default data_dir needs no entry; internal dbs (`_' prefix) are skipped
+%% so the system db itself never recurses.
+%%====================================================================
+
+db_dir_key(Name) -> <<"_dbdir:", Name/binary>>.
+
+register_db_dir(<<"_", _/binary>>, _Opts) ->
+    ok;
+register_db_dir(Name, Opts) ->
+    case maps:get(data_dir, Opts, undefined) of
+        undefined ->
+            ok;
+        DataDir ->
+            DirBin = unicode:characters_to_binary(DataDir),
+            try put_system_doc(db_dir_key(Name),
+                               #{<<"data_dir">> => DirBin}) of
+                ok ->
+                    ok;
+                Other ->
+                    warn_db_dir(Name, Other)
+            catch
+                Class:Reason ->
+                    warn_db_dir(Name, {Class, Reason})
+            end
+    end.
+
+warn_db_dir(Name, Reason) ->
+    logger:warning("barrel_docdb: could not record data_dir for ~ts: ~p",
+                   [Name, Reason]),
+    ok.
+
+%% Resolve a closed db's data_dir: explicit option, else the recorded
+%% per-db dir, else the global default.
+closed_db_data_dir(Name, Opts) ->
+    case maps:get(data_dir, Opts, undefined) of
+        undefined ->
+            case lookup_db_dir(Name) of
+                {ok, DataDir} -> DataDir;
+                not_found -> default_data_dir()
+            end;
+        DataDir ->
+            DataDir
+    end.
+
+lookup_db_dir(Name) ->
+    case system_db_available() of
+        true ->
+            try get_local_doc(?SYSTEM_DB, db_dir_key(Name)) of
+                {ok, #{<<"data_dir">> := DirBin}} ->
+                    {ok, unicode:characters_to_list(DirBin)};
+                _ ->
+                    not_found
+            catch
+                _:_ -> not_found
+            end;
+        false ->
+            not_found
+    end.
+
+forget_db_dir(<<"_", _/binary>>) ->
+    ok;
+forget_db_dir(Name) ->
+    case system_db_available() of
+        true ->
+            try delete_local_doc(?SYSTEM_DB, db_dir_key(Name))
+            catch _:_ -> ok
+            end,
+            ok;
+        false ->
+            ok
+    end.
+
+%% True when the ?SYSTEM_DB can be read without materializing it: open,
+%% or present on disk (opened on demand). A default-only node that never
+%% recorded a per-db dir never creates it.
+system_db_available() ->
+    case get_db(?SYSTEM_DB) of
+        {ok, _} ->
+            true;
+        {error, not_found} ->
+            SysPath = filename:join(default_data_dir(),
+                                    binary_to_list(?SYSTEM_DB)),
+            filelib:is_dir(SysPath) andalso ensure_system_db() =:= ok
+    end.
+
+default_data_dir() ->
+    application:get_env(barrel_docdb, data_dir, "/tmp/barrel_data").
 
 %% @doc Get database information.
 %%
@@ -1799,8 +1907,6 @@ fold_local_docs(Db, Prefix, Fun, Acc0) ->
 %% System documents are global (not per-database) and stored in a
 %% special _barrel_system database. They're used for global configuration
 %% like replication tasks, node settings, etc.
-
--define(SYSTEM_DB, <<"_barrel_system">>).
 
 %% @doc Ensure the system database exists.
 %% Called automatically by system_doc operations.

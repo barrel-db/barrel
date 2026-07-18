@@ -15,6 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   requests) and `ssl_options` (mTLS client cert), plus the `sync_signing` and
   `sync_ssl` app-env equivalents. Bearer auth is unchanged when neither is set.
 
+### Fixed
+- `delete_db/1` on a closed database created with a per-db `data_dir` no longer
+  silently returns `ok` while leaking the files: the `data_dir` is remembered so
+  the files are located and removed after close (#3). Default-`data_dir` deletes
+  stay idempotent.
+
 ## [1.0.0] - 2026-07-10
 
 First stable release. The `barrel_docdb` API is frozen: it will not break
