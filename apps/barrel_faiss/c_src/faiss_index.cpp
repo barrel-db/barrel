@@ -8,10 +8,15 @@
 #include <faiss/impl/IDSelector.h>
 
 #include <cstring>
+#include <cstdint>
 #include <mutex>
 #include <vector>
 
 namespace faiss_nif {
+
+// Upper bound on search top-k, to reject result buffers that would overflow
+// or demand an unreasonable allocation.
+static const int64_t SEARCH_MAX_K = 1000000;
 
 ErlNifResourceType* INDEX_RESOURCE_TYPE = nullptr;
 
@@ -39,12 +44,18 @@ int init_resources(ErlNifEnv* env) {
     return INDEX_RESOURCE_TYPE ? 0 : -1;
 }
 
-// Helper to get metric type from atom
-static faiss::MetricType get_metric(ErlNifEnv* env, ERL_NIF_TERM term) {
+// Helper to get metric type from atom. Returns false for an unknown atom
+// (rather than silently defaulting to L2 and producing wrong results).
+static bool get_metric(ErlNifEnv* env, ERL_NIF_TERM term, faiss::MetricType* out) {
     if (enif_is_identical(term, ATOM_INNER_PRODUCT)) {
-        return faiss::METRIC_INNER_PRODUCT;
+        *out = faiss::METRIC_INNER_PRODUCT;
+        return true;
     }
-    return faiss::METRIC_L2;
+    if (enif_is_identical(term, ATOM_L2)) {
+        *out = faiss::METRIC_L2;
+        return true;
+    }
+    return false;
 }
 
 // Phase 1: new/2 - create flat index
@@ -54,7 +65,10 @@ ERL_NIF_TERM nif_new(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[]) {
         return enif_make_badarg(env);
     }
 
-    faiss::MetricType metric = get_metric(env, argv[1]);
+    faiss::MetricType metric;
+    if (!get_metric(env, argv[1], &metric)) {
+        return enif_make_badarg(env);
+    }
 
     try {
         faiss::Index* index = new faiss::IndexFlat(dimension, metric);
@@ -87,11 +101,16 @@ ERL_NIF_TERM nif_index_factory(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv
     if (!enif_inspect_binary(env, argv[1], &desc_bin)) {
         return enif_make_badarg(env);
     }
-    std::string description(reinterpret_cast<char*>(desc_bin.data), desc_bin.size);
 
-    faiss::MetricType metric = get_metric(env, argv[2]);
+    faiss::MetricType metric;
+    if (!get_metric(env, argv[2], &metric)) {
+        return enif_make_badarg(env);
+    }
 
     try {
+        // Construct inside the try: a pathological Description could make
+        // the std::string ctor throw, which must not escape the NIF.
+        std::string description(reinterpret_cast<char*>(desc_bin.data), desc_bin.size);
         faiss::Index* index = faiss::index_factory(dimension, description.c_str(), metric);
 
         IndexResource* res = static_cast<IndexResource*>(
@@ -245,22 +264,31 @@ ERL_NIF_TERM nif_search(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[]) {
     int64_t nq = query_bin.size / vector_size;
     const float* queries = reinterpret_cast<const float*>(query_bin.data);
 
-    std::vector<float> distances(nq * k);
-    std::vector<int64_t> labels(nq * k);
+    // Guard the result-buffer size: k is caller-supplied and unbounded, so
+    // nq * k can overflow or demand a multi-TB allocation. Reject before
+    // allocating (an over-large std::vector would otherwise throw outside
+    // the try below and abort the VM across the C ABI).
+    if (nq > 0 && (k > SEARCH_MAX_K ||
+                   k > static_cast<int64_t>(SIZE_MAX / sizeof(int64_t)) / nq)) {
+        return make_error(env, "k_too_large");
+    }
 
+    size_t total = static_cast<size_t>(nq) * static_cast<size_t>(k);
+
+    ERL_NIF_TERM dist_term = 0, labels_term = 0;
     try {
+        std::vector<float> distances(total);
+        std::vector<int64_t> labels(total);
+
         res->index->search(nq, queries, k, distances.data(), labels.data());
+
+        unsigned char* dist_buf = enif_make_new_binary(env, total * sizeof(float), &dist_term);
+        unsigned char* labels_buf = enif_make_new_binary(env, total * sizeof(int64_t), &labels_term);
+        memcpy(dist_buf, distances.data(), total * sizeof(float));
+        memcpy(labels_buf, labels.data(), total * sizeof(int64_t));
     } catch (const std::exception& e) {
         return make_error(env, e.what());
     }
-
-    // Return as binaries
-    ERL_NIF_TERM dist_term, labels_term;
-    unsigned char* dist_buf = enif_make_new_binary(env, nq * k * sizeof(float), &dist_term);
-    unsigned char* labels_buf = enif_make_new_binary(env, nq * k * sizeof(int64_t), &labels_term);
-
-    memcpy(dist_buf, distances.data(), nq * k * sizeof(float));
-    memcpy(labels_buf, labels.data(), nq * k * sizeof(int64_t));
 
     return enif_make_tuple3(env, ATOM_OK, dist_term, labels_term);
 }
@@ -400,7 +428,6 @@ ERL_NIF_TERM nif_write_index(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[]
     if (!enif_inspect_binary(env, argv[1], &path_bin)) {
         return enif_make_badarg(env);
     }
-    std::string path(reinterpret_cast<char*>(path_bin.data), path_bin.size);
 
     std::shared_lock<std::shared_mutex> lock(res->rw_mutex);
     if (!res->index) {
@@ -408,6 +435,7 @@ ERL_NIF_TERM nif_write_index(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[]
     }
 
     try {
+        std::string path(reinterpret_cast<char*>(path_bin.data), path_bin.size);
         faiss::write_index(res->index, path.c_str());
         return ATOM_OK;
     } catch (const std::exception& e) {
@@ -421,9 +449,9 @@ ERL_NIF_TERM nif_read_index(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
     if (!enif_inspect_binary(env, argv[0], &path_bin)) {
         return enif_make_badarg(env);
     }
-    std::string path(reinterpret_cast<char*>(path_bin.data), path_bin.size);
 
     try {
+        std::string path(reinterpret_cast<char*>(path_bin.data), path_bin.size);
         faiss::Index* index = faiss::read_index(path.c_str());
 
         IndexResource* res = static_cast<IndexResource*>(

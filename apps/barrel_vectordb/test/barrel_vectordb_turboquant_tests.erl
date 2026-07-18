@@ -10,6 +10,15 @@
 %% Test Generators
 %%====================================================================
 
+%% Empty batch must return [] rather than a zero-size-alloc badarg.
+tq_batch_empty_nif_test() ->
+    {ok, Config} = barrel_vectordb_turboquant:new(#{dimension => 128}),
+    Query = [rand:uniform() - 0.5 || _ <- lists:seq(1, 128)],
+    Tables = barrel_vectordb_turboquant:precompute_tables(Config, Query),
+    Vec = [rand:uniform() - 0.5 || _ <- lists:seq(1, 128)],
+    <<_V:8, Bits:8, _/binary>> = barrel_vectordb_turboquant:encode(Config, Vec),
+    ?assertEqual([], barrel_vectordb_nif:tq_batch_adc_distance(Tables, [], Bits)).
+
 turboquant_test_() ->
     {foreach,
      fun setup/0,

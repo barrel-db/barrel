@@ -16,6 +16,20 @@
 #endif
 
 /* Shared helpers */
+
+/* enif_make_double raises badarg on a non-finite value. Distances derived
+ * from crafted/corrupt binaries can be NaN/Inf, so map those to a defined
+ * finite extreme (NaN and +Inf sort as "far", -Inf as "near") rather than
+ * letting the NIF raise mid-compute. */
+static inline ERL_NIF_TERM make_finite_double(ErlNifEnv* env, double v) {
+    if (isnan(v)) {
+        v = 1.0e38;
+    } else if (isinf(v)) {
+        v = (v > 0) ? 1.0e38 : -1.0e38;
+    }
+    return enif_make_double(env, v);
+}
+
 static inline float dequantize_radius(uint16_t quant) {
     if (quant == 0) return 0.0f;
     float t = (float)quant / 65535.0f * logf(11.0f);

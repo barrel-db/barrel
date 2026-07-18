@@ -41,8 +41,8 @@ static ErlNifFunc nif_funcs[] = {
     {"cosine_distance", 2, nif_cosine_distance, ERL_NIF_DIRTY_JOB_CPU_BOUND},
     {"cosine_distance_normalized", 2, nif_cosine_distance_normalized, ERL_NIF_DIRTY_JOB_CPU_BOUND},
     {"euclidean_distance", 2, nif_euclidean_distance, ERL_NIF_DIRTY_JOB_CPU_BOUND},
-    {"to_binary", 1, nif_to_binary, 0},
-    {"from_binary", 1, nif_from_binary, 0},
+    {"to_binary", 1, nif_to_binary, ERL_NIF_DIRTY_JOB_CPU_BOUND},
+    {"from_binary", 1, nif_from_binary, ERL_NIF_DIRTY_JOB_CPU_BOUND},
     /* TurboQuant */
     {"tq_adc_distance", 3, nif_tq_adc_distance, ERL_NIF_DIRTY_JOB_CPU_BOUND},
     {"tq_batch_adc_distance", 3, nif_tq_batch_adc_distance, ERL_NIF_DIRTY_JOB_CPU_BOUND},
