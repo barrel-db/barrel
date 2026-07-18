@@ -85,7 +85,12 @@
     retention_interval :: pos_integer(),  %% Interval between sweeps in ms
     ttl_sweep_interval = 0 :: non_neg_integer(),  %% Doc TTL sweep interval in ms (0 = off)
     ttl_sweep_batch = 512 :: pos_integer(),  %% Max expired docs per sweep pass
-    ttl_timer :: reference() | undefined  %% Timer for periodic TTL sweeps
+    ttl_timer :: reference() | undefined,  %% Timer for periodic TTL sweeps
+    %% In-flight compaction/retention/ttl workers, one per kind, run off the
+    %% writer loop. #{Kind => {Pid, Waiters, Periodic}}: Waiters are the
+    %% gen_server Froms to reply to; Periodic marks a worker that a timer
+    %% contributed to, so its completion re-arms the periodic timer.
+    sweep_workers = #{} :: #{atom() => {pid(), [term()], boolean()}}
 }).
 
 %% Default compaction settings
@@ -512,14 +517,14 @@ handle_call({delete_doc, DocId, Opts}, _From,
     end,
     {reply, Result, State};
 
-handle_call({fold_docs, Fun, Acc}, _From,
-            #state{name = DbName, store_ref = StoreRef} = State) ->
-    Result = do_fold_docs(StoreRef, DbName, Fun, Acc, #{}),
-    {reply, Result, State};
+handle_call({fold_docs, Fun, Acc}, From, State) ->
+    handle_call({fold_docs, Fun, Acc, #{}}, From, State);
 
 handle_call({fold_docs, Fun, Acc, Opts}, _From,
             #state{name = DbName, store_ref = StoreRef} = State) ->
-    Result = do_fold_docs(StoreRef, DbName, Fun, Acc, Opts),
+    %% Fallback path (store ref not yet published): reuse the caller-side
+    %% fold so prefix bounding and snapshot reads match the fast path.
+    Result = barrel_docdb_reader:fold_docs(StoreRef, DbName, Fun, Acc, Opts),
     {reply, Result, State};
 
 %% Embedding column write-back
@@ -528,21 +533,25 @@ handle_call({set_doc_embedding, DocId, ExpectedRev, Vector}, _From,
     Result = do_set_doc_embedding(StoreRef, DbName, DocId, ExpectedRev, Vector),
     {reply, Result, State};
 
-%% Retention sweep (manual trigger; also runs on the timer)
+%% Retention sweep (manual trigger; also runs on the timer). Runs in the
+%% shared worker so it does not block the writer loop; the reply is deferred
+%% until the sweep finishes.
 handle_call(sweep_retention, _From,
+            #state{retention_period = 0} = State) ->
+    {reply, {ok, #{retention => infinite}}, State};
+handle_call(sweep_retention, From,
             #state{name = DbName, store_ref = StoreRef, att_ref = AttRef,
                    retention_period = RetentionPeriod} = State) ->
-    Result = case RetentionPeriod of
-        0 -> {ok, #{retention => infinite}};
-        _ -> do_retention_sweep(StoreRef, AttRef, DbName, RetentionPeriod)
-    end,
-    {reply, Result, State};
+    Fun = fun() -> do_retention_sweep(StoreRef, AttRef, DbName,
+                                      RetentionPeriod) end,
+    {noreply, start_sweep(retention, Fun, From, false, State)};
 
-%% Doc TTL sweep (manual trigger; also runs on the timer)
-handle_call(ttl_sweep, _From,
+%% Doc TTL sweep (manual trigger; also runs on the timer).
+handle_call(ttl_sweep, From,
             #state{name = DbName, store_ref = StoreRef,
                    ttl_sweep_batch = Batch} = State) ->
-    {reply, do_ttl_sweep(StoreRef, DbName, Batch), State};
+    Fun = fun() -> do_ttl_sweep(StoreRef, DbName, Batch) end,
+    {noreply, start_sweep(ttl, Fun, From, false, State)};
 
 %% Tagged outbox operations
 handle_call({outbox_ack, Tag, Hlcs}, _From,
@@ -619,35 +628,43 @@ handle_cast(_Msg, State) ->
     {noreply, State}.
 
 %% @doc Handle other messages
-handle_info(compaction_check, #state{store_ref = StoreRef,
-                                      compaction_interval = Interval,
-                                      compaction_size_threshold = Threshold} = State) ->
-    %% Check database size and trigger compaction if needed
-    NewState = do_check_compaction(StoreRef, Threshold, State),
-    %% Restart timer for next check
-    TimerRef = erlang:send_after(Interval, self(), compaction_check),
-    {noreply, NewState#state{compaction_timer = TimerRef}};
+%% The periodic compaction/retention/ttl work runs in a monitored worker so
+%% it never blocks the writer loop (a long compaction used to make concurrent
+%% writes time out). The periodic timer is re-armed when the worker finishes.
+handle_info(compaction_check, #state{store_ref = StoreRef, name = Name,
+                                     compaction_size_threshold = Threshold}
+                              = State) ->
+    Fun = fun() -> do_check_compaction(StoreRef, Threshold, Name) end,
+    {noreply, start_sweep(compaction, Fun, none, true, State)};
 
 handle_info(retention_sweep, #state{name = DbName, store_ref = StoreRef,
                                     att_ref = AttRef,
-                                    retention_period = RetentionPeriod,
-                                    retention_interval = Interval} = State) ->
-    {ok, _Stats} = do_retention_sweep(StoreRef, AttRef, DbName,
-                                      RetentionPeriod),
-    TimerRef = erlang:send_after(Interval, self(), retention_sweep),
-    {noreply, State#state{retention_timer = TimerRef}};
+                                    retention_period = RetentionPeriod}
+                             = State) ->
+    Fun = fun() -> do_retention_sweep(StoreRef, AttRef, DbName,
+                                      RetentionPeriod) end,
+    {noreply, start_sweep(retention, Fun, none, true, State)};
 
 handle_info(ttl_sweep, #state{name = DbName, store_ref = StoreRef,
-                              ttl_sweep_interval = Interval,
                               ttl_sweep_batch = Batch} = State) ->
-    {ok, Swept} = do_ttl_sweep(StoreRef, DbName, Batch),
-    %% a full batch means more work is waiting: come back quickly
-    NextIn = case Swept >= Batch of
-        true -> 100;
-        false -> Interval
-    end,
-    TimerRef = erlang:send_after(NextIn, self(), ttl_sweep),
-    {noreply, State#state{ttl_timer = TimerRef}};
+    Fun = fun() -> do_ttl_sweep(StoreRef, DbName, Batch) end,
+    {noreply, start_sweep(ttl, Fun, none, true, State)};
+
+handle_info({sweep_done, Kind, Result}, State) ->
+    {noreply, finish_sweep(Kind, Result, State)};
+
+handle_info({'DOWN', _Ref, process, Pid, Reason},
+            #state{sweep_workers = Workers} = State) ->
+    %% Workers wrap their work in try/catch and always report via sweep_done,
+    %% so a DOWN normally arrives after the kind is already cleared. This is
+    %% the safety net for a worker that died without reporting.
+    case sweep_kind_of_pid(Pid, Workers) of
+        {ok, Kind} ->
+            {noreply, finish_sweep(Kind, {error, {sweep_crashed, Reason}},
+                                   State)};
+        error ->
+            {noreply, State}
+    end;
 
 handle_info(_Info, State) ->
     {noreply, State}.
@@ -769,10 +786,74 @@ crypto_marker_path(DbPath) ->
 add_env_opt(Opts, undefined) -> Opts;
 add_env_opt(Opts, Env) -> Opts#{env => Env}.
 
+%% @doc Start (or join) the single worker for a sweep kind. `From' is a
+%% gen_server From to reply to (or `none' for a timer-driven run); `Periodic'
+%% marks a timer contribution so the worker re-arms the periodic timer when
+%% it finishes. At most one worker per kind runs at a time.
+start_sweep(Kind, Fun, From, Periodic, #state{sweep_workers = Workers} = State) ->
+    case maps:find(Kind, Workers) of
+        {ok, {Pid, Waiters, WasPeriodic}} ->
+            %% Already running: attach this caller and OR in the periodic flag.
+            Workers1 = Workers#{Kind => {Pid, add_waiter(From, Waiters),
+                                         WasPeriodic orelse Periodic}},
+            State#state{sweep_workers = Workers1};
+        error ->
+            Server = self(),
+            {Pid, _MRef} = spawn_monitor(fun() ->
+                Result = try Fun()
+                         catch C:E:St -> {error, {sweep_failed, C, E, St}}
+                         end,
+                Server ! {sweep_done, Kind, Result}
+            end),
+            Workers1 = Workers#{Kind => {Pid, add_waiter(From, []), Periodic}},
+            State#state{sweep_workers = Workers1}
+    end.
+
+add_waiter(none, Waiters) -> Waiters;
+add_waiter(From, Waiters) -> [From | Waiters].
+
+%% A sweep worker finished: reply to any waiting callers, and re-arm the
+%% periodic timer when a timer contributed to this run.
+finish_sweep(Kind, Result, #state{sweep_workers = Workers} = State) ->
+    case maps:take(Kind, Workers) of
+        {{_Pid, Waiters, Periodic}, Workers1} ->
+            lists:foreach(fun(From) -> gen_server:reply(From, Result) end,
+                          lists:reverse(Waiters)),
+            State1 = State#state{sweep_workers = Workers1},
+            case Periodic of
+                true -> reschedule_sweep(Kind, Result, State1);
+                false -> State1
+            end;
+        error ->
+            State
+    end.
+
+%% Re-arm the periodic timer for a kind. A full TTL batch comes back quickly
+%% to drain the backlog; everything else waits the configured interval.
+reschedule_sweep(compaction, _Result, #state{compaction_interval = I} = State) ->
+    State#state{compaction_timer =
+                    erlang:send_after(I, self(), compaction_check)};
+reschedule_sweep(retention, _Result, #state{retention_interval = I} = State) ->
+    State#state{retention_timer =
+                    erlang:send_after(I, self(), retention_sweep)};
+reschedule_sweep(ttl, Result, #state{ttl_sweep_interval = Interval,
+                                     ttl_sweep_batch = Batch} = State) ->
+    NextIn = case Result of
+        {ok, Swept} when is_integer(Swept), Swept >= Batch -> 100;
+        _ -> Interval
+    end,
+    State#state{ttl_timer = erlang:send_after(NextIn, self(), ttl_sweep)}.
+
+sweep_kind_of_pid(Pid, Workers) ->
+    Match = [K || {K, {P, _, _}} <- maps:to_list(Workers), P =:= Pid],
+    case Match of
+        [Kind | _] -> {ok, Kind};
+        [] -> error
+    end.
+
 %% @doc Check database size and trigger compaction if threshold exceeded
 %% Called periodically by the compaction_check timer.
-do_check_compaction(StoreRef, Threshold, State) ->
-    #state{name = Name} = State,
+do_check_compaction(StoreRef, Threshold, Name) ->
     case barrel_store_rocksdb:get_db_size(StoreRef) of
         {ok, Size} when Size >= Threshold ->
             logger:info("Database ~s size ~p bytes exceeds threshold ~p, triggering compaction",
@@ -780,18 +861,18 @@ do_check_compaction(StoreRef, Threshold, State) ->
             case barrel_store_rocksdb:compact_default_cf(StoreRef) of
                 ok ->
                     logger:info("Database ~s compaction completed", [Name]),
-                    State;
+                    ok;
                 {error, Reason} ->
                     logger:warning("Database ~s compaction failed: ~p", [Name, Reason]),
-                    State
+                    {error, Reason}
             end;
         {ok, Size} ->
             logger:debug("Database ~s size ~p bytes below threshold ~p, skipping compaction",
                          [Name, Size, Threshold]),
-            State;
+            ok;
         {error, Reason} ->
             logger:warning("Failed to get database ~s size: ~p", [Name, Reason]),
-            State
+            {error, Reason}
     end.
 
 %% @private Release the store handle and registrations leaked by a
@@ -1565,61 +1646,6 @@ do_delete_doc(StoreRef, DbName, DocId, Opts) ->
                 false -> {ok, DeleteResult}
             end
     end.
-
-%% @doc Fold over all documents (using wide column entity)
-%% Options:
-%%   - include_deleted: boolean() - include deleted documents (default: false)
-%% Note: Uses regular key iteration since wide columns are stored per-key
-do_fold_docs(StoreRef, DbName, Fun, Acc, Opts) ->
-    Ks = barrel_keyspace:resolve(DbName),
-    StartKey = barrel_store_keys:doc_entity_prefix(Ks),
-    EndKey = barrel_store_keys:doc_entity_end(Ks),
-    PrefixLen = byte_size(StartKey),
-    IncludeDeleted = maps:get(include_deleted, Opts, false),
-
-    FoldFun = fun(Key, _Value, AccIn) ->
-        %% Extract DocId from key (after prefix)
-        DocId = binary:part(Key, PrefixLen, byte_size(Key) - PrefixLen),
-        %% Get entity to access columns
-        case barrel_store_rocksdb:get_entity(StoreRef, Key) of
-            {ok, Columns} ->
-                Rev = barrel_version:to_token(
-                    barrel_version:decode(
-                        proplists:get_value(?COL_VERSION, Columns))),
-                Deleted = bin_to_deleted(proplists:get_value(?COL_DELETED, Columns, <<"false">>)),
-                case {Deleted andalso not IncludeDeleted,
-                      barrel_docdb_reader:expired(Columns)} of
-                    {true, _} ->
-                        %% Skip deleted documents
-                        {ok, AccIn};
-                    {_, true} ->
-                        %% Lazily expired (the TTL sweeper will
-                        %% tombstone it)
-                        {ok, AccIn};
-                    _ ->
-                        %% Get document body from body CF (current body, no rev in key)
-                        BodyKey = barrel_store_keys:doc_body(Ks, DocId),
-                        DocBody = case barrel_store_rocksdb:body_get(StoreRef, BodyKey) of
-                            {ok, CborBin} -> barrel_docdb_codec_cbor:decode_any(CborBin);
-                            not_found -> #{}
-                        end,
-                        Doc = DocBody#{
-                            <<"id">> => DocId,
-                            <<"_rev">> => Rev
-                        },
-                        case Fun(Doc, AccIn) of
-                            {ok, AccOut} -> {ok, AccOut};
-                            {stop, AccOut} -> {stop, AccOut};
-                            stop -> {stop, AccIn}
-                        end
-                end;
-            not_found ->
-                {ok, AccIn}
-        end
-    end,
-
-    FinalAcc = barrel_store_rocksdb:fold_range(StoreRef, StartKey, EndKey, FoldFun, Acc),
-    {ok, FinalAcc}.
 
 %%====================================================================
 %% Replication Operations

@@ -937,12 +937,7 @@ delete_doc(Db, DocId, Opts) ->
 -spec fold_docs(binary() | pid(), fun((map(), term()) -> {ok, term()} | {stop, term()} | stop), term()) ->
     {ok, term()}.
 fold_docs(Db, Fun, Acc) ->
-    DbName = db_name(Db),
-    barrel_trace:with_db_span(fold, DbName, fun() ->
-        with_db(Db, fun(Pid) ->
-            barrel_db_server:fold_docs(Pid, Fun, Acc)
-        end)
-    end).
+    fold_docs(Db, Fun, Acc, #{}).
 
 %% @doc Fold over all documents with options.
 %%
@@ -961,9 +956,18 @@ fold_docs(Db, Fun, Acc) ->
 fold_docs(Db, Fun, Acc, Opts) when is_map(Opts) ->
     DbName = db_name(Db),
     barrel_trace:with_db_span(fold, DbName, fun() ->
-        with_db(Db, fun(Pid) ->
-            barrel_db_server:fold_docs(Pid, Fun, Acc, Opts)
-        end)
+        %% Fold in the caller's process against a snapshot when the store
+        %% ref is available, so it never blocks the writer loop and a
+        %% prefix scan stays range-bounded. Fall back to the server only
+        %% when the store ref is not published (e.g. mid-open).
+        case reader_store(Db) of
+            {ok, StoreRef} ->
+                barrel_docdb_reader:fold_docs(StoreRef, Db, Fun, Acc, Opts);
+            undefined ->
+                with_db(Db, fun(Pid) ->
+                    barrel_db_server:fold_docs(Pid, Fun, Acc, Opts)
+                end)
+        end
     end).
 
 %% @doc Get list of conflicting revisions for a document.

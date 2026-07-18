@@ -14,7 +14,7 @@
 
 %% API
 -export([start_link/0]).
--export([create/5, lookup/1, update/2, release/1]).
+-export([create/5, lookup/1, update/2, release/1, detach/1]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
@@ -116,6 +116,15 @@ release(CursorId) ->
         [] ->
             ok
     end.
+
+%% @doc Drop a cursor entry WITHOUT releasing its snapshot. Used when
+%% resuming: the successor cursor (or the terminal chunk) now owns the
+%% shared snapshot, so releasing it here would drop a snapshot still in
+%% use by later chunks.
+-spec detach(binary()) -> ok.
+detach(CursorId) ->
+    true = ets:delete(?TABLE, CursorId),
+    ok.
 
 %%====================================================================
 %% gen_server callbacks
