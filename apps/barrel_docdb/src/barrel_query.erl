@@ -9,6 +9,7 @@
 %%% #{
 %%%     where => [
 %%%         {path, [<<"type">>], <<"user">>},           % equality
+%%%         {path, [<<"tags">>], <<"erlang">>},         % list => membership
 %%%         {path, [<<"org_id">>], '?Org'},              % bind variable
 %%%         {compare, [<<"age">>], '>', 18},            % comparison
 %%%         {'and', [...]},                              % conjunction
@@ -1557,9 +1558,11 @@ find_index_conditions(Conditions) ->
 find_index_conditions([], Acc) ->
     lists:reverse(Acc);
 find_index_conditions([{path, Path, Value} | Rest], Acc) ->
-    case is_logic_var(Value) of
+    case is_logic_var(Value) orelse path_has_index(Path) of
         true ->
-            %% Variable binding - can't use for initial index lookup
+            %% Variable binding, or a positional (integer) path which has
+            %% no membership value-index entry (#5) - can't seed an index
+            %% lookup; leave it to the residual matcher on a full scan.
             find_index_conditions(Rest, Acc);
         false ->
             %% Concrete value - good for index
@@ -2170,7 +2173,11 @@ classify_scan_query(Conditions, Plan) ->
     case {Conditions, NeedsBodyForQuery} of
         {[{path, Path, Value}], false} ->
             %% Pure equality - only if value is concrete (not a logic var)
-            case is_logic_var(Value) of
+            %% and the path is all field names. A positional segment
+            %% (integer) has no value-index entry since lists index by
+            %% membership (#5), so fall to a full scan where the residual
+            %% matcher walks the document.
+            case is_logic_var(Value) orelse path_has_index(Path) of
                 true -> needs_body;
                 false -> {pure_equality, Path, Value}
             end;
@@ -2197,8 +2204,9 @@ classify_scan_query(Conditions, Plan) ->
 
 %% @doc Check if all conditions can be evaluated using index
 all_index_conditions([]) -> true;
-all_index_conditions([{path, _, Value} | Rest]) ->
-    case is_logic_var(Value) of
+all_index_conditions([{path, Path, Value} | Rest]) ->
+    %% A positional (integer) path has no membership value-index entry (#5).
+    case is_logic_var(Value) orelse path_has_index(Path) of
         true -> false;
         false -> all_index_conditions(Rest)
     end;
@@ -2213,6 +2221,13 @@ all_index_conditions([{compare, _, Op, Value} | Rest])
         false -> all_index_conditions(Rest)
     end;
 all_index_conditions(_) -> false.
+
+%% @doc True if a path contains a positional (integer) segment. Lists are
+%% indexed by membership (#5), so such paths have no value-index entry and
+%% must be resolved by a full scan / the residual matcher.
+-spec path_has_index([term()]) -> boolean().
+path_has_index(Path) ->
+    lists:any(fun erlang:is_integer/1, Path).
 
 %% @doc Check if projections require document body
 needs_body_for_projection(['*']) -> false;
@@ -2240,7 +2255,9 @@ classify_scan_query_adaptive(StoreRef, DbName, Conditions, Plan) ->
     NeedsBodyForQuery = needs_body_for_projection(Projections),
     case {Conditions, NeedsBodyForQuery} of
         {[{path, Path, Value}], false} ->
-            case is_logic_var(Value) of
+            %% Positional (integer) paths have no value-index entry under
+            %% membership indexing (#5); scan instead.
+            case is_logic_var(Value) orelse path_has_index(Path) of
                 true ->
                     needs_body;
                 false ->
@@ -2568,9 +2585,10 @@ collect_scan_docids(StoreRef, DbName, Conditions, _Snapshot, MaxCount) ->
             end
     end.
 
-%% @private Check if a condition can use index for intersection
-is_index_condition({path, _Path, Value}) ->
-    not is_logic_var(Value);
+%% @private Check if a condition can use index for intersection. A
+%% positional (integer) path has no membership value-index entry (#5).
+is_index_condition({path, Path, Value}) ->
+    not is_logic_var(Value) andalso not path_has_index(Path);
 is_index_condition({compare, _Path, _Op, Value}) ->
     not is_logic_var(Value);
 is_index_condition({prefix, _Path, _Prefix}) ->
@@ -3287,9 +3305,12 @@ maybe_fetch_docs_chunked(DbName, DocIds, true, DecoderFun) ->
                         Fun -> Fun(CborBin)
                     end,
                     {true, #{<<"id">> => DocId, <<"doc">> => Doc}};
-                   ({DocId, not_found}) ->
-                    %% Doc deleted - return ID only with deleted flag
-                    {true, #{<<"id">> => DocId, <<"deleted">> => true}};
+                   ({_DocId, not_found}) ->
+                    %% No live body for this index hit: a stale/orphaned
+                    %% index entry (e.g. a pre-membership list entry, #5),
+                    %% not a live document - skip it rather than emit a
+                    %% mangled/tombstone row.
+                    false;
                    ({_DocId, {error, _}}) ->
                     false
                 end,
@@ -3373,9 +3394,19 @@ match_condition(Doc, {path, Path, Value}, _Bindings, BoundVars) ->
                     %% Bind the variable
                     {true, BoundVars#{Value => DocValue}};
                 false ->
-                    case DocValue =:= Value of
-                        true -> {true, BoundVars};
-                        false -> false
+                    %% Membership for list fields (#5): a path query on a
+                    %% list field matches when Value is a member; scalars
+                    %% keep whole-value equality (the `Value' pattern).
+                    case DocValue of
+                        List when is_list(List) ->
+                            case lists:member(Value, List) of
+                                true -> {true, BoundVars};
+                                false -> false
+                            end;
+                        Value ->
+                            {true, BoundVars};
+                        _ ->
+                            false
                     end
             end;
         not_found ->

@@ -65,6 +65,11 @@ LIMIT 10 OFFSET 20
   `BETWEEN a AND b`, `IS [NOT] NULL`, `IS [NOT] MISSING`,
   `CONTAINS(path, value)`, `AND`, `OR`, `NOT`. Comparisons only match
   same-typed values (both numbers or both strings).
+- Array membership: `d.tags CONTAINS 'erlang'` (infix) and
+  `'erlang' IN d.tags` both test whether the list at `d.tags` contains
+  the value; they are equivalent to `CONTAINS(d.tags, 'erlang')`. `IN`
+  with a parenthesized list, `d.status IN ('a', 'b')`, is still
+  scalar set membership.
 - `$name` parameters bind scalars from the `params` map.
 - `WHERE id = 'x'`, id ranges, and `id LIKE 'prefix%'` become
   primary-key scans.

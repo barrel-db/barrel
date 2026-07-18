@@ -154,6 +154,11 @@ basic_execution(_Config) ->
         ids("SELECT * FROM db WHERE type = 'user' AND NOT status = 'active'")),
     ?assertEqual([<<"post:1">>, <<"post:3">>, <<"user:1">>],
         ids("SELECT * FROM db WHERE CONTAINS(tags, 'erlang')")),
+    %% #5: infix CONTAINS and `IN <array>' are the same membership
+    ?assertEqual([<<"post:1">>, <<"post:3">>, <<"user:1">>],
+        ids("SELECT * FROM db WHERE tags CONTAINS 'erlang'")),
+    ?assertEqual([<<"post:1">>, <<"post:3">>, <<"user:1">>],
+        ids("SELECT * FROM db WHERE 'erlang' IN tags")),
     ?assertEqual([<<"user:2">>],
         ids("SELECT * FROM db WHERE type = 'user' AND age BETWEEN 20 AND 26")),
     ?assertEqual([<<"post:2">>, <<"post:3">>],

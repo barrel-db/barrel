@@ -132,10 +132,11 @@ analyze_arrays(_Config) ->
         <<"tags">> => [<<"a">>, <<"b">>, <<"c">>]
     },
     Paths = barrel_ars:analyze(Doc),
+    %% #5: arrays index by membership (no positional index)
     Expected = lists:sort([
-        {[<<"tags">>, 0, <<"a">>], <<>>},
-        {[<<"tags">>, 1, <<"b">>], <<>>},
-        {[<<"tags">>, 2, <<"c">>], <<>>}
+        {[<<"tags">>, <<"a">>], <<>>},
+        {[<<"tags">>, <<"b">>], <<>>},
+        {[<<"tags">>, <<"c">>], <<>>}
     ]),
     ?assertEqual(Expected, lists:sort(Paths)).
 
@@ -147,11 +148,13 @@ analyze_arrays_with_objects(_Config) ->
         ]
     },
     Paths = barrel_ars:analyze(Doc),
+    %% #5: array-of-objects indexes by membership (no positional index),
+    %% so both elements' fields collapse onto the same field paths.
     Expected = lists:sort([
-        {[<<"items">>, 0, <<"sku">>, <<"ABC">>], <<>>},
-        {[<<"items">>, 0, <<"qty">>, 2], <<>>},
-        {[<<"items">>, 1, <<"sku">>, <<"XYZ">>], <<>>},
-        {[<<"items">>, 1, <<"qty">>, 1], <<>>}
+        {[<<"items">>, <<"sku">>, <<"ABC">>], <<>>},
+        {[<<"items">>, <<"qty">>, 2], <<>>},
+        {[<<"items">>, <<"sku">>, <<"XYZ">>], <<>>},
+        {[<<"items">>, <<"qty">>, 1], <<>>}
     ]),
     ?assertEqual(Expected, lists:sort(Paths)).
 
@@ -187,21 +190,24 @@ analyze_complex_doc(_Config) ->
         <<"e">> => [#{<<"a">> => 1}, #{<<"b">> => 2, <<"c">> => 3}]
     },
     Paths = barrel_ars:analyze(Doc),
+    %% #5: lists index by membership (no positional index). `c.b' and `d'
+    %% are string lists; `e' is a list of objects whose fields collapse
+    %% onto membership paths.
     Expected = lists:sort([
         {[<<"a">>, 1], <<>>},
         {[<<"b">>, <<"2">>], <<>>},
         {[<<"c">>, <<"a">>, 1], <<>>},
-        {[<<"c">>, <<"b">>, 0, <<"a">>], <<>>},
-        {[<<"c">>, <<"b">>, 1, <<"b">>], <<>>},
-        {[<<"c">>, <<"b">>, 2, <<"c">>], <<>>},
+        {[<<"c">>, <<"b">>, <<"a">>], <<>>},
+        {[<<"c">>, <<"b">>, <<"b">>], <<>>},
+        {[<<"c">>, <<"b">>, <<"c">>], <<>>},
         {[<<"c">>, <<"c">>, <<"a">>, 1], <<>>},
         {[<<"c">>, <<"c">>, <<"b">>, 2], <<>>},
-        {[<<"d">>, 0, <<"a">>], <<>>},
-        {[<<"d">>, 1, <<"b">>], <<>>},
-        {[<<"d">>, 2, <<"c">>], <<>>},
-        {[<<"e">>, 0, <<"a">>, 1], <<>>},
-        {[<<"e">>, 1, <<"b">>, 2], <<>>},
-        {[<<"e">>, 1, <<"c">>, 3], <<>>}
+        {[<<"d">>, <<"a">>], <<>>},
+        {[<<"d">>, <<"b">>], <<>>},
+        {[<<"d">>, <<"c">>], <<>>},
+        {[<<"e">>, <<"a">>, 1], <<>>},
+        {[<<"e">>, <<"b">>, 2], <<>>},
+        {[<<"e">>, <<"c">>, 3], <<>>}
     ]),
     ?assertEqual(Expected, lists:sort(Paths)).
 
