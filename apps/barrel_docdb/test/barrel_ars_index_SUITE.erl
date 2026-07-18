@@ -182,11 +182,11 @@ index_doc_with_arrays(Config) ->
     Results = fold_all_paths(StoreRef, DbName, [<<"tags">>]),
     ?assertEqual(3, length(Results)),
 
-    %% Verify paths include array indices
+    %% #5: arrays index by membership (no positional index).
     Paths = [P || {P, _} <- Results],
-    ?assert(lists:member([<<"tags">>, 0, <<"a">>], Paths)),
-    ?assert(lists:member([<<"tags">>, 1, <<"b">>], Paths)),
-    ?assert(lists:member([<<"tags">>, 2, <<"c">>], Paths)),
+    ?assert(lists:member([<<"tags">>, <<"a">>], Paths)),
+    ?assert(lists:member([<<"tags">>, <<"b">>], Paths)),
+    ?assert(lists:member([<<"tags">>, <<"c">>], Paths)),
 
     ok.
 

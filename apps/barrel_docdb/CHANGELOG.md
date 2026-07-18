@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `barrel_rep_transport_http` endpoints gain optional `signing` (Ed25519 signed
   requests) and `ssl_options` (mTLS client cert), plus the `sync_signing` and
   `sync_ssl` app-env equivalents. Bearer auth is unchanged when neither is set.
+- BQL infix array membership: `tags CONTAINS 'x'` and `'x' IN tags`, both
+  equivalent to the existing `CONTAINS(tags, 'x')` function form.
 
 ### Fixed
 - `delete_db/1` on a closed database created with a per-db `data_dir` no longer
@@ -24,6 +26,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `merge_branch/2` now accept the pid returned by `create_db/2` (resolved to the
   name), like the document functions, and return `{error, invalid_db_ref}` for a
   dead or non-database pid instead of silently doing nothing (#4).
+- `find/2` with `{path, [field], V}` against a list-valued field now means
+  membership (V is an element of the list) and returns well-formed rows instead
+  of a mangled `#{id => <<" ...">>, deleted => true}` row. Lists are indexed by
+  membership path (`[field, element]`, no positional index); positional access
+  (`{path, [field, N], V}`) still works via scan. Documents written before the
+  upgrade keep stale positional index entries and are not matched by membership
+  until reindexed; such entries no longer corrupt query results (#5).
 
 ## [1.0.0] - 2026-07-10
 

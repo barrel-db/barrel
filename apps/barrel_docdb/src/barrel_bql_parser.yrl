@@ -11,7 +11,7 @@ Nonterminals
     statement select_stmt select_list proj_list projection
     from_clause source opt_alias fn_args fn_arg
     opt_where expr and_expr not_expr predicate operand
-    literal literal_list
+    literal literal_list in_rhs
     path_expr path_rest path_key
     opt_order order_list order_item opt_dir
     opt_limit opt_offset opt_subscribe.
@@ -112,10 +112,9 @@ predicate -> operand is 'not' null : {is_null, token_loc('$2'), '$1', true}.
 predicate -> operand is missing : {is_missing, token_loc('$2'), '$1', false}.
 predicate -> operand is 'not' missing :
     {is_missing, token_loc('$2'), '$1', true}.
-predicate -> operand in '(' literal_list ')' :
-    {in, token_loc('$2'), '$1', lists:reverse('$4'), false}.
-predicate -> operand 'not' in '(' literal_list ')' :
-    {in, token_loc('$3'), '$1', lists:reverse('$5'), true}.
+predicate -> operand in in_rhs : mk_in(token_loc('$2'), '$1', '$3', false).
+predicate -> operand 'not' in in_rhs :
+    mk_in(token_loc('$3'), '$1', '$4', true).
 predicate -> operand like string :
     {like, token_loc('$2'), '$1', string_value('$3'), false}.
 predicate -> operand 'not' like string :
@@ -126,6 +125,8 @@ predicate -> operand 'not' between operand 'and' operand :
     {between, token_loc('$3'), '$1', '$4', '$6', true}.
 predicate -> contains '(' path_expr ',' literal ')' :
     {contains, token_loc('$1'), '$3', '$5'}.
+predicate -> path_expr contains literal :
+    {contains, token_loc('$2'), '$1', '$3'}.
 
 operand -> path_expr : '$1'.
 operand -> literal : '$1'.
@@ -142,6 +143,12 @@ literal -> null : {lit, token_loc('$1'), null}.
 
 literal_list -> literal : ['$1'].
 literal_list -> literal_list ',' literal : ['$3' | '$1'].
+
+%% IN right-hand side: a parenthesized set (scalar `in') or a bare path
+%% (array membership, #5). Unified under one nonterminal so `in' stays
+%% LALR(1)-clean (the '(' vs ident choice is one-token lookahead).
+in_rhs -> '(' literal_list ')' : {set, lists:reverse('$2')}.
+in_rhs -> path_expr : {member, '$1'}.
 
 %%--------------------------------------------------------------------
 %% Paths: a.b, a[0], a[*], and any keyword after a dot
@@ -221,3 +228,16 @@ string_value({string, _Loc, S}) -> S.
 token_loc(Token) -> element(2, Token).
 
 path_loc({path, Loc, _Components}) -> Loc.
+
+%% Unify the two IN right-hand sides (#5). A parenthesized set stays a
+%% scalar `in'; a bare path is array membership, i.e. `X IN arr' ==
+%% `arr CONTAINS X', reusing the `contains' node ('not' wraps the negated
+%% form). Membership requires a literal element for now.
+mk_in(Loc, {lit, _, _} = Lit, {member, Path}, false) ->
+    {contains, Loc, Path, Lit};
+mk_in(Loc, {lit, _, _} = Lit, {member, Path}, true) ->
+    {'not', Loc, {contains, Loc, Path, Lit}};
+mk_in(Loc, Operand, {set, Literals}, Negated) ->
+    {in, Loc, Operand, Literals, Negated};
+mk_in(Loc, _Operand, {member, _Path}, _Negated) ->
+    return_error(Loc, "membership (IN <array>) requires a literal element").

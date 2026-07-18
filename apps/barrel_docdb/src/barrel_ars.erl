@@ -5,7 +5,9 @@
 %%% Based on barrel_ars_view.erl from barrel apps branch.
 %%%
 %%% Path format: [field1, field2, ..., value]
-%%% For arrays, index position is included: [field, 0, nested_field, value]
+%%% Arrays are indexed by MEMBERSHIP: each element contributes
+%%% [field, ..., element] with no positional index, so a path query on the
+%%% field matches any member (#5).
 %%%
 %%% Example:
 %%% ```
@@ -125,19 +127,21 @@ analyze_doc(Doc, RevPath, Acc) ->
 analyze_value(V, RevPath, Acc) when is_map(V) ->
     analyze_doc(V, RevPath, Acc);
 analyze_value(V, RevPath, Acc) when is_list(V) ->
-    analyze_list(V, RevPath, 0, Acc);
+    analyze_list(V, RevPath, Acc);
 analyze_value(V, RevPath, Acc) ->
     %% Leaf value - reverse path and add truncated value at end
     Path = lists:reverse([short(V) | RevPath]),
     [{Path, <<>>} | Acc].
 
-%% @private Analyze a list/array with index tracking
--spec analyze_list(list(), [term()], non_neg_integer(), [{[term()], <<>>}]) ->
+%% @private Analyze a list/array as MEMBERSHIP: index each element at the
+%% field path WITHOUT its positional index (#5), so a path query on the
+%% field matches any member. Duplicate elements collapse to one path.
+-spec analyze_list(list(), [term()], [{[term()], <<>>}]) ->
     [{[term()], <<>>}].
-analyze_list([Item | Rest], RevPath, Index, Acc) ->
-    Acc1 = analyze_value(Item, [Index | RevPath], Acc),
-    analyze_list(Rest, RevPath, Index + 1, Acc1);
-analyze_list([], _RevPath, _Index, Acc) ->
+analyze_list([Item | Rest], RevPath, Acc) ->
+    Acc1 = analyze_value(Item, RevPath, Acc),
+    analyze_list(Rest, RevPath, Acc1);
+analyze_list([], _RevPath, Acc) ->
     Acc.
 
 %%====================================================================
