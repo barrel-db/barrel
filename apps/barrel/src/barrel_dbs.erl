@@ -238,9 +238,13 @@ do_ensure(Name, Opts, #state{dbs = Dbs} = State) ->
                     Dbs1 = Dbs#{Name := Entry#entry{last_used = now_ms()}},
                     {ok, Db, State#state{dbs = Dbs1}};
                 false ->
-                    %% the docdb crashed without taking the manager
-                    %% down (only the vector store is linked): drop
-                    %% the stale handle and reopen
+                    %% the docdb crashed without taking the manager down
+                    %% (only the vector store is linked): stop the stale
+                    %% handle first, which shuts the still-alive vector
+                    %% store (barrel:close stops it before the dead docdb),
+                    %% then reopen. Without this the store leaks its
+                    %% RocksDB handles on every docdb crash.
+                    _ = try barrel:close(Db) catch _:_ -> ok end,
                     reopen(Name, Opts,
                            State#state{dbs = maps:remove(Name, Dbs)})
             end;
