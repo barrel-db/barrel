@@ -12,6 +12,10 @@
 %% The same codec serializes filters for replication-task persistence.
 -module(barrel_rep_filter).
 
+%% Bounds and/or/not nesting from the wire so a hostile peer cannot force
+%% deep recursion (stack/CPU) with a pathological filter.
+-define(MAX_FILTER_DEPTH, 32).
+
 -export([to_wire/1, from_wire/1]).
 
 %%====================================================================
@@ -102,7 +106,8 @@ from_wire(Wire) when is_map(Wire) ->
                 Acc2;
             #{<<"where">> := Where} when is_list(Where) ->
                 Acc2#{query =>
-                          #{where => [cond_from_wire(C) || C <- Where]}};
+                          #{where => [cond_from_wire(C, ?MAX_FILTER_DEPTH)
+                                      || C <- Where]}};
             BadQ ->
                 throw({bad_filter, {query, BadQ}})
         end,
@@ -113,30 +118,32 @@ from_wire(Wire) when is_map(Wire) ->
 from_wire(Other) ->
     {error, {bad_filter, Other}}.
 
-cond_from_wire([<<"path">>, Path, Value]) ->
+cond_from_wire(_Cond, 0) ->
+    throw({bad_filter, too_deeply_nested});
+cond_from_wire([<<"path">>, Path, Value], _D) ->
     {path, path_from_wire(Path), value_from_wire(Value)};
-cond_from_wire([<<"compare">>, Path, Op, Value]) ->
+cond_from_wire([<<"compare">>, Path, Op, Value], _D) ->
     {compare, path_from_wire(Path), op_from_wire(Op),
      value_from_wire(Value)};
-cond_from_wire([<<"and">>, Conds]) when is_list(Conds) ->
-    {'and', [cond_from_wire(C) || C <- Conds]};
-cond_from_wire([<<"or">>, Conds]) when is_list(Conds) ->
-    {'or', [cond_from_wire(C) || C <- Conds]};
-cond_from_wire([<<"not">>, Cond]) ->
-    {'not', cond_from_wire(Cond)};
-cond_from_wire([<<"in">>, Path, Values]) when is_list(Values) ->
+cond_from_wire([<<"and">>, Conds], D) when is_list(Conds) ->
+    {'and', [cond_from_wire(C, D - 1) || C <- Conds]};
+cond_from_wire([<<"or">>, Conds], D) when is_list(Conds) ->
+    {'or', [cond_from_wire(C, D - 1) || C <- Conds]};
+cond_from_wire([<<"not">>, Cond], D) ->
+    {'not', cond_from_wire(Cond, D - 1)};
+cond_from_wire([<<"in">>, Path, Values], _D) when is_list(Values) ->
     {in, path_from_wire(Path), [value_from_wire(V) || V <- Values]};
-cond_from_wire([<<"contains">>, Path, Value]) ->
+cond_from_wire([<<"contains">>, Path, Value], _D) ->
     {contains, path_from_wire(Path), value_from_wire(Value)};
-cond_from_wire([<<"exists">>, Path]) ->
+cond_from_wire([<<"exists">>, Path], _D) ->
     {exists, path_from_wire(Path)};
-cond_from_wire([<<"missing">>, Path]) ->
+cond_from_wire([<<"missing">>, Path], _D) ->
     {missing, path_from_wire(Path)};
-cond_from_wire([<<"regex">>, Path, Pattern]) when is_binary(Pattern) ->
+cond_from_wire([<<"regex">>, Path, Pattern], _D) when is_binary(Pattern) ->
     {regex, path_from_wire(Path), Pattern};
-cond_from_wire([<<"prefix">>, Path, Prefix]) when is_binary(Prefix) ->
+cond_from_wire([<<"prefix">>, Path, Prefix], _D) when is_binary(Prefix) ->
     {prefix, path_from_wire(Path), Prefix};
-cond_from_wire(Other) ->
+cond_from_wire(Other, _D) ->
     throw({bad_filter, Other}).
 
 path_from_wire(Path) when is_list(Path), Path =/= [] ->

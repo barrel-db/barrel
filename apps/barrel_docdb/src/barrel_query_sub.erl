@@ -27,6 +27,10 @@
 
 -include("barrel_docdb.hrl").
 
+%% Bounds regex backtracking so a hostile wire-filter pattern cannot pin a
+%% scheduler; over the limit is treated as no match.
+-define(RE_MATCH_LIMIT, 100000).
+
 %% API
 -export([
     start_link/0,
@@ -451,9 +455,11 @@ match_condition(Doc, {missing, Path}, _Bindings, BoundVars) ->
 match_condition(Doc, {regex, Path, Pattern}, _Bindings, BoundVars) ->
     case get_path_value(Doc, Path) of
         {ok, DocValue} when is_binary(DocValue) ->
-            case re:run(DocValue, Pattern) of
+            case re:run(DocValue, Pattern,
+                        [{match_limit, ?RE_MATCH_LIMIT},
+                         {match_limit_recursion, ?RE_MATCH_LIMIT}]) of
                 {match, _} -> {true, BoundVars};
-                nomatch -> false
+                _ -> false
             end;
         _ ->
             false

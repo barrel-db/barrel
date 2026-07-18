@@ -63,12 +63,34 @@ legacy_state(Other) ->
 %% skew. Unknown accept methods are dropped; an empty accept locks the
 %% server (every request 401s) rather than falling open.
 multi_state(Cfg) ->
-    Accept = [M || M <- maps:get(accept, Cfg, [bearer]),
-                   lists:member(M, [bearer, signed, mtls])],
+    Accept0 = [M || M <- maps:get(accept, Cfg, [bearer]),
+                    lists:member(M, [bearer, signed, mtls])],
+    Accept = drop_ungated_mtls(Accept0),
     Hashes = token_hashes(Cfg),
     Signers = maps:get(signers, Cfg, #{}),
     SkewMs = maps:get(skew_ms, Cfg, 300000),
     base_state(Hashes, Signers, Accept, SkewMs).
+
+%% mtls_ok trusts that a TLS connection carries a verified client cert,
+%% which only holds when the listener actually gates on it. If mtls is
+%% accepted but the tls env does not set `verify => verify_peer', drop mtls
+%% from the accepted set (fail closed) so a certless client is never
+%% authenticated as a trusted peer by a config gap.
+drop_ungated_mtls(Accept) ->
+    case lists:member(mtls, Accept) andalso not mtls_gate_configured() of
+        true ->
+            logger:warning("barrel_server: auth accepts mtls but tls has no "
+                           "verify_peer; disabling mtls auth"),
+            Accept -- [mtls];
+        false ->
+            Accept
+    end.
+
+mtls_gate_configured() ->
+    case application:get_env(barrel_server, tls, undefined) of
+        #{verify := verify_peer} -> true;
+        _ -> false
+    end.
 
 token_hashes(#{tokens := Tokens}) when is_list(Tokens) ->
     [crypto:hash(sha256, T) || T <- Tokens];

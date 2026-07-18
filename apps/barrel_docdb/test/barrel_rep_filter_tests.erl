@@ -117,3 +117,19 @@ seq_codec_test() ->
     Enc = barrel_rep_checkpoint:encode_seq(Hlc),
     ?assert(is_binary(Enc)),
     ?assertEqual(Hlc, barrel_rep_checkpoint:decode_seq(Enc)).
+
+%%--------------------------------------------------------------------
+%% Wire filter hardening
+%%--------------------------------------------------------------------
+
+%% A wire filter nested beyond the depth bound is rejected rather than
+%% driving unbounded recursion.
+filter_depth_bound_test() ->
+    Leaf = [<<"path">>, [<<"a">>], <<"x">>],
+    Nest = fun Nest(0, Acc) -> Acc;
+               Nest(N, Acc) -> Nest(N - 1, [<<"not">>, Acc])
+           end,
+    Shallow = #{<<"query">> => #{<<"where">> => [Nest(8, Leaf)]}},
+    ?assertMatch({ok, _}, barrel_rep_filter:from_wire(Shallow)),
+    Deep = #{<<"query">> => #{<<"where">> => [Nest(200, Leaf)]}},
+    ?assertMatch({error, {bad_filter, _}}, barrel_rep_filter:from_wire(Deep)).

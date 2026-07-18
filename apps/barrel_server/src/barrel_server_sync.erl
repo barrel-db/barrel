@@ -331,9 +331,20 @@ put_att(Req) ->
     end).
 
 att_write_opts(Req) ->
-    Opts0 = case livery_req:header(?DIGEST_HEADER, Req, undefined) of
+    %% Bind the body to the SIGNED content hash. x-barrel-content-sha256 is
+    %% covered by the request signature (and equals the attachment digest on
+    %% a signed upload); x-barrel-digest alone is unsigned, so an on-path
+    %% attacker could rewrite it to match a forged body. Dropping or forging
+    %% the signed header breaks the signature, so the x-barrel-digest
+    %% fallback only applies to unsigned (bearer) requests.
+    Digest = case livery_req:header(<<"x-barrel-content-sha256">>, Req,
+                                    undefined) of
+        undefined -> livery_req:header(?DIGEST_HEADER, Req, undefined);
+        Signed -> Signed
+    end,
+    Opts0 = case Digest of
         undefined -> #{};
-        Digest -> #{expected_digest => Digest}
+        _ -> #{expected_digest => Digest}
     end,
     case livery_req:header(?ORIGIN_HEADER, Req, undefined) of
         undefined ->
