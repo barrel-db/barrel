@@ -45,4 +45,11 @@ init([]) ->
         shutdown => 5000,
         type => worker
     },
-    {ok, {SupFlags, [Registry]}}.
+    StoreSup = #{
+        id => barrel_vectordb_store_sup,
+        start => {barrel_vectordb_store_sup, start_link, []},
+        restart => permanent,
+        shutdown => infinity,
+        type => supervisor
+    },
+    {ok, {SupFlags, [Registry, StoreSup]}}.
