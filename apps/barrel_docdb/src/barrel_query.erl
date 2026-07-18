@@ -147,6 +147,11 @@
 %%====================================================================
 
 %% Target: ~1MB of doc data per chunk for good cache utilization
+%% Bounds regex backtracking so a catastrophic pattern (a hostile
+%% replication peer can supply the wire filter's raw regex) cannot pin a
+%% scheduler. Over the limit is treated as no match.
+-define(RE_MATCH_LIMIT, 100000).
+
 -define(TARGET_CHUNK_BYTES, 1048576).
 -define(MIN_CHUNK_SIZE, 50).
 -define(MAX_CHUNK_SIZE, 1000).
@@ -3484,9 +3489,11 @@ match_condition(Doc, {missing, Path}, _Bindings, BoundVars) ->
 match_condition(Doc, {regex, Path, Pattern}, _Bindings, BoundVars) ->
     case get_path_value(Doc, Path) of
         {ok, DocValue} when is_binary(DocValue) ->
-            case re:run(DocValue, Pattern) of
+            case re:run(DocValue, Pattern,
+                        [{match_limit, ?RE_MATCH_LIMIT},
+                         {match_limit_recursion, ?RE_MATCH_LIMIT}]) of
                 {match, _} -> {true, BoundVars};
-                nomatch -> false
+                _ -> false
             end;
         _ ->
             false

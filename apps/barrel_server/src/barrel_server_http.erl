@@ -904,8 +904,16 @@ encode_embedding_field(Doc) ->
 err_bin(Atom) when is_atom(Atom) -> atom_to_binary(Atom, utf8);
 err_bin(Other) -> iolist_to_binary(io_lib:format("~p", [Other])).
 
+-define(MAX_SEARCH_K, 10000).
+
 search_opts(Body) ->
-    K = maps:get(<<"k">>, Body, 10),
+    %% Clamp k so a request cannot ask the backend to build an unbounded
+    %% top-k result set.
+    K0 = maps:get(<<"k">>, Body, 10),
+    K = case is_integer(K0) andalso K0 > 0 of
+        true -> min(K0, ?MAX_SEARCH_K);
+        false -> 10
+    end,
     #{k => K}.
 
 search_reply({ok, Hits}) when is_list(Hits) ->
