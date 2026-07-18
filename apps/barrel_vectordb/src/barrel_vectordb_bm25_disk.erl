@@ -189,6 +189,10 @@ open(Path, Opts) ->
                     DocStatsTable = ets:new(bm25_doc_stats, [set, public]),
                     TermStatsTable = ets:new(bm25_term_stats, [set, public]),
 
+                    %% Delete the tables if the rest of the open fails (corrupt
+                    %% block-max index, bad doc stats), so a failed open does
+                    %% not orphan these public ETS tables.
+                    try
                     %% Load block-max index
                     {ok, BlockmaxIndex} = barrel_vectordb_bm25_disk_file:read_blockmax_index(FileHandle),
 
@@ -216,7 +220,13 @@ open(Path, Opts) ->
                         disk_term_count = maps:get(term_count, Header, 0),
                         disk_total_tokens = maps:get(total_tokens, Header, 0),
                         blockmax_index = BlockmaxIndex
-                    }};
+                    }}
+                    catch
+                        Class:Reason:St ->
+                            ets:delete(DocStatsTable),
+                            ets:delete(TermStatsTable),
+                            erlang:raise(Class, Reason, St)
+                    end;
                 {error, _} = Error ->
                     barrel_vectordb_bm25_disk_file:close(FileHandle),
                     Error

@@ -576,6 +576,9 @@ process_writes_atomic(Writes, #state{db = Db, cf_vectors = CfV, cf_metadata = Cf
                                       index = Index, index_module = Mod, dimension = Dim} = State) ->
     {ok, Batch} = rocksdb:batch(),
 
+    %% The off-heap batch object must be released on every path (commit,
+    %% error, or crash), not just left for GC.
+    try
     %% First, prepare all embeddings if needed (this is done before batch to avoid
     %% partial writes on embedding failures)
     case prepare_writes(Writes, State) of
@@ -653,6 +656,9 @@ process_writes_atomic(Writes, #state{db = Db, cf_vectors = CfV, cf_metadata = Cf
                         State),
                     {[ErrorReply | OkReplies], NewState}
             end
+    end
+    after
+        rocksdb:release_batch(Batch)
     end.
 
 %% Apply write to RocksDB batch only (no index update yet). Returns the vector(s)
@@ -1090,31 +1096,35 @@ do_add(Id, Text, Metadata, Vector, #state{db = Db, cf_vectors = CfV,
     VectorBin = encode_vector(Vector),
 
     {ok, Batch} = rocksdb:batch(),
-    ok = rocksdb:batch_put(Batch, CfV, Id, VectorBin),
-    DocPairs = put_docdata_to_batch(Docstore, Batch, CfM, CfT, Id, Text, Metadata),
+    try
+        ok = rocksdb:batch_put(Batch, CfV, Id, VectorBin),
+        DocPairs = put_docdata_to_batch(Docstore, Batch, CfM, CfT, Id, Text, Metadata),
 
-    %% Index updated in-memory only (rebuilt from vectors on startup)
-    case Mod:insert(Index, Id, Vector) of
-        {ok, NewIndex} ->
-            case rocksdb:write_batch(Db, Batch, []) of
-                ok ->
-                    case docstore_multi_put(Docstore, DocPairs) of
-                        ok ->
-                            %% Also add to BM25 index if enabled
-                            case bm25_add(BM25Index, Id, Text) of
-                                {ok, NewBM25Index} ->
-                                    {ok, State#state{index = NewIndex, bm25_index = NewBM25Index}};
-                                {error, Reason} ->
-                                    {error, {bm25_error, Reason}}
-                            end;
-                        {error, DsReason} ->
-                            {error, {docstore_error, DsReason}}
-                    end;
-                {error, Reason} ->
-                    {error, {db_error, Reason}}
-            end;
-        {error, Reason} ->
-            {error, Reason}
+        %% Index updated in-memory only (rebuilt from vectors on startup)
+        case Mod:insert(Index, Id, Vector) of
+            {ok, NewIndex} ->
+                case rocksdb:write_batch(Db, Batch, []) of
+                    ok ->
+                        case docstore_multi_put(Docstore, DocPairs) of
+                            ok ->
+                                %% Also add to BM25 index if enabled
+                                case bm25_add(BM25Index, Id, Text) of
+                                    {ok, NewBM25Index} ->
+                                        {ok, State#state{index = NewIndex, bm25_index = NewBM25Index}};
+                                    {error, Reason} ->
+                                        {error, {bm25_error, Reason}}
+                                end;
+                            {error, DsReason} ->
+                                {error, {docstore_error, DsReason}}
+                        end;
+                    {error, Reason} ->
+                        {error, {db_error, Reason}}
+                end;
+            {error, Reason} ->
+                {error, Reason}
+        end
+    after
+        rocksdb:release_batch(Batch)
     end.
 
 %% Get a document
@@ -1146,26 +1156,30 @@ do_delete(Id, #state{db = Db, cf_vectors = CfV, cf_metadata = CfM,
                      cf_text = CfT, cf_hnsw = CfH, index = Index, index_module = Mod,
                      bm25_index = BM25Index, docstore = Docstore} = State) ->
     {ok, Batch} = rocksdb:batch(),
-    ok = rocksdb:batch_delete(Batch, CfV, Id),
-    ok = delete_docdata_from_batch(Docstore, Batch, CfM, CfT, Id),
-    ok = rocksdb:batch_delete(Batch, CfH, Id),
+    try
+        ok = rocksdb:batch_delete(Batch, CfV, Id),
+        ok = delete_docdata_from_batch(Docstore, Batch, CfM, CfT, Id),
+        ok = rocksdb:batch_delete(Batch, CfH, Id),
 
-    case rocksdb:write_batch(Db, Batch, []) of
-        ok ->
-            case docstore_delete(Docstore, Id) of
-                ok ->
-                    case Mod:delete(Index, Id) of
-                        {ok, NewIndex} ->
-                            %% Also remove from BM25 index if enabled
-                            {ok, NewBM25Index} = bm25_remove(BM25Index, Id),
-                            {ok, State#state{index = NewIndex, bm25_index = NewBM25Index}};
-                        {error, Reason} -> {error, Reason}
-                    end;
-                {error, DsReason} ->
-                    {error, {docstore_error, DsReason}}
-            end;
-        {error, Reason} ->
-            {error, {db_error, Reason}}
+        case rocksdb:write_batch(Db, Batch, []) of
+            ok ->
+                case docstore_delete(Docstore, Id) of
+                    ok ->
+                        case Mod:delete(Index, Id) of
+                            {ok, NewIndex} ->
+                                %% Also remove from BM25 index if enabled
+                                {ok, NewBM25Index} = bm25_remove(BM25Index, Id),
+                                {ok, State#state{index = NewIndex, bm25_index = NewBM25Index}};
+                            {error, Reason} -> {error, Reason}
+                        end;
+                    {error, DsReason} ->
+                        {error, {docstore_error, DsReason}}
+                end;
+            {error, Reason} ->
+                {error, {db_error, Reason}}
+        end
+    after
+        rocksdb:release_batch(Batch)
     end.
 
 %% Peek at documents (sample without search)

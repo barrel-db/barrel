@@ -96,7 +96,16 @@ handle_call({register, Name, Pid}, _From, Mons) ->
     end;
 handle_call({unregister, Name}, _From, Mons) ->
     ets:delete(?TAB, Name),
-    {reply, ok, Mons}.
+    %% Drop the monitor too, or a process that registers and unregisters
+    %% many names accumulates live monitors until it finally dies.
+    Mons1 = case [R || {R, N} <- maps:to_list(Mons), N =:= Name] of
+        [Ref | _] ->
+            erlang:demonitor(Ref, [flush]),
+            maps:remove(Ref, Mons);
+        [] ->
+            Mons
+    end,
+    {reply, ok, Mons1}.
 
 handle_cast(_Msg, Mons) ->
     {noreply, Mons}.
