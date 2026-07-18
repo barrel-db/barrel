@@ -307,20 +307,28 @@ do_replicate(Source, Target, SourceTransport, TargetTransport, Since,
             {ok, AccStats, Checkpoint};
 
         {ok, Changes, LastSeq} ->
-            %% Replicate this batch
-            case barrel_rep_alg:replicate(
-                     Source, Target, SourceTransport, TargetTransport,
-                     Changes) of
-                {ok, BatchStats} ->
-                    do_replicate_batch_done(
-                        Source, Target, SourceTransport, TargetTransport,
-                        BatchSize, CheckpointSize, Checkpoint, Filter,
-                        AccStats, DocsProcessed, Changes, LastSeq,
-                        BatchStats);
-                {error, _} = BatchError ->
-                    %% a target-side batch failure (network, auth) aborts
-                    %% the run with the error instead of crashing it
-                    BatchError
+            case barrel_rep_checkpoint:seq_advanced(Since, LastSeq) of
+                false ->
+                    %% A non-empty batch that did not advance the sequence
+                    %% means a non-conforming source. Abort instead of
+                    %% re-requesting the same point forever.
+                    {error, {no_progress, Since, LastSeq}};
+                true ->
+                    %% Replicate this batch
+                    case barrel_rep_alg:replicate(
+                             Source, Target, SourceTransport, TargetTransport,
+                             Changes) of
+                        {ok, BatchStats} ->
+                            do_replicate_batch_done(
+                                Source, Target, SourceTransport, TargetTransport,
+                                BatchSize, CheckpointSize, Checkpoint, Filter,
+                                AccStats, DocsProcessed, Changes, LastSeq,
+                                BatchStats);
+                        {error, _} = BatchError ->
+                            %% a target-side batch failure (network, auth)
+                            %% aborts the run with the error
+                            BatchError
+                    end
             end;
 
         {error, _} = Error ->

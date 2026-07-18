@@ -24,6 +24,9 @@
 %% Seq wire codec (base64 of the 12-byte HLC; <<"first">> sentinel)
 -export([encode_seq/1, decode_seq/1]).
 
+%% Sequence ordering
+-export([seq_advanced/2]).
+
 %% Internal API for reading checkpoints
 -export([
     read_checkpoint_doc/3
@@ -95,6 +98,16 @@ get_last_seq(#checkpoint{last_seq = Seq}) ->
 -spec set_last_seq(barrel_hlc:timestamp() | first, checkpoint()) -> checkpoint().
 set_last_seq(Seq, #checkpoint{docs_processed = DocsProcessed} = Checkpoint) ->
     Checkpoint#checkpoint{last_seq = Seq, docs_processed = DocsProcessed + 1}.
+
+%% @doc True if `New' is strictly after `Old' in sequence order. `first'
+%% precedes every real sequence. A drain loop uses this to detect a source
+%% that returns a non-empty batch without advancing the sequence, which
+%% would otherwise loop forever re-requesting the same point.
+-spec seq_advanced(barrel_hlc:timestamp() | first,
+                   barrel_hlc:timestamp() | first) -> boolean().
+seq_advanced(_Old, first) -> false;
+seq_advanced(first, _New) -> true;
+seq_advanced(Old, New) -> barrel_hlc:compare(New, Old) =:= gt.
 
 %% @doc Check if checkpoint should be written and write it if needed
 -spec maybe_write_checkpoint(checkpoint()) -> checkpoint().
