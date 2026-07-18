@@ -27,9 +27,12 @@
 %%%     (default 5000 ms)</li>
 %%% </ul>
 %%%
-%%% The manager does not trap exits: if an owned store crashes, the
-%%% manager crashes with it, the supervisor restarts it with an empty
-%%% cache, and databases reopen on the next ensure.
+%%% Cold opens run in a short-lived worker so a slow open never blocks the
+%%% manager loop; concurrent `ensure' calls for the same name coalesce onto
+%%% one open. Manager-owned databases are held by name (the docdb server and
+%%% the vector store both run under their own supervisors, not linked to the
+%%% manager); a crash of either is detected by the liveness check on the
+%%% next `ensure', which reopens.
 %%% @end
 %%%-------------------------------------------------------------------
 -module(barrel_dbs).
@@ -48,6 +51,9 @@
 -define(SERVER, ?MODULE).
 -define(DEFAULT_IDLE_TIMEOUT, 300000).
 -define(DEFAULT_EVICT_GUARD, 5000).
+%% How long a name-targeting call (close/destroy/branch/pin) waits before
+%% retrying while that name is mid-open.
+-define(OPENING_RETRY_MS, 25).
 
 -record(entry, {
     db :: barrel:db(),
@@ -58,7 +64,12 @@
     owner :: term()
 }).
 
--record(state, {dbs = #{} :: #{binary() => #entry{}}}).
+%% `opening' holds cold opens in flight in a worker (so a slow open never
+%% blocks the manager loop), with waiters coalesced onto that one open (a
+%% second open of the same name would race on the RocksDB lock).
+%% #{Name => {WorkerPid, [{From, Opts}]}}.
+-record(state, {dbs = #{} :: #{binary() => #entry{}},
+                opening = #{} :: #{binary() => {pid(), [{term(), map()}]}}}).
 
 %%====================================================================
 %% API
@@ -140,74 +151,8 @@ init([]) ->
     arm_sweep(),
     {ok, #state{}}.
 
-handle_call({ensure, Name, Opts}, _From, State) ->
-    case do_ensure(Name, Opts, State) of
-        {ok, Db, State1} -> {reply, {ok, Db}, State1};
-        {error, Reason, State1} -> {reply, {error, Reason}, State1}
-    end;
-handle_call({close, Name}, _From, #state{dbs = Dbs} = State) ->
-    case maps:take(Name, Dbs) of
-        {#entry{db = Db}, Rest} ->
-            _ = barrel:close(Db),
-            {reply, ok, State#state{dbs = Rest}};
-        error ->
-            {reply, ok, State}
-    end;
-handle_call({close_owned, Owner}, _From, #state{dbs = Dbs} = State) ->
-    Owned = [{N, E} || {N, E} <- maps:to_list(Dbs),
-                       E#entry.owner =:= Owner],
-    Dbs1 = lists:foldl(
-        fun({Name, #entry{db = Db}}, Acc) ->
-            _ = try barrel:close(Db) catch _:_ -> ok end,
-            maps:remove(Name, Acc)
-        end, Dbs, Owned),
-    {reply, ok, State#state{dbs = Dbs1}};
-handle_call({destroy, Name}, _From, State) ->
-    case do_ensure(Name, #{}, State) of
-        {ok, Db, State1} ->
-            Rest = maps:remove(Name, State1#state.dbs),
-            Result = try barrel:delete(Db)
-                     catch _:Reason -> {error, Reason}
-                     end,
-            {reply, Result, State1#state{dbs = Rest}};
-        {error, Reason, State1} ->
-            {reply, {error, Reason}, State1}
-    end;
-handle_call({branch, Parent, BranchName, Opts}, _From, State) ->
-    OpenOpts = maps:get(open_opts, Opts, #{}),
-    BranchOpts = maps:without([open_opts], Opts),
-    Owner = maps:get(owner, OpenOpts, undefined),
-    case do_ensure(Parent, OpenOpts, State) of
-        {ok, ParentDb, State1} ->
-            case maybe_make_room(State1) of
-                {ok, State2} ->
-                    case barrel:branch(ParentDb, BranchName, BranchOpts) of
-                        {ok, BranchDb} ->
-                            {reply, {ok, BranchDb},
-                             insert(BranchName, BranchDb, Owner, State2)};
-                        {error, _} = Err ->
-                            {reply, Err, State2}
-                    end;
-                {error, Reason} ->
-                    {reply, {error, Reason}, State1}
-            end;
-        {error, Reason, State1} ->
-            {reply, {error, Reason}, State1}
-    end;
-handle_call({pin, Name, Flag}, _From, #state{dbs = Dbs} = State) ->
-    case maps:find(Name, Dbs) of
-        {ok, Entry} ->
-            Dbs1 = Dbs#{Name := Entry#entry{pinned = Flag}},
-            {reply, ok, State#state{dbs = Dbs1}};
-        error ->
-            {reply, {error, not_open}, State}
-    end;
-handle_call(list, _From, #state{dbs = Dbs} = State) ->
-    {reply, maps:keys(Dbs), State};
-handle_call(sweep, _From, State) ->
-    {reply, ok, do_sweep(State)};
-handle_call(_Req, _From, State) ->
-    {reply, {error, unknown_call}, State}.
+handle_call(Req, From, State) ->
+    do_call(Req, From, State).
 
 handle_cast(_Msg, State) ->
     {noreply, State}.
@@ -216,8 +161,189 @@ handle_info(sweep, State) ->
     State1 = do_sweep(State),
     arm_sweep(),
     {noreply, State1};
+%% A cold open finished in its worker: install the handle (or report the
+%% error) and answer every coalesced waiter.
+handle_info({opened, Name, Result}, #state{opening = Opening} = State) ->
+    case maps:take(Name, Opening) of
+        {{_Pid, Waiters}, Opening1} ->
+            State1 = State#state{opening = Opening1},
+            case Result of
+                {ok, Db} ->
+                    %% the first-arrived waiter's owner tags the entry
+                    {_From0, Opts0} = lists:last(Waiters),
+                    Owner = maps:get(owner, Opts0, undefined),
+                    State2 = insert(Name, Db, Owner, State1),
+                    _ = [gen_server:reply(F, {ok, Db}) || {F, _} <- Waiters],
+                    {noreply, State2};
+                {error, _} = Err ->
+                    _ = [gen_server:reply(F, Err) || {F, _} <- Waiters],
+                    {noreply, State1}
+            end;
+        error ->
+            {noreply, State}
+    end;
+%% A name-targeting call deferred while its name was mid-open; retry it.
+handle_info({retry_call, Req, From}, State) ->
+    case do_call(Req, From, State) of
+        {reply, Reply, State1} ->
+            gen_server:reply(From, Reply),
+            {noreply, State1};
+        {noreply, State1} ->
+            {noreply, State1}
+    end;
+%% Safety net: an open worker died without reporting (it traps its own
+%% errors and always sends {opened,...}, so only an external kill lands
+%% here). Fail the waiters rather than leave them blocked.
+handle_info({'DOWN', _Ref, process, Pid, Reason},
+            #state{opening = Opening} = State) ->
+    case [{N, W} || {N, {P, W}} <- maps:to_list(Opening), P =:= Pid] of
+        [{Name, Waiters}] ->
+            _ = [gen_server:reply(F, {error, {open_crashed, Reason}})
+                 || {F, _} <- Waiters],
+            {noreply, State#state{opening = maps:remove(Name, Opening)}};
+        [] ->
+            {noreply, State}
+    end;
 handle_info(_Info, State) ->
     {noreply, State}.
+
+%%====================================================================
+%% Call dispatch (also re-entered by {retry_call, ...})
+%%====================================================================
+
+do_call({ensure, Name, Opts}, From, State) ->
+    {noreply, ensure_async(Name, Opts, From, State)};
+do_call({close, Name} = Req, From, State) ->
+    with_free_name(Name, Req, From, State,
+        fun(#state{dbs = Dbs} = S) ->
+            case maps:take(Name, Dbs) of
+                {#entry{db = Db}, Rest} ->
+                    _ = barrel:close(Db),
+                    {reply, ok, S#state{dbs = Rest}};
+                error ->
+                    {reply, ok, S}
+            end
+        end);
+do_call({close_owned, Owner}, _From, #state{dbs = Dbs} = State) ->
+    Owned = [{N, E} || {N, E} <- maps:to_list(Dbs),
+                       E#entry.owner =:= Owner],
+    Dbs1 = lists:foldl(
+        fun({Name, #entry{db = Db}}, Acc) ->
+            _ = try barrel:close(Db) catch _:_ -> ok end,
+            maps:remove(Name, Acc)
+        end, Dbs, Owned),
+    {reply, ok, State#state{dbs = Dbs1}};
+do_call({destroy, Name} = Req, From, State) ->
+    with_free_name(Name, Req, From, State,
+        fun(S) ->
+            case do_ensure(Name, #{}, S) of
+                {ok, Db, S1} ->
+                    Rest = maps:remove(Name, S1#state.dbs),
+                    Result = try barrel:delete(Db)
+                             catch _:Reason -> {error, Reason}
+                             end,
+                    {reply, Result, S1#state{dbs = Rest}};
+                {error, Reason, S1} ->
+                    {reply, {error, Reason}, S1}
+            end
+        end);
+do_call({branch, Parent, BranchName, Opts} = Req, From, State) ->
+    %% The open targets Parent, so defer while Parent is mid-open.
+    with_free_name(Parent, Req, From, State,
+        fun(S) ->
+            OpenOpts = maps:get(open_opts, Opts, #{}),
+            BranchOpts = maps:without([open_opts], Opts),
+            Owner = maps:get(owner, OpenOpts, undefined),
+            case do_ensure(Parent, OpenOpts, S) of
+                {ok, ParentDb, S1} ->
+                    case maybe_make_room(S1) of
+                        {ok, S2} ->
+                            case barrel:branch(ParentDb, BranchName,
+                                               BranchOpts) of
+                                {ok, BranchDb} ->
+                                    {reply, {ok, BranchDb},
+                                     insert(BranchName, BranchDb, Owner, S2)};
+                                {error, _} = Err ->
+                                    {reply, Err, S2}
+                            end;
+                        {error, Reason} ->
+                            {reply, {error, Reason}, S1}
+                    end;
+                {error, Reason, S1} ->
+                    {reply, {error, Reason}, S1}
+            end
+        end);
+do_call({pin, Name, Flag} = Req, From, State) ->
+    with_free_name(Name, Req, From, State,
+        fun(#state{dbs = Dbs} = S) ->
+            case maps:find(Name, Dbs) of
+                {ok, Entry} ->
+                    Dbs1 = Dbs#{Name := Entry#entry{pinned = Flag}},
+                    {reply, ok, S#state{dbs = Dbs1}};
+                error ->
+                    {reply, {error, not_open}, S}
+            end
+        end);
+do_call(list, _From, #state{dbs = Dbs} = State) ->
+    {reply, maps:keys(Dbs), State};
+do_call(sweep, _From, State) ->
+    {reply, ok, do_sweep(State)}.
+
+%% Run `Thunk(State)' now if `Name' is not mid-open; otherwise defer the
+%% whole call until the open finishes, so no synchronous open can race the
+%% in-flight one on the same database.
+with_free_name(Name, Req, From, #state{opening = Opening} = State, Thunk) ->
+    case maps:is_key(Name, Opening) of
+        true ->
+            erlang:send_after(?OPENING_RETRY_MS, self(),
+                              {retry_call, Req, From}),
+            {noreply, State};
+        false ->
+            Thunk(State)
+    end.
+
+%% Answer `From' from the cache, coalesce onto an in-flight open, or start
+%% one in a worker. Always returns the new state; `From' is replied to via
+%% gen_server:reply (now or on open completion).
+ensure_async(Name, Opts, From, #state{dbs = Dbs, opening = Opening} = State) ->
+    case maps:find(Name, Dbs) of
+        {ok, #entry{db = Db} = Entry} ->
+            case alive(Db) of
+                true ->
+                    gen_server:reply(From, {ok, Db}),
+                    State#state{dbs =
+                        Dbs#{Name := Entry#entry{last_used = now_ms()}}};
+                false ->
+                    %% docdb or store crashed: stop the stale handle, reopen
+                    _ = try barrel:close(Db) catch _:_ -> ok end,
+                    start_open(Name, Opts, From,
+                               State#state{dbs = maps:remove(Name, Dbs)})
+            end;
+        error ->
+            case maps:find(Name, Opening) of
+                {ok, {Pid, Waiters}} ->
+                    State#state{opening =
+                        Opening#{Name => {Pid, [{From, Opts} | Waiters]}}};
+                error ->
+                    start_open(Name, Opts, From, State)
+            end
+    end.
+
+start_open(Name, Opts, From, State) ->
+    case maybe_make_room(State) of
+        {ok, #state{opening = Opening} = State1} ->
+            Server = self(),
+            OpenOpts = open_opts(Opts),
+            {Pid, _Ref} = spawn_monitor(fun() ->
+                Result = try barrel:open(Name, OpenOpts)
+                         catch C:E -> {error, {C, E}} end,
+                Server ! {opened, Name, Result}
+            end),
+            State1#state{opening = Opening#{Name => {Pid, [{From, Opts}]}}};
+        {error, Reason} ->
+            gen_server:reply(From, {error, Reason}),
+            State
+    end.
 
 terminate(_Reason, #state{dbs = Dbs}) ->
     maps:foreach(
@@ -254,10 +380,9 @@ do_ensure(Name, Opts, #state{dbs = Dbs} = State) ->
 
 reopen(Name, Opts, State) ->
     Owner = maps:get(owner, Opts, undefined),
-    OpenOpts = maps:without([owner], Opts),
     case maybe_make_room(State) of
         {ok, State1} ->
-            case barrel:open(Name, OpenOpts) of
+            case barrel:open(Name, open_opts(Opts)) of
                 {ok, Db} ->
                     {ok, Db, insert(Name, Db, Owner, State1)};
                 {error, Reason} ->
@@ -267,15 +392,29 @@ reopen(Name, Opts, State) ->
             {error, Reason, State}
     end.
 
+%% Strip the manager's own `owner' tag and force store_supervised: a
+%% manager-owned store is tracked by name and must not be linked to the
+%% (transient or loop) process that opens it.
+open_opts(Opts) ->
+    (maps:without([owner], Opts))#{store_supervised => true}.
+
 insert(Name, Db, Owner, #state{dbs = Dbs} = State) ->
     Entry = #entry{db = Db, last_used = now_ms(), owner = Owner},
     State#state{dbs = Dbs#{Name => Entry}}.
 
-alive(#{docdb := DbBin}) ->
+%% The manager holds stores by name (never linked): a handle is live only
+%% while both its docdb server and its supervised vector store are up.
+alive(#{docdb := DbBin} = Db) ->
+    docdb_alive(DbBin) andalso vstore_alive(Db).
+
+docdb_alive(DbBin) ->
     case persistent_term:get({barrel_db, DbBin}, undefined) of
         Pid when is_pid(Pid) -> is_process_alive(Pid);
         _ -> false
     end.
+
+vstore_alive(#{vstore := VBin}) ->
+    barrel_vectordb_registry:whereis_name({vstore, VBin}) =/= undefined.
 
 %% Enforce dbs_max_open before an open: evict the least recently used
 %% unpinned entry idle for at least the guard, else refuse.

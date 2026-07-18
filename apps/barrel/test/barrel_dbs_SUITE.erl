@@ -17,7 +17,8 @@
     t_all_pinned_errors/1,
     t_reopen_preserves_data/1,
     t_crash_restart/1,
-    t_record_close_stops_indexer/1
+    t_record_close_stops_indexer/1,
+    t_concurrent_ensure_coalesces/1
 ]).
 
 -include_lib("common_test/include/ct.hrl").
@@ -26,7 +27,7 @@
 all() ->
     [t_idle_close, t_touch_resets, t_pin_blocks, t_lru_eviction,
      t_all_pinned_errors, t_reopen_preserves_data, t_crash_restart,
-     t_record_close_stops_indexer].
+     t_record_close_stops_indexer, t_concurrent_ensure_coalesces].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(barrel),
@@ -222,3 +223,22 @@ unmock_embed() ->
 mock_vec(Text) ->
     Hash = erlang:phash2(Text, 1000000),
     [Hash / 1000000.0, (Hash rem 1000) / 1000.0, (Hash rem 100) / 100.0].
+
+%% Concurrent ensure/2 of the same cold database must coalesce onto ONE
+%% open (a second barrel:open would race on the RocksDB lock). Every caller
+%% gets the same handle, and none fails.
+t_concurrent_ensure_coalesces(Config) ->
+    Name = uname(<<"coalesce">>),
+    Opts = open_opts(Name, Config),
+    Parent = self(),
+    N = 20,
+    _ = [spawn(fun() -> Parent ! {res, barrel_dbs:ensure(Name, Opts)} end)
+         || _ <- lists:seq(1, N)],
+    Results = [receive {res, R} -> R after 30000 -> ct:fail(ensure_timeout) end
+               || _ <- lists:seq(1, N)],
+    [?assertMatch({ok, _}, R) || R <- Results],
+    Handles = lists:usort([Db || {ok, Db} <- Results]),
+    ?assertEqual(1, length(Handles)),
+    %% the manager loop stayed responsive throughout
+    ?assert(lists:member(Name, barrel_dbs:list())),
+    ok.
