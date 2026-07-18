@@ -20,7 +20,8 @@
     t_vector_batch/1,
     t_changes/1,
     t_delete_db/1,
-    t_binary_names/1
+    t_binary_names/1,
+    t_supervised_store_survives_opener/1
 ]).
 
 -include_lib("common_test/include/ct.hrl").
@@ -31,7 +32,7 @@
 all() ->
     [t_doc_crud, t_batch_docs, t_attachments, t_attachment_stream,
      t_vectors, t_vector_batch, t_changes, t_delete_db,
-     t_binary_names].
+     t_binary_names, t_supervised_store_survives_opener].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(barrel_docdb),
@@ -256,4 +257,27 @@ t_binary_names(Config) ->
     %% deterministic no-atom-leak proof for the whole facade path
     ?assertError(badarg, binary_to_existing_atom(Name, utf8)),
     ?assertError(badarg, binary_to_existing_atom(Branch, utf8)),
+    ok.
+
+%% A store opened `store_supervised' is parented to the store supervisor,
+%% so it outlives the process that opened it (a `start_link' store would
+%% die with its opener). This is what lets a manager open on a worker.
+t_supervised_store_survives_opener(Config) ->
+    Priv = ?config(priv_dir, Config),
+    VPath = filename:join(Priv, "sup_survives_vec"),
+    Name = <<"sup_survives_db">>,
+    VCfg = #{dimension => ?DIM, db_path => VPath, bm25_backend => memory},
+    Parent = self(),
+    Opener = spawn(fun() ->
+        {ok, _Db} = barrel:open(Name, #{vectordb => VCfg,
+                                        store_supervised => true}),
+        Parent ! opened
+    end),
+    receive opened -> ok after 20000 -> ct:fail(open_timeout) end,
+    timer:sleep(200),
+    ?assertNot(is_process_alive(Opener)),
+    ?assertNotEqual(undefined,
+                    barrel_vectordb_registry:whereis_name({vstore, Name})),
+    ?assert(is_pid(persistent_term:get({barrel_db, Name}, undefined))),
+    ok = barrel:close(#{name => Name, docdb => Name, vstore => Name}),
     ok.

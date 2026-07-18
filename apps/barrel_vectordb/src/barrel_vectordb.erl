@@ -79,6 +79,7 @@
 %% API - Lifecycle
 -export([
     start_link/1,
+    start_supervised/1,
     stop/1
 ]).
 
@@ -266,6 +267,19 @@ start_link(Config) ->
         dimension => Dimension
     }, maps:without([name, dimensions, path], Config)),
     barrel_vectordb_server:start_link(Name, StoreConfig).
+
+%% @doc Start a store under {@link barrel_vectordb_store_sup} (the store's
+%% parent is the supervisor, not the caller), reusing a store already
+%% running for the same name. Use this to open a store on behalf of a
+%% long-lived owner that must not be the store's parent; `start_link/1'
+%% (caller-linked) stays the default for callers that own the store's life.
+-spec start_supervised(store_config()) -> {ok, pid()} | {error, term()}.
+start_supervised(Config) ->
+    case barrel_vectordb_store_sup:start_store(Config) of
+        {ok, Pid} -> {ok, Pid};
+        {error, {already_started, Pid}} -> {ok, Pid};
+        {error, _} = Err -> Err
+    end.
 
 %% @doc Destroy a store: close every handle (RocksDB, index, disk
 %% BM25) and remove the storage directory. The store stops.

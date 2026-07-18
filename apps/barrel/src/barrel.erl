@@ -186,7 +186,8 @@ open_plain(DbBin, Opts) ->
         {ok, _DbPid} ->
             case vec_crypto_config(DbBin, EncSpec, VecConfig0) of
                 {ok, VecConfig} ->
-                    case barrel_vectordb:start_link(VecConfig#{name => DbBin}) of
+                    case start_vstore(VecConfig#{name => DbBin},
+                                      maps:get(store_supervised, Opts, false)) of
                         {ok, _StorePid} ->
                             {ok, with_encryption(#{name => DbBin,
                                                    docdb => DbBin,
@@ -234,7 +235,9 @@ do_open_record(DbBin, Opts, Policy) ->
                         {ok, VecConfig1} ->
                             do_open_record_stores(DbBin, Policy, Dim,
                                                   VecConfig0, VecConfig1,
-                                                  EncSpec);
+                                                  EncSpec,
+                                                  maps:get(store_supervised,
+                                                           Opts, false));
                         {error, _} = CErr ->
                             _ = barrel_docdb:close_db(DbBin),
                             CErr
@@ -247,7 +250,7 @@ do_open_record(DbBin, Opts, Policy) ->
     end.
 
 do_open_record_stores(DbBin, Policy, Dim, VecConfig0, VecConfig1,
-                      EncSpec) ->
+                      EncSpec, Supervised) ->
     case init_embed(Policy, Dim) of
         {ok, EmbedState} ->
             VecConfig = VecConfig1#{
@@ -260,7 +263,7 @@ do_open_record_stores(DbBin, Policy, Dim, VecConfig0, VecConfig1,
                 docstore => {barrel_record_docstore,
                              #{db => DbBin, policy => Policy}}
             },
-            case barrel_vectordb:start_link(VecConfig) of
+            case start_vstore(VecConfig, Supervised) of
                 {ok, _StorePid} ->
                     case start_indexer(DbBin, Policy,
                                        EmbedState, Dim) of
@@ -920,6 +923,13 @@ ensure_docdb(DbBin, DocOpts) ->
         {error, _} ->
             barrel_docdb:create_db(DbBin, DocOpts)
     end.
+
+%% Start the vector store either linked to the caller (default: the caller
+%% owns the store's life) or under barrel_vectordb_store_sup (when the
+%% caller must not be the store's parent, e.g. a barrel_dbs open worker).
+%% Both leave the docdb server supervised as usual.
+start_vstore(Config, true) -> barrel_vectordb:start_supervised(Config);
+start_vstore(Config, false) -> barrel_vectordb:start_link(Config).
 
 put_encryption(DocOpts, disabled) -> DocOpts;
 put_encryption(DocOpts, Spec) -> DocOpts#{encryption => Spec}.
