@@ -244,7 +244,10 @@ pip_install(VenvPath, Packages) ->
     Pip = filename:join(venv_bin_dir(VenvPath), "pip"),
     PackageStr = string:join(Packages, " "),
     Cmd = Pip ++ " install " ++ PackageStr,
-    case run_cmd(Cmd) of
+    %% Installing torch/sentence-transformers routinely exceeds the 60s
+    %% default; use a multi-minute budget so pip is not killed mid-install
+    %% (leaving the venv missing the package).
+    case run_cmd(Cmd, 600000) of
         {ok, _} -> ok;
         {error, _} = Error -> Error
     end.
@@ -281,11 +284,13 @@ collect_output(Port, Acc, Timeout) ->
 remove_dir(Dir) ->
     case filelib:is_dir(Dir) of
         true ->
-            case os:type() of
+            %% Use a port with a timeout, not os:cmd, so a stalled mount
+            %% cannot block the caller forever.
+            _ = case os:type() of
                 {win32, _} ->
-                    os:cmd("rmdir /s /q \"" ++ Dir ++ "\"");
+                    run_cmd("rmdir /s /q \"" ++ Dir ++ "\"", 60000);
                 _ ->
-                    os:cmd("rm -rf \"" ++ Dir ++ "\"")
+                    run_cmd("rm -rf \"" ++ Dir ++ "\"", 60000)
             end,
             ok;
         false ->
