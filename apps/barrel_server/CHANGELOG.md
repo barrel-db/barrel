@@ -3,6 +3,20 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.2.1] - 2026-07-18
+
+### Fixed
+- A signed attachment upload binds the body to the signed
+  `x-barrel-content-sha256` header (not the unsigned `x-barrel-digest`), so an
+  on-path body swap on a signed upload is rejected.
+- mTLS is dropped from the accepted auth set unless the listener sets
+  `verify_peer`, so a certless client is never authenticated by a config gap.
+- The replication changes wire filter bounds regex work and nesting depth
+  (ReDoS), and vector search `k` is clamped.
+- The live-query bridge opens databases in the caller, so a cold open no longer
+  blocks other subscribe/snapshot/unsubscribe calls; a snapshot reuses a cached
+  id-sorted view instead of re-sorting in the loop.
+
 ## [1.2.0] - 2026-07-17
 
 ### Added

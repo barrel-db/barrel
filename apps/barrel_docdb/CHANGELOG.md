@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.1] - 2026-07-18
+
+### Fixed
+- Replication drain stops with `{error, no_progress}` when a source returns a
+  non-empty batch without advancing its sequence, instead of spinning at 100% CPU.
+- Replication tasks are linked to the trap-exit manager (no orphan doubling on a
+  manager restart), and per-batch checkpointing runs off the manager loop.
+- Compaction, retention and TTL sweeps run in a worker off the writer loop, so a
+  long sweep no longer makes concurrent writes time out.
+- `fold_docs` honors `id_prefix` (it was scanning the whole database) and reads
+  under a caller-side snapshot instead of blocking the writer.
+- Replication-changes wire-filter regex is bounded by a match limit and filter
+  nesting is capped (ReDoS); a resumed chunked query hands its snapshot to the
+  successor cursor.
+
 ## [1.1.0] - 2026-07-17
 
 ### Added

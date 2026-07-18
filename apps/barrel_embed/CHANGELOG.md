@@ -3,6 +3,14 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.3.1] - 2026-07-18
+
+### Fixed
+- The managed-venv pip install uses a multi-minute timeout, so a
+  torch/sentence-transformers install is no longer killed at 60s (which left the
+  venv missing packages); directory removal runs under a bounded port instead of
+  an unbounded `os:cmd`.
+
 ## [2.3.0] - 2026-07-08
 
 Coordinated umbrella release.

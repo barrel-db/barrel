@@ -4,6 +4,28 @@ All notable changes to the Barrel umbrella are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and each app
 is versioned independently under [Semantic Versioning](https://semver.org/).
 
+## [2026-07-18] Code-review hardening + non-blocking database opens
+
+A multi-dimension review (C NIFs, supervision, concurrency, resource leaks,
+security) drove a round of fixes across the umbrella: the vector NIFs bounds-check
+their inputs, replication no longer spins on a non-advancing source, compaction
+and sweeps run off the database writer loop, and the sync surface closes a
+signed-attachment forgery, an mTLS config gap, and a filter ReDoS. The database
+lifecycle manager now opens databases in a worker off its message loop, with
+request coalescing, so a cold or wedged open no longer blocks node-wide lifecycle
+calls; this rides on a new `barrel:open` `store_supervised` option that parents
+the vector store to a supervisor instead of the caller.
+
+| App | Version | Change |
+|-----|---------|--------|
+| barrel | 1.1.0 | non-blocking `barrel_dbs` opens (worker + coalescing); `barrel:open` `store_supervised` option; reopen no longer leaks the vector store |
+| barrel_docdb | 1.1.1 | replication no-progress guard + task lifecycle; compaction/retention/TTL off the writer loop; `fold_docs` honors `id_prefix`; wire-filter ReDoS bound; cursor snapshot handoff |
+| barrel_server | 1.2.1 | signed-attachment body binding; mTLS `verify_peer` gate; wire-filter ReDoS + search `k` clamp; live-query bridge opens off its loop |
+| barrel_vectordb | 2.2.0 | supervised store (`start_supervised`); batch-ADC NIF bounds checks; RocksDB batch/ETS/monitor cleanup |
+| barrel_faiss | 1.0.1 | `search` caps `k` and allocates inside the try; resource re-open on upgrade; strict metric atoms |
+| barrel_rerank | 1.0.1 | startup fails fast on a Python exit instead of hanging |
+| barrel_embed | 2.3.1 | venv pip/rm commands bounded so a torch install is not killed at 60s |
+
 ## [2026-07-17] Sync-wire auth hardening + multi-protocol serving
 
 `barrel_server` gains opt-in Ed25519 signed-request auth and an mTLS transport

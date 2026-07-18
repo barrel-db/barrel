@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.1 (2026-07-18)
+
+- Fail fast on a Python startup exit instead of hanging the full timeout: the
+  init handshake now handles the port's `exit_status`.
+
 ## 1.0.0 (2026-07-10)
 
 Coordinated umbrella release. Added tests for the sidecar response decoder.
