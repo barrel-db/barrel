@@ -40,10 +40,11 @@ ok = barrel_ngram:open(<<"code">>, #{db => <<"mydb">>}),
 
 ## Status
 
-M1: dense trigram selection, a single immutable segment per corpus, and
-one-shot indexing from the changes feed. Sparse (content-defined)
-selection, incremental indexing with deletes, regex, sharding, and the
-MCP tool land in later milestones.
+Dense trigram selection over multiple immutable segments, kept live by a
+push subscription to the changes feed (updates and deletes reflected via
+the confirm pass), with crash-safe manifest recovery. Compaction and a
+live-docs bitmap, sparse (content-defined) selection, regex, sharding, and
+the MCP tool land in later milestones.
 
 ## License
 

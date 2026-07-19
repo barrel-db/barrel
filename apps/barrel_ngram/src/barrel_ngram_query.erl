@@ -1,23 +1,16 @@
 %%%-------------------------------------------------------------------
-%%% @doc Substring query path: gram intersection then the confirm pass.
+%%% @doc Substring query path: fan across segments, then the confirm pass.
 %%%
-%%% Trigram presence is a necessary but not sufficient condition for a
-%%% substring match, so every candidate is confirmed by fetching the
-%%% document and running the real substring match on its corpus text.
-%%%
-%%% Plan:
-%%% <ol>
-%%%   <li>Ask the selector for the literal's reliable grams.</li>
-%%%   <li>`{reliable, Grams}': intersect those grams' posting lists to get
-%%%       candidate ordinals. `brute_force' (literal shorter than a
-%%%       trigram): take every ordinal.</li>
-%%%   <li>Map ordinals to keys via the segment sidecar, fetch the docs
-%%%       from barrel_docdb, and keep only those whose corpus text really
-%%%       contains the literal. Each hit carries its match spans.</li>
-%%% </ol>
+%%% Candidates are gathered from every live segment (gram intersection, or
+%%% the whole segment for a sub-trigram literal) plus the shard's unfrozen
+%%% buffer, then de-duplicated by id. Every candidate is confirmed by
+%%% fetching the current document and running the real substring match on
+%%% its corpus text, so trigram false positives, stale entries left by an
+%%% update, and deleted documents (fetched as `not_found') are all
+%%% dropped. Trigram presence is necessary, never sufficient.
 %%%
 %%% The query runs in the calling process against its own immutable read
-%%% handle, never inside the shard loop.
+%%% handles, never inside the shard loop.
 %%% @end
 %%%-------------------------------------------------------------------
 -module(barrel_ngram_query).
@@ -33,47 +26,47 @@ search(_Corpus, <<>>, _Opts) ->
     {error, empty_literal};
 search(Corpus, Literal, _Opts) when is_binary(Literal) ->
     {ok, Config} = barrel_ngram_shard:get_config(Corpus),
-    case barrel_ngram_shard:get_segment(Corpus) of
-        none ->
-            {ok, []};
-        {ok, Path} ->
-            case barrel_ngram_segment:open(Path) of
-                {ok, Handle} ->
-                    try
-                        run(Handle, Config, Literal)
-                    after
-                        barrel_ngram_segment:close(Handle)
-                    end;
-                {error, _} = Err ->
-                    Err
-            end
-    end.
-
-%%====================================================================
-%% Internal
-%%====================================================================
-
-run(Handle, Config, Literal) ->
-    case candidate_ordinals(Handle, Config, Literal) of
+    {ok, Segments} = barrel_ngram_shard:get_manifest(Corpus),
+    BufferKeys = barrel_ngram_shard:buffer_keys(Corpus),
+    Selector = maps:get(selector, Config, barrel_ngram_selector_dense),
+    case segment_keys(Segments, Selector, Literal) of
         {error, _} = Err ->
             Err;
-        Ordinals ->
-            KeyPairs = barrel_ngram_segment:keys(Handle, Ordinals),
+        SegKeys ->
+            Keys = lists:usort(SegKeys ++ BufferKeys),
             Db = maps:get(db, Config),
-            {ok, confirm(Db, KeyPairs, Literal, Config)}
+            {ok, confirm(Db, Keys, Literal, Config)}
     end.
 
-%% @private Candidate ordinals before the confirm pass.
-candidate_ordinals(Handle, Config, Literal) ->
-    Selector = maps:get(selector, Config, barrel_ngram_selector_dense),
-    case barrel_ngram_selector:reliable_grams(Selector, Literal) of
-        brute_force ->
-            all_ordinals(Handle);
-        {reliable, []} ->
-            all_ordinals(Handle);
-        {reliable, Grams} ->
-            intersect_grams(Handle, Grams)
-    end.
+%%====================================================================
+%% Candidate gathering
+%%====================================================================
+
+%% @private Candidate ids across all segments (de-dup happens in search/3).
+segment_keys(Segments, Selector, Literal) ->
+    lists:foldl(
+        fun(_Seg, {error, _} = Err) ->
+                Err;
+           ({_Gen, Path}, Acc) ->
+                case barrel_ngram_segment:open(Path) of
+                    {ok, H} ->
+                        try candidate_keys(H, Selector, Literal) of
+                            Keys -> Keys ++ Acc
+                        after
+                            barrel_ngram_segment:close(H)
+                        end;
+                    {error, _} = Err ->
+                        Err
+                end
+        end, [], Segments).
+
+candidate_keys(Handle, Selector, Literal) ->
+    Ordinals = case barrel_ngram_selector:reliable_grams(Selector, Literal) of
+        brute_force -> all_ordinals(Handle);
+        {reliable, []} -> all_ordinals(Handle);
+        {reliable, Grams} -> intersect_grams(Handle, Grams)
+    end,
+    [K || {_O, K} <- barrel_ngram_segment:keys(Handle, Ordinals)].
 
 all_ordinals(Handle) ->
     case barrel_ngram_segment:doc_count(Handle) of
@@ -81,8 +74,8 @@ all_ordinals(Handle) ->
         N -> lists:seq(0, N - 1)
     end.
 
-%% @private Intersect the posting lists of the given grams. A missing
-%% gram makes the intersection empty.
+%% @private Intersect the posting lists of the grams. A missing gram makes
+%% the intersection empty.
 intersect_grams(Handle, Grams) ->
     collect_lists(Handle, Grams, []).
 
@@ -90,21 +83,20 @@ collect_lists(_Handle, [], Acc) ->
     barrel_ngram_postings:intersect_all(Acc);
 collect_lists(Handle, [G | Rest], Acc) ->
     case barrel_ngram_segment:lookup_postings(Handle, G) of
-        empty ->
-            [];   %% one absent gram => no candidates
-        {ok, Ords} ->
-            collect_lists(Handle, Rest, [Ords | Acc]);
-        {error, _} = Err ->
-            Err
+        empty -> [];
+        {ok, Ords} -> collect_lists(Handle, Rest, [Ords | Acc]);
+        {error, _} -> []
     end.
 
+%%====================================================================
+%% Confirm pass
+%%====================================================================
+
 %% @private Fetch each candidate and keep the real substring matches.
-confirm(Db, KeyPairs, Literal, Config) ->
-    Keys = [K || {_O, K} <- KeyPairs],
-    Results = case Keys of
-        [] -> [];
-        _ -> barrel_docdb:get_docs(Db, Keys)
-    end,
+confirm(_Db, [], _Literal, _Config) ->
+    [];
+confirm(Db, Keys, Literal, Config) ->
+    Results = barrel_docdb:get_docs(Db, Keys),
     Hits = lists:filtermap(
         fun({K, {ok, Doc}}) ->
                 Text = barrel_ngram_corpus:doc_text(Doc, Config),

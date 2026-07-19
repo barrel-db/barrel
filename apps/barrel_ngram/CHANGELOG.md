@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-07-19
+
+### Added
+
+- Incremental live indexing: a corpus subscribes to its database's changes
+  feed (push mode) and keeps in sync in the background. Updates and deletes
+  are reflected in results through the confirm pass, which re-fetches the
+  current document and drops `not_found`.
+- Multi-segment storage with a crash-safe manifest (`barrel_ngram_manifest`),
+  written atomically (temp + rename); the manifest commit is the recovery
+  point, and orphan segments from a crash before commit are cleared at start.
+- Query fans across every live segment plus the unfrozen buffer.
+- Recovery replays only the feed tail since the persisted HLC watermark.
+- `barrel_ngram:refresh/1`: synchronous catch-up + freeze; `index/1` now
+  delegates to it.
+
 ## [0.1.0] - 2026-07-18
 
 ### Added

@@ -19,7 +19,7 @@
 %%%-------------------------------------------------------------------
 -module(barrel_ngram).
 
--export([open/2, close/1, index/1, search/2, search/3]).
+-export([open/2, close/1, index/1, refresh/1, search/2, search/3]).
 
 -type corpus() :: binary() | atom().
 -export_type([corpus/0]).
@@ -53,11 +53,19 @@ open(Corpus, Opts) ->
 close(Corpus) ->
     barrel_ngram_shard_sup:stop_shard(Corpus).
 
-%% @doc Build (or rebuild) the corpus index from its database's changes
-%% feed. Returns a summary with the document count and watermark.
+%% @doc Catch the corpus up to the current head of its database's changes
+%% feed and freeze the buffer. The index is kept live in the background by
+%% a feed subscription; this is the synchronous catch-up point for tests
+%% and ops. Alias of {@link refresh/1}.
 -spec index(corpus()) -> {ok, map()} | {error, term()}.
 index(Corpus) ->
-    barrel_ngram_indexer:build(Corpus).
+    refresh(Corpus).
+
+%% @doc Synchronously drain the changes feed up to now and freeze the
+%% active buffer into a segment.
+-spec refresh(corpus()) -> {ok, map()} | {error, term()}.
+refresh(Corpus) ->
+    barrel_ngram_shard:refresh(Corpus).
 
 %% @equiv search(Corpus, Literal, #{})
 -spec search(corpus(), binary()) -> {ok, [barrel_ngram_query:hit()]} | {error, term()}.
