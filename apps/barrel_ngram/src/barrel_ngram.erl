@@ -19,7 +19,8 @@
 %%%-------------------------------------------------------------------
 -module(barrel_ngram).
 
--export([open/2, close/1, index/1, refresh/1, compact/1, search/2, search/3]).
+-export([open/2, close/1, index/1, refresh/1, compact/1, search/2, search/3,
+         regex/2, regex/3]).
 
 -type corpus() :: binary() | atom().
 -export_type([corpus/0]).
@@ -85,6 +86,20 @@ search(Corpus, Literal) ->
     {ok, [barrel_ngram_query:hit()]} | {error, term()}.
 search(Corpus, Literal, Opts) ->
     barrel_ngram_query:search(Corpus, Literal, Opts).
+
+%% @equiv regex(Corpus, Regex, #{})
+-spec regex(corpus(), binary()) ->
+    {ok, [barrel_ngram_query:hit()]} | {error, term()}.
+regex(Corpus, Regex) ->
+    regex(Corpus, Regex, #{}).
+
+%% @doc Regex search (PCRE syntax). Returns hits with the matching id and
+%% the match spans within its corpus text. `{error, {bad_regex, _}}' if the
+%% pattern does not compile.
+-spec regex(corpus(), binary(), map()) ->
+    {ok, [barrel_ngram_query:hit()]} | {error, term()}.
+regex(Corpus, Regex, Opts) ->
+    barrel_ngram_query:regex_search(Corpus, Regex, Opts).
 
 %%====================================================================
 %% Internal

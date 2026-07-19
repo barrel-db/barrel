@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-07-19
+
+### Added
+
+- Regex search (`barrel_ngram:regex/2,3`, PCRE syntax). A regex is turned
+  into a mandatory-trigram boolean query (Russ Cox / Google Code Search)
+  that is intersected and unioned over the posting lists, then each
+  candidate is confirmed with a bounded `re:run`. The analysis is always
+  sound (unsure constructs contribute no constraint), so results are
+  exact. Trigram-accelerated on dense corpora; sparse corpora brute-force
+  since their index holds only a sample of grams.
+- `barrel_ngram_postings:union_all/1` and a `covers_all_grams/1` selector
+  callback (the regex planner uses the trigram query only when the index
+  is complete).
+
 ## [0.4.0] - 2026-07-19
 
 ### Added

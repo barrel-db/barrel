@@ -16,7 +16,7 @@
 -module(barrel_ngram_postings).
 
 -export([encode/1, decode/1]).
--export([intersect_all/1]).
+-export([intersect_all/1, union_all/1]).
 
 -type ordinal() :: non_neg_integer().
 -export_type([ordinal/0]).
@@ -74,6 +74,14 @@ varint_decode(<<Byte:8, Rest/binary>>, Acc, Shift) ->
 %%====================================================================
 %% Intersection
 %%====================================================================
+
+%% @doc Union several ascending posting lists into one ascending, unique
+%% list (k-way merge with dedup).
+-spec union_all([[ordinal()]]) -> [ordinal()].
+union_all([]) ->
+    [];
+union_all(Lists) ->
+    lists:umerge(Lists).
 
 %% @doc Intersect several ascending posting lists. Any empty input makes
 %% the whole intersection empty. The result is ascending.

@@ -28,7 +28,12 @@
 -module(barrel_ngram_selector_sparse).
 -behaviour(barrel_ngram_selector).
 
--export([select_grams/2, reliable_grams/2]).
+-export([select_grams/2, reliable_grams/2, covers_all_grams/1]).
+
+%% @doc Sparse samples grams, so an arbitrary trigram may be absent; the
+%% regex planner must not rely on the index being complete.
+-spec covers_all_grams(map()) -> boolean().
+covers_all_grams(_Opts) -> false.
 
 -define(DEFAULT_RADIUS, 3).
 -define(DEFAULT_SAMPLE_RATE, 4).

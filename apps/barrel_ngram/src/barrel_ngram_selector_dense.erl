@@ -10,7 +10,11 @@
 -module(barrel_ngram_selector_dense).
 -behaviour(barrel_ngram_selector).
 
--export([select_grams/2, reliable_grams/2]).
+-export([select_grams/2, reliable_grams/2, covers_all_grams/1]).
+
+%% @doc Dense indexes every trigram, so any mandatory trigram is present.
+-spec covers_all_grams(map()) -> boolean().
+covers_all_grams(_Opts) -> true.
 
 %% @doc Every overlapping trigram of `Bytes', deduplicated and ascending.
 %% Inputs shorter than three bytes contribute no grams. Options are unused.

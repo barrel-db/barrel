@@ -15,7 +15,9 @@
 %%%-------------------------------------------------------------------
 -module(barrel_ngram_query).
 
--export([search/3]).
+-export([search/3, regex_search/3]).
+
+-define(RE_MATCH_LIMIT, 100000).
 
 -type hit() :: #{id := binary(), spans := [{non_neg_integer(), non_neg_integer()}]}.
 -export_type([hit/0]).
@@ -104,6 +106,94 @@ confirm(Db, Keys, Literal, Config) ->
                 case binary:matches(Text, Literal) of
                     [] -> false;
                     Spans -> {true, #{id => K, spans => Spans}}
+                end;
+           ({_K, _Other}) ->
+                false
+        end, lists:zip(Keys, Results)),
+    lists:sort(fun(#{id := A}, #{id := B}) -> A =< B end, Hits).
+
+%%====================================================================
+%% Regex search
+%%====================================================================
+
+%% @doc Regex search: turn the regex into a mandatory-trigram query,
+%% intersect it over the index (only when the selector indexes every gram),
+%% then confirm each candidate with the real regex engine.
+-spec regex_search(term(), binary(), map()) -> {ok, [hit()]} | {error, term()}.
+regex_search(Corpus, Regex, _Opts) when is_binary(Regex) ->
+    case re:compile(Regex) of
+        {error, Reason} ->
+            {error, {bad_regex, Reason}};
+        {ok, RE} ->
+            {ok, Config} = barrel_ngram_shard:get_config(Corpus),
+            {ok, Segments} = barrel_ngram_shard:get_manifest(Corpus),
+            BufferKeys = barrel_ngram_shard:buffer_keys(Corpus),
+            Selector = maps:get(selector, Config, barrel_ngram_selector_dense),
+            SelectorOpts = maps:get(selector_opts, Config, #{}),
+            Query = case barrel_ngram_selector:covers_all_grams(Selector, SelectorOpts) of
+                true -> barrel_ngram_regex:trigram_query(Regex);
+                false -> all
+            end,
+            SegKeys = regex_segment_keys(Segments, Query),
+            Keys = lists:usort(SegKeys ++ BufferKeys),
+            Db = maps:get(db, Config),
+            {ok, regex_confirm(Db, Keys, RE, Config)}
+    end.
+
+%% @private Candidate ids across all segments for a trigram query.
+regex_segment_keys(Segments, Query) ->
+    lists:foldl(
+        fun({_Gen, Path}, Acc) ->
+            case barrel_ngram_segment:open(Path) of
+                {ok, H} ->
+                    try eval_keys(H, Query) of
+                        Keys -> Keys ++ Acc
+                    after
+                        barrel_ngram_segment:close(H)
+                    end;
+                {error, _} ->
+                    Acc
+            end
+        end, [], Segments).
+
+eval_keys(Handle, Query) ->
+    Ordinals = eval_query(Handle, Query),
+    [K || {_O, K} <- barrel_ngram_segment:keys(Handle, Ordinals)].
+
+%% @private Evaluate a trigram query to candidate ordinals.
+eval_query(Handle, all) ->
+    all_ordinals(Handle);
+eval_query(_Handle, none) ->
+    [];
+eval_query(Handle, {gram, G}) ->
+    case barrel_ngram_segment:lookup_postings(Handle, G) of
+        {ok, Ords} -> Ords;
+        empty -> [];
+        {error, _} -> []
+    end;
+eval_query(Handle, {'and', Qs}) ->
+    barrel_ngram_postings:intersect_all([eval_query(Handle, Q) || Q <- Qs]);
+eval_query(Handle, {'or', Qs}) ->
+    barrel_ngram_postings:union_all([eval_query(Handle, Q) || Q <- Qs]).
+
+%% @private Fetch each candidate and keep the real regex matches.
+regex_confirm(_Db, [], _RE, _Config) ->
+    [];
+regex_confirm(Db, Keys, RE, Config) ->
+    Results = barrel_docdb:get_docs(Db, Keys),
+    Hits = lists:filtermap(
+        fun({K, {ok, Doc}}) ->
+                Text = barrel_ngram_corpus:doc_text(Doc, Config),
+                case re:run(Text, RE,
+                            [global, {capture, first, index},
+                             {match_limit, ?RE_MATCH_LIMIT},
+                             {match_limit_recursion, ?RE_MATCH_LIMIT}]) of
+                    {match, Matches} ->
+                        {true, #{id => K, spans => [{S, L} || [{S, L}] <- Matches]}};
+                    nomatch ->
+                        false;
+                    {error, _} ->
+                        false
                 end;
            ({_K, _Other}) ->
                 false

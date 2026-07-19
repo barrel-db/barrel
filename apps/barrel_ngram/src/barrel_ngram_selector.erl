@@ -30,7 +30,7 @@
 %%%-------------------------------------------------------------------
 -module(barrel_ngram_selector).
 
--export([select_grams/3, reliable_grams/3]).
+-export([select_grams/3, reliable_grams/3, covers_all_grams/2]).
 
 -export_type([gram/0, reliable/0]).
 
@@ -40,6 +40,11 @@
 
 -callback select_grams(binary(), map()) -> [gram()].
 -callback reliable_grams(binary(), map()) -> reliable().
+%% Whether the selector indexes EVERY trigram of a document. The regex
+%% planner needs this: an arbitrary mandatory trigram is only guaranteed
+%% present when the selector covers all grams (dense). A sampling selector
+%% (sparse) does not, so regex there must brute-force.
+-callback covers_all_grams(map()) -> boolean().
 
 %% @doc Dispatch `select_grams/2' to a selector module.
 -spec select_grams(module(), map(), binary()) -> [gram()].
@@ -50,3 +55,8 @@ select_grams(Mod, Opts, Bytes) ->
 -spec reliable_grams(module(), map(), binary()) -> reliable().
 reliable_grams(Mod, Opts, Query) ->
     Mod:reliable_grams(Query, Opts).
+
+%% @doc Whether the selector indexes every trigram (dispatch).
+-spec covers_all_grams(module(), map()) -> boolean().
+covers_all_grams(Mod, Opts) ->
+    Mod:covers_all_grams(Opts).

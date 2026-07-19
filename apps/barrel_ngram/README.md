@@ -22,7 +22,10 @@ ok = barrel_ngram:open(<<"code">>, #{db => <<"mydb">>}),
 
 %% Exact substring search. Each hit carries the document id and the
 %% match spans within its indexed text.
-{ok, Hits} = barrel_ngram:search(<<"code">>, <<"connect_timeout">>).
+{ok, Hits} = barrel_ngram:search(<<"code">>, <<"connect_timeout">>),
+
+%% Regex search (PCRE syntax).
+{ok, More} = barrel_ngram:regex(<<"code">>, <<"connect_\\w+timeout">>).
 ```
 
 ## How it works
@@ -40,11 +43,12 @@ ok = barrel_ngram:open(<<"code">>, #{db => <<"mydb">>}),
 
 ## Status
 
-Dense and sparse (content-defined) trigram selection over multiple
-immutable segments, kept live by a push subscription to the changes feed
-(updates and deletes reflected via the confirm pass), with crash-safe
-manifest recovery and compaction that evicts superseded and deleted
-entries. Regex, sharding, and the MCP tool land in later milestones.
+Substring and regex search over dense and sparse (content-defined)
+trigram selection, across multiple immutable segments kept live by a push
+subscription to the changes feed (updates and deletes reflected via the
+confirm pass), with crash-safe manifest recovery and compaction that
+evicts superseded and deleted entries. Sharding and the MCP tool land in
+later milestones.
 
 Choose the selector per corpus: dense (default, indexes every trigram) or
 sparse (`selector => barrel_ngram_selector_sparse`, indexes a sampled
