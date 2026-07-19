@@ -1,36 +1,42 @@
 %%%-------------------------------------------------------------------
-%%% @doc Per-corpus shard: the changes-feed subscriber and segment writer.
+%%% @doc Per-corpus shard: changes-feed subscriber, segment writer, and
+%%% compaction coordinator.
 %%%
 %%% The shard keeps a corpus in sync with its barrel_docdb database. It
 %%% subscribes to the changes feed in push mode and applies each batch to
-%%% an in-memory buffer keyed by document id, so an update or delete
-%%% inside the unfrozen window cleanly replaces or removes an entry. When
-%%% the buffer passes a threshold it freezes to a new immutable segment
-%%% and commits the manifest, advancing the persisted watermark.
+%%% an in-memory buffer keyed by document id (an update replaces, a delete
+%%% becomes a tombstone). When the buffer passes a threshold it freezes to
+%%% a new immutable segment and commits the manifest, advancing the
+%%% persisted watermark.
+%%%
+%%% Segments only ever accumulate on their own, so when the live count
+%%% crosses a threshold the shard compacts: an offloaded worker merges the
+%%% segments, collapsing each key to its newest version by HLC and
+%%% dropping superseded and deleted ordinals, and the shard swaps the
+%%% manifest to the merged segment. `compact/1' does this synchronously.
 %%%
 %%% Recovery is the watermark: on start the shard loads the manifest and
 %%% resubscribes from its watermark, so only the feed tail is replayed
-%%% (idempotently). Durability of the index is the segments + manifest;
-%%% the buffer is always reconstructable from the feed.
-%%%
-%%% Correctness of updates/deletes does not depend on any liveness
-%%% structure here: a stale or deleted id that still lives in an older
-%%% segment is dropped by the query confirm pass (it re-fetches the
-%%% current document and drops `not_found'). Merge and a live-docs bitmap
-%%% are a later milestone's growth control.
+%%% (idempotently). Correctness of updates/deletes never depends on
+%%% compaction, the query confirm pass re-fetches the current document and
+%%% drops a stale or deleted candidate.
 %%% @end
 %%%-------------------------------------------------------------------
 -module(barrel_ngram_shard).
 -behaviour(gen_server).
 
 -export([start_link/2]).
--export([refresh/1, get_manifest/1, buffer_keys/1, get_config/1]).
+-export([refresh/1, compact/1, get_manifest/1, buffer_keys/1, get_config/1]).
 
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
 -define(DEFAULT_FREEZE_THRESHOLD, 1000).
+-define(DEFAULT_COMPACT_THRESHOLD, 16).
 -define(REFRESH_BATCH, 1000).
 -define(SUBSCRIBE_RETRY_MS, 1000).
+
+%% Buffer content: live grams, or a tombstone.
+-type content() :: {live, [barrel_ngram_selector:gram()]} | deleted.
 
 -record(state, {
     corpus :: term(),
@@ -40,8 +46,10 @@
     dir :: binary(),
     manifest :: barrel_ngram_manifest:manifest(),
     watermark :: binary() | first,   %% applied HLC (12-byte) or first
-    buffer = #{} :: #{binary() => [barrel_ngram_selector:gram()]},
+    buffer = #{} :: #{binary() => {binary(), content()}},
     freeze_threshold :: pos_integer(),
+    compact_threshold :: pos_integer() | infinity,
+    merge_worker :: undefined | {pid(), reference()},
     stream_pid :: pid() | undefined
 }).
 
@@ -58,6 +66,13 @@ start_link(Corpus, Config) ->
 -spec refresh(term()) -> {ok, map()} | {error, term()}.
 refresh(Corpus) ->
     gen_server:call(via(Corpus), refresh, infinity).
+
+%% @doc Synchronously compact every live segment into one, evicting
+%% superseded and deleted ordinals. Returns `{error, busy}' if a
+%% background compaction is in flight.
+-spec compact(term()) -> {ok, map()} | {error, term()}.
+compact(Corpus) ->
+    gen_server:call(via(Corpus), compact, infinity).
 
 %% @doc The live segments as `{Gen, Path}', ascending by generation.
 -spec get_manifest(term()) -> {ok, [{non_neg_integer(), binary()}]}.
@@ -93,18 +108,39 @@ init({Corpus, Config}) ->
         dir = Dir,
         manifest = Manifest0,
         watermark = barrel_ngram_manifest:watermark(Manifest0),
-        freeze_threshold = maps:get(freeze_threshold, Config, ?DEFAULT_FREEZE_THRESHOLD)
+        freeze_threshold = maps:get(freeze_threshold, Config, ?DEFAULT_FREEZE_THRESHOLD),
+        compact_threshold = maps:get(compact_threshold, Config, ?DEFAULT_COMPACT_THRESHOLD),
+        merge_worker = undefined
     },
     {ok, subscribe(State0)}.
 
 handle_call(refresh, _From, State) ->
-    State1 = drain(State),
-    State2 = do_freeze(State1),
+    State1 = maybe_compact(do_freeze(drain(State))),
     Reply = {ok, #{
-        segments => length(barrel_ngram_manifest:list_segments(State2#state.manifest)),
-        watermark => State2#state.watermark
+        segments => length(barrel_ngram_manifest:list_segments(State1#state.manifest)),
+        watermark => State1#state.watermark
     }},
-    {reply, Reply, State2};
+    {reply, Reply, State1};
+
+handle_call(compact, _From, #state{merge_worker = undefined} = State0) ->
+    State1 = do_freeze(State0),
+    case barrel_ngram_manifest:list_segments(State1#state.manifest) of
+        [] ->
+            {reply, {ok, #{segments => 0}}, State1};
+        Segs ->
+            InputFiles = [maps:get(file, S) || S <- Segs],
+            InputPaths = [filename:join(State1#state.dir, F) || F <- InputFiles],
+            case barrel_ngram_merge:merge(InputPaths, true) of
+                {ok, TempPath, DocCount, _Wm} ->
+                    State2 = apply_merge_result(TempPath, DocCount, InputFiles, State1),
+                    N = length(barrel_ngram_manifest:list_segments(State2#state.manifest)),
+                    {reply, {ok, #{segments => N, doc_count => DocCount}}, State2};
+                {error, Reason} ->
+                    {reply, {error, Reason}, State1}
+            end
+    end;
+handle_call(compact, _From, State) ->
+    {reply, {error, busy}, State};
 
 handle_call(get_manifest, _From, #state{dir = Dir, manifest = M} = State) ->
     Segs = [{maps:get(gen, S), filename:join(Dir, maps:get(file, S))}
@@ -126,7 +162,26 @@ handle_info({changes, ReqId, Changes}, #state{stream_pid = Pid} = State) ->
         undefined -> ok;
         _ -> barrel_changes_stream:ack(Pid, ReqId)
     end,
-    {noreply, maybe_freeze(State1)};
+    {noreply, maybe_compact(maybe_freeze(State1))};
+
+handle_info({merge_done, Result, InputFiles},
+            #state{merge_worker = {_Pid, MRef}} = State) ->
+    erlang:demonitor(MRef, [flush]),
+    State1 = case Result of
+        {ok, TempPath, DocCount, _Wm} ->
+            apply_merge_result(TempPath, DocCount, InputFiles, State);
+        {error, Reason} ->
+            logger:warning("barrel_ngram compaction failed for ~p: ~p",
+                           [State#state.corpus, Reason]),
+            State
+    end,
+    {noreply, State1#state{merge_worker = undefined}};
+
+handle_info({'DOWN', MRef, process, _Pid, Reason},
+            #state{merge_worker = {_WPid, MRef}} = State) ->
+    logger:warning("barrel_ngram compaction worker died for ~p: ~p",
+                   [State#state.corpus, Reason]),
+    {noreply, State#state{merge_worker = undefined}};
 
 handle_info({'EXIT', Pid, _Reason}, #state{stream_pid = Pid} = State) ->
     {noreply, subscribe(State#state{stream_pid = undefined})};
@@ -180,14 +235,15 @@ apply_change(Change, {Buffer, Wm}, Sel, Cfg) ->
             Id = maps:get(id, Change),
             Buffer1 = case maps:get(deleted, Change, false) of
                 true ->
-                    maps:remove(Id, Buffer);
+                    Buffer#{Id => {EncHlc, deleted}};
                 false ->
                     case maps:get(doc, Change, undefined) of
                         Doc when is_map(Doc) ->
                             Text = barrel_ngram_corpus:doc_text(Doc, Cfg),
-                            Buffer#{Id => barrel_ngram_selector:select_grams(Sel, Text)};
+                            Grams = barrel_ngram_selector:select_grams(Sel, Text),
+                            Buffer#{Id => {EncHlc, {live, Grams}}};
                         _ ->
-                            maps:remove(Id, Buffer)
+                            Buffer
                     end
             end,
             {Buffer1, EncHlc}
@@ -227,13 +283,13 @@ do_freeze(#state{buffer = Buffer} = State) when map_size(Buffer) =:= 0 ->
 do_freeze(#state{buffer = Buffer, manifest = M, dir = Dir,
                  watermark = Wm} = State) ->
     Keys = maps:keys(Buffer),
-    Postings = build_postings(Buffer, Keys),
+    {Entries, Postings} = build_segment(Buffer, Keys),
     Gen = barrel_ngram_manifest:next_gen(M),
-    File = iolist_to_binary(io_lib:format("segment-~6..0b.ngseg", [Gen])),
+    File = segment_file(Gen),
     Path = filename:join(Dir, File),
     WmBin = wm_bin(Wm),
     Spec = #{doc_count => length(Keys), watermark => WmBin,
-             postings => Postings, keys => Keys},
+             postings => Postings, entries => Entries},
     case barrel_ngram_segment:write(Path, Spec) of
         ok ->
             M1 = barrel_ngram_manifest:add_segment(
@@ -247,19 +303,85 @@ do_freeze(#state{buffer = Buffer, manifest = M, dir = Dir,
             State
     end.
 
-%% @private Group the keyed buffer into {Gram, AscendingOrdinals}. Ordinal
-%% i is Keys!!i (the freeze order).
-build_postings(Buffer, Keys) ->
+%% @private Build ordinal-ordered entries and the {Gram, Ordinals} postings
+%% from the keyed buffer. Ordinal i is Keys!!i (the freeze order); a
+%% tombstone contributes an entry but no grams.
+build_segment(Buffer, Keys) ->
     KeyToOrd = maps:from_list(
         lists:zip(Keys, lists:seq(0, length(Keys) - 1))),
+    Entries = [begin
+                   {Hlc, Content} = maps:get(K, Buffer),
+                   #{key => K, hlc => Hlc, deleted => Content =:= deleted}
+               end || K <- Keys],
     GramMap = maps:fold(
-        fun(Key, Grams, Acc) ->
-            Ord = maps:get(Key, KeyToOrd),
-            lists:foldl(
-                fun(G, A) -> maps:update_with(G, fun(L) -> [Ord | L] end, [Ord], A) end,
-                Acc, Grams)
+        fun(Key, {_Hlc, {live, Grams}}, Acc) ->
+                Ord = maps:get(Key, KeyToOrd),
+                lists:foldl(
+                    fun(G, A) -> maps:update_with(G, fun(L) -> [Ord | L] end, [Ord], A) end,
+                    Acc, Grams);
+           (_Key, {_Hlc, deleted}, Acc) ->
+                Acc
         end, #{}, Buffer),
-    [{G, lists:usort(Os)} || {G, Os} <- maps:to_list(GramMap)].
+    Postings = [{G, lists:usort(Os)} || {G, Os} <- maps:to_list(GramMap)],
+    {Entries, Postings}.
+
+%%====================================================================
+%% Compaction
+%%====================================================================
+
+%% @private Trigger a background compaction when the live segment count
+%% crosses the threshold and none is running.
+maybe_compact(#state{merge_worker = undefined, compact_threshold = T,
+                     manifest = M, dir = Dir} = State) when is_integer(T) ->
+    Segs = barrel_ngram_manifest:list_segments(M),
+    case length(Segs) >= T of
+        true ->
+            InputFiles = [maps:get(file, S) || S <- Segs],
+            InputPaths = [filename:join(Dir, F) || F <- InputFiles],
+            Self = self(),
+            {Pid, MRef} = spawn_monitor(
+                fun() ->
+                    Result = barrel_ngram_merge:merge(InputPaths, true),
+                    Self ! {merge_done, Result, InputFiles}
+                end),
+            State#state{merge_worker = {Pid, MRef}};
+        false ->
+            State
+    end;
+maybe_compact(State) ->
+    State.
+
+%% @private Swap in a merged segment: rename it to the next gen, drop the
+%% inputs from the manifest, commit, then delete the input files. The
+%% manifest save is the atomic commit; a crash before it leaves the merged
+%% file as an orphan and keeps the inputs.
+apply_merge_result(TempPath, DocCount, InputFiles,
+                   #state{dir = Dir, manifest = M} = State) ->
+    Gen = barrel_ngram_manifest:next_gen(M),
+    FinalFile = segment_file(Gen),
+    FinalPath = filename:join(Dir, FinalFile),
+    case file:rename(TempPath, FinalPath) of
+        ok ->
+            M1 = barrel_ngram_manifest:remove_segments(M, InputFiles),
+            M2 = barrel_ngram_manifest:add_segment(
+                   M1, #{gen => Gen, file => FinalFile, doc_count => DocCount}),
+            case barrel_ngram_manifest:save(Dir, M2) of
+                ok ->
+                    [file:delete(filename:join(Dir, F))
+                     || F <- InputFiles, F =/= FinalFile],
+                    State#state{manifest = M2};
+                {error, SReason} ->
+                    logger:error("barrel_ngram manifest save failed for ~p: ~p",
+                                 [State#state.corpus, SReason]),
+                    _ = file:delete(FinalPath),
+                    State
+            end;
+        {error, RReason} ->
+            logger:error("barrel_ngram merge rename failed for ~p: ~p",
+                         [State#state.corpus, RReason]),
+            _ = file:delete(TempPath),
+            State
+    end.
 
 %%====================================================================
 %% Helpers
@@ -267,6 +389,9 @@ build_postings(Buffer, Keys) ->
 
 via(Corpus) ->
     {via, barrel_ngram_registry, {shard, Corpus}}.
+
+segment_file(Gen) ->
+    iolist_to_binary(io_lib:format("segment-~6..0b.ngseg", [Gen])).
 
 since(first) -> first;
 since(Bin) when is_binary(Bin) -> barrel_hlc:decode(Bin).

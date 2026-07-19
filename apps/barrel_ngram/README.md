@@ -42,9 +42,9 @@ ok = barrel_ngram:open(<<"code">>, #{db => <<"mydb">>}),
 
 Dense trigram selection over multiple immutable segments, kept live by a
 push subscription to the changes feed (updates and deletes reflected via
-the confirm pass), with crash-safe manifest recovery. Compaction and a
-live-docs bitmap, sparse (content-defined) selection, regex, sharding, and
-the MCP tool land in later milestones.
+the confirm pass), with crash-safe manifest recovery and compaction that
+evicts superseded and deleted entries. Sparse (content-defined) selection,
+regex, sharding, and the MCP tool land in later milestones.
 
 ## License
 

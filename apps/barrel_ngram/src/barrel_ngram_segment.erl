@@ -8,7 +8,7 @@
 %%% [0, 4096)                      header (magic, offsets, doc_count, watermark)
 %%% [4096, +offset_table_len)      offset table: u32 per gram, direct-addressed
 %%% [postings_off, +postings_len)  postings region (byte 0 is a sentinel)
-%%% [sidecar_off, +sidecar_len)    ordinal -> key sidecar
+%%% [sidecar_off, +sidecar_len)    ordinal -> {key, hlc, deleted} sidecar
 %%% '''
 %%%
 %%% The offset table is direct-addressed: `table[Gram]' is the byte
@@ -16,16 +16,19 @@
 %%% when the gram is absent. Byte 0 of the postings region is a reserved
 %%% sentinel so a 0 entry is unambiguously "empty". The table spans only
 %%% up to the highest gram present; a query for any higher gram reads
-%%% past the table and is treated as empty.
+%%% past the table and is treated as empty. The table also serves as the
+%%% gram directory for {@link all_postings/1}.
 %%%
 %%% Each posting block is stored length-prefixed: `[Len:32][block]' where
 %%% the block is a delta+varint list of ordinals (see
 %%% {@link barrel_ngram_postings}).
 %%%
-%%% The sidecar maps a local ordinal back to its barrel document key: a
-%%% fixed `[KeyOff:32][KeyLen:32]' index (one entry per ordinal) followed
-%%% by the concatenated key bytes. The index is read once at open and
-%%% cached; keys are read on demand with `file:pread'.
+%%% The sidecar maps a local ordinal to its document key, the change HLC
+%%% that produced it (the recency sequence number used when merging), and
+%%% a deleted flag (a tombstone: a deleted key carries no grams). The
+%%% index is `[KeyOff:32][KeyLen:32][Deleted:8][Hlc:12]' per ordinal,
+%%% followed by the concatenated key bytes. It is read once at open;
+%%% key bytes are read on demand with `file:pread'.
 %%%
 %%% Reads use `file:pread' and leave caching to the OS/ZFS ARC. Handles
 %%% carry a raw read fd owned by the opening process, so a query opens its
@@ -35,13 +38,15 @@
 -module(barrel_ngram_segment).
 
 -export([write/2, open/1, close/1]).
--export([lookup_postings/2, keys/2, doc_count/1, watermark/1]).
+-export([lookup_postings/2, keys/2, entries/1, all_postings/1,
+         doc_count/1, watermark/1]).
 
 -define(MAGIC, <<"NGRAMSEG">>).
--define(VERSION, 1).
+-define(VERSION, 2).
 -define(SECTOR, 4096).
 -define(GRAM_COUNT, (1 bsl 24)).
 -define(ENTRY_BYTES, 4).
+-define(SIDECAR_ENTRY, 21).   %% KeyOff:32 + KeyLen:32 + Deleted:8 + Hlc:96
 
 -record(segment, {
     fd :: file:fd(),
@@ -51,21 +56,24 @@
     postings_off :: non_neg_integer(),
     sidecar_off :: non_neg_integer(),
     key_data_start :: non_neg_integer(),
-    key_index :: tuple(),        %% ordinal -> {KeyOff, KeyLen}
+    key_index :: tuple(),        %% ordinal -> {KeyOff, KeyLen, Deleted, Hlc}
     watermark :: binary()
 }).
 
 -opaque handle() :: #segment{}.
 -export_type([handle/0]).
 
+%% A per-ordinal entry given to write/2 (ordinal order).
+-type entry() :: #{key := binary(), hlc := binary(), deleted := boolean()}.
+
 %% Input to write/2.
 -type spec() :: #{
     doc_count := non_neg_integer(),
     watermark := binary(),
     postings := [{barrel_ngram_selector:gram(), [barrel_ngram_postings:ordinal()]}],
-    keys := [binary()]     %% key for ordinal 0, 1, ... in order
+    entries := [entry()]     %% entry for ordinal 0, 1, ... in order
 }.
--export_type([spec/0]).
+-export_type([spec/0, entry/0]).
 
 %%====================================================================
 %% Write
@@ -75,9 +83,9 @@
 %% renames into place so a reader never sees a partial segment.
 -spec write(file:name_all(), spec()) -> ok | {error, term()}.
 write(Path, #{doc_count := DocCount, watermark := Wm,
-              postings := Postings, keys := Keys}) ->
+              postings := Postings, entries := Entries}) ->
     12 = byte_size(Wm),
-    DocCount = length(Keys),
+    DocCount = length(Entries),
 
     SortedGrams = lists:keysort(1, Postings),
     {PostingsRegion, GramOffsets} = build_postings(SortedGrams),
@@ -90,7 +98,7 @@ write(Path, #{doc_count := DocCount, watermark := Wm,
     OffsetTable = iolist_to_binary(build_table(GramOffsets, 0, [])),
     OffsetTableLen = byte_size(OffsetTable),
 
-    {SidecarIndex, KeyData} = build_sidecar(Keys),
+    {SidecarIndex, KeyData} = build_sidecar(Entries),
     Sidecar = <<SidecarIndex/binary, KeyData/binary>>,
     SidecarLen = byte_size(Sidecar),
 
@@ -157,15 +165,18 @@ build_table([{Gram, Off} | Rest], Next, Acc) ->
     Entry = <<Off:32/little>>,
     build_table(Rest, Gram + 1, [Entry, ZeroRun | Acc]).
 
-%% @private Build the sidecar index and key-data blob.
-build_sidecar(Keys) ->
+%% @private Build the sidecar index and key-data blob from ordinal-ordered
+%% entries.
+build_sidecar(Entries) ->
     {IdxRev, DataRev, _End} =
         lists:foldl(
-            fun(K, {IdxAcc, DataAcc, Off}) ->
+            fun(#{key := K, hlc := Hlc, deleted := Del}, {IdxAcc, DataAcc, Off}) ->
+                12 = byte_size(Hlc),
                 Len = byte_size(K),
-                Entry = <<Off:32/little, Len:32/little>>,
-                {[Entry | IdxAcc], [K | DataAcc], Off + Len}
-            end, {[], [], 0}, Keys),
+                DelByte = case Del of true -> 1; false -> 0 end,
+                E = <<Off:32/little, Len:32/little, DelByte:8, Hlc:12/binary>>,
+                {[E | IdxAcc], [K | DataAcc], Off + Len}
+            end, {[], [], 0}, Entries),
     {iolist_to_binary(lists:reverse(IdxRev)),
      iolist_to_binary(lists:reverse(DataRev))}.
 
@@ -192,7 +203,7 @@ open(Path) ->
                                 sidecar_off = maps:get(sidecar_off, H),
                                 key_data_start =
                                     maps:get(sidecar_off, H)
-                                    + maps:get(doc_count, H) * 8,
+                                    + maps:get(doc_count, H) * ?SIDECAR_ENTRY,
                                 key_index = KeyIndex,
                                 watermark = maps:get(watermark, H)
                             }};
@@ -214,7 +225,7 @@ close(#segment{fd = Fd}) ->
     _ = file:close(Fd),
     ok.
 
-%% @doc Document count in the segment.
+%% @doc Document count in the segment (includes tombstones).
 -spec doc_count(handle()) -> non_neg_integer().
 doc_count(#segment{doc_count = N}) -> N.
 
@@ -234,20 +245,23 @@ lookup_postings(#segment{fd = Fd, offset_table_off = TableOff,
         {ok, <<0:32/little>>} ->
             empty;
         {ok, <<RegionOff:32/little>>} ->
-            case file:pread(Fd, PostingsOff + RegionOff, 4) of
-                {ok, <<Len:32/little>>} ->
-                    case file:pread(Fd, PostingsOff + RegionOff + 4, Len) of
-                        {ok, Block} -> {ok, barrel_ngram_postings:decode(Block)};
-                        eof -> {error, truncated_postings};
-                        {error, _} = Err -> Err
-                    end;
-                eof -> {error, truncated_postings};
-                {error, _} = Err -> Err
-            end;
+            read_block(Fd, PostingsOff + RegionOff);
         eof ->
             empty;
         {error, _} = Err ->
             Err
+    end.
+
+read_block(Fd, At) ->
+    case file:pread(Fd, At, 4) of
+        {ok, <<Len:32/little>>} ->
+            case file:pread(Fd, At + 4, Len) of
+                {ok, Block} -> {ok, barrel_ngram_postings:decode(Block)};
+                eof -> {error, truncated_postings};
+                {error, _} = Err -> Err
+            end;
+        eof -> {error, truncated_postings};
+        {error, _} = Err -> Err
     end.
 
 %% @doc Resolve ordinals to `{Ordinal, Key}' pairs (one batched pread).
@@ -260,7 +274,7 @@ keys(#segment{fd = Fd, doc_count = DocCount, key_index = KeyIndex,
               key_data_start = DataStart}, Ordinals) ->
     Valid = [O || O <- Ordinals, O >= 0, O < DocCount],
     Pairs = [begin
-                 {Off, Len} = element(O + 1, KeyIndex),
+                 {Off, Len, _Del, _Hlc} = element(O + 1, KeyIndex),
                  {DataStart + Off, Len}
              end || O <- Valid],
     case file:pread(Fd, Pairs) of
@@ -271,6 +285,39 @@ keys(#segment{fd = Fd, doc_count = DocCount, key_index = KeyIndex,
         {error, _} ->
             []
     end.
+
+%% @doc Every ordinal as `{Ordinal, Key, Hlc, Deleted}'. Used by the merger.
+-spec entries(handle()) ->
+    [{barrel_ngram_postings:ordinal(), binary(), binary(), boolean()}].
+entries(#segment{doc_count = 0}) ->
+    [];
+entries(#segment{doc_count = N, key_index = KI} = H) ->
+    Ords = lists:seq(0, N - 1),
+    KeyMap = maps:from_list(keys(H, Ords)),
+    [begin
+         {_Off, _Len, Del, Hlc} = element(O + 1, KI),
+         {O, maps:get(O, KeyMap), Hlc, Del}
+     end || O <- Ords].
+
+%% @doc Every present `{Gram, [Ordinal]}' in the segment. Reads the offset
+%% table (the gram directory) sequentially, then each posting block. Used
+%% by the merger to rebuild per-ordinal grams.
+-spec all_postings(handle()) ->
+    [{barrel_ngram_selector:gram(), [barrel_ngram_postings:ordinal()]}].
+all_postings(#segment{offset_table_len = 0}) ->
+    [];
+all_postings(#segment{fd = Fd, offset_table_off = TOff,
+                      offset_table_len = TLen, postings_off = POff}) ->
+    {ok, Table} = file:pread(Fd, TOff, TLen),
+    scan_table(Table, 0, Fd, POff, []).
+
+scan_table(<<>>, _Gram, _Fd, _POff, Acc) ->
+    lists:reverse(Acc);
+scan_table(<<0:32/little, Rest/binary>>, Gram, Fd, POff, Acc) ->
+    scan_table(Rest, Gram + 1, Fd, POff, Acc);
+scan_table(<<RegionOff:32/little, Rest/binary>>, Gram, Fd, POff, Acc) ->
+    {ok, Ords} = read_block(Fd, POff + RegionOff),
+    scan_table(Rest, Gram + 1, Fd, POff, [{Gram, Ords} | Acc]).
 
 %%====================================================================
 %% Header + sidecar-index parsing
@@ -321,8 +368,9 @@ parse_header(_) ->
 read_key_index(_Fd, #{doc_count := 0}) ->
     {ok, {}};
 read_key_index(Fd, #{sidecar_off := SOff, doc_count := DocCount}) ->
-    case file:pread(Fd, SOff, DocCount * 8) of
-        {ok, Bin} when byte_size(Bin) =:= DocCount * 8 ->
+    Bytes = DocCount * ?SIDECAR_ENTRY,
+    case file:pread(Fd, SOff, Bytes) of
+        {ok, Bin} when byte_size(Bin) =:= Bytes ->
             {ok, list_to_tuple(parse_index(Bin, []))};
         {ok, _} ->
             {error, truncated_sidecar};
@@ -334,8 +382,9 @@ read_key_index(Fd, #{sidecar_off := SOff, doc_count := DocCount}) ->
 
 parse_index(<<>>, Acc) ->
     lists:reverse(Acc);
-parse_index(<<Off:32/little, Len:32/little, Rest/binary>>, Acc) ->
-    parse_index(Rest, [{Off, Len} | Acc]).
+parse_index(<<Off:32/little, Len:32/little, Del:8, Hlc:12/binary, Rest/binary>>, Acc) ->
+    Deleted = Del =/= 0,
+    parse_index(Rest, [{Off, Len, Deleted, Hlc} | Acc]).
 
 %%====================================================================
 %% Helpers

@@ -19,7 +19,7 @@
 %%%-------------------------------------------------------------------
 -module(barrel_ngram).
 
--export([open/2, close/1, index/1, refresh/1, search/2, search/3]).
+-export([open/2, close/1, index/1, refresh/1, compact/1, search/2, search/3]).
 
 -type corpus() :: binary() | atom().
 -export_type([corpus/0]).
@@ -67,6 +67,13 @@ index(Corpus) ->
 refresh(Corpus) ->
     barrel_ngram_shard:refresh(Corpus).
 
+%% @doc Compact every live segment into one, physically evicting
+%% superseded and deleted entries. Returns `{error, busy}' if a background
+%% compaction is already running.
+-spec compact(corpus()) -> {ok, map()} | {error, term()}.
+compact(Corpus) ->
+    barrel_ngram_shard:compact(Corpus).
+
 %% @equiv search(Corpus, Literal, #{})
 -spec search(corpus(), binary()) -> {ok, [barrel_ngram_query:hit()]} | {error, term()}.
 search(Corpus, Literal) ->
@@ -84,7 +91,7 @@ search(Corpus, Literal, Opts) ->
 %%====================================================================
 
 normalize(Corpus, Opts) ->
-    #{
+    Base = #{
         corpus => Corpus,
         db => maps:get(db, Opts),
         selector => maps:get(selector, Opts, barrel_ngram_selector_dense),
@@ -92,4 +99,6 @@ normalize(Corpus, Opts) ->
         data_dir => maps:get(data_dir, Opts,
                              application:get_env(barrel_ngram, data_dir,
                                                  "data/barrel_ngram"))
-    }.
+    },
+    %% pass tuning options through to the shard (defaults live there)
+    maps:merge(Base, maps:with([freeze_threshold, compact_threshold], Opts)).

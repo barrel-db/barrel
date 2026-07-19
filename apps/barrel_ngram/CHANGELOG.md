@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-07-19
+
+### Added
+
+- Compaction: an offloaded worker merges live segments into one,
+  collapsing each key to its newest version by HLC and physically
+  evicting superseded and deleted entries. Fires automatically when the
+  segment count crosses a threshold (`compact_threshold`), and
+  `barrel_ngram:compact/1` runs it synchronously.
+- Deletes are recorded as segment tombstones so compaction can evict
+  them; the segment sidecar (format v2) carries a per-ordinal change HLC
+  and deleted flag.
+
+### Changed
+
+- Segment format bumped to v2. The manifest rename remains the sole
+  commit point, so a crash mid-merge leaves an orphan segment that is
+  cleaned up on the next open.
+
 ## [0.2.0] - 2026-07-19
 
 ### Added

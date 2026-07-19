@@ -16,7 +16,8 @@
 -module(barrel_ngram_manifest).
 
 -export([empty/0, load/1, save/2]).
--export([watermark/1, set_watermark/2, list_segments/1, next_gen/1, add_segment/2]).
+-export([watermark/1, set_watermark/2, list_segments/1, next_gen/1,
+         add_segment/2, remove_segments/2]).
 -export([cleanup_orphans/2]).
 
 -define(FILENAME, "manifest").
@@ -88,6 +89,13 @@ next_gen(M) -> maps:get(next_gen, M, 0).
 add_segment(M, #{gen := Gen} = Seg) ->
     M#{segments => maps:get(segments, M, []) ++ [Seg],
        next_gen => max(maps:get(next_gen, M, 0), Gen + 1)}.
+
+%% @doc Drop the segments whose file name is in `Files' (merge inputs).
+-spec remove_segments(manifest(), [binary()]) -> manifest().
+remove_segments(M, Files) ->
+    Keep = [S || S <- maps:get(segments, M, []),
+                 not lists:member(maps:get(file, S), Files)],
+    M#{segments => Keep}.
 
 %% @doc Delete `segment-*.ngseg' files (and stray `*.tmp') in Dir that
 %% the manifest does not list. Call at startup to clear orphans left by a

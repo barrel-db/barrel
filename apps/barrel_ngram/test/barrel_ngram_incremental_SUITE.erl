@@ -17,11 +17,15 @@
          init_per_testcase/2, end_per_testcase/2]).
 
 -export([live_subscription/1, live_update/1, live_delete/1,
-         multi_segment_fan/1, recovery/1, incremental_oracle/1]).
+         multi_segment_fan/1, recovery/1, incremental_oracle/1,
+         superseded_collapse/1, delete_eviction/1, auto_compaction/1,
+         compaction_crash_safety/1, post_compaction_oracle/1]).
 
 all() ->
     [live_subscription, live_update, live_delete, multi_segment_fan,
-     recovery, incremental_oracle].
+     recovery, incremental_oracle,
+     superseded_collapse, delete_eviction, auto_compaction,
+     compaction_crash_safety, post_compaction_oracle].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(barrel_docdb),
@@ -37,7 +41,11 @@ init_per_testcase(TC, Config) ->
     Dir = filename:join(?config(priv_dir, Config), atom_to_list(TC)),
     _ = barrel_docdb:delete_db(Db),
     {ok, _} = barrel_docdb:create_db(Db),
-    ok = barrel_ngram:open(Corpus, #{db => Db, data_dir => Dir}),
+    %% auto-compaction is exercised only by its own case; elsewhere disable
+    %% it so the synchronous compact/1 tests stay deterministic.
+    Threshold = case TC of auto_compaction -> 3; _ -> infinity end,
+    ok = barrel_ngram:open(Corpus, #{db => Db, data_dir => Dir,
+                                     compact_threshold => Threshold}),
     [{db, Db}, {corpus, Corpus}, {dir, Dir} | Config].
 
 end_per_testcase(_TC, Config) ->
@@ -120,6 +128,83 @@ incremental_oracle(Config) ->
                 <<"upstream">>, <<"widget">>, <<"retry backoff">>,
                 <<"connect timeout">>, <<"nonexistent">>, <<"co">>, <<"e ">>,
                 <<"z">>, <<" ">>],
+    lists:foreach(
+        fun(Lit) ->
+            Expected = brute_force(Tracker, Lit),
+            Actual = search(C, Lit),
+            ?assertEqual({Lit, Expected}, {Lit, Actual})
+        end, Literals).
+
+superseded_collapse(Config) ->
+    Db = ?config(db, Config), C = ?config(corpus, Config),
+    R1 = put_doc(Db, <<"a">>, <<"apple version one">>), refresh(C),
+    _ = put_doc(Db, <<"b">>, <<"banana stays">>), refresh(C),
+    _ = put_doc(Db, <<"a">>, <<"apricot version two">>, R1), refresh(C),
+    %% a now lives in two segments (v1 and v2); three segments total
+    {ok, Before} = barrel_ngram_shard:get_manifest(C),
+    ?assert(length(Before) >= 3),
+    {ok, #{segments := Segs, doc_count := DocCount}} = barrel_ngram:compact(C),
+    ?assertEqual(1, Segs),
+    ?assertEqual(2, DocCount),   %% a (collapsed) + b
+    %% results unchanged: newest content wins, superseded content gone
+    ?assertEqual([<<"a">>], search(C, <<"apricot">>)),
+    ?assertEqual([], search(C, <<"apple">>)),
+    ?assertEqual([<<"b">>], search(C, <<"banana">>)).
+
+delete_eviction(Config) ->
+    Db = ?config(db, Config), C = ?config(corpus, Config),
+    R1 = put_doc(Db, <<"a">>, <<"delete_me alpha">>), refresh(C),
+    _ = put_doc(Db, <<"b">>, <<"keep beta">>), refresh(C),
+    ?assertEqual([<<"a">>], search(C, <<"delete_me">>)),
+    ok = del_doc(Db, <<"a">>, R1), refresh(C),
+    ?assertEqual([], search(C, <<"delete_me">>)),
+    {ok, #{segments := Segs, doc_count := DocCount}} = barrel_ngram:compact(C),
+    ?assertEqual(1, Segs),
+    ?assertEqual(1, DocCount),   %% a physically evicted, only b remains
+    ?assertEqual([], search(C, <<"delete_me">>)),
+    ?assertEqual([<<"b">>], search(C, <<"keep">>)).
+
+auto_compaction(Config) ->
+    %% opened with compact_threshold => 3: the third freeze triggers a
+    %% background merge that settles the segment count back down.
+    Db = ?config(db, Config), C = ?config(corpus, Config),
+    _ = put_doc(Db, <<"a">>, <<"common apple">>), refresh(C),
+    _ = put_doc(Db, <<"b">>, <<"common banana">>), refresh(C),
+    _ = put_doc(Db, <<"c">>, <<"common cherry">>), refresh(C),
+    ok = wait_until(fun() ->
+                        {ok, Segs} = barrel_ngram_shard:get_manifest(C),
+                        length(Segs) =< 1
+                    end, 100),
+    ?assertEqual([<<"a">>, <<"b">>, <<"c">>], search(C, <<"common">>)),
+    ?assertEqual([<<"b">>], search(C, <<"banana">>)).
+
+compaction_crash_safety(Config) ->
+    Db = ?config(db, Config), C = ?config(corpus, Config),
+    Dir = ?config(dir, Config),
+    _ = put_doc(Db, <<"a">>, <<"survives compaction">>), refresh(C),
+    ?assertEqual([<<"a">>], search(C, <<"survives">>)),
+    %% simulate a crash mid-merge: a merged temp segment written but the
+    %% manifest never swapped. It must be cleaned up on reopen.
+    CorpusDir = filename:join(Dir, binary_to_list(C)),
+    Stray = filename:join(CorpusDir, "segment-merge-999999.ngseg"),
+    ok = file:write_file(Stray, <<"garbage">>),
+    ok = barrel_ngram:close(C),
+    ok = barrel_ngram:open(C, #{db => Db, data_dir => Dir,
+                                compact_threshold => infinity}),
+    ?assertNot(filelib:is_file(Stray)),
+    ?assertEqual([<<"a">>], search(C, <<"survives">>)).
+
+post_compaction_oracle(Config) ->
+    Db = ?config(db, Config), C = ?config(corpus, Config),
+    _ = rand:seed(exsss, {21, 4, 96}),
+    Tracker = run_workload(Db, C, 60, #{}, 0),
+    refresh(C),
+    {ok, #{segments := Segs}} = barrel_ngram:compact(C),
+    ?assertEqual(1, Segs),
+    Literals = [<<"connect">>, <<"timeout">>, <<"retry">>, <<"backoff">>,
+                <<"error">>, <<"pool">>, <<"config">>, <<"jitter">>,
+                <<"upstream">>, <<"widget">>, <<"retry backoff">>,
+                <<"nonexistent">>, <<"co">>, <<"z">>],
     lists:foreach(
         fun(Lit) ->
             Expected = brute_force(Tracker, Lit),
