@@ -60,12 +60,14 @@ do_merge(Handles, InputPaths, DropTombstones) ->
     KeyState = collect(Handles),
     {Entries, Postings, DocCount} = build_output(KeyState, DropTombstones),
     Wm = max_watermark(Handles),
+    %% preserve the inputs' codec on the merged output
+    Codec = barrel_ngram_segment:codec(hd(Handles)),
     Dir = filename:dirname(hd(InputPaths)),
     Name = "segment-merge-" ++ integer_to_list(erlang:unique_integer([positive]))
            ++ ".ngseg",
     Temp = filename:join(Dir, Name),
     Spec = #{doc_count => DocCount, watermark => Wm,
-             postings => Postings, entries => Entries},
+             postings => Postings, entries => Entries, codec => Codec},
     case barrel_ngram_segment:write(Temp, Spec) of
         ok -> {ok, iolist_to_binary(Temp), DocCount, Wm};
         {error, _} = Err -> Err

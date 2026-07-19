@@ -302,7 +302,7 @@ maybe_freeze(State) ->
 do_freeze(#state{buffer = Buffer} = State) when map_size(Buffer) =:= 0 ->
     State;
 do_freeze(#state{buffer = Buffer, manifest = M, dir = Dir,
-                 watermark = Wm} = State) ->
+                 watermark = Wm, config = Config} = State) ->
     Keys = maps:keys(Buffer),
     {Entries, Postings} = build_segment(Buffer, Keys),
     Gen = barrel_ngram_manifest:next_gen(M),
@@ -310,7 +310,8 @@ do_freeze(#state{buffer = Buffer, manifest = M, dir = Dir,
     Path = filename:join(Dir, File),
     WmBin = wm_bin(Wm),
     Spec = #{doc_count => length(Keys), watermark => WmBin,
-             postings => Postings, entries => Entries},
+             postings => Postings, entries => Entries,
+             codec => maps:get(postings, Config, varint)},
     case barrel_ngram_segment:write(Path, Spec) of
         ok ->
             M1 = barrel_ngram_manifest:add_segment(

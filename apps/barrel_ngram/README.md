@@ -43,7 +43,9 @@ ok = barrel_ngram:open(<<"code">>, #{db => <<"mydb">>}),
 - Byte-level trigrams over a 2^24 gram space, direct-addressed through a
   flat `u32` offset table.
 - Delta+varint posting lists of local document ordinals, intersected by
-  galloping search.
+  galloping search; a corpus can opt into roaring bitmaps
+  (`postings => roaring`) for a native intersection AND on large dense
+  corpora.
 - Immutable segment files read with `file:pread`; a local ordinal maps
   back to its document key through a sidecar.
 - A query turns the literal into its overlapping trigrams, intersects

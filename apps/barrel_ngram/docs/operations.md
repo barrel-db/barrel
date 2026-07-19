@@ -40,7 +40,8 @@ ok = barrel_ngram:open(<<"code">>,
 
 Tuning options at open: `freeze_threshold` (buffer size before an automatic freeze),
 `compact_threshold` (live segment count before an automatic compaction; `infinity`
-disables it).
+disables it), and `postings` (the posting codec, `varint` default or `roaring` for large
+dense corpora, see [design](design.md)).
 
 ## Recovery
 

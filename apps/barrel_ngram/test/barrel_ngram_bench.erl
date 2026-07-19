@@ -19,22 +19,27 @@ run(#{ordinals := N, grams := K, reps := Reps, sizes := Sizes}) ->
     io:format("~n== posting-list intersection ==~n"
               "ordinal space ~p, intersecting ~p lists, ~p reps~n~n",
               [N, K, Reps]),
-    io:format("~-12s ~-14s ~-14s ~-10s~n",
-              ["list size", "decode us/op", "intersect us/op", "result"]),
+    io:format("~-12s ~-18s ~-18s ~-10s~n",
+              ["list size", "varint dec+int us", "roaring int+dec us", "result"]),
     lists:foreach(fun(Sz) -> bench_size(N, Sz, K, Reps) end, Sizes),
     ok.
 
 bench_size(N, Sz, K, Reps) ->
     _ = rand:seed(exsss, {Sz + 1, 7, 13}),
     Lists = [gen_sorted(N, Sz) || _ <- lists:seq(1, K)],
-    Blocks = [barrel_ngram_postings:encode(L) || L <- Lists],
-    %% decode cost (per full set of K blocks)
-    Tdec = time(Reps, fun() -> [barrel_ngram_postings:decode(B) || B <- Blocks] end),
-    %% intersect cost (over already-decoded lists)
-    Tint = time(Reps, fun() -> barrel_ngram_postings:intersect_all(Lists) end),
+    VBlocks = [barrel_ngram_postings:encode(L) || L <- Lists],
+    RBlocks = [barrel_ngram_roaring:encode(L) || L <- Lists],
+    %% varint query path: decode each block then galloping intersect
+    Tvar = time(Reps, fun() ->
+        Ls = [barrel_ngram_postings:decode(B) || B <- VBlocks],
+        barrel_ngram_postings:intersect_all(Ls)
+    end),
+    %% roaring query path: native AND over blocks then decode once
+    Troar = time(Reps, fun() ->
+        barrel_ngram_roaring:decode(barrel_ngram_roaring:intersect_all(RBlocks))
+    end),
     Result = barrel_ngram_postings:intersect_all(Lists),
-    io:format("~-12B ~-14.1f ~-14.1f ~-10B~n",
-              [Sz, Tdec, Tint, length(Result)]).
+    io:format("~-12B ~-18.1f ~-18.1f ~-10B~n", [Sz, Tvar, Troar, length(Result)]).
 
 time(Reps, Fun) ->
     _ = Fun(),   %% warm up

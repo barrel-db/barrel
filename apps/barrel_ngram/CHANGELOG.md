@@ -5,7 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.6.2] - 2026-07-19
+## [0.7.0] - 2026-07-19
+
+### Added
+
+- Roaring-bitmap posting codec (opt in per corpus with `postings => roaring`).
+  Posting lists are stored as roaring bitmaps and intersected with a native
+  AND in a self-contained NIF (`barrel_ngram_roaring`, vendored CRoaring),
+  removing the delta+varint decode cost for large dense corpora. On the
+  intersection benchmark, twelve 50k-ordinal lists intersect in ~0.1 ms
+  versus ~140 ms for varint. `varint` stays the default (it wins on small
+  lists); results are identical either way (a differential oracle holds
+  roaring byte-for-byte against varint).
+
+### Changed
+
+- Segment format bumped to v3 (a per-segment codec byte). This is
+  barrel_ngram's first C: the roaring NIF is built by cmake at compile time.
 
 ### Added
 

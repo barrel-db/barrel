@@ -68,20 +68,22 @@ selector emits a content-defined sample for a smaller index. See [selectors](sel
 - Storage is roughly the postings (proportional to text size, smaller with the sparse
   selector) plus the offset table per segment.
 
-## Intersection performance
+## Posting codecs and intersection performance
 
-Posting-list intersection is galloping over decoded ordinal lists. Measured over a
-100k-document shard intersecting 12 lists (`barrel_ngram_bench:run/0`): intersection is
-sub-millisecond for lists up to a few thousand ordinals and about 6 ms for lists of 50k,
-and the cost is dominated by decoding the delta+varint blocks, not the intersection
-itself. So the current path is fast for the configurations to use at scale: shard large
-corpora (smaller per-shard lists) and use the sparse selector for code (fewer, smaller
-posting lists).
+The default posting codec is delta+varint, intersected by galloping over decoded ordinal
+lists. Measured over a 100k-document shard intersecting 12 lists
+(`barrel_ngram_bench:run/0`): the galloping intersect is fast, but decoding the varint
+blocks (materializing the ordinal lists) dominates for large lists, and it is inherent to
+delta+varint (sequential, no random access). That only bites a large, dense corpus with
+hot trigrams (a common gram present in most documents); sharding and the sparse selector
+keep per-list sizes small in normal use.
 
-The one slow regime is a large, dense, unsharded corpus with hot trigrams (a common gram
-present in most documents), where decoding a very large block dominates. The postings
-codec is a seam (`barrel_ngram_postings`): a roaring-bitmap backend (a compressed bitmap
-with a native AND and no list materialization) can be dropped in there to remove that
-decode cost if a deployment hits that regime. It is intentionally not built by default;
-the measurement does not justify a native dependency for the sharded/sparse
-configurations.
+For that regime, open the corpus with `postings => roaring`. Posting lists are stored as
+roaring bitmaps and intersected with a native AND in the NIF (`barrel_ngram_roaring`,
+backed by vendored CRoaring), with no Erlang list materialization. Measured on the same
+benchmark, roaring intersects twelve 50k-ordinal lists in about 0.1 ms versus 140 ms for
+varint (a fourth of a millisecond even at 10k), at the cost of a fixed per-list overhead
+that makes it slightly slower for tiny lists. So `varint` stays the default and `roaring`
+is opt-in for large dense corpora. Both produce identical results (a differential oracle
+holds `roaring` byte-for-byte against `varint`). The codec is a per-segment property, so a
+corpus records it and reads it back at query and merge time.

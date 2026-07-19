@@ -107,9 +107,13 @@ all_ordinals(Handle) ->
     end.
 
 %% @private Intersect the posting lists of the grams. A missing gram makes
-%% the intersection empty.
+%% the intersection empty. Roaring segments intersect the raw blocks in the
+%% NIF (no Erlang list materialization); varint segments decode and gallop.
 intersect_grams(Handle, Grams) ->
-    collect_lists(Handle, Grams, []).
+    case barrel_ngram_segment:codec(Handle) of
+        varint -> collect_lists(Handle, Grams, []);
+        roaring -> collect_blocks(Handle, Grams, [])
+    end.
 
 collect_lists(_Handle, [], Acc) ->
     barrel_ngram_postings:intersect_all(Acc);
@@ -117,6 +121,15 @@ collect_lists(Handle, [G | Rest], Acc) ->
     case barrel_ngram_segment:lookup_postings(Handle, G) of
         empty -> [];
         {ok, Ords} -> collect_lists(Handle, Rest, [Ords | Acc]);
+        {error, _} -> []
+    end.
+
+collect_blocks(_Handle, [], Acc) ->
+    barrel_ngram_roaring:decode(barrel_ngram_roaring:intersect_all(Acc));
+collect_blocks(Handle, [G | Rest], Acc) ->
+    case barrel_ngram_segment:lookup_block(Handle, G) of
+        empty -> [];
+        {ok, Block} -> collect_blocks(Handle, Rest, [Block | Acc]);
         {error, _} -> []
     end.
 
@@ -196,21 +209,42 @@ eval_keys(Handle, Query) ->
     Ordinals = eval_query(Handle, Query),
     [K || {_O, K} <- barrel_ngram_segment:keys(Handle, Ordinals)].
 
-%% @private Evaluate a trigram query to candidate ordinals.
-eval_query(Handle, all) ->
+%% @private Evaluate a trigram query to candidate ordinals, per the
+%% segment's codec. Roaring combines binaries natively and decodes once.
+eval_query(Handle, Query) ->
+    case barrel_ngram_segment:codec(Handle) of
+        varint -> eval_varint(Handle, Query);
+        roaring -> barrel_ngram_roaring:decode(eval_roaring(Handle, Query))
+    end.
+
+eval_varint(Handle, all) ->
     all_ordinals(Handle);
-eval_query(_Handle, none) ->
+eval_varint(_Handle, none) ->
     [];
-eval_query(Handle, {gram, G}) ->
+eval_varint(Handle, {gram, G}) ->
     case barrel_ngram_segment:lookup_postings(Handle, G) of
         {ok, Ords} -> Ords;
         empty -> [];
         {error, _} -> []
     end;
-eval_query(Handle, {'and', Qs}) ->
-    barrel_ngram_postings:intersect_all([eval_query(Handle, Q) || Q <- Qs]);
-eval_query(Handle, {'or', Qs}) ->
-    barrel_ngram_postings:union_all([eval_query(Handle, Q) || Q <- Qs]).
+eval_varint(Handle, {'and', Qs}) ->
+    barrel_ngram_postings:intersect_all([eval_varint(Handle, Q) || Q <- Qs]);
+eval_varint(Handle, {'or', Qs}) ->
+    barrel_ngram_postings:union_all([eval_varint(Handle, Q) || Q <- Qs]).
+
+eval_roaring(Handle, all) ->
+    barrel_ngram_roaring:encode(all_ordinals(Handle));
+eval_roaring(_Handle, none) ->
+    barrel_ngram_roaring:encode([]);
+eval_roaring(Handle, {gram, G}) ->
+    case barrel_ngram_segment:lookup_block(Handle, G) of
+        {ok, Block} -> Block;
+        _ -> barrel_ngram_roaring:encode([])
+    end;
+eval_roaring(Handle, {'and', Qs}) ->
+    barrel_ngram_roaring:intersect_all([eval_roaring(Handle, Q) || Q <- Qs]);
+eval_roaring(Handle, {'or', Qs}) ->
+    barrel_ngram_roaring:union_all([eval_roaring(Handle, Q) || Q <- Qs]).
 
 %% @private Fetch each candidate and keep the real regex matches.
 regex_confirm(_Db, [], _RE, _Config) ->

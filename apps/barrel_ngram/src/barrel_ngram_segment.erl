@@ -38,18 +38,22 @@
 -module(barrel_ngram_segment).
 
 -export([write/2, open/1, close/1]).
--export([lookup_postings/2, keys/2, entries/1, all_postings/1,
-         doc_count/1, watermark/1]).
+-export([lookup_postings/2, lookup_block/2, keys/2, entries/1, all_postings/1,
+         doc_count/1, watermark/1, codec/1]).
 
 -define(MAGIC, <<"NGRAMSEG">>).
--define(VERSION, 2).
+-define(VERSION, 3).
 -define(SECTOR, 4096).
 -define(GRAM_COUNT, (1 bsl 24)).
 -define(ENTRY_BYTES, 4).
 -define(SIDECAR_ENTRY, 21).   %% KeyOff:32 + KeyLen:32 + Deleted:8 + Hlc:96
 
+-type codec() :: varint | roaring.
+-export_type([codec/0]).
+
 -record(segment, {
     fd :: file:fd(),
+    codec :: codec(),
     doc_count :: non_neg_integer(),
     offset_table_off :: non_neg_integer(),
     offset_table_len :: non_neg_integer(),
@@ -71,7 +75,8 @@
     doc_count := non_neg_integer(),
     watermark := binary(),
     postings := [{barrel_ngram_selector:gram(), [barrel_ngram_postings:ordinal()]}],
-    entries := [entry()]     %% entry for ordinal 0, 1, ... in order
+    entries := [entry()],    %% entry for ordinal 0, 1, ... in order
+    codec => codec()         %% posting-block codec (default varint)
 }.
 -export_type([spec/0, entry/0]).
 
@@ -83,12 +88,13 @@
 %% renames into place so a reader never sees a partial segment.
 -spec write(file:name_all(), spec()) -> ok | {error, term()}.
 write(Path, #{doc_count := DocCount, watermark := Wm,
-              postings := Postings, entries := Entries}) ->
+              postings := Postings, entries := Entries} = Spec) ->
     12 = byte_size(Wm),
     DocCount = length(Entries),
+    Codec = maps:get(codec, Spec, varint),
 
     SortedGrams = lists:keysort(1, Postings),
-    {PostingsRegion, GramOffsets} = build_postings(SortedGrams),
+    {PostingsRegion, GramOffsets} = build_postings(SortedGrams, Codec),
     PostingsLen = byte_size(PostingsRegion),
 
     OffsetTableLen = case GramOffsets of
@@ -114,7 +120,8 @@ write(Path, #{doc_count := DocCount, watermark := Wm,
         postings_len => PostingsLen,
         sidecar_off => SidecarOff,
         sidecar_len => SidecarLen,
-        watermark => Wm
+        watermark => Wm,
+        codec => Codec
     }),
     PaddedHeader = pad_to_sector(Header),
 
@@ -143,17 +150,23 @@ write_all(Fd, [Bin | Rest]) ->
     end.
 
 %% @private Lay out the postings region and collect gram -> region-offset.
-build_postings(SortedGrams) ->
+build_postings(SortedGrams, Codec) ->
     %% Region byte 0 is the empty sentinel; blocks start at offset 1.
-    build_postings(SortedGrams, [<<0>>], 1, []).
+    build_postings(SortedGrams, Codec, [<<0>>], 1, []).
 
-build_postings([], RegionAcc, _NextOff, GramOffAcc) ->
+build_postings([], _Codec, RegionAcc, _NextOff, GramOffAcc) ->
     {iolist_to_binary(lists:reverse(RegionAcc)), lists:reverse(GramOffAcc)};
-build_postings([{Gram, Ords} | Rest], RegionAcc, NextOff, GramOffAcc) ->
-    Block = barrel_ngram_postings:encode(Ords),
+build_postings([{Gram, Ords} | Rest], Codec, RegionAcc, NextOff, GramOffAcc) ->
+    Block = encode_block(Codec, Ords),
     Entry = <<(byte_size(Block)):32/little, Block/binary>>,
-    build_postings(Rest, [Entry | RegionAcc], NextOff + byte_size(Entry),
+    build_postings(Rest, Codec, [Entry | RegionAcc], NextOff + byte_size(Entry),
                    [{Gram, NextOff} | GramOffAcc]).
+
+encode_block(varint, Ords) -> barrel_ngram_postings:encode(Ords);
+encode_block(roaring, Ords) -> barrel_ngram_roaring:encode(Ords).
+
+decode_block(varint, Block) -> barrel_ngram_postings:decode(Block);
+decode_block(roaring, Block) -> barrel_ngram_roaring:decode(Block).
 
 %% @private Build the direct-addressed offset table as an iolist of
 %% zero-runs and 4-byte entries. GramOffsets is ascending by gram.
@@ -196,6 +209,7 @@ open(Path) ->
                         {ok, KeyIndex} ->
                             {ok, #segment{
                                 fd = Fd,
+                                codec = maps:get(codec, H),
                                 doc_count = maps:get(doc_count, H),
                                 offset_table_off = maps:get(offset_table_off, H),
                                 offset_table_len = maps:get(offset_table_len, H),
@@ -233,30 +247,44 @@ doc_count(#segment{doc_count = N}) -> N.
 -spec watermark(handle()) -> binary().
 watermark(#segment{watermark = Wm}) -> Wm.
 
+%% @doc The posting-block codec of this segment.
+-spec codec(handle()) -> codec().
+codec(#segment{codec = Codec}) -> Codec.
+
 %% @doc Posting list (ascending ordinals) for a gram, or `empty'.
 -spec lookup_postings(handle(), barrel_ngram_selector:gram()) ->
     {ok, [barrel_ngram_postings:ordinal()]} | empty | {error, term()}.
-lookup_postings(#segment{offset_table_len = TableLen}, Gram)
+lookup_postings(#segment{codec = Codec} = H, Gram) ->
+    case lookup_block(H, Gram) of
+        {ok, Block} -> {ok, decode_block(Codec, Block)};
+        Other -> Other
+    end.
+
+%% @doc The raw (undecoded) posting block for a gram, or `empty'. Lets the
+%% query combine blocks natively (roaring) without decoding each to a list.
+-spec lookup_block(handle(), barrel_ngram_selector:gram()) ->
+    {ok, binary()} | empty | {error, term()}.
+lookup_block(#segment{offset_table_len = TableLen}, Gram)
         when Gram * ?ENTRY_BYTES + ?ENTRY_BYTES > TableLen ->
     empty;
-lookup_postings(#segment{fd = Fd, offset_table_off = TableOff,
-                         postings_off = PostingsOff}, Gram) ->
+lookup_block(#segment{fd = Fd, offset_table_off = TableOff,
+                      postings_off = PostingsOff}, Gram) ->
     case file:pread(Fd, TableOff + Gram * ?ENTRY_BYTES, ?ENTRY_BYTES) of
         {ok, <<0:32/little>>} ->
             empty;
         {ok, <<RegionOff:32/little>>} ->
-            read_block(Fd, PostingsOff + RegionOff);
+            read_raw_block(Fd, PostingsOff + RegionOff);
         eof ->
             empty;
         {error, _} = Err ->
             Err
     end.
 
-read_block(Fd, At) ->
+read_raw_block(Fd, At) ->
     case file:pread(Fd, At, 4) of
         {ok, <<Len:32/little>>} ->
             case file:pread(Fd, At + 4, Len) of
-                {ok, Block} -> {ok, barrel_ngram_postings:decode(Block)};
+                {ok, Block} -> {ok, Block};
                 eof -> {error, truncated_postings};
                 {error, _} = Err -> Err
             end;
@@ -306,18 +334,19 @@ entries(#segment{doc_count = N, key_index = KI} = H) ->
     [{barrel_ngram_selector:gram(), [barrel_ngram_postings:ordinal()]}].
 all_postings(#segment{offset_table_len = 0}) ->
     [];
-all_postings(#segment{fd = Fd, offset_table_off = TOff,
+all_postings(#segment{fd = Fd, codec = Codec, offset_table_off = TOff,
                       offset_table_len = TLen, postings_off = POff}) ->
     {ok, Table} = file:pread(Fd, TOff, TLen),
-    scan_table(Table, 0, Fd, POff, []).
+    scan_table(Table, 0, Fd, Codec, POff, []).
 
-scan_table(<<>>, _Gram, _Fd, _POff, Acc) ->
+scan_table(<<>>, _Gram, _Fd, _Codec, _POff, Acc) ->
     lists:reverse(Acc);
-scan_table(<<0:32/little, Rest/binary>>, Gram, Fd, POff, Acc) ->
-    scan_table(Rest, Gram + 1, Fd, POff, Acc);
-scan_table(<<RegionOff:32/little, Rest/binary>>, Gram, Fd, POff, Acc) ->
-    {ok, Ords} = read_block(Fd, POff + RegionOff),
-    scan_table(Rest, Gram + 1, Fd, POff, [{Gram, Ords} | Acc]).
+scan_table(<<0:32/little, Rest/binary>>, Gram, Fd, Codec, POff, Acc) ->
+    scan_table(Rest, Gram + 1, Fd, Codec, POff, Acc);
+scan_table(<<RegionOff:32/little, Rest/binary>>, Gram, Fd, Codec, POff, Acc) ->
+    {ok, Block} = read_raw_block(Fd, POff + RegionOff),
+    scan_table(Rest, Gram + 1, Fd, Codec, POff,
+               [{Gram, decode_block(Codec, Block)} | Acc]).
 
 %%====================================================================
 %% Header + sidecar-index parsing
@@ -326,7 +355,7 @@ scan_table(<<RegionOff:32/little, Rest/binary>>, Gram, Fd, POff, Acc) ->
 encode_header(#{doc_count := DocCount, offset_table_off := OTOff,
                 offset_table_len := OTLen, postings_off := POff,
                 postings_len := PLen, sidecar_off := SOff,
-                sidecar_len := SLen, watermark := Wm}) ->
+                sidecar_len := SLen, watermark := Wm, codec := Codec}) ->
     <<?MAGIC/binary,
       ?VERSION:32/little,
       DocCount:32/little,
@@ -336,7 +365,14 @@ encode_header(#{doc_count := DocCount, offset_table_off := OTOff,
       PLen:64/little,
       SOff:64/little,
       SLen:64/little,
-      Wm:12/binary>>.
+      Wm:12/binary,
+      (codec_byte(Codec)):8>>.
+
+codec_byte(varint) -> 0;
+codec_byte(roaring) -> 1.
+
+byte_codec(0) -> varint;
+byte_codec(1) -> roaring.
 
 read_header(Fd) ->
     case file:pread(Fd, 0, ?SECTOR) of
@@ -348,7 +384,7 @@ read_header(Fd) ->
 parse_header(<<Magic:8/binary, Version:32/little, DocCount:32/little,
                OTOff:64/little, OTLen:64/little, POff:64/little,
                PLen:64/little, SOff:64/little, SLen:64/little,
-               Wm:12/binary, _/binary>>)
+               Wm:12/binary, CodecByte:8, _/binary>>)
         when Magic =:= ?MAGIC, Version =:= ?VERSION ->
     {ok, #{
         doc_count => DocCount,
@@ -358,7 +394,8 @@ parse_header(<<Magic:8/binary, Version:32/little, DocCount:32/little,
         postings_len => PLen,
         sidecar_off => SOff,
         sidecar_len => SLen,
-        watermark => Wm
+        watermark => Wm,
+        codec => byte_codec(CodecByte)
     }};
 parse_header(<<Magic:8/binary, _/binary>>) when Magic =/= ?MAGIC ->
     {error, invalid_magic};

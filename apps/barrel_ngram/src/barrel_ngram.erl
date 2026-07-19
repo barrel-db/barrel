@@ -37,6 +37,8 @@
 %%   <li>`data_dir' - segment storage directory (default from app env).</li>
 %%   <li>`shards' - number of shards to spread the corpus across by
 %%       rendezvous hashing (default 1). Fixed for the corpus.</li>
+%%   <li>`postings' - posting-list codec, `varint' (default) or `roaring'
+%%       (a native bitmap AND for large dense corpora).</li>
 %% </ul>
 -spec open(corpus(), map()) -> ok | {error, term()}.
 open(Corpus, Opts) ->
@@ -178,4 +180,4 @@ normalize(Corpus, Opts) ->
     },
     %% pass tuning options through to the shard (defaults live there)
     maps:merge(Base, maps:with([freeze_threshold, compact_threshold,
-                                selector_opts], Opts)).
+                                selector_opts, postings], Opts)).
