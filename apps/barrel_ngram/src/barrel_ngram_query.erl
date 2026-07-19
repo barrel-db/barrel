@@ -29,7 +29,8 @@ search(Corpus, Literal, _Opts) when is_binary(Literal) ->
     {ok, Segments} = barrel_ngram_shard:get_manifest(Corpus),
     BufferKeys = barrel_ngram_shard:buffer_keys(Corpus),
     Selector = maps:get(selector, Config, barrel_ngram_selector_dense),
-    case segment_keys(Segments, Selector, Literal) of
+    SelectorOpts = maps:get(selector_opts, Config, #{}),
+    case segment_keys(Segments, Selector, SelectorOpts, Literal) of
         {error, _} = Err ->
             Err;
         SegKeys ->
@@ -43,14 +44,14 @@ search(Corpus, Literal, _Opts) when is_binary(Literal) ->
 %%====================================================================
 
 %% @private Candidate ids across all segments (de-dup happens in search/3).
-segment_keys(Segments, Selector, Literal) ->
+segment_keys(Segments, Selector, SelectorOpts, Literal) ->
     lists:foldl(
         fun(_Seg, {error, _} = Err) ->
                 Err;
            ({_Gen, Path}, Acc) ->
                 case barrel_ngram_segment:open(Path) of
                     {ok, H} ->
-                        try candidate_keys(H, Selector, Literal) of
+                        try candidate_keys(H, Selector, SelectorOpts, Literal) of
                             Keys -> Keys ++ Acc
                         after
                             barrel_ngram_segment:close(H)
@@ -60,8 +61,8 @@ segment_keys(Segments, Selector, Literal) ->
                 end
         end, [], Segments).
 
-candidate_keys(Handle, Selector, Literal) ->
-    Ordinals = case barrel_ngram_selector:reliable_grams(Selector, Literal) of
+candidate_keys(Handle, Selector, SelectorOpts, Literal) ->
+    Ordinals = case barrel_ngram_selector:reliable_grams(Selector, SelectorOpts, Literal) of
         brute_force -> all_ordinals(Handle);
         {reliable, []} -> all_ordinals(Handle);
         {reliable, Grams} -> intersect_grams(Handle, Grams)

@@ -42,6 +42,7 @@
     corpus :: term(),
     config :: map(),
     selector :: module(),
+    selector_opts :: map(),
     db :: binary(),
     dir :: binary(),
     manifest :: barrel_ngram_manifest:manifest(),
@@ -96,6 +97,7 @@ get_config(Corpus) ->
 init({Corpus, Config}) ->
     process_flag(trap_exit, true),
     Selector = maps:get(selector, Config, barrel_ngram_selector_dense),
+    SelectorOpts = maps:get(selector_opts, Config, #{}),
     Db = maps:get(db, Config),
     Dir = corpus_dir(Corpus, Config),
     {ok, Manifest0} = barrel_ngram_manifest:load(Dir),
@@ -104,6 +106,7 @@ init({Corpus, Config}) ->
         corpus = Corpus,
         config = Config,
         selector = Selector,
+        selector_opts = SelectorOpts,
         db = Db,
         dir = Dir,
         manifest = Manifest0,
@@ -219,14 +222,14 @@ subscribe(#state{db = Db, watermark = Wm} = State) ->
 
 %% @private Apply a batch to the buffer, advancing the watermark. Changes
 %% at or below the current watermark are skipped (idempotent replay).
-apply_changes(Changes, #state{buffer = Buffer, watermark = Wm,
-                              selector = Sel, config = Cfg} = State) ->
+apply_changes(Changes, #state{buffer = Buffer, watermark = Wm, selector = Sel,
+                              selector_opts = SelOpts, config = Cfg} = State) ->
     {Buffer1, Wm1} = lists:foldl(
-        fun(Change, Acc) -> apply_change(Change, Acc, Sel, Cfg) end,
+        fun(Change, Acc) -> apply_change(Change, Acc, Sel, SelOpts, Cfg) end,
         {Buffer, Wm}, Changes),
     State#state{buffer = Buffer1, watermark = Wm1}.
 
-apply_change(Change, {Buffer, Wm}, Sel, Cfg) ->
+apply_change(Change, {Buffer, Wm}, Sel, SelOpts, Cfg) ->
     EncHlc = barrel_hlc:encode(maps:get(hlc, Change)),
     case Wm =/= first andalso EncHlc =< Wm of
         true ->
@@ -240,7 +243,7 @@ apply_change(Change, {Buffer, Wm}, Sel, Cfg) ->
                     case maps:get(doc, Change, undefined) of
                         Doc when is_map(Doc) ->
                             Text = barrel_ngram_corpus:doc_text(Doc, Cfg),
-                            Grams = barrel_ngram_selector:select_grams(Sel, Text),
+                            Grams = barrel_ngram_selector:select_grams(Sel, SelOpts, Text),
                             Buffer#{Id => {EncHlc, {live, Grams}}};
                         _ ->
                             Buffer

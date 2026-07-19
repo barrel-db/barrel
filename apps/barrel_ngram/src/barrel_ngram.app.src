@@ -1,6 +1,6 @@
 {application, barrel_ngram, [
     {description, "Trigram substring and regex index over barrel_docdb documents"},
-    {vsn, "0.3.0"},
+    {vsn, "0.4.0"},
     {registered, [barrel_ngram_sup, barrel_ngram_registry]},
     {mod, {barrel_ngram_app, []}},
     {applications, [

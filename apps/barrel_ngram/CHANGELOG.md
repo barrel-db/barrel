@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-07-19
+
+### Added
+
+- Sparse (content-defined) gram selector: a trigram is kept only when a
+  hash of its local byte window passes a sampling test, shrinking the
+  index. The query planner intersects only over grams whose window falls
+  entirely inside the literal, and falls back to a brute-force scan for
+  short literals, so results stay exact. Opt in per corpus with
+  `selector => barrel_ngram_selector_sparse` and `selector_opts`.
+
+### Changed
+
+- The selector behaviour callbacks now take an options map
+  (`select_grams/2`, `reliable_grams/2`), carrying per-selector tuning.
+
 ## [0.3.0] - 2026-07-19
 
 ### Added

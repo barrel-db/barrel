@@ -101,4 +101,5 @@ normalize(Corpus, Opts) ->
                                                  "data/barrel_ngram"))
     },
     %% pass tuning options through to the shard (defaults live there)
-    maps:merge(Base, maps:with([freeze_threshold, compact_threshold], Opts)).
+    maps:merge(Base, maps:with([freeze_threshold, compact_threshold,
+                                selector_opts], Opts)).

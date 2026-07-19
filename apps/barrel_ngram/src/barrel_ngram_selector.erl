@@ -9,27 +9,28 @@
 %%% its containing documents produced. That subset relationship is what
 %%% makes the trigram intersection a correct necessary-condition filter.
 %%%
-%%% Two callbacks:
+%%% Two callbacks, each taking the bytes and a selector-options map:
 %%%
 %%% <ul>
-%%%   <li>`select_grams/1' - the grams a byte string contributes to the
+%%%   <li>`select_grams/2' - the grams a byte string contributes to the
 %%%       index. Used at index time.</li>
-%%%   <li>`reliable_grams/1' - the grams of a query literal the planner
+%%%   <li>`reliable_grams/2' - the grams of a query literal the planner
 %%%       may safely intersect over, or `brute_force' when it may not
 %%%       (too short, or every gram sits on an unreliable boundary). Used
 %%%       at query time.</li>
 %%% </ul>
 %%%
-%%% For the dense selector every gram is reliable, so `reliable_grams/1'
+%%% For the dense selector every gram is reliable, so `reliable_grams/2'
 %%% returns all of them (or `brute_force' below the trigram length). The
-%%% boundary/interior distinction only bites the content-defined (sparse)
-%%% selector, which the sparse milestone adds behind this same behaviour
-%%% without changing anything above it.
+%%% boundary/interior distinction bites the content-defined (sparse)
+%%% selector, which lives behind this same behaviour without changing
+%%% anything above it. The options map carries per-selector tuning (e.g.
+%%% the sparse selector's window radius and sample rate).
 %%% @end
 %%%-------------------------------------------------------------------
 -module(barrel_ngram_selector).
 
--export([select_grams/2, reliable_grams/2]).
+-export([select_grams/3, reliable_grams/3]).
 
 -export_type([gram/0, reliable/0]).
 
@@ -37,15 +38,15 @@
 -type gram() :: 0..16#FFFFFF.
 -type reliable() :: {reliable, [gram()]} | brute_force.
 
--callback select_grams(binary()) -> [gram()].
--callback reliable_grams(binary()) -> reliable().
+-callback select_grams(binary(), map()) -> [gram()].
+-callback reliable_grams(binary(), map()) -> reliable().
 
-%% @doc Dispatch `select_grams/1' to a selector module.
--spec select_grams(module(), binary()) -> [gram()].
-select_grams(Mod, Bytes) ->
-    Mod:select_grams(Bytes).
+%% @doc Dispatch `select_grams/2' to a selector module.
+-spec select_grams(module(), map(), binary()) -> [gram()].
+select_grams(Mod, Opts, Bytes) ->
+    Mod:select_grams(Bytes, Opts).
 
-%% @doc Dispatch `reliable_grams/1' to a selector module.
--spec reliable_grams(module(), binary()) -> reliable().
-reliable_grams(Mod, Query) ->
-    Mod:reliable_grams(Query).
+%% @doc Dispatch `reliable_grams/2' to a selector module.
+-spec reliable_grams(module(), map(), binary()) -> reliable().
+reliable_grams(Mod, Opts, Query) ->
+    Mod:reliable_grams(Query, Opts).

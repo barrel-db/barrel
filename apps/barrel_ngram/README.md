@@ -40,11 +40,15 @@ ok = barrel_ngram:open(<<"code">>, #{db => <<"mydb">>}),
 
 ## Status
 
-Dense trigram selection over multiple immutable segments, kept live by a
-push subscription to the changes feed (updates and deletes reflected via
-the confirm pass), with crash-safe manifest recovery and compaction that
-evicts superseded and deleted entries. Sparse (content-defined) selection,
-regex, sharding, and the MCP tool land in later milestones.
+Dense and sparse (content-defined) trigram selection over multiple
+immutable segments, kept live by a push subscription to the changes feed
+(updates and deletes reflected via the confirm pass), with crash-safe
+manifest recovery and compaction that evicts superseded and deleted
+entries. Regex, sharding, and the MCP tool land in later milestones.
+
+Choose the selector per corpus: dense (default, indexes every trigram) or
+sparse (`selector => barrel_ngram_selector_sparse`, indexes a sampled
+subset for a smaller index).
 
 ## License
 
