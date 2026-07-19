@@ -25,20 +25,32 @@
 -type corpus() :: binary() | atom().
 -export_type([corpus/0]).
 
-%% @doc Open a corpus bound to a database.
+%% @doc Create or re-attach a corpus bound to a database.
+%%
+%% There is no separate create step: this creates the corpus if it does not
+%% exist and re-attaches (resuming from its on-disk state) if it does. It
+%% starts a feed subscription that keeps the index in sync. `selector',
+%% `shards', and `postings' are fixed for the life of a corpus.
 %%
 %% Options:
 %% <ul>
 %%   <li>`db' (required) - the barrel_docdb database name to index.</li>
 %%   <li>`selector' - gram selector module (default
 %%       `barrel_ngram_selector_dense').</li>
+%%   <li>`selector_opts' - selector tuning map (default `#{}'), e.g. the
+%%       sparse selector's `radius' and `sample_rate'.</li>
 %%   <li>`fields' - `all' or a list of field names to index (default
 %%       `all').</li>
-%%   <li>`data_dir' - segment storage directory (default from app env).</li>
 %%   <li>`shards' - number of shards to spread the corpus across by
-%%       rendezvous hashing (default 1). Fixed for the corpus.</li>
+%%       rendezvous hashing (default 1).</li>
 %%   <li>`postings' - posting-list codec, `varint' (default) or `roaring'
 %%       (a native bitmap AND for large dense corpora).</li>
+%%   <li>`data_dir' - segment storage directory (default from app env);
+%%       segments live under `data_dir/<corpus>/'.</li>
+%%   <li>`freeze_threshold' - buffer size before an automatic freeze
+%%       (default 1000).</li>
+%%   <li>`compact_threshold' - live segment count before an automatic
+%%       compaction (default 16; `infinity' disables it).</li>
 %% </ul>
 -spec open(corpus(), map()) -> ok | {error, term()}.
 open(Corpus, Opts) ->
