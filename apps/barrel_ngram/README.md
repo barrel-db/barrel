@@ -28,6 +28,16 @@ ok = barrel_ngram:open(<<"code">>, #{db => <<"mydb">>}),
 {ok, More} = barrel_ngram:regex(<<"code">>, <<"connect_\\w+timeout">>).
 ```
 
+## Documentation
+
+- [Getting started](docs/getting-started.md) - open, index, search, regex.
+- [Selectors](docs/selectors.md) - dense vs sparse, tuning.
+- [Regex](docs/regex.md) - patterns, what accelerates.
+- [Sharding](docs/sharding.md) - spread a corpus across N shards.
+- [Operations](docs/operations.md) - refresh, compact, recovery, deletes.
+- [MCP tool](docs/mcp.md) - the `ngram_search` server tool.
+- [Design](docs/design.md) - how the index is built and stored.
+
 ## How it works
 
 - Byte-level trigrams over a 2^24 gram space, direct-addressed through a
