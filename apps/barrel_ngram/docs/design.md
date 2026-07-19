@@ -67,3 +67,21 @@ selector emits a content-defined sample for a smaller index. See [selectors](sel
 - A query does trigram intersection then a batched multi-get for the confirm pass.
 - Storage is roughly the postings (proportional to text size, smaller with the sparse
   selector) plus the offset table per segment.
+
+## Intersection performance
+
+Posting-list intersection is galloping over decoded ordinal lists. Measured over a
+100k-document shard intersecting 12 lists (`barrel_ngram_bench:run/0`): intersection is
+sub-millisecond for lists up to a few thousand ordinals and about 6 ms for lists of 50k,
+and the cost is dominated by decoding the delta+varint blocks, not the intersection
+itself. So the current path is fast for the configurations to use at scale: shard large
+corpora (smaller per-shard lists) and use the sparse selector for code (fewer, smaller
+posting lists).
+
+The one slow regime is a large, dense, unsharded corpus with hot trigrams (a common gram
+present in most documents), where decoding a very large block dominates. The postings
+codec is a seam (`barrel_ngram_postings`): a roaring-bitmap backend (a compressed bitmap
+with a native AND and no list materialization) can be dropped in there to remove that
+decode cost if a deployment hits that regime. It is intentionally not built by default;
+the measurement does not justify a native dependency for the sharded/sparse
+configurations.
