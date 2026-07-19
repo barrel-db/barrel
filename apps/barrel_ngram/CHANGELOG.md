@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-07-19
+
+### Added
+
+- Sharding: a corpus can be spread across N shards by rendezvous hashing
+  on the document key (`open` option `shards => N`, default 1). Each shard
+  indexes only its slice; queries fan out across shards and merge. Because
+  a document is owned by exactly one shard, results are identical to a
+  single-shard corpus. New self-contained `barrel_ngram_shards` module.
+
 ## [0.5.0] - 2026-07-19
 
 ### Added

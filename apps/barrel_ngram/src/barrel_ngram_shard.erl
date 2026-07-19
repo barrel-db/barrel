@@ -39,7 +39,10 @@
 -type content() :: {live, [barrel_ngram_selector:gram()]} | deleted.
 
 -record(state, {
+    ref :: term(),
     corpus :: term(),
+    shard_index :: non_neg_integer(),
+    shards :: pos_integer(),
     config :: map(),
     selector :: module(),
     selector_opts :: map(),
@@ -58,9 +61,9 @@
 %% API
 %%====================================================================
 
--spec start_link(term(), map()) -> {ok, pid()} | {error, term()}.
-start_link(Corpus, Config) ->
-    gen_server:start_link(via(Corpus), ?MODULE, {Corpus, Config}, []).
+-spec start_link(barrel_ngram_shards:ref(), map()) -> {ok, pid()} | {error, term()}.
+start_link(Ref, Config) ->
+    gen_server:start_link(via(Ref), ?MODULE, {Ref, Config}, []).
 
 %% @doc Synchronously drain the feed up to now and freeze the buffer.
 %% The deterministic catch-up point for tests and ops.
@@ -94,16 +97,22 @@ get_config(Corpus) ->
 %% gen_server callbacks
 %%====================================================================
 
-init({Corpus, Config}) ->
+init({Ref, Config}) ->
     process_flag(trap_exit, true),
+    Corpus = maps:get(corpus, Config),
+    ShardIndex = maps:get(shard_index, Config, 0),
+    Shards = maps:get(shards, Config, 1),
     Selector = maps:get(selector, Config, barrel_ngram_selector_dense),
     SelectorOpts = maps:get(selector_opts, Config, #{}),
     Db = maps:get(db, Config),
-    Dir = corpus_dir(Corpus, Config),
+    Dir = shard_dir(Corpus, ShardIndex, Shards, Config),
     {ok, Manifest0} = barrel_ngram_manifest:load(Dir),
     ok = barrel_ngram_manifest:cleanup_orphans(Dir, Manifest0),
     State0 = #state{
+        ref = Ref,
         corpus = Corpus,
+        shard_index = ShardIndex,
+        shards = Shards,
         config = Config,
         selector = Selector,
         selector_opts = SelectorOpts,
@@ -223,30 +232,39 @@ subscribe(#state{db = Db, watermark = Wm} = State) ->
 %% @private Apply a batch to the buffer, advancing the watermark. Changes
 %% at or below the current watermark are skipped (idempotent replay).
 apply_changes(Changes, #state{buffer = Buffer, watermark = Wm, selector = Sel,
-                              selector_opts = SelOpts, config = Cfg} = State) ->
+                              selector_opts = SelOpts, config = Cfg,
+                              shard_index = I, shards = N} = State) ->
     {Buffer1, Wm1} = lists:foldl(
-        fun(Change, Acc) -> apply_change(Change, Acc, Sel, SelOpts, Cfg) end,
+        fun(Change, Acc) -> apply_change(Change, Acc, Sel, SelOpts, Cfg, I, N) end,
         {Buffer, Wm}, Changes),
     State#state{buffer = Buffer1, watermark = Wm1}.
 
-apply_change(Change, {Buffer, Wm}, Sel, SelOpts, Cfg) ->
+%% Advance the watermark for every change above it (owned or not, so the
+%% shard never reprocesses the feed), but only buffer a change this shard
+%% owns by rendezvous.
+apply_change(Change, {Buffer, Wm}, Sel, SelOpts, Cfg, I, N) ->
     EncHlc = barrel_hlc:encode(maps:get(hlc, Change)),
     case Wm =/= first andalso EncHlc =< Wm of
         true ->
             {Buffer, Wm};
         false ->
             Id = maps:get(id, Change),
-            Buffer1 = case maps:get(deleted, Change, false) of
-                true ->
-                    Buffer#{Id => {EncHlc, deleted}};
+            Buffer1 = case barrel_ngram_shards:shard_for(Id, N) =:= I of
                 false ->
-                    case maps:get(doc, Change, undefined) of
-                        Doc when is_map(Doc) ->
-                            Text = barrel_ngram_corpus:doc_text(Doc, Cfg),
-                            Grams = barrel_ngram_selector:select_grams(Sel, SelOpts, Text),
-                            Buffer#{Id => {EncHlc, {live, Grams}}};
-                        _ ->
-                            Buffer
+                    Buffer;
+                true ->
+                    case maps:get(deleted, Change, false) of
+                        true ->
+                            Buffer#{Id => {EncHlc, deleted}};
+                        false ->
+                            case maps:get(doc, Change, undefined) of
+                                Doc when is_map(Doc) ->
+                                    Text = barrel_ngram_corpus:doc_text(Doc, Cfg),
+                                    Grams = barrel_ngram_selector:select_grams(Sel, SelOpts, Text),
+                                    Buffer#{Id => {EncHlc, {live, Grams}}};
+                                _ ->
+                                    Buffer
+                            end
                     end
             end,
             {Buffer1, EncHlc}
@@ -390,8 +408,8 @@ apply_merge_result(TempPath, DocCount, InputFiles,
 %% Helpers
 %%====================================================================
 
-via(Corpus) ->
-    {via, barrel_ngram_registry, {shard, Corpus}}.
+via(Ref) ->
+    {via, barrel_ngram_registry, {shard, Ref}}.
 
 segment_file(Gen) ->
     iolist_to_binary(io_lib:format("segment-~6..0b.ngseg", [Gen])).
@@ -402,10 +420,17 @@ since(Bin) when is_binary(Bin) -> barrel_hlc:decode(Bin).
 wm_bin(first) -> <<0:96>>;
 wm_bin(Bin) when is_binary(Bin) -> Bin.
 
-corpus_dir(Corpus, Config) ->
-    DataDir = maps:get(data_dir, Config,
-                       application:get_env(barrel_ngram, data_dir, "data/barrel_ngram")),
-    iolist_to_binary(filename:join([DataDir, corpus_name(Corpus)])).
+%% Single shard keeps the corpus dir unchanged; multi-shard nests a
+%% shard-<I> subdir under it.
+shard_dir(Corpus, _I, 1, Config) ->
+    iolist_to_binary(filename:join([data_dir(Config), corpus_name(Corpus)]));
+shard_dir(Corpus, I, _N, Config) ->
+    Sub = io_lib:format("shard-~6..0b", [I]),
+    iolist_to_binary(filename:join([data_dir(Config), corpus_name(Corpus), Sub])).
+
+data_dir(Config) ->
+    maps:get(data_dir, Config,
+             application:get_env(barrel_ngram, data_dir, "data/barrel_ngram")).
 
 corpus_name(Corpus) when is_binary(Corpus) -> Corpus;
 corpus_name(Corpus) when is_atom(Corpus) -> atom_to_binary(Corpus, utf8);

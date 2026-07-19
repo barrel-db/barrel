@@ -47,8 +47,9 @@ Substring and regex search over dense and sparse (content-defined)
 trigram selection, across multiple immutable segments kept live by a push
 subscription to the changes feed (updates and deletes reflected via the
 confirm pass), with crash-safe manifest recovery and compaction that
-evicts superseded and deleted entries. Sharding and the MCP tool land in
-later milestones.
+evicts superseded and deleted entries. A corpus can be sharded across N
+nodes by rendezvous hashing (`open` option `shards => N`). The MCP tool
+lands in a later milestone.
 
 Choose the selector per corpus: dense (default, indexes every trigram) or
 sparse (`selector => barrel_ngram_selector_sparse`, indexes a sampled

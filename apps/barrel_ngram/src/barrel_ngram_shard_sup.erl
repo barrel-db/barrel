@@ -20,20 +20,20 @@
 start_link() ->
     supervisor:start_link({local, ?SERVER}, ?MODULE, []).
 
-%% @doc Start a shard for a corpus. Returns the existing shard if one is
-%% already running for the corpus.
--spec start_shard(term(), map()) -> {ok, pid()} | {error, term()}.
-start_shard(Corpus, Config) ->
-    case supervisor:start_child(?SERVER, [Corpus, Config]) of
+%% @doc Start a shard by ref. Returns the existing shard if one is already
+%% running for that ref.
+-spec start_shard(barrel_ngram_shards:ref(), map()) -> {ok, pid()} | {error, term()}.
+start_shard(Ref, Config) ->
+    case supervisor:start_child(?SERVER, [Ref, Config]) of
         {ok, Pid} -> {ok, Pid};
         {error, {already_started, Pid}} -> {ok, Pid};
         {error, _} = Error -> Error
     end.
 
-%% @doc Stop the shard for a corpus.
--spec stop_shard(term()) -> ok | {error, not_found}.
-stop_shard(Corpus) ->
-    case barrel_ngram_registry:whereis_name({shard, Corpus}) of
+%% @doc Stop the shard for a ref.
+-spec stop_shard(barrel_ngram_shards:ref()) -> ok | {error, not_found}.
+stop_shard(Ref) ->
+    case barrel_ngram_registry:whereis_name({shard, Ref}) of
         undefined -> {error, not_found};
         Pid -> supervisor:terminate_child(?SERVER, Pid)
     end.

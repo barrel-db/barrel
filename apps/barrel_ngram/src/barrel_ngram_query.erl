@@ -22,14 +22,21 @@
 -type hit() :: #{id := binary(), spans := [{non_neg_integer(), non_neg_integer()}]}.
 -export_type([hit/0]).
 
-%% @doc Substring search for `Literal' in `Corpus'.
+%% @doc Substring search for `Literal' in `Corpus'. Fans across the
+%% corpus's shards and merges. Each document lives in exactly one shard, so
+%% the union needs no cross-shard dedup.
 -spec search(term(), binary(), map()) -> {ok, [hit()]} | {error, term()}.
 search(_Corpus, <<>>, _Opts) ->
     {error, empty_literal};
 search(Corpus, Literal, _Opts) when is_binary(Literal) ->
-    {ok, Config} = barrel_ngram_shard:get_config(Corpus),
-    {ok, Segments} = barrel_ngram_shard:get_manifest(Corpus),
-    BufferKeys = barrel_ngram_shard:buffer_keys(Corpus),
+    {N, Config} = corpus_nc(Corpus),
+    Refs = barrel_ngram_shards:refs(Corpus, N),
+    merge_hits([search_shard(Ref, Config, Literal) || Ref <- Refs]).
+
+%% @private Substring candidates from one shard, confirmed.
+search_shard(Ref, Config, Literal) ->
+    {ok, Segments} = barrel_ngram_shard:get_manifest(Ref),
+    BufferKeys = barrel_ngram_shard:buffer_keys(Ref),
     Selector = maps:get(selector, Config, barrel_ngram_selector_dense),
     SelectorOpts = maps:get(selector_opts, Config, #{}),
     case segment_keys(Segments, Selector, SelectorOpts, Literal) of
@@ -39,6 +46,28 @@ search(Corpus, Literal, _Opts) when is_binary(Literal) ->
             Keys = lists:usort(SegKeys ++ BufferKeys),
             Db = maps:get(db, Config),
             {ok, confirm(Db, Keys, Literal, Config)}
+    end.
+
+%% @private Corpus shard count + config from the meta, defaulting to a
+%% single shard whose config is read from the shard itself.
+corpus_nc(Corpus) ->
+    case barrel_ngram_shards:get_meta(Corpus) of
+        {ok, #{shards := N, config := Config}} ->
+            {N, Config};
+        undefined ->
+            {ok, Config} = barrel_ngram_shard:get_config(Corpus),
+            {1, Config}
+    end.
+
+%% @private Merge per-shard results: first error wins, else union the hits
+%% and sort by id.
+merge_hits(Results) ->
+    case [E || {error, _} = E <- Results] of
+        [Err | _] ->
+            Err;
+        [] ->
+            Hits = lists:append([H || {ok, H} <- Results]),
+            {ok, lists:sort(fun(#{id := A}, #{id := B}) -> A =< B end, Hits)}
     end.
 
 %%====================================================================
@@ -125,20 +154,27 @@ regex_search(Corpus, Regex, _Opts) when is_binary(Regex) ->
         {error, Reason} ->
             {error, {bad_regex, Reason}};
         {ok, RE} ->
-            {ok, Config} = barrel_ngram_shard:get_config(Corpus),
-            {ok, Segments} = barrel_ngram_shard:get_manifest(Corpus),
-            BufferKeys = barrel_ngram_shard:buffer_keys(Corpus),
+            {N, Config} = corpus_nc(Corpus),
             Selector = maps:get(selector, Config, barrel_ngram_selector_dense),
             SelectorOpts = maps:get(selector_opts, Config, #{}),
+            %% the trigram query is corpus-wide (depends only on the
+            %% selector), so compute it once and reuse across shards.
             Query = case barrel_ngram_selector:covers_all_grams(Selector, SelectorOpts) of
                 true -> barrel_ngram_regex:trigram_query(Regex);
                 false -> all
             end,
-            SegKeys = regex_segment_keys(Segments, Query),
-            Keys = lists:usort(SegKeys ++ BufferKeys),
-            Db = maps:get(db, Config),
-            {ok, regex_confirm(Db, Keys, RE, Config)}
+            Refs = barrel_ngram_shards:refs(Corpus, N),
+            merge_hits([regex_search_shard(Ref, Query, RE, Config) || Ref <- Refs])
     end.
+
+%% @private Regex candidates from one shard, confirmed.
+regex_search_shard(Ref, Query, RE, Config) ->
+    {ok, Segments} = barrel_ngram_shard:get_manifest(Ref),
+    BufferKeys = barrel_ngram_shard:buffer_keys(Ref),
+    SegKeys = regex_segment_keys(Segments, Query),
+    Keys = lists:usort(SegKeys ++ BufferKeys),
+    Db = maps:get(db, Config),
+    {ok, regex_confirm(Db, Keys, RE, Config)}.
 
 %% @private Candidate ids across all segments for a trigram query.
 regex_segment_keys(Segments, Query) ->
