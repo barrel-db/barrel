@@ -3,6 +3,14 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.3.0] - 2026-07-19
+
+### Added
+- `ngram_search` MCP tool: exact substring or regex (mode literal or regex)
+  search over a database's documents via the barrel_ngram trigram index, each
+  hit carrying the document id and match spans. Read-only; the corpus is opened
+  lazily per database.
+
 ## [1.2.1] - 2026-07-18
 
 ### Fixed

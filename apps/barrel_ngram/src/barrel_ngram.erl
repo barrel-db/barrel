@@ -19,8 +19,8 @@
 %%%-------------------------------------------------------------------
 -module(barrel_ngram).
 
--export([open/2, close/1, index/1, refresh/1, compact/1, search/2, search/3,
-         regex/2, regex/3]).
+-export([open/2, close/1, is_open/1, index/1, refresh/1, compact/1,
+         search/2, search/3, regex/2, regex/3]).
 
 -type corpus() :: binary() | atom().
 -export_type([corpus/0]).
@@ -62,6 +62,14 @@ close(Corpus) ->
     _ = [barrel_ngram_shard_sup:stop_shard(Ref) || Ref <- corpus_refs(Corpus)],
     barrel_ngram_shards:erase_meta(Corpus),
     ok.
+
+%% @doc Whether a corpus is currently open (cheap metadata check).
+-spec is_open(corpus()) -> boolean().
+is_open(Corpus) ->
+    case barrel_ngram_shards:get_meta(Corpus) of
+        {ok, _} -> true;
+        undefined -> false
+    end.
 
 %% @doc Catch the corpus up to the current head of its database's changes
 %% feed and freeze the buffer. The index is kept live in the background by

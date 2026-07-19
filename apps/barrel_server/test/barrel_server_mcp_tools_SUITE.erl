@@ -17,6 +17,7 @@
     t_query_paging/1,
     t_query_subscribe_rejected/1,
     t_search/1,
+    t_ngram_search/1,
     t_changes_cursor/1,
     t_branch_merge/1,
     t_capability_scoping/1,
@@ -34,7 +35,7 @@ all() ->
 groups() ->
     [
         {open, [], [t_tools_list, t_db_doc_roundtrip, t_query_paging,
-                    t_query_subscribe_rejected, t_search,
+                    t_query_subscribe_rejected, t_search, t_ngram_search,
                     t_changes_cursor, t_branch_merge]},
         {locked, [], [t_capability_scoping, t_server_token_full]}
     ].
@@ -81,8 +82,9 @@ t_tools_list(_Config) ->
     Expected = [<<"db_create">>, <<"db_list">>, <<"db_info">>,
                 <<"doc_get">>, <<"doc_put">>, <<"doc_delete">>,
                 <<"query">>, <<"query_subscribe">>,
-                <<"query_unsubscribe">>, <<"search">>, <<"changes">>,
-                <<"branch_create">>, <<"branch_list">>, <<"merge">>],
+                <<"query_unsubscribe">>, <<"search">>, <<"ngram_search">>,
+                <<"changes">>, <<"branch_create">>, <<"branch_list">>,
+                <<"merge">>],
     ?assertEqual([], Expected -- Names),
     %% annotations surface the behavioural hints
     [Delete] = [T || #{<<"name">> := <<"doc_delete">>} = T <- Tools],
@@ -191,6 +193,44 @@ t_search(_Config) ->
     {true, #{<<"error">> := <<"bad_mode">>}} =
         call(C, <<"search">>, #{<<"db">> => <<"mcp_s">>,
                                 <<"mode">> => <<"regex">>}),
+    barrel_mcp_client:close(C),
+    ok.
+
+t_ngram_search(_Config) ->
+    C = connect(#{}),
+    {false, _} = call(C, <<"db_create">>, #{<<"db">> => <<"mcp_ng">>}),
+    lists:foreach(
+        fun({Id, Body}) ->
+            {false, _} = call(C, <<"doc_put">>,
+                              #{<<"db">> => <<"mcp_ng">>,
+                                <<"doc">> => #{<<"id">> => Id,
+                                               <<"body">> => Body}})
+        end,
+        [{<<"a">>, <<"error connect_timeout in the pool">>},
+         {<<"b">>, <<"unrelated widget content">>},
+         {<<"c">>, <<"fn connect_retry() budget">>}]),
+    %% literal
+    {false, #{<<"hits">> := H1}} =
+        call(C, <<"ngram_search">>, #{<<"db">> => <<"mcp_ng">>,
+                                      <<"query">> => <<"connect_timeout">>}),
+    ?assertEqual([<<"a">>], [maps:get(<<"id">>, H) || H <- H1]),
+    ?assertMatch([#{<<"spans">> := [[_, _] | _]} | _], H1),
+    %% regex over both connect_ identifiers
+    {false, #{<<"hits">> := H2}} =
+        call(C, <<"ngram_search">>, #{<<"db">> => <<"mcp_ng">>,
+                                      <<"mode">> => <<"regex">>,
+                                      <<"query">> => <<"connect_\\w+">>}),
+    ?assertEqual([<<"a">>, <<"c">>],
+                 lists:sort([maps:get(<<"id">>, H) || H <- H2])),
+    %% no match
+    {false, #{<<"hits">> := [], <<"count">> := 0}} =
+        call(C, <<"ngram_search">>, #{<<"db">> => <<"mcp_ng">>,
+                                      <<"query">> => <<"nonexistent">>}),
+    %% malformed regex is an error result, not a crash
+    {true, #{<<"error">> := _}} =
+        call(C, <<"ngram_search">>, #{<<"db">> => <<"mcp_ng">>,
+                                      <<"mode">> => <<"regex">>,
+                                      <<"query">> => <<"(unclosed">>}),
     barrel_mcp_client:close(C),
     ok.
 

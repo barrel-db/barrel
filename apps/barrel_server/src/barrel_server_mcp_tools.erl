@@ -28,6 +28,7 @@
     query_subscribe/2,
     query_unsubscribe/2,
     search/2,
+    ngram_search/2,
     changes/2,
     branch_create/2,
     branch_list/2,
@@ -144,6 +145,18 @@ specs() ->
                                      <<"vector">> => arr(),
                                      <<"k">> => int()},
                                    [<<"db">>, <<"mode">>]),
+            annotations => #{<<"readOnlyHint">> => true}
+        }},
+        {<<"ngram_search">>, ngram_search, #{
+            description => <<"Exact substring or regex search over a "
+                             "database's documents via a trigram index. "
+                             "mode literal (default) or regex; each hit "
+                             "carries the document id and match spans.">>,
+            input_schema => schema(#{<<"db">> => str(),
+                                     <<"query">> => str(),
+                                     <<"mode">> => str(),
+                                     <<"limit">> => int()},
+                                   [<<"db">>, <<"query">>]),
             annotations => #{<<"readOnlyHint">> => true}
         }},
         {<<"changes">>, changes, #{
@@ -374,6 +387,57 @@ search_reply(Err) ->
 %% vector hits are maps; BM25 hits are {Id, Score} tuples
 hit({Id, Score}) -> #{key => Id, score => Score};
 hit(Map) when is_map(Map) -> barrel_server_http:jsonable(Map).
+
+%%====================================================================
+%% Lexical (ngram) search
+%%====================================================================
+
+ngram_search(#{<<"db">> := Name} = Args, Ctx) ->
+    with_db(Name, Ctx, read, fun(_Db) ->
+        Query = maps:get(<<"query">>, Args, <<>>),
+        Mode = maps:get(<<"mode">>, Args, <<"literal">>),
+        Limit = ngram_limit(maps:get(<<"limit">>, Args, 50)),
+        case Query of
+            <<>> ->
+                {tool_error, #{error => <<"empty_query">>}};
+            _ ->
+                ok = ensure_corpus(Name),
+                _ = barrel_ngram:refresh(Name),
+                ngram_reply(run_ngram(Name, Mode, Query), Limit)
+        end
+    end).
+
+run_ngram(Name, <<"literal">>, Query) -> barrel_ngram:search(Name, Query);
+run_ngram(Name, <<"regex">>, Query) -> barrel_ngram:regex(Name, Query);
+run_ngram(_Name, _Mode, _Query) -> {error, bad_mode}.
+
+ngram_reply({ok, Hits}, Limit) ->
+    reply(#{count => length(Hits),
+            hits => [ngram_hit(H) || H <- lists:sublist(Hits, Limit)]});
+ngram_reply({error, _} = Err, _Limit) ->
+    err(Err).
+
+ngram_hit(#{id := Id, spans := Spans}) ->
+    #{id => Id, spans => [[S, L] || {S, L} <- Spans]}.
+
+%% Open the corpus (keyed by db name) once; the background subscription
+%% then keeps it live. Segments live under the server's data dir.
+ensure_corpus(Name) ->
+    case barrel_ngram:is_open(Name) of
+        true ->
+            ok;
+        false ->
+            DataDir = filename:join(server_data_dir(), "ngram"),
+            _ = barrel_ngram:open(Name, #{db => Name, data_dir => DataDir}),
+            ok
+    end.
+
+server_data_dir() ->
+    application:get_env(barrel_server, data_dir, "data").
+
+ngram_limit(N) when is_integer(N), N > 0, N =< 1000 -> N;
+ngram_limit(N) when is_integer(N), N > 1000 -> 1000;
+ngram_limit(_) -> 50.
 
 %%====================================================================
 %% Changes
