@@ -26,7 +26,8 @@
 -behaviour(gen_server).
 
 -export([start_link/2]).
--export([refresh/1, compact/1, get_manifest/1, buffer_keys/1, get_config/1]).
+-export([refresh/1, compact/1, get_manifest/1, buffer_keys/1, snapshot/1,
+         get_config/1]).
 
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
@@ -87,6 +88,13 @@ get_manifest(Corpus) ->
 -spec buffer_keys(term()) -> [binary()].
 buffer_keys(Corpus) ->
     gen_server:call(via(Corpus), buffer_keys, infinity).
+
+%% @doc The live segments and the buffered ids in one atomic read, so a
+%% query never straddles a freeze (which could move a doc out of the buffer
+%% into a segment the query did not see).
+-spec snapshot(term()) -> {ok, [{non_neg_integer(), binary()}], [binary()]}.
+snapshot(Corpus) ->
+    gen_server:call(via(Corpus), snapshot, infinity).
 
 %% @doc The corpus config held by the shard.
 -spec get_config(term()) -> {ok, map()}.
@@ -161,6 +169,11 @@ handle_call(get_manifest, _From, #state{dir = Dir, manifest = M} = State) ->
 
 handle_call(buffer_keys, _From, #state{buffer = Buffer} = State) ->
     {reply, maps:keys(Buffer), State};
+
+handle_call(snapshot, _From, #state{dir = Dir, manifest = M, buffer = Buffer} = State) ->
+    Segs = [{maps:get(gen, S), filename:join(Dir, maps:get(file, S))}
+            || S <- barrel_ngram_manifest:list_segments(M)],
+    {reply, {ok, Segs, maps:keys(Buffer)}, State};
 
 handle_call(get_config, _From, #state{config = Config} = State) ->
     {reply, {ok, Config}, State}.
@@ -280,10 +293,12 @@ drain(#state{db = Db, watermark = Wm} = State) ->
         {ok, [], _Last} ->
             State;
         {ok, Changes, _Last} ->
-            State1 = apply_changes(Changes, State),
-            case length(Changes) < ?REFRESH_BATCH of
-                true -> State1;
-                false -> drain(State1)
+            #state{watermark = Wm1} = State1 = apply_changes(Changes, State),
+            %% continue only on a full batch that made progress; a full batch
+            %% that does not advance the watermark would otherwise loop forever
+            case length(Changes) >= ?REFRESH_BATCH andalso Wm1 =/= Wm of
+                true -> drain(State1);
+                false -> State1
             end;
         {error, _} ->
             State
@@ -317,8 +332,17 @@ do_freeze(#state{buffer = Buffer, manifest = M, dir = Dir,
             M1 = barrel_ngram_manifest:add_segment(
                    M, #{gen => Gen, file => File, doc_count => length(Keys)}),
             M2 = barrel_ngram_manifest:set_watermark(M1, WmBin),
-            ok = barrel_ngram_manifest:save(Dir, M2),
-            State#state{manifest = M2, buffer = #{}};
+            case barrel_ngram_manifest:save(Dir, M2) of
+                ok ->
+                    State#state{manifest = M2, buffer = #{}};
+                {error, SReason} ->
+                    %% manifest not committed: drop the orphan segment and
+                    %% keep the buffer + old watermark (the tail replays)
+                    logger:error("barrel_ngram freeze manifest save failed for ~p: ~p",
+                                 [State#state.corpus, SReason]),
+                    _ = file:delete(Path),
+                    State
+            end;
         {error, Reason} ->
             logger:error("barrel_ngram freeze failed for ~p: ~p",
                          [State#state.corpus, Reason]),

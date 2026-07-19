@@ -58,12 +58,16 @@ load(Dir) ->
 %% @doc Write the manifest atomically (temp + rename).
 -spec save(file:name_all(), manifest()) -> ok | {error, term()}.
 save(Dir, M) ->
-    ok = filelib:ensure_dir(filename:join(Dir, "dummy")),
-    Path = filename:join(Dir, ?FILENAME),
-    Tmp = iolist_to_binary([to_binary(Path), <<".tmp">>]),
-    case file:write_file(Tmp, term_to_binary(M)) of
-        ok -> file:rename(Tmp, Path);
-        {error, _} = Err -> Err
+    case filelib:ensure_dir(filename:join(Dir, "dummy")) of
+        ok ->
+            Path = filename:join(Dir, ?FILENAME),
+            Tmp = iolist_to_binary([to_binary(Path), <<".tmp">>]),
+            case file:write_file(Tmp, term_to_binary(M)) of
+                ok -> file:rename(Tmp, Path);
+                {error, _} = Err -> Err
+            end;
+        {error, _} = Err ->
+            Err
     end.
 
 %% @doc The applied HLC watermark (12-byte encoded, or `first').

@@ -35,8 +35,7 @@ search(Corpus, Literal, _Opts) when is_binary(Literal) ->
 
 %% @private Substring candidates from one shard, confirmed.
 search_shard(Ref, Config, Literal) ->
-    {ok, Segments} = barrel_ngram_shard:get_manifest(Ref),
-    BufferKeys = barrel_ngram_shard:buffer_keys(Ref),
+    {ok, Segments, BufferKeys} = barrel_ngram_shard:snapshot(Ref),
     Selector = maps:get(selector, Config, barrel_ngram_selector_dense),
     SelectorOpts = maps:get(selector_opts, Config, #{}),
     case segment_keys(Segments, Selector, SelectorOpts, Literal) of
@@ -182,8 +181,7 @@ regex_search(Corpus, Regex, _Opts) when is_binary(Regex) ->
 
 %% @private Regex candidates from one shard, confirmed.
 regex_search_shard(Ref, Query, RE, Config) ->
-    {ok, Segments} = barrel_ngram_shard:get_manifest(Ref),
-    BufferKeys = barrel_ngram_shard:buffer_keys(Ref),
+    {ok, Segments, BufferKeys} = barrel_ngram_shard:snapshot(Ref),
     SegKeys = regex_segment_keys(Segments, Query),
     Keys = lists:usort(SegKeys ++ BufferKeys),
     Db = maps:get(db, Config),

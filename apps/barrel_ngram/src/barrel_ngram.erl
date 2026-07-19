@@ -66,6 +66,10 @@ open(Corpus, Opts) ->
                                                  #{shards => N, config => Config}),
                     ok;
                 {error, _} = Err ->
+                    %% roll back any shards that did start (a later shard's
+                    %% start failed) so none is left orphaned
+                    _ = [barrel_ngram_shard_sup:stop_shard(Ref)
+                         || Ref <- barrel_ngram_shards:refs(Corpus, N)],
                     Err
             end
     end.

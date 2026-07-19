@@ -9,6 +9,7 @@
  * Ordinals are per-shard local ids and fit in 32 bits, so the 32-bit
  * roaring API is used.
  */
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -42,8 +43,11 @@ static ERL_NIF_TERM bitmap_to_binary(ErlNifEnv *env, const roaring_bitmap_t *r) 
     return bin_term;
 }
 
-/* Deserialize an Erlang binary term to a bitmap (bounds-checked). NULL on
- * a bad binary or a corrupt/oversized payload. */
+/* Deserialize an Erlang binary term to a bitmap. NULL on a non-binary, a
+ * payload whose framing does not fit the buffer, or a structurally invalid
+ * bitmap. deserialize_size bounds the read; deserialize_safe never reads
+ * past the buffer; internal_validate rejects a well-framed but corrupt
+ * bitmap (e.g. bit rot on disk) before any set op reads it. */
 static roaring_bitmap_t *binary_to_bitmap(ErlNifEnv *env, ERL_NIF_TERM term) {
     ErlNifBinary bin;
     if (!enif_inspect_binary(env, term, &bin)) return NULL;
@@ -51,8 +55,15 @@ static roaring_bitmap_t *binary_to_bitmap(ErlNifEnv *env, ERL_NIF_TERM term) {
                                                  bin.size) == 0) {
         return NULL;
     }
-    return roaring_bitmap_portable_deserialize_safe((const char *)bin.data,
-                                                    bin.size);
+    roaring_bitmap_t *r = roaring_bitmap_portable_deserialize_safe(
+        (const char *)bin.data, bin.size);
+    if (r == NULL) return NULL;
+    const char *reason = NULL;
+    if (!roaring_bitmap_internal_validate(r, &reason)) {
+        roaring_bitmap_free(r);
+        return NULL;
+    }
+    return r;
 }
 
 /* roaring_encode(List) -> Binary */
@@ -76,7 +87,12 @@ static ERL_NIF_TERM decode_nif(ErlNifEnv *env, int argc,
     uint64_t card = roaring_bitmap_get_cardinality(r);
     ERL_NIF_TERM list = enif_make_list(env, 0);
     if (card > 0) {
-        uint32_t *arr = (uint32_t *)malloc(sizeof(uint32_t) * card);
+        /* guard the multiply against size_t truncation before malloc */
+        if (card > SIZE_MAX / sizeof(uint32_t)) {
+            roaring_bitmap_free(r);
+            return enif_make_badarg(env);
+        }
+        uint32_t *arr = (uint32_t *)malloc(sizeof(uint32_t) * (size_t)card);
         if (arr == NULL) {
             roaring_bitmap_free(r);
             return enif_make_badarg(env);

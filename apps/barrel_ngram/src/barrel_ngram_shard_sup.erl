@@ -46,10 +46,14 @@ init([]) ->
         period => 60
     },
 
+    %% transient: a deliberate stop (close/1 -> terminate_child) is not
+    %% restarted, but an abnormal crash is restarted with the same args, so
+    %% the shard reloads its manifest and resubscribes rather than leaving
+    %% the corpus with no live shard.
     Shard = #{
         id => barrel_ngram_shard,
         start => {barrel_ngram_shard, start_link, []},
-        restart => temporary,
+        restart => transient,
         shutdown => 5000,
         type => worker,
         modules => [barrel_ngram_shard]

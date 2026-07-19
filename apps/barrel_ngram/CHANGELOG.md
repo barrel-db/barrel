@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.1] - 2026-07-19
+
+### Fixed
+
+- Roaring NIF: guard the decode output allocation against a `size_t`
+  multiply overflow, and validate a deserialized bitmap before any set op
+  reads it (a corrupt or bit-rotted segment now fails cleanly).
+- A manifest-save error during freeze no longer crashes the shard: the
+  orphan segment is dropped and the buffer and watermark are kept (the tail
+  replays). `manifest:save/1` tolerates an `ensure_dir` error.
+- `refresh` drain stops when a full feed batch does not advance the
+  watermark, so it cannot spin.
+- `open/2` rolls back any shards it already started if a later shard fails,
+  so a partial open leaves nothing orphaned; a shard is now a `transient`
+  child, so an abnormal crash restarts it instead of leaving the corpus
+  with no live shard.
+- A query reads a shard's segments and buffer in one atomic call, so it
+  never straddles a freeze.
+
 ## [0.7.0] - 2026-07-19
 
 ### Added
