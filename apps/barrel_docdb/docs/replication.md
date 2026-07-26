@@ -86,6 +86,23 @@ Tasks = barrel_rep_tasks:list_tasks().
 
 Tasks move through `pending`, `running`, `paused`, `completed` (one-shot), and `failed`. Task config is persisted in a system database, so a task resumes from its checkpoint after a restart.
 
+### Attachments
+
+Tasks replicate attachments by default, same as `barrel_rep:replicate/2,3`. Attachments live on their own feed (independent of the document changes feed), so they have their own checkpoint (`att_seq`, persisted alongside `last_seq`) and their own idle-wake handling: a continuous task periodically re-checks attachments even when no document change occurs, so an attachment added to an already-replicated document still converges without any further doc write.
+
+```erlang
+{ok, TaskId} = barrel_rep_tasks:start_task(#{
+    source => <<"mydb">>,
+    target => <<"http://remote:8080/db/mydb">>,
+    mode => continuous,
+    direction => push,
+    attachments => true,      %% default; set false to skip attachments
+    att_batch_size => 100      %% attachment feed batch size (default 100)
+}).
+```
+
+Set `attachments => false` to replicate documents only. This is persisted with the rest of the task config, so it survives `pause_task`/`resume_task` and node restarts.
+
 ## Filtered Replication
 
 Replicate only documents matching specific criteria using the `filter` option. A filtered stream keeps its own checkpoint, separate from the full replication.
