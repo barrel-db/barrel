@@ -103,6 +103,17 @@ Tasks replicate attachments by default, same as `barrel_rep:replicate/2,3`. Atta
 
 Set `attachments => false` to replicate documents only. This is persisted with the rest of the task config, so it survives `pause_task`/`resume_task` and node restarts.
 
+### Attachment Storage Backends
+
+Where attachment bytes actually live is pluggable, via the `barrel_att_backend` behaviour: `barrel_att_store` picks a backend per database from `att_opts.backend` (default, and the only backend shipped today, is `barrel_att_store_blob`, an embedded RocksDB instance with BlobDB enabled). A backend can be a local filesystem or an object store like S3, but no such backend exists in this repo yet; `barrel_att_backend` names them only as examples of what the behaviour is designed to support.
+
+This matters for replication because the behaviour splits its callbacks in two:
+
+- **Required**: `put`/`get`/`delete`/streaming, storing and reading bytes. Any backend needs these.
+- **Optional**: `att_changes/4`, `att_floor/2`, `sweep_att_feed/3`, `rebuild_feed/2`, `checkpoint/2`: the attachment change feed that replication (and timeline branching, for `checkpoint/2`) reads from.
+
+`barrel_att_store_blob` implements both sets: it keeps its feed in the *same* RocksDB instance as the blobs, committed in the same write batch as the blob write, so the feed can never fall out of sync with what was actually stored. A backend that only implements the required set (which is the minimum needed for an S3-style backend, since S3 has no equivalent to a local atomic write batch) has no feed to read from. Replication detects this per call (`barrel_att_store:supports_sync/1`, checked via `erlang:function_exported/3`) and degrades gracefully rather than erroring: attachment sync reports `att_sync => skipped`, for one-shot replication, timeline merges, and tasks alike. Attachments still work locally (put/get/delete) in that case; they just don't replicate until the backend also implements the feed callbacks.
+
 ## Filtered Replication
 
 Replicate only documents matching specific criteria using the `filter` option. A filtered stream keeps its own checkpoint, separate from the full replication.
