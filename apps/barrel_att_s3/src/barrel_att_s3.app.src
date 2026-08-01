@@ -1,0 +1,15 @@
+{application, barrel_att_s3, [
+    {description, "S3-compatible attachment storage backend for barrel_docdb"},
+    {vsn, "0.1.0"},
+    {registered, []},
+    {applications, [
+        kernel,
+        stdlib,
+        crypto,
+        livery_s3
+    ]},
+    {env, []},
+    {modules, []},
+    {licenses, ["Apache-2.0"]},
+    {links, [{"GitHub", "https://github.com/barrel-db/barrel"}]}
+]}.
