@@ -19,7 +19,9 @@
          checkpoint_resume/1,
          off_switch/1,
          mixed_docs_and_attachments/1,
-         floor_forces_resync/1]).
+         floor_forces_resync/1,
+         source_lacks_feed_reports_skipped/1,
+         target_lacks_feed_puts_land_without_lww/1]).
 
 all() ->
     [basic_sync_and_digest_skip,
@@ -29,7 +31,9 @@ all() ->
      checkpoint_resume,
      off_switch,
      mixed_docs_and_attachments,
-     floor_forces_resync].
+     floor_forces_resync,
+     source_lacks_feed_reports_skipped,
+     target_lacks_feed_puts_land_without_lww].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(barrel_docdb),
@@ -186,4 +190,64 @@ floor_forces_resync(Config) ->
                                                        <<"keep">>)
     after
         _ = barrel_docdb:delete_db(Src)
+    end.
+
+%%====================================================================
+%% Replication asymmetry: barrel_rep_att's "skipped" degrade only checks
+%% the SOURCE's feed support (barrel_rep_att:supports/1 gates on the
+%% transport, not the backend; the actual skip comes from the source's
+%% att_changes/4 call failing at runtime) -- nothing checks the target.
+%% Uses its own src/tgt pair (not the suite's shared per-testcase ones)
+%% since these need a non-default att_opts.backend.
+%%====================================================================
+
+source_lacks_feed_reports_skipped(Config) ->
+    Dir = ?config(dir, Config),
+    Src = <<"asym_nofeed_src">>,
+    Tgt = <<"asym_nofeed_tgt">>,
+    {ok, _} = barrel_docdb:create_db(Src, #{
+        data_dir => Dir,
+        att_opts => #{backend => barrel_docdb_test_att_backend_minimal}
+    }),
+    {ok, _} = barrel_docdb:create_db(Tgt, #{data_dir => Dir}),
+    try
+        {ok, _} = barrel_docdb:put_attachment(Src, <<"d">>, <<"f">>, <<"v">>),
+        {ok, R} = barrel_rep:replicate(Src, Tgt),
+        ?assertEqual(skipped, att_stats(R)),
+        %% the attachment never replicates: with no feed to enumerate
+        %% changes from, the sync phase has nothing to walk, even though
+        %% put/get on Src itself works fine
+        ?assertEqual({error, not_found},
+                     barrel_docdb:get_attachment(Tgt, <<"d">>, <<"f">>))
+    after
+        _ = barrel_docdb:delete_db(Src),
+        _ = barrel_docdb:delete_db(Tgt)
+    end.
+
+%% Puts/deletes are required callbacks, not feed-gated, so replicating
+%% INTO a feedless target still moves bytes -- but with no feed there to
+%% check origin_hlc against, an older value from the source can clobber
+%% a newer one already on the target, unlike RocksDB<->RocksDB (where the
+%% target's own feed would reject the stale write via barrel_att_feed:check/6).
+target_lacks_feed_puts_land_without_lww(Config) ->
+    Dir = ?config(dir, Config),
+    Src = <<"asym_target_nofeed_src">>,
+    Tgt = <<"asym_target_nofeed_tgt">>,
+    {ok, _} = barrel_docdb:create_db(Src, #{data_dir => Dir}),
+    {ok, _} = barrel_docdb:create_db(Tgt, #{
+        data_dir => Dir,
+        att_opts => #{backend => barrel_docdb_test_att_backend_minimal}
+    }),
+    try
+        %% the target's own, more recent state
+        {ok, _} = barrel_docdb:put_attachment(Tgt, <<"d">>, <<"f">>, <<"new">>),
+        %% the source has an older value for the same attachment
+        {ok, _} = barrel_docdb:put_attachment(Src, <<"d">>, <<"f">>, <<"old">>),
+        {ok, R} = barrel_rep:replicate(Src, Tgt),
+        ?assertMatch(#{atts_written := 1}, att_stats(R)),
+        ?assertEqual({ok, <<"old">>},
+                     barrel_docdb:get_attachment(Tgt, <<"d">>, <<"f">>))
+    after
+        _ = barrel_docdb:delete_db(Src),
+        _ = barrel_docdb:delete_db(Tgt)
     end.

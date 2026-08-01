@@ -25,7 +25,8 @@
     delete_parent_branch_survives/1,
     list_branches_open_only/1,
     branch_sweeper_independent_floor/1,
-    merge_after_branch_sweep/1
+    merge_after_branch_sweep/1,
+    fork_checkpointless_backend_returns_clean_error/1
 ]).
 
 -include_lib("common_test/include/ct.hrl").
@@ -39,7 +40,8 @@ all() ->
      fork_channels_inherited, branch_reopen_resumes_channels,
      inherited_rep_checkpoints_inert, delete_closed_branch_removes_files,
      delete_parent_branch_survives, list_branches_open_only,
-     branch_sweeper_independent_floor, merge_after_branch_sweep].
+     branch_sweeper_independent_floor, merge_after_branch_sweep,
+     fork_checkpointless_backend_returns_clean_error].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(barrel_docdb),
@@ -592,5 +594,29 @@ merge_after_branch_sweep(Config) ->
         {ok, _} = barrel_docdb:get_doc(Db0, <<"doomed">>)
     after
         _ = barrel_docdb:delete_db(Branch)
+    end,
+    ok.
+
+%% A backend without checkpoint/2 used to crash the caller: fork/6 did a
+%% bare {ok, ForkHlc} = checkpoint_to(...) match, and checkpoint_to returns
+%% {error, unsupported} for such a backend, badmatching into a catch-all
+%% that re-raised instead of returning a clean {error, _}. Uses its own
+%% parent/branch pair (not the suite's shared per-testcase db) since it
+%% needs a non-default att_opts.backend.
+fork_checkpointless_backend_returns_clean_error(Config) ->
+    DataDir = ?config(data_dir, Config),
+    Parent = <<"tl_nocheckpoint_parent">>,
+    Branch = <<"tl_nocheckpoint_branch">>,
+    {ok, _} = barrel_docdb:create_db(Parent, #{
+        data_dir => DataDir,
+        att_opts => #{backend => barrel_docdb_test_att_backend_minimal}
+    }),
+    try
+        ?assertMatch({error, _}, barrel_docdb:branch_db(Parent, Branch, #{})),
+        %% no half-created branch directory left behind
+        BranchPath = filename:join(DataDir, binary_to_list(Branch)),
+        ?assertNot(filelib:is_dir(BranchPath))
+    after
+        _ = barrel_docdb:delete_db(Parent)
     end,
     ok.
