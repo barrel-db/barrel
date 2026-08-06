@@ -1,0 +1,76 @@
+# MinIO + Garage + two barrel_server peers, for the S3 attachment-backend
+# test suite (apps/barrel_att_s3/test/barrel_att_s3_SUITE.erl, via the `s3`
+# CI leg) and test/e2e/attachments-s3.sh. peer-a stays on the default
+# (RocksDB) attachment backend; peer-b is built the same way but its
+# databases point their att_opts at MinIO or Garage -- same image, same
+# release, different runtime config, mirroring how a real deployment would
+# choose a backend per database.
+#
+# Garage needs a one-time layout/bucket/key bootstrap after it starts --
+# compose alone only starts the process. attachments-s3-setup.sh does that
+# and is the entry point both the CI leg and the e2e script use; it is safe
+# (and expected) to run this compose file on its own for local iteration.
+
+services:
+  minio:
+    image: minio/minio
+    container_name: barrel-att-s3-minio
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "19000:9000"
+      - "19001:9001"
+
+  garage:
+    image: dxflrs/garage:v1.0.1
+    container_name: barrel-att-s3-garage
+    volumes:
+      - ./garage.toml:/etc/garage.toml:ro
+      - garage-meta:/var/lib/garage/meta
+      - garage-data:/var/lib/garage/data
+    ports:
+      - "13900:3900"
+      - "13901:3901"
+      - "13903:3903"
+
+  peer-a:
+    build:
+      context: ../..
+      dockerfile: test/e2e/Dockerfile
+      args:
+        RELX_PROFILES: s3_server,prod
+        RELX_BUILD_DIR: s3_server+prod
+    image: barrel-server-att-s3-e2e
+    container_name: barrel-att-s3-peer-a
+    ports:
+      - "8093:8080"
+    healthcheck:
+      test: ["CMD", "barrel_server", "ping"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+
+  peer-b:
+    # Reuse the image peer-a builds.
+    image: barrel-server-att-s3-e2e
+    container_name: barrel-att-s3-peer-b
+    depends_on:
+      peer-a:
+        condition: service_started
+      minio:
+        condition: service_started
+      garage:
+        condition: service_started
+    ports:
+      - "8094:8080"
+    healthcheck:
+      test: ["CMD", "barrel_server", "ping"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  garage-meta:
+  garage-data:

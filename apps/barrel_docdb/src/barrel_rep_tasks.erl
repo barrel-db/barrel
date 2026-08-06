@@ -69,6 +69,15 @@
 -define(BACKOFF_MIN, 1000).
 -define(BACKOFF_MAX, 60000).
 
+%% Bound on how long a stream-subscribed continuous task can go without
+%% re-checking attachments: attachments have their own feed, so a doc-only
+%% wake signal never fires for an attachment-only write. Separate from the
+%% doc-side pacing constants above since it addresses a different concern.
+-define(ATT_IDLE_INTERVAL, 5000).
+
+%% Default attachment sync batch size
+-define(DEFAULT_ATT_BATCH_SIZE, 100).
+
 %%====================================================================
 %% Types
 %%====================================================================
@@ -87,7 +96,9 @@
     target_transport => module(),         % Transport for target
     batch_size => pos_integer(),
     filter => barrel_rep:filter_opts(),
-    wait_for => [binary() | map()]        % Chain: wait for downstream targets
+    wait_for => [binary() | map()],       % Chain: wait for downstream targets
+    attachments => boolean(),             % Replicate attachments (default: true)
+    att_batch_size => pos_integer()       % Attachment feed batch size (default: 100)
 }.
 
 -type task() :: #{
@@ -95,6 +106,7 @@
     config := task_config(),
     status := task_status(),
     last_seq => seq() | first,
+    att_seq => seq() | first,
     error => binary(),
     created_at := integer(),
     updated_at := integer()
@@ -450,7 +462,10 @@ run_task(Parent, TaskId, Config, SourceTransport, TargetTransport, StartSeq) ->
         batch_size => maps:get(batch_size, Config, ?DEFAULT_BATCH_SIZE),
         filter => maps:get(filter, Config, #{}),
         wait_for => [resolve_endpoint(W)
-                     || W <- maps:get(wait_for, Config, [])]
+                     || W <- maps:get(wait_for, Config, [])],
+        attachments => maps:get(attachments, Config, true),
+        att_batch_size => maps:get(att_batch_size, Config,
+                                   ?DEFAULT_ATT_BATCH_SIZE)
     },
 
     ExtraAttrs = #{
@@ -525,11 +540,31 @@ run_task_loop(Ctx, Since) ->
 
     case FromTransport:get_changes(From, Since, ChangesOpts) of
         {ok, [], _LastSeq} when Mode =:= one_shot ->
-            %% No more changes, one-shot complete
-            gen_server:cast(Parent, {task_complete, TaskId});
+            %% No more doc changes: run the attachment phase to completion
+            %% once (mirrors barrel_rep:replicate_one_shot/2's "doc phase to
+            %% completion, then one attachment pass" shape) before reporting
+            %% the task done.
+            case sync_attachments(Ctx) of
+                ok ->
+                    gen_server:cast(Parent, {task_complete, TaskId});
+                {error, Reason} ->
+                    gen_server:cast(Parent, {task_error, TaskId,
+                                             {att_sync_failed, Reason}})
+            end;
 
         {ok, [], _LastSeq} ->
-            %% Idle: block on the wake signal (stream or poll timer)
+            %% Idle on the doc side. Attachments have their own feed, so a
+            %% doc-only wake signal never fires for an attachment-only
+            %% write: catch those up here too, best-effort, before waiting
+            %% again. Poll mode already revisits this branch on every sleep
+            %% cycle; stream mode's bounded wake (see wait_for_wake/1) is
+            %% what makes it revisit this branch when idle on a live stream.
+            case sync_attachments(Ctx) of
+                ok -> ok;
+                {error, Reason} ->
+                    gen_server:cast(Parent, {task_last_error, TaskId,
+                                             {att_sync_failed, Reason}})
+            end,
             run_task_loop(wait_for_wake(Ctx), Since);
 
         {ok, Changes, LastSeq} ->
@@ -546,7 +581,26 @@ run_task_loop(Ctx, Since) ->
                             %% Persist the checkpoint here in the task
                             %% process, off the manager's message loop.
                             _ = update_task_seq(TaskId, LastSeq),
-                            run_task_loop(reset_pacing(Ctx), LastSeq);
+                            case Mode of
+                                continuous ->
+                                    %% Attachments have no retry/backoff
+                                    %% risk for one-shot the way docs do;
+                                    %% the doc watermark is already durably
+                                    %% advanced above, so a broken
+                                    %% attachment target never stalls
+                                    %% healthy doc replication behind it.
+                                    case sync_attachments(Ctx) of
+                                        ok ->
+                                            run_task_loop(reset_pacing(Ctx),
+                                                         LastSeq);
+                                        {error, AttReason} ->
+                                            handle_loop_error(
+                                                Ctx, LastSeq,
+                                                {att_sync_failed, AttReason})
+                                    end;
+                                one_shot ->
+                                    run_task_loop(reset_pacing(Ctx), LastSeq)
+                            end;
                         {error, Reason} ->
                             handle_loop_error(Ctx, Since, Reason)
                     end
@@ -563,6 +617,27 @@ replicate_batch(From, To, FromTransport, ToTransport, Changes, WaitFor) ->
             wait_for_downstream(Changes, WaitFor);
         {error, _} = Error ->
             Error
+    end.
+
+%% @doc Attachment phase for a task: independent lifecycle + checkpoint
+%% (own watermark persisted on the task's own doc), same shape as
+%% barrel_rep:replicate_one_shot/2's post-doc-phase attachment sync and
+%% barrel_timeline's merge_attachments/4 (caller-owned checkpoint via
+%% sync_from/7). Skips entirely when the task config disabled it.
+sync_attachments(#{attachments := false}) ->
+    ok;
+sync_attachments(#{task_id := TaskId, from := From, to := To,
+                   from_transport := FromTransport,
+                   to_transport := ToTransport,
+                   att_batch_size := AttBatchSize}) ->
+    AttSince = get_task_att_seq(TaskId),
+    CheckpointFun = fun(Seq) -> update_task_att_seq(TaskId, Seq) end,
+    case barrel_rep_att:sync_from(From, To, FromTransport, ToTransport,
+                                  AttSince, CheckpointFun,
+                                  #{att_batch_size => AttBatchSize}) of
+        {ok, _Stats} -> ok;
+        skipped -> ok;
+        {error, _} = Error -> Error
     end.
 
 %% Continuous tasks ride out transient errors: record last_error on
@@ -585,14 +660,20 @@ reset_pacing(Ctx) ->
 
 %% Idle continuous task. Stream-woken: the stream payload is
 %% unfiltered, so it is a wake-up signal only; ack immediately and
-%% drain through the transport with the task's filter. Polling:
-%% adaptive interval, doubled while idle.
+%% drain through the transport with the task's filter. The await is
+%% bounded (not infinity): attachments have no doc-feed wake signal of
+%% their own, so a periodic timeout is what lets run_task_loop's idle
+%% branch re-check attachments even when no doc change ever arrives.
+%% Polling: adaptive interval, doubled while idle.
 wait_for_wake(#{wake := {stream, Stream}} = Ctx) ->
-    case barrel_changes_stream:await(Stream, infinity) of
+    case barrel_changes_stream:await(Stream, ?ATT_IDLE_INTERVAL) of
         {ReqId, _Changes} ->
             ok = barrel_changes_stream:ack(Stream, ReqId),
             Ctx;
-        [] ->
+        timeout ->
+            %% no doc changes yet; still alive, just re-check next time
+            Ctx;
+        down ->
             %% stream went away: degrade to polling
             Ctx#{wake := poll}
     end;
@@ -756,6 +837,17 @@ update_task_seq(TaskId, Seq) ->
         Doc#{<<"last_seq">> => format_seq(Seq)}
     end).
 
+update_task_att_seq(TaskId, Seq) ->
+    update_task_doc(TaskId, fun(Doc) ->
+        Doc#{<<"att_seq">> => format_seq(Seq)}
+    end).
+
+get_task_att_seq(TaskId) ->
+    case barrel_docdb:get_local_doc(?TASKS_DB, task_doc_id(TaskId)) of
+        {ok, Doc} -> parse_seq(maps:get(<<"att_seq">>, Doc, <<"first">>));
+        {error, not_found} -> first
+    end.
+
 update_task_last_error(TaskId, Reason) ->
     update_task_doc(TaskId, fun(Doc) ->
         Doc#{<<"last_error">> => format_reason(Reason)}
@@ -787,6 +879,7 @@ task_to_doc(#{id := Id, config := Config, status := Status,
         <<"config">> => config_to_map(Config),
         <<"status">> => atom_to_binary(Status),
         <<"last_seq">> => format_seq(maps:get(last_seq, Task, first)),
+        <<"att_seq">> => format_seq(maps:get(att_seq, Task, first)),
         <<"created_at">> => CreatedAt,
         <<"updated_at">> => UpdatedAt
     }.
@@ -797,6 +890,11 @@ doc_to_task(Doc) ->
         config => map_to_config(maps:get(<<"config">>, Doc)),
         status => binary_to_existing_atom(maps:get(<<"status">>, Doc), utf8),
         last_seq => parse_seq(maps:get(<<"last_seq">>, Doc, <<"first">>)),
+        %% Unconditional, defaulted like last_seq (not the maps:fold below,
+        %% which is only for genuinely-absent-until-first-error fields): a
+        %% task doc written before this field existed must still parse,
+        %% defaulting to a full attachment backfill.
+        att_seq => parse_seq(maps:get(<<"att_seq">>, Doc, <<"first">>)),
         created_at => maps:get(<<"created_at">>, Doc),
         updated_at => maps:get(<<"updated_at">>, Doc)
     },
@@ -828,6 +926,8 @@ config_to_map(Config) ->
                Acc#{<<"filter">> => barrel_rep_filter:to_wire(V)};
            (wait_for, V, Acc) ->
                Acc#{<<"wait_for">> => [endpoint_to_doc(W) || W <- V]};
+           (attachments, V, Acc) -> Acc#{<<"attachments">> => V};
+           (att_batch_size, V, Acc) -> Acc#{<<"att_batch_size">> => V};
            (_, _, Acc) -> Acc
         end,
         #{},
@@ -855,6 +955,8 @@ map_to_config(Map) ->
                    {error, _} -> Acc
                end;
            (<<"wait_for">>, V, Acc) -> Acc#{wait_for => V};
+           (<<"attachments">>, V, Acc) -> Acc#{attachments => V};
+           (<<"att_batch_size">>, V, Acc) -> Acc#{att_batch_size => V};
            (_, _, Acc) -> Acc
         end,
         #{},

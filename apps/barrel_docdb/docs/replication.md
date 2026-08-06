@@ -86,6 +86,36 @@ Tasks = barrel_rep_tasks:list_tasks().
 
 Tasks move through `pending`, `running`, `paused`, `completed` (one-shot), and `failed`. Task config is persisted in a system database, so a task resumes from its checkpoint after a restart.
 
+### Attachments
+
+Tasks replicate attachments by default, same as `barrel_rep:replicate/2,3`. Attachments live on their own feed (independent of the document changes feed), so they have their own checkpoint (`att_seq`, persisted alongside `last_seq`) and their own idle-wake handling: a continuous task periodically re-checks attachments even when no document change occurs, so an attachment added to an already-replicated document still converges without any further doc write.
+
+```erlang
+{ok, TaskId} = barrel_rep_tasks:start_task(#{
+    source => <<"mydb">>,
+    target => <<"http://remote:8080/db/mydb">>,
+    mode => continuous,
+    direction => push,
+    attachments => true,      %% default; set false to skip attachments
+    att_batch_size => 100      %% attachment feed batch size (default 100)
+}).
+```
+
+Set `attachments => false` to replicate documents only. This is persisted with the rest of the task config, so it survives `pause_task`/`resume_task` and node restarts.
+
+### Attachment Storage Backends
+
+Where attachment bytes actually live is pluggable, via the `barrel_att_backend` behaviour: `barrel_att_store` picks a backend per database from `att_opts.backend` (default is `barrel_att_store_blob`, an embedded RocksDB instance with BlobDB enabled). `barrel_att_s3` (a separate sibling app, opt in with the `s3` rebar3 profile) is an S3-compatible backend for AWS S3, MinIO, or Garage -- see its [getting started](../../barrel_att_s3/docs/getting-started.md) guide.
+
+This matters for replication because the behaviour splits its callbacks in two:
+
+- **Required**: `put`/`get`/`delete`/streaming, storing and reading bytes. Any backend needs these.
+- **Optional**: `att_changes/4`, `att_floor/2`, `sweep_att_feed/3`, `rebuild_feed/2` (the attachment change feed replication reads from), `checkpoint/2` (timeline branching), `destroy/2` (backend-owned state beyond the local directory, erased on `delete_db`).
+
+`barrel_att_store_blob` implements both sets: it keeps its feed in the *same* RocksDB instance as the blobs, committed in the same write batch as the blob write, so the feed can never fall out of sync with what was actually stored. `barrel_att_s3` implements both sets too, as of a later revision than its first release: it keeps its feed in a small local RocksDB instance alongside the (remote) attachment bytes, since S3 has no equivalent to a local atomic write batch spanning both -- committed just after each S3 write succeeds, not atomically with it. Either way, replication treats both backends the same: full LWW-checked sync as both source and target.
+
+A backend that implements only the required set (put/get/delete/streaming, no feed at all) still degrades gracefully rather than erroring, detected per call via `barrel_att_store:supports_sync/1` (`erlang:function_exported/3`): attachment sync reports `att_sync => skipped` as a replication *source*, for one-shot replication, timeline merges, and tasks alike. Attachments still work locally (put/get/delete) in that case; they just don't replicate. This check only covers the source -- such a backend as a replication *target* is not detected, since `put`/`delete` are required callbacks and land regardless, with no feed on the target to check `origin_hlc` against, so the last-write-wins guard a feed-backed target enforces silently does not apply for it.
+
 ## Filtered Replication
 
 Replicate only documents matching specific criteria using the `filter` option. A filtered stream keeps its own checkpoint, separate from the full replication.

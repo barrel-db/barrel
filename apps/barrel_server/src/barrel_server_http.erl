@@ -113,12 +113,127 @@ health(_Req) ->
 %% Database lifecycle
 %%====================================================================
 
+%% @doc `Body' is optional (an empty body is `#{}', not an error, same as
+%% `with_json' everywhere else) -- a plain `PUT /db/:name' keeps behaving
+%% exactly as before. `att_opts' picks a non-default attachment backend
+%% (e.g. S3); see `att_opts_from_json/1'.
 create_db(Req) ->
     Name = livery_req:binding(<<"db">>, Req),
-    case barrel_server_dbs:ensure(Name) of
+    with_json(Req, fun(Body) ->
+        case att_opts_from_json(maps:get(<<"att_opts">>, Body, undefined)) of
+            {error, _} = Err ->
+                error_resp(Err);
+            {ok, undefined} ->
+                do_create_db(Name, #{});
+            {ok, AttOpts} ->
+                %% barrel:open/2 (barrel_server_dbs:ensure/2's eventual
+                %% callee) reads att_opts nested under `docdb', not at
+                %% the top level -- see barrel.erl:open_plain/2.
+                do_create_db(Name, #{docdb => #{att_opts => AttOpts}})
+        end
+    end).
+
+do_create_db(Name, Opts) ->
+    case barrel_server_dbs:ensure(Name, Opts) of
         {ok, _Db} -> json_resp(201, #{ok => true, db => Name});
         Err -> error_resp(Err)
     end.
+
+%% @private `undefined' (no `att_opts' key at all) passes through
+%% unchanged -- create_db keeps defaulting to the RocksDB backend.
+%% `backend' is an explicit whitelist match, not a generic atom
+%% conversion, so a bad value is a clean 400 rather than a crash. The `s3'
+%% sub-map is NOT a hardcoded field whitelist: barrel_att_s3_store's own
+%% contract is "everything except bucket/part_size passes straight to
+%% livery_s3:new/1", so keys convert via binary_to_existing_atom/2 instead
+%% -- every option livery_s3:new/1 or barrel_att_s3_store itself reads
+%% (bucket, endpoint, region, access_key_id, secret_access_key,
+%% session_token, part_size, ...) is already an atom that exists in the
+%% compiled code, so this needs no maintained list and safely rejects
+%% genuine garbage instead of minting new atoms.
+att_opts_from_json(undefined) ->
+    {ok, undefined};
+att_opts_from_json(#{<<"backend">> := BackendBin} = Json) ->
+    case backend_from_json(BackendBin) of
+        {error, _} = Err ->
+            Err;
+        {ok, Backend} ->
+            case ensure_backend_loaded(Backend) of
+                {error, _} = Err -> Err;
+                ok ->
+                    case s3_opts_from_json(maps:get(<<"s3">>, Json, #{})) of
+                        {error, _} = Err -> Err;
+                        {ok, S3Opts} -> check_required_s3_opts(Backend, S3Opts)
+                    end
+            end
+    end;
+att_opts_from_json(_) ->
+    {error, {bad_att_opts, missing_backend}}.
+
+backend_from_json(<<"blob">>) -> {ok, blob};
+backend_from_json(<<"s3">>) -> {ok, s3};
+backend_from_json(Other) -> {error, {bad_att_opts, {unknown_backend, Other}}}.
+
+%% @private `binary_to_existing_atom/2' in `s3_opts_from_json/1' only
+%% accepts a key whose atom is already registered in the VM -- correct, so
+%% a garbage key can never mint a new atom, but that registration happens
+%% when `livery_s3'/`barrel_att_s3_store' are *loaded*, which only happens
+%% on its own under the `s3'/`s3_server' profiles. A plain `server' build
+%% (e.g. CI's `rebar3 as server ct') never loads either module by itself,
+%% so every genuinely valid s3 option would otherwise be misreported as
+%% `unknown_s3_option'. Force the load here instead of hoping something
+%% else already did it, and report plainly when the backend truly isn't
+%% part of this build.
+ensure_backend_loaded(s3) ->
+    case code:ensure_loaded(livery_s3) of
+        {module, livery_s3} ->
+            {module, barrel_att_s3_store} = code:ensure_loaded(barrel_att_s3_store),
+            ok;
+        {error, _} ->
+            {error, {bad_att_opts, {backend_unavailable, s3}}}
+    end;
+ensure_backend_loaded(_) ->
+    ok.
+
+s3_opts_from_json(Json) when is_map(Json) ->
+    try
+        {ok, maps:fold(fun(K, V, Acc) ->
+            Acc#{binary_to_existing_atom(K, utf8) => V}
+        end, #{}, Json)}
+    catch
+        error:badarg -> {error, {bad_att_opts, {unknown_s3_option, redact_secrets(Json)}}}
+    end;
+s3_opts_from_json(_) ->
+    {error, {bad_att_opts, s3_must_be_object}}.
+
+%% @private `endpoint' has no default anywhere downstream (livery_s3:new/1
+%% does a bare maps:get(endpoint, Opts), no fallback) -- catch a missing
+%% one here with a clean 400 rather than let a raw {badkey, endpoint} term
+%% reach a caller. `bucket' doesn't need the same treatment:
+%% barrel_att_s3_store:open/2 already reports a clean {error,
+%% missing_bucket} for it.
+check_required_s3_opts(s3, S3Opts) ->
+    case maps:is_key(endpoint, S3Opts) of
+        true -> {ok, #{backend => s3, s3 => S3Opts}};
+        false -> {error, {bad_att_opts, {missing_required_s3_option, endpoint}}}
+    end;
+check_required_s3_opts(Backend, S3Opts) ->
+    {ok, #{backend => Backend, s3 => S3Opts}}.
+
+%% @private The caller's own submitted `s3' map is echoed back in the
+%% error (to name the offending key), but not their credentials -- an
+%% error response body can land in access logs, browser history, or a
+%% proxy's logs in ways the caller likely didn't intend, and even a
+%% single misspelled key would otherwise echo the whole map back.
+redact_secrets(Json) when is_map(Json) ->
+    maps:map(fun
+        (K, _V) when K =:= <<"secret_access_key">>;
+                    K =:= <<"access_key_id">>;
+                    K =:= <<"session_token">> ->
+            <<"[redacted]">>;
+        (_K, V) ->
+            V
+    end, Json).
 
 db_info(Req) ->
     with_db(Req, fun(Db) ->
@@ -746,19 +861,66 @@ emit_changes([C | Rest], Emit) ->
 %% Attachments
 %%====================================================================
 
+%% @doc `If-None-Match: *' / `If-Match: <etag>' opt into S3 conditional
+%% writes (`create_only'/`expected_etag' -- see barrel_att_s3_store); a
+%% backend that can't evaluate them (Garage) or doesn't understand them at
+%% all (the default RocksDB backend) is handled by the callee, not here.
 put_att(Req) ->
     with_db(Req, fun(Db) ->
         Id = livery_req:binding(<<"id">>, Req),
         Name = livery_req:binding(<<"name">>, Req),
-        case read_body(Req) of
-            {ok, Data} ->
-                case barrel:put_attachment(Db, Id, Name, Data) of
-                    {ok, Res} -> json_resp(201, jsonable(Res));
+        case att_write_opts(Req) of
+            {error, _} = Err ->
+                error_resp(Err);
+            {ok, Opts} ->
+                case read_body(Req) of
+                    {ok, Data} ->
+                        case barrel:put_attachment(Db, Id, Name, Data, Opts) of
+                            {ok, Res} -> json_resp(201, jsonable(Res));
+                            Err -> error_resp(Err)
+                        end;
                     Err -> error_resp(Err)
-                end;
-            Err -> error_resp(Err)
+                end
         end
     end).
+
+att_write_opts(Req) ->
+    case if_none_match_opt(Req) of
+        {error, _} = Err ->
+            Err;
+        {ok, CreateOnlyOpts} ->
+            %% if_match_opt/1 never fails (any If-Match value is a valid,
+            %% if possibly non-matching, etag) -- unlike if_none_match_opt/1
+            %% above, whose non-"*" values are rejected.
+            {ok, ExpectedEtagOpts} = if_match_opt(Req),
+            {ok, maps:merge(CreateOnlyOpts, ExpectedEtagOpts)}
+    end.
+
+%% `create_only' is a boolean in the Erlang API, not an etag -- only the
+%% wildcard form of If-None-Match has an equivalent to translate.
+if_none_match_opt(Req) ->
+    case livery_req:header(<<"if-none-match">>, Req, undefined) of
+        undefined -> {ok, #{}};
+        <<"*">> -> {ok, #{create_only => true}};
+        Other -> {error, {bad_if_none_match, Other}}
+    end.
+
+-spec if_match_opt(term()) -> {ok, map()}.
+if_match_opt(Req) ->
+    case livery_req:header(<<"if-match">>, Req, undefined) of
+        undefined -> {ok, #{}};
+        Etag -> {ok, #{expected_etag => unquote_etag(Etag)}}
+    end.
+
+%% HTTP etags are conventionally quoted ("abc123"); barrel_att_s3_store's
+%% own etag values (e.g. from get_info) are already unquoted internally.
+unquote_etag(<<$", Rest/binary>>) when byte_size(Rest) > 0 ->
+    case binary:last(Rest) of
+        $" -> binary:part(Rest, 0, byte_size(Rest) - 1);
+        _ -> <<$", Rest/binary>>
+    end;
+unquote_etag(Etag) ->
+    Etag.
 
 get_att(Req) ->
     with_db(Req, fun(Db) ->
@@ -990,7 +1152,27 @@ error_resp(invalid_name) -> json_resp(400, #{error => <<"invalid_name">>});
 error_resp(bad_json) -> json_resp(400, #{error => <<"bad_json">>});
 error_resp({invalid_provenance, _}) ->
     json_resp(400, #{error => <<"invalid_provenance">>});
+error_resp({bad_att_opts, Reason}) ->
+    json_resp(400, #{error => <<"bad_att_opts">>,
+                     reason => iolist_to_binary(io_lib:format("~p", [Reason]))});
 error_resp(conflict) -> json_resp(409, #{error => <<"conflict">>});
+error_resp({conflict, CurrentInfo}) ->
+    json_resp(409, jsonable(#{error => <<"conflict">>, current => CurrentInfo}));
+%% The store can't evaluate If-Match/If-None-Match at all (Garage) -- not
+%% a failed precondition (that's {conflict, _} above, 409: the store DID
+%% evaluate it and it lost), a materially different, non-retryable-the-
+%% same-way condition. Already fast at the backend level (conditional
+%% write support is probed once at open/2 and cached; no S3 call is
+%% attempted here), so nothing extra to do on the HTTP side either.
+error_resp(conditional_writes_unsupported) ->
+    json_resp(501, #{error => <<"conditional_writes_unsupported">>});
+error_resp({bad_if_none_match, _}) ->
+    json_resp(400, #{error => <<"bad_if_none_match">>});
+%% A freshly forked S3-backed branch: the local feed already knows this
+%% attachment exists, but the background copy sweep hasn't reached it yet
+%% (see barrel_att_s3_store's "Branching" moduledoc section). Transient,
+%% not a server error -- retry shortly.
+error_resp({att_sync_pending, _}) -> json_resp(503, #{error => <<"att_sync_pending">>});
 error_resp(bad_since) -> json_resp(400, #{error => <<"bad_since">>});
 error_resp(bad_until) -> json_resp(400, #{error => <<"bad_until">>});
 error_resp(bad_limit) -> json_resp(400, #{error => <<"bad_limit">>});

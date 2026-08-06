@@ -8,7 +8,7 @@
 %%%-------------------------------------------------------------------
 -module(barrel_server_dbs).
 
--export([ensure/1, close/1, branch/3, destroy/1, list/0]).
+-export([ensure/1, ensure/2, close/1, branch/3, destroy/1, list/0]).
 
 -define(MAX_NAME_LEN, 128).
 
@@ -19,10 +19,31 @@
 %% @doc Return the (possibly newly opened) handle for `Name'.
 -spec ensure(binary()) -> {ok, barrel:db()} | {error, term()}.
 ensure(Name) when is_binary(Name) ->
+    ensure(Name, #{}).
+
+%% @doc Same as `ensure/1', with `Opts' (e.g. `#{docdb => #{att_opts =>
+%% ...}}') merged over the server-wide `open_opts()' baseline -- only
+%% takes effect on a cold open (genuinely new, or reopened after being
+%% closed): an already-open `Name' short-circuits in `barrel_dbs' before
+%% Opts is ever consulted.
+-spec ensure(binary(), map()) -> {ok, barrel:db()} | {error, term()}.
+ensure(Name, Opts) when is_binary(Name), is_map(Opts) ->
     case valid_name(Name) of
-        true -> barrel_dbs:ensure(Name, open_opts());
+        true -> barrel_dbs:ensure(Name, merge_opts(Opts));
         false -> {error, invalid_name}
     end.
+
+%% @private `barrel:open/2' reads `docdb'/`vectordb' as nested sub-maps
+%% (see barrel.erl:open_plain/2), so a flat maps:merge/2 of the caller's
+%% Opts over open_opts() would silently DROP any static `docdb' config
+%% this server was started with (e.g. an operator-set encryption spec)
+%% whenever a caller supplies its own `docdb' sub-map (`att_opts') --
+%% merge that one key one level deeper instead of wholesale replacing it.
+merge_opts(Opts) ->
+    Base = open_opts(),
+    BaseDocdb = maps:get(docdb, Base, #{}),
+    CallerDocdb = maps:get(docdb, Opts, #{}),
+    (maps:merge(Base, Opts))#{docdb => maps:merge(BaseDocdb, CallerDocdb)}.
 
 %% @doc Close and forget the database `Name'. Idempotent.
 -spec close(binary()) -> ok.
