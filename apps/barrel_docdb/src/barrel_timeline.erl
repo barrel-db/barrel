@@ -105,8 +105,10 @@ fork(Parent, ParentPid, PInfo, BranchName, BranchPath, Opts) ->
     DocsPath = filename:join(BranchPath, "docs"),
     AttPath = filename:join(BranchPath, "attachments"),
     try
-        {ok, ForkHlc} =
-            barrel_db_server:checkpoint_to(ParentPid, DocsPath, AttPath),
+        ForkHlc = case barrel_db_server:checkpoint_to(ParentPid, DocsPath, AttPath) of
+            {ok, Hlc} -> Hlc;
+            {error, _} = CkptErr -> throw(CkptErr)
+        end,
         ok = barrel_keyspace:write_meta(BranchPath, #{
             keyspace => Parent,
             parent => Parent,

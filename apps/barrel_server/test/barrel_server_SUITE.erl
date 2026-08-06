@@ -27,7 +27,13 @@
     t_query_subscribe_requires_sse/1,
     t_query_subscribe_sse/1,
     t_not_found/1,
-    t_no_atom_leak/1
+    t_no_atom_leak/1,
+    t_create_db_att_opts_validation/1,
+    t_create_db_att_opts_missing_endpoint/1,
+    t_create_db_att_opts_redacts_secrets/1,
+    t_create_db_att_opts_blob_explicit/1,
+    t_attachment_conditional_headers_unenforced_on_blob/1,
+    t_attachment_bad_if_none_match/1
 ]).
 
 -include_lib("common_test/include/ct.hrl").
@@ -41,7 +47,11 @@ all() ->
      t_changes_continuous, t_embedding,
      t_query_ndjson, t_query_get, t_query_params_json,
      t_query_parse_error, t_query_subscribe_requires_sse,
-     t_query_subscribe_sse, t_not_found, t_no_atom_leak].
+     t_query_subscribe_sse, t_not_found, t_no_atom_leak,
+     t_create_db_att_opts_validation, t_create_db_att_opts_missing_endpoint,
+     t_create_db_att_opts_redacts_secrets, t_create_db_att_opts_blob_explicit,
+     t_attachment_conditional_headers_unenforced_on_blob,
+     t_attachment_bad_if_none_match].
 
 init_per_suite(Config) ->
     %% Load first, then override env (application:load resets to .app defaults).
@@ -320,6 +330,11 @@ req_raw_h(Method, Url, Headers) ->
                                         <<>>, [with_body]),
     {S, Body}.
 
+%% Like req/3, but with caller-supplied headers (e.g. If-Match/
+%% If-None-Match) -- the response body is still JSON-decoded.
+req_h(Method, Url, Headers, Body) ->
+    decode(hackney:request(Method, list_to_binary(Url), Headers, Body, [with_body])).
+
 decode({ok, S, _H, Body}) ->
     Decoded = case Body of
         <<>> -> #{};
@@ -340,4 +355,117 @@ t_no_atom_leak(Config) ->
     ?assertError(badarg,
                  binary_to_existing_atom(list_to_binary(Name), utf8)),
     {200, _} = req(delete, B ++ "/db/" ++ Name, <<>>),
+    ok.
+
+%%====================================================================
+%% att_opts / conditional-write HTTP surface (no real S3 needed: these
+%% either fail validation before any backend is touched, or exercise the
+%% "blob" branch, which needs no bucket/credentials at all)
+%%====================================================================
+
+t_create_db_att_opts_validation(Config) ->
+    B = base(Config),
+    %% att_opts given but no backend key at all
+    {400, Err1} = req_json(put, B ++ "/db/attoptsbad1",
+                           #{<<"att_opts">> => #{}}),
+    ?assertEqual(<<"bad_att_opts">>, maps:get(<<"error">>, Err1)),
+    %% unknown backend value
+    {400, Err2} = req_json(put, B ++ "/db/attoptsbad2",
+                           #{<<"att_opts">> => #{<<"backend">> => <<"not-a-backend">>}}),
+    ?assertEqual(<<"bad_att_opts">>, maps:get(<<"error">>, Err2)),
+    %% s3 sub-map with a key that isn't a real livery_s3/barrel_att_s3
+    %% option -- exercises the binary_to_existing_atom safety rejection
+    {400, Err3} = req_json(put, B ++ "/db/attoptsbad3",
+                           #{<<"att_opts">> => #{<<"backend">> => <<"s3">>,
+                                                 <<"s3">> => #{<<"totally_bogus_option">> => <<"x">>}}}),
+    ?assertEqual(<<"bad_att_opts">>, maps:get(<<"error">>, Err3)),
+    %% malformed JSON body entirely -- still the pre-existing bad_json path
+    {400, Err4} = req(put, B ++ "/db/attoptsbad4", <<"{not json">>),
+    ?assertEqual(<<"bad_json">>, maps:get(<<"error">>, Err4)),
+    ok.
+
+%% endpoint has no default anywhere downstream (livery_s3:new/1 does a
+%% bare maps:get(endpoint, Opts), no fallback) -- omitting it must be a
+%% clean 400, not a raw {badkey, endpoint} term leaking through as a 500.
+%% Under a plain `server' build (no `s3'/`s3_server' profile, e.g. CI's
+%% `rebar3 as server ct') the s3 backend itself isn't compiled in, so the
+%% honest answer is `backend_unavailable' rather than the endpoint check
+%% -- both are still a clean 400 bad_att_opts, never unknown_s3_option or
+%% a 500.
+t_create_db_att_opts_missing_endpoint(Config) ->
+    B = base(Config),
+    {400, Err} = req_json(put, B ++ "/db/attoptsnoendpoint",
+                          #{<<"att_opts">> => #{<<"backend">> => <<"s3">>,
+                                                <<"s3">> => #{<<"bucket">> => <<"x">>,
+                                                              <<"access_key_id">> => <<"a">>,
+                                                              <<"secret_access_key">> => <<"b">>}}}),
+    ?assertEqual(<<"bad_att_opts">>, maps:get(<<"error">>, Err)),
+    Reason = maps:get(<<"reason">>, Err),
+    Needle = case code:ensure_loaded(livery_s3) of
+        {module, livery_s3} -> <<"endpoint">>;
+        {error, _} -> <<"s3">>
+    end,
+    ?assertNotEqual(nomatch, binary:match(Reason, Needle)),
+    ok.
+
+%% An unknown s3 key echoes the submitted map back (to name the
+%% offending key), but must not echo a submitted credential value along
+%% with it -- that response body can land in access logs, browser
+%% history, or a proxy's logs in ways the caller likely didn't intend.
+t_create_db_att_opts_redacts_secrets(Config) ->
+    B = base(Config),
+    {400, Err} = req_json(put, B ++ "/db/attoptsredact",
+                          #{<<"att_opts">> => #{<<"backend">> => <<"s3">>,
+                                                <<"s3">> => #{<<"bucket">> => <<"x">>,
+                                                              <<"endpoint">> => <<"http://x">>,
+                                                              <<"access_key_id">> => <<"AKIASECRETID">>,
+                                                              <<"secret_access_key">> => <<"topsecretvalue">>,
+                                                              <<"totally_bogus_option">> => <<"y">>}}}),
+    ?assertEqual(<<"bad_att_opts">>, maps:get(<<"error">>, Err)),
+    Reason = maps:get(<<"reason">>, Err),
+    ?assertEqual(nomatch, binary:match(Reason, <<"topsecretvalue">>)),
+    ?assertEqual(nomatch, binary:match(Reason, <<"AKIASECRETID">>)),
+    case code:ensure_loaded(livery_s3) of
+        {module, livery_s3} ->
+            %% the offending key name is still visible, for debuggability
+            ?assertNotEqual(nomatch, binary:match(Reason, <<"totally_bogus_option">>));
+        {error, _} ->
+            %% s3 backend not compiled into this build -- rejected before
+            %% the offending key is ever inspected, nothing to redact
+            ok
+    end,
+    ok.
+
+%% "blob" is the explicit, valid form of the default backend -- exercises
+%% the full att_opts parse-and-thread path succeeding, without needing
+%% real S3 infrastructure (bucket/credentials) at all.
+t_create_db_att_opts_blob_explicit(Config) ->
+    B = base(Config),
+    {201, Resp} = req_json(put, B ++ "/db/attoptsblob",
+                           #{<<"att_opts">> => #{<<"backend">> => <<"blob">>}}),
+    ?assertEqual(true, maps:get(<<"ok">>, Resp)),
+    {201, _} = req_json(put, url("/doc/d1", B), #{}),
+    ok.
+
+%% Documented, pre-existing limitation (not introduced by this change):
+%% create_only/expected_etag are S3-specific Opts keys the default
+%% RocksDB (blob) backend's put/6 never inspects -- the header reaches
+%% the backend, but isn't enforced. Two writes with the "only if absent"
+%% header both succeed rather than the second one conflicting.
+t_attachment_conditional_headers_unenforced_on_blob(Config) ->
+    B = base(Config),
+    {201, _} = req_json(put, url("/doc/cond-doc", B), #{}),
+    Headers = [{<<"if-none-match">>, <<"*">>}],
+    {201, _} = req_h(put, url("/doc/cond-doc/att/f.txt", B), Headers, <<"first">>),
+    {201, _} = req_h(put, url("/doc/cond-doc/att/f.txt", B), Headers, <<"second">>),
+    {200, Body} = req_raw(get, url("/doc/cond-doc/att/f.txt", B)),
+    ?assertEqual(<<"second">>, Body),
+    ok.
+
+t_attachment_bad_if_none_match(Config) ->
+    B = base(Config),
+    {201, _} = req_json(put, url("/doc/bad-inm-doc", B), #{}),
+    Headers = [{<<"if-none-match">>, <<"\"some-etag\"">>}],
+    {400, Err} = req_h(put, url("/doc/bad-inm-doc/att/f.txt", B), Headers, <<"x">>),
+    ?assertEqual(<<"bad_if_none_match">>, maps:get(<<"error">>, Err)),
     ok.

@@ -352,9 +352,15 @@ init(Name, Config, CompiledChannels, DbPath, Keyspace, Parent, ForkHlc, Env) ->
                             Env),
     case barrel_store_rocksdb:open(DocStorePath, StoreOpts) of
         {ok, StoreRef} ->
-            %% Open attachment store (separate RocksDB with BlobDB)
+            %% Open attachment store (separate RocksDB with BlobDB). db_name
+            %% (the resolved keyspace, same value the compaction filter
+            %% above uses) lets a backend that needs a stable identity at
+            %% open time -- e.g. barrel_att_s3, seeding its S3 key prefix on
+            %% first open -- derive one without every backend needing its
+            %% own convention for it.
             AttStorePath = filename:join(DbPath, "attachments"),
-            AttOpts = add_env_opt(maps:get(att_opts, Config, #{}), Env),
+            AttOpts = add_env_opt((maps:get(att_opts, Config, #{}))#{db_name => Keyspace},
+                                  Env),
             case barrel_att_store:open(AttStorePath, AttOpts) of
                 {ok, AttRef} ->
                     %% Register in persistent_term for lookup

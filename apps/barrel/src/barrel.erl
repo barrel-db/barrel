@@ -60,6 +60,7 @@
 %% Attachments / blobs (barrel_docdb; backend pluggable per database)
 -export([
     put_attachment/4,
+    put_attachment/5,
     get_attachment/3,
     delete_attachment/3,
     list_attachments/2,
@@ -644,6 +645,13 @@ compile_bql(Bql, Opts) ->
 -spec put_attachment(db(), binary(), binary(), binary()) -> {ok, map()} | {error, term()}.
 put_attachment(#{docdb := DbBin}, DocId, AttName, Data) ->
     barrel_docdb:put_attachment(DbBin, DocId, AttName, Data).
+
+%% @doc Store a document attachment with options (create_only,
+%% expected_etag, content_type, ...; see barrel_docdb:put_attachment/5).
+-spec put_attachment(db(), binary(), binary(), binary(), map()) ->
+    {ok, map()} | {ok, ignored} | {error, term()}.
+put_attachment(#{docdb := DbBin}, DocId, AttName, Data, Opts) ->
+    barrel_docdb:put_attachment(DbBin, DocId, AttName, Data, Opts).
 
 %% @doc Fetch a document attachment.
 -spec get_attachment(db(), binary(), binary()) -> {ok, binary()} | {error, term()}.

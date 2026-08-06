@@ -71,7 +71,10 @@ groups() ->
             task_config_round_trip,
             task_restore_after_manager_restart,
             task_event_driven_latency,
-            task_continuous_survives_error
+            task_continuous_survives_error,
+            task_one_shot_replicates_attachment,
+            task_continuous_replicates_attachment_only_change,
+            task_attachments_disabled_survives_restart
         ]}
     ].
 
@@ -1080,6 +1083,93 @@ task_continuous_survives_error(_Config) ->
         end
     end, 100, 100),
     {ok, #{status := running}} = barrel_rep_tasks:get_task(TaskId),
+    ok = barrel_rep_tasks:stop_task(TaskId),
+    ok = barrel_rep_tasks:delete_task(TaskId),
+    ok.
+
+%%====================================================================
+%% Task attachment replication (regression: tasks used to drop
+%% attachments entirely; barrel_rep and barrel_timeline always ran
+%% the attachment phase, barrel_rep_tasks never did)
+%%====================================================================
+
+task_one_shot_replicates_attachment(_Config) ->
+    {ok, _} = barrel_docdb:put_doc(<<"test_source">>,
+                                   #{<<"id">> => <<"att_doc">>}),
+    {ok, _} = barrel_docdb:put_attachment(<<"test_source">>, <<"att_doc">>,
+                                          <<"note.txt">>, <<"hello">>),
+    {ok, TaskId} = barrel_rep_tasks:start_task(#{
+        source => <<"test_source">>,
+        target => <<"test_target">>,
+        mode => one_shot,
+        direction => push
+    }),
+    ok = wait_until(fun() ->
+        case barrel_rep_tasks:get_task(TaskId) of
+            {ok, #{status := completed}} -> true;
+            {ok, #{status := failed, error := Err}} ->
+                ct:fail({task_failed, Err});
+            _ -> false
+        end
+    end, 100, 100),
+    {ok, <<"hello">>} = barrel_docdb:get_attachment(
+        <<"test_target">>, <<"att_doc">>, <<"note.txt">>),
+    ok = barrel_rep_tasks:delete_task(TaskId),
+    ok.
+
+task_continuous_replicates_attachment_only_change(_Config) ->
+    {ok, TaskId} = barrel_rep_tasks:start_task(#{
+        source => <<"test_source">>,
+        target => <<"test_target">>,
+        mode => continuous,
+        direction => push
+    }),
+    {ok, _} = barrel_docdb:put_doc(<<"test_source">>,
+                                   #{<<"id">> => <<"idle_doc">>}),
+    ok = wait_until(doc_in(<<"test_target">>, <<"idle_doc">>), 50, 100),
+    %% No further doc-body change from here: attachments live on their own
+    %% feed, so a continuous task idling on the doc changes stream must
+    %% notice this on its own bounded wake, not because a doc write nudges
+    %% it (that's the bug this suite guards against).
+    {ok, _} = barrel_docdb:put_attachment(<<"test_source">>, <<"idle_doc">>,
+                                          <<"note.txt">>, <<"hi">>),
+    ok = wait_until(fun() ->
+        case barrel_docdb:get_attachment(<<"test_target">>, <<"idle_doc">>,
+                                         <<"note.txt">>) of
+            {ok, <<"hi">>} -> true;
+            _ -> false
+        end
+    end, 200, 60),
+    ok = barrel_rep_tasks:stop_task(TaskId),
+    ok = barrel_rep_tasks:delete_task(TaskId),
+    ok.
+
+task_attachments_disabled_survives_restart(_Config) ->
+    {ok, TaskId} = barrel_rep_tasks:start_task(#{
+        source => <<"test_source">>,
+        target => <<"test_target">>,
+        mode => continuous,
+        direction => push,
+        attachments => false
+    }),
+    {ok, #{config := Config0}} = barrel_rep_tasks:get_task(TaskId),
+    ?assertEqual(false, maps:get(attachments, Config0)),
+    %% stop/resume round-trips the config through config_to_map/
+    %% map_to_config: a dropped key here would silently re-enable
+    %% attachment replication after any restart
+    ok = barrel_rep_tasks:stop_task(TaskId),
+    ok = barrel_rep_tasks:resume_task(TaskId),
+    {ok, #{config := Config1}} = barrel_rep_tasks:get_task(TaskId),
+    ?assertEqual(false, maps:get(attachments, Config1)),
+    {ok, _} = barrel_docdb:put_doc(<<"test_source">>,
+                                   #{<<"id">> => <<"off_doc">>}),
+    {ok, _} = barrel_docdb:put_attachment(<<"test_source">>, <<"off_doc">>,
+                                          <<"f">>, <<"v">>),
+    ok = wait_until(doc_in(<<"test_target">>, <<"off_doc">>), 50, 100),
+    timer:sleep(1000),
+    ?assertEqual({error, not_found},
+                 barrel_docdb:get_attachment(<<"test_target">>, <<"off_doc">>,
+                                             <<"f">>)),
     ok = barrel_rep_tasks:stop_task(TaskId),
     ok = barrel_rep_tasks:delete_task(TaskId),
     ok.

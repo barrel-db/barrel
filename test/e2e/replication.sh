@@ -97,6 +97,59 @@ replicate peer-a "$PUSH_A_TO_B" || { echo "  replication call failed"; fail=$((f
 code=$(curl -s -o /dev/null -w '%{http_code}' "$B/db/$DB/doc/doc1")
 check "peer-b reflects the delete of doc1" 404 "$code"
 
+# --- continuous replication task + attachments (own database, so it
+# doesn't interact with the assertions above) ---
+#
+# barrel_rep_tasks:start_task/1 (mode => continuous) used to replicate
+# document bodies only: attachments live on their own feed, independent of
+# the document changes feed, and a continuous task subscribed only to the
+# doc feed never woke up for an attachment-only write. This checks the fix
+# over a real HTTP wire and real separate processes, not just in-VM CT.
+ATTDB=attdb
+echo "--- creating $ATTDB on both peers"
+curl -fsS -X PUT "$A/db/$ATTDB" >/dev/null
+curl -fsS -X PUT "$B/db/$ATTDB" >/dev/null
+
+echo "--- writing doc1 to peer-a, starting a continuous push task"
+curl -fsS -X PUT "$A/db/$ATTDB/doc/doc1" \
+    -H 'content-type: application/json' -d '{"n":1}' >/dev/null
+
+# `eval` echoes the final expression's own return value, not anything an
+# inner io:format call printed (that's why PUSH_A_TO_B/PULL_B_TO_A above
+# just show "ok": the return value of their own trailing io:format/2).
+# So the last expression here must evaluate to the task id itself; it
+# comes back ~p-formatted as a quoted string, hence the sed to unquote it.
+START_TASK='{ok, TaskId} = barrel_rep_tasks:start_task(#{source => <<"attdb">>, target => barrel_rep_transport_http:endpoint(<<"http://peer-b:8080/db/attdb">>), target_transport => barrel_rep_transport_http, mode => continuous, direction => push}), binary_to_list(TaskId).'
+TASK_ID=$($COMPOSE exec -T peer-a barrel_server eval "$START_TASK" \
+    | tr -d '\r\n' | sed -E 's/^"//; s/"$//') \
+    || { echo "  start_task failed"; fail=$((fail+1)); }
+echo "  task started: $TASK_ID"
+
+echo "--- waiting for doc1 to converge via the task"
+ok=0
+for _ in $(seq 1 20); do
+    code=$(curl -s -o /dev/null -w '%{http_code}' "$B/db/$ATTDB/doc/doc1")
+    if [ "$code" = "200" ]; then ok=1; break; fi
+    sleep 1
+done
+check "peer-b has doc1 via continuous task" 1 "$ok"
+
+echo "--- putting an attachment on doc1 with NO further doc change"
+curl -fsS -X PUT "$A/db/$ATTDB/doc/doc1/att/note.txt" \
+    -H 'content-type: text/plain' -d 'hello' >/dev/null
+
+echo "--- waiting for the attachment to converge (idle-wake path)"
+body=""
+for _ in $(seq 1 15); do
+    body=$(curl -fsS "$B/db/$ATTDB/doc/doc1/att/note.txt" 2>/dev/null || true)
+    if [ "$body" = "hello" ]; then break; fi
+    sleep 2
+done
+check "peer-b converged the attachment-only change" hello "$body"
+
+$COMPOSE exec -T peer-a barrel_server eval \
+    "barrel_rep_tasks:stop_task(<<\"$TASK_ID\">>)." >/dev/null 2>&1 || true
+
 echo
 echo "=== $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

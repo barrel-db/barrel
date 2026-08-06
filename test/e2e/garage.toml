@@ -1,0 +1,25 @@
+# Garage config for the S3 attachment-backend test fixture (CI `s3` leg and
+# test/e2e/attachments-s3.sh). Single-node, single-replica -- a test fixture,
+# not a deployment reference. rpc_secret/admin_token below are fixture-only
+# values with no access to anything but this throwaway container's own data.
+#
+# Garage needs a one-time layout+bucket+key bootstrap after it starts; this
+# file alone only gets the process listening. See attachments-s3-setup.sh.
+
+metadata_dir = "/var/lib/garage/meta"
+data_dir = "/var/lib/garage/data"
+db_engine = "sqlite"
+replication_factor = 1
+
+rpc_bind_addr = "[::]:3901"
+rpc_public_addr = "127.0.0.1:3901"
+rpc_secret = "fd14c1f611d057cb83b4925f39d43334c61c0104a7e6ee66127fdaf7a73ce6a2"
+
+[s3_api]
+s3_region = "garage"
+api_bind_addr = "[::]:3900"
+root_domain = ".s3.garage.localhost"
+
+[admin]
+api_bind_addr = "[::]:3903"
+admin_token = "a69ecf899951d816c803ab7cbcc5b279"
