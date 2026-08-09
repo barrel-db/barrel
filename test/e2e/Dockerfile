@@ -24,8 +24,14 @@ RUN git init -q -b main \
     && git -c user.email=build@barrel -c user.name=build commit -qm "e2e build"
 
 # barrel_faiss is not in the server release (it needs a system FAISS build), so
-# this compiles barrel_server and its actual deps only.
-RUN rebar3 as server,prod release -n barrel_server
+# this compiles barrel_server and its actual deps only. RELX_PROFILES/
+# RELX_BUILD_DIR let the attachments-s3 fixture build the `s3_server,prod`
+# combo instead (adds the barrel_att_s3/livery_s3 backend to the release);
+# the two args must stay in sync (RELX_BUILD_DIR is RELX_PROFILES with `,`
+# replaced by `+`, rebar3's own profile-combo directory naming).
+ARG RELX_PROFILES=server,prod
+ARG RELX_BUILD_DIR=server+prod
+RUN rebar3 as ${RELX_PROFILES} release -n barrel_server
 
 FROM debian:trixie-slim AS runtime
 
@@ -37,7 +43,8 @@ RUN apt-get update \
         libzstd1 zlib1g libbz2-1.0 liblz4-1 libsnappy1v5 \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=build /src/_build/server+prod/rel/barrel_server /opt/barrel_server
+ARG RELX_BUILD_DIR=server+prod
+COPY --from=build /src/_build/${RELX_BUILD_DIR}/rel/barrel_server /opt/barrel_server
 
 ENV PATH="/opt/barrel_server/bin:${PATH}"
 # Databases live under the release dir. Data is ephemeral: each E2E run starts

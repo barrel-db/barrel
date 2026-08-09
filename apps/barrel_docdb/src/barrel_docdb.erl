@@ -406,6 +406,11 @@ delete_db(Name) when is_binary(Name) ->
 %%
 %% Databases created before per-db `data_dir' was remembered have no
 %% record; pass their `data_dir' explicitly via this function.
+%%
+%% An attachment backend with state beyond its local directory (S3) is
+%% given a chance to erase it first: automatic if the database is open,
+%% otherwise only if `att_opts' is given here too (nothing else can
+%% recover S3 credentials for an already-closed database).
 -spec delete_db(binary(), map()) -> ok | {error, term()}.
 delete_db(Name, Opts) when is_binary(Name), is_map(Opts) ->
     case validate_db_name(Name) of
@@ -420,6 +425,8 @@ do_delete_db(Name, Opts) ->
         {ok, Pid} ->
             {ok, Info} = barrel_db_server:info(Pid),
             DbPath = maps:get(db_path, Info),
+            {ok, AttRef} = barrel_db_server:get_att_ref(Pid),
+            destroy_att_store(AttRef, Name, DbPath),
             barrel_db_server:stop(Pid),
             %% Remove data directory via stdlib (no shell, no injection).
             del_db_dir(DbPath);
@@ -427,10 +434,61 @@ do_delete_db(Name, Opts) ->
             %% Not open: resolve the on-disk location from the option,
             %% the remembered per-db data_dir, or the app env default.
             DataDir = closed_db_data_dir(Name, Opts),
-            del_db_dir(filename:join(DataDir, binary_to_list(Name)))
+            DbPath = filename:join(DataDir, binary_to_list(Name)),
+            maybe_destroy_closed_att_store(Name, DbPath, Opts),
+            del_db_dir(DbPath)
     end,
     forget_db_dir(Name),
     Result.
+
+%% Best-effort: an attachment backend without extra state to erase (the
+%% default RocksDB one) returns {error, unsupported}, and del_db_dir right
+%% after this already removes everything it owns anyway. Wrapped in a
+%% catch-all: the documented {error, _} returns are already handled above,
+%% this is only for a genuine, unexpected crash deeper in the call chain --
+%% closing the caller's own handle (and removing the local directory)
+%% matters more than a clean exit from this one best-effort step, so a
+%% crash here is logged and swallowed rather than aborting the delete.
+destroy_att_store(AttRef, Name, DbPath) ->
+    AttPath = filename:join(DbPath, "attachments"),
+    try barrel_att_store:destroy(AttRef, Name) of
+        ok -> ok;
+        {error, unsupported} -> ok;
+        {error, Reason} ->
+            logger:warning("barrel_docdb: attachment destroy for ~ts (~s) failed: ~p",
+                           [Name, AttPath, Reason])
+    catch
+        Class:Reason:Stack ->
+            logger:warning("barrel_docdb: attachment destroy for ~ts (~s) crashed: ~p",
+                           [Name, AttPath, {Class, Reason, Stack}])
+    end.
+
+%% Only reachable with an explicit att_opts (e.g. S3 credentials) in
+%% Opts: a closed database has no running process to ask for its att_ref,
+%% and config is runtime-only (never persisted), so without att_opts here
+%% there is nothing to open a backend with -- del_db_dir still removes
+%% the local directory either way.
+%%
+%% resume_fork_sync => false: this store is about to be destroyed
+%% immediately below, so resuming a background fork-copy sweep on open
+%% would be pure waste -- and, more importantly, skipping it closes one
+%% whole path by which destroy/2's own listing snapshot could miss
+%% objects a freshly (re)spawned sweep writes afterward, orphaning them in
+%% the bucket with no local record left to ever revisit that prefix again.
+maybe_destroy_closed_att_store(Name, DbPath, Opts) ->
+    case maps:find(att_opts, Opts) of
+        error ->
+            ok;
+        {ok, AttOpts} ->
+            AttPath = filename:join(DbPath, "attachments"),
+            case barrel_att_store:open(AttPath, AttOpts#{resume_fork_sync => false}) of
+                {ok, AttRef} ->
+                    destroy_att_store(AttRef, Name, DbPath),
+                    barrel_att_store:close(AttRef);
+                {error, _} ->
+                    ok
+            end
+    end.
 
 del_db_dir(DbPath) ->
     case file:del_dir_r(DbPath) of

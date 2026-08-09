@@ -6,6 +6,7 @@ name: CI
 #               catches hidden cross-app dependencies before publishing
 #   - faiss:    optional FAISS backend leg (needs the FAISS C++ library)
 #   - server:   network server leg (pulls livery + transports)
+#   - s3:       optional S3 attachment-backend leg (real MinIO + Garage)
 #   - barrel-lite: TypeScript client (typecheck, build, unit tests)
 # Dev target is OTP 29; CI pins OTP 28 (image guaranteed, code builds on both).
 
@@ -119,6 +120,39 @@ jobs:
       # the FAISS C++ library is installed above, so run the suite (not just compile)
       - run: rebar3 as faiss ct --suite apps/barrel_faiss/test/barrel_faiss_SUITE
 
+  s3:
+    name: S3 attachment backend
+    # Needs real docker (MinIO + Garage via docker compose), which the
+    # erlang:28 container the other legs use does not expose -- same reason
+    # e2e-replication below runs directly on the runner instead of in a
+    # container. rebar3 comes from setup-beam rather than the container
+    # image for the same reason.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: '28'
+          rebar3-version: '3.25.0'
+      - name: System dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential libssl-dev zlib1g-dev \
+            libsnappy-dev liblz4-dev libzstd-dev python3 python3-venv
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/rebar3
+          key: rebar3-s3-${{ hashFiles('rebar.lock') }}
+      # Prints GARAGE_S3_TEST_ACCESS_KEY/_SECRET_KEY/_BUCKET as `export`
+      # lines on success; the garage group in barrel_att_s3_SUITE skips
+      # cleanly without them, so this must run before the suite, not after.
+      - name: Provision minio + garage
+        run: test/e2e/attachments-s3-setup.sh | sed 's/^export //' >> "$GITHUB_ENV"
+      - run: rebar3 as s3 ct --suite=apps/barrel_att_s3/test/barrel_att_s3_SUITE,apps/barrel_att_s3/test/barrel_att_s3_rep_SUITE
+      - name: Tear down minio + garage
+        if: always()
+        run: docker compose -f test/e2e/docker-compose.attachments-s3.yml down -v --remove-orphans
+
   barrel-lite:
     name: barrel-lite (TS client)
     runs-on: ubuntu-latest
@@ -209,3 +243,13 @@ jobs:
       - uses: actions/checkout@v4
       - name: Replication across two peers
         run: bash test/e2e/replication.sh
+
+  e2e-attachments-s3:
+    name: E2E S3 attachment backend (MinIO + Garage + two peers)
+    # Opt-in: needs a Docker-capable runner and builds the server image.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: S3 attachment backend against real MinIO and Garage
+        run: bash test/e2e/attachments-s3.sh

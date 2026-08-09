@@ -83,12 +83,16 @@ next(Pid) ->
     end.
 
 %% @doc Wait for changes (push mode)
--spec await(pid()) -> {reference(), [barrel_changes:change()]} | [].
+-spec await(pid()) -> {reference(), [barrel_changes:change()]} | down.
 await(Pid) ->
     await(Pid, infinity).
 
-%% @doc Wait for changes with timeout (push mode)
--spec await(pid(), timeout()) -> {reference(), [barrel_changes:change()]} | [].
+%% @doc Wait for changes with timeout (push mode). Distinguishes a
+%% genuine timeout (`timeout') from the stream process dying (`down'),
+%% so a caller polling on a bounded timeout can tell "nothing new yet"
+%% from "this stream is gone."
+-spec await(pid(), timeout()) ->
+    {reference(), [barrel_changes:change()]} | timeout | down.
 await(Pid, Timeout) ->
     MRef = monitor(process, Pid),
     receive
@@ -96,10 +100,10 @@ await(Pid, Timeout) ->
             demonitor(MRef, [flush]),
             {ReqId, Changes};
         {'DOWN', MRef, process, _, _Reason} ->
-            []
+            down
     after Timeout ->
         demonitor(MRef, [flush]),
-        []
+        timeout
     end.
 
 %% @doc Acknowledge receipt of changes (push mode)

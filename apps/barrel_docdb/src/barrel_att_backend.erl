@@ -101,5 +101,12 @@
 -callback checkpoint(AttRef :: map(), Path :: string()) ->
     ok | {error, term()}.
 
+%% Erase everything owned by this store beyond its local directory (e.g.
+%% remote objects) before delete_db removes that directory. Backends
+%% without it need no extra step: local deletion already covers them.
+-callback destroy(AttRef :: map(), DbName :: binary()) ->
+    ok | {error, term()}.
+
 -optional_callbacks([delete/5, att_changes/4, att_floor/2,
-                     sweep_att_feed/3, rebuild_feed/2, checkpoint/2]).
+                     sweep_att_feed/3, rebuild_feed/2, checkpoint/2,
+                     destroy/2]).
