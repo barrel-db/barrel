@@ -26,7 +26,7 @@
 %%% `open/2' also opens a small, local, metadata-only RocksDB instance at
 %%% `Path/feed.db' (`Path' is always `<DbPath>/attachments', a real local
 %%% directory even though the attachment bytes themselves live in S3 --
-%%% confirmed via `barrel_db_server:init/8'). `barrel_att_feed' is not
+%%% confirmed via `barrel_db_server''s `init/8'). `barrel_att_feed' is not
 %%% actually storage-agnostic: it hardcodes `rocksdb:*' calls against
 %%% whatever handle it's given, so this is where those calls land for this
 %%% backend, exactly the way `barrel_att_store_blob' points the same module
@@ -99,7 +99,7 @@
 %%% Deleting a still-syncing branch while it happens to be open can still
 %%% leak the objects that sweep writes after `destroy/2''s own listing
 %%% snapshot -- narrow, not closed here, same class of accepted
-%%% check-then-act race as the ones above. See `docs/limitations.md`'s
+%%% check-then-act race as the ones above. See `docs/limitations.md''s
 %%% "Deleting a database" section.
 %%%
 %%% == Multipart upload GC ==
@@ -1268,7 +1268,7 @@ read_chunk(#{type := read, reader := Reader} = Stream) ->
 %% drained) read stream's underlying connection is reclaimed by hackney's
 %% own pool/timeout machinery, not explicitly cancelled here -- livery_client
 %% exposes no cancel for a pull-style reader (only for its separate
-%% flow => manual push-stream mechanism, which get_object's `stream => true`
+%% flow => manual push-stream mechanism, which get_object's `stream => true'
 %% option does not use).
 -spec close_stream(map()) -> ok.
 close_stream(_Stream) ->
