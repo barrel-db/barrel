@@ -16,5 +16,17 @@
     {doc, "https://docs.barrel-db.eu/ngram"},
     {links, [
         {"GitHub", "https://github.com/barrel-db/barrel"}
+    ]},
+    %% the NIF is built from c_src (vendored CRoaring) via do_cmake.sh; the
+    %% default hex file set omits the root script, so list the build
+    %% inputs explicitly -- same pattern as barrel_vectordb/barrel_faiss
+    {files, [
+        "src",
+        "c_src",
+        "do_cmake.sh",
+        "rebar.config",
+        "README.md",
+        "LICENSE",
+        "CHANGELOG.md"
     ]}
 ]}.
