@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-08-09
+
+### Added
+- `barrel_att_store:backend_module/1` and `is_available/1`: pluggable
+  attachment-backend resolution -- an unavailable or unloaded backend
+  (e.g. `barrel_att_s3` in a build without the `s3` profile) fails
+  `open/2` cleanly instead of crashing on a missing module. `open/2`'s
+  `att_opts` now also gets `db_name` (the resolved keyspace), so a
+  backend needing a stable identity at open time can derive one without
+  its own convention for it.
+
+### Fixed
+- Continuous/persistent replication tasks (`barrel_rep_tasks`) now run
+  the attachment phase: attachments live on their own feed, independent
+  of the doc changes feed, so a task subscribed only to the doc feed
+  never woke up for an attachment-only write. `barrel_changes_stream:await/1,2`
+  distinguishes a genuine timeout from the stream process dying, which is
+  what lets the task's stream wait be bounded instead of blocking
+  forever, giving it a periodic chance to check. Adds
+  `attachments`/`att_batch_size` task config and a persisted `att_seq`
+  watermark.
+- `barrel_timeline:fork/6` returns a clean error instead of crashing when
+  branching a backend without `checkpoint/2` (any feedless attachment
+  backend).
+
 ## [1.1.1] - 2026-07-18
 
 ### Fixed

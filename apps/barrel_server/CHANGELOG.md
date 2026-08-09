@@ -3,6 +3,14 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.4.0] - 2026-08-09
+
+### Added
+- `PUT /db/:name` accepts an `att_opts` JSON body to select the
+  attachment backend (e.g. S3) at creation time.
+- The attachment `PUT` route wires `If-Match`/`If-None-Match` headers to
+  `create_only`/`expected_etag` write-conflict detection.
+
 ## [1.3.0] - 2026-07-19
 
 ### Added

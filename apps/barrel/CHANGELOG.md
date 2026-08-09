@@ -3,6 +3,12 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.2.0] - 2026-08-09
+
+### Added
+- `put_attachment/5`: store a document attachment with options
+  (`create_only`, `expected_etag`, `content_type`, ...).
+
 ## [1.1.0] - 2026-07-18
 
 ### Added

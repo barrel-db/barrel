@@ -4,6 +4,30 @@ All notable changes to the Barrel umbrella are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and each app
 is versioned independently under [Semantic Versioning](https://semver.org/).
 
+## [2026-08-09] S3-compatible attachment backend
+
+New sibling app `barrel_att_s3` implements `barrel_att_backend` against
+S3-compatible object stores (AWS S3, MinIO, Garage) via `livery_s3`, kept out
+of the default embeddable build behind a new `s3` rebar3 profile. It covers
+whole-blob and streaming put/get/delete, opt-in write-conflict detection
+(`create_only`/`expected_etag`) with a real per-store capability probe, a
+local attachment feed that makes S3-backed databases full bidirectional
+replication participants, non-blocking eager-copy branching, and a background
+sweeper that garbage-collects multipart uploads abandoned by a crash
+mid-upload. Both backend selection and write-conflict detection are reachable
+over `barrel_server`'s HTTP routes. `barrel_docdb` gains the pluggable-backend
+resolution this needed, plus a fix so continuous/persistent replication tasks
+notice attachment-only writes (they have their own feed, independent of the
+doc changes feed). CI gains an `s3` leg against real MinIO and Garage
+containers and an opt-in e2e job.
+
+| App | Version | Change |
+|-----|---------|--------|
+| barrel_att_s3 | 0.1.0 | initial release -- S3-compatible attachment backend, HTTP surfacing, multipart-upload GC |
+| barrel_docdb | 1.2.0 | pluggable attachment-backend resolution; continuous-replication attachment-phase fix; clean error branching a feedless backend |
+| barrel_server | 1.4.0 | `att_opts` on `PUT /db/:name`; `If-Match`/`If-None-Match` wired to `create_only`/`expected_etag` |
+| barrel | 1.2.0 | `put_attachment/5` |
+
 ## [2026-07-18] Code-review hardening + non-blocking database opens
 
 A multi-dimension review (C NIFs, supervision, concurrency, resource leaks,
