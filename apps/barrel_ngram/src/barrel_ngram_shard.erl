@@ -5,9 +5,15 @@
 %%% The shard keeps a corpus in sync with its barrel_docdb database. It
 %%% subscribes to the changes feed in push mode and applies each batch to
 %%% an in-memory buffer keyed by document id (an update replaces, a delete
-%%% becomes a tombstone). When the buffer passes a threshold it freezes to
-%%% a new immutable segment and commits the manifest, advancing the
-%%% persisted watermark.
+%%% becomes a tombstone). The buffer holds each live key's corpus TEXT, not
+%%% pre-computed grams: gram selection (both phase-1 dense and phase-2
+%%% positional) happens once, at freeze time, from that text, rather than
+%%% once per change -- a document updated several times before a freeze
+%%% only ever has its final version's grams computed once, and the buffer
+%%% is not searched directly (every buffered key is always a candidate),
+%%% so nothing needs its grams before freeze. When the buffer passes a
+%%% threshold it freezes to a new immutable segment and commits the
+%%% manifest, advancing the persisted watermark.
 %%%
 %%% Segments only ever accumulate on their own, so when the live count
 %%% crosses a threshold the shard compacts: an offloaded worker merges the
@@ -36,8 +42,9 @@
 -define(REFRESH_BATCH, 1000).
 -define(SUBSCRIBE_RETRY_MS, 1000).
 
-%% Buffer content: live grams, or a tombstone.
--type content() :: {live, [barrel_ngram_selector:gram()]} | deleted.
+%% Buffer content: live corpus text (grams are derived at freeze time,
+%% from both phases -- see the moduledoc), or a tombstone.
+-type content() :: {live, binary()} | deleted.
 
 -record(state, {
     ref :: term(),
@@ -45,8 +52,6 @@
     shard_index :: non_neg_integer(),
     shards :: pos_integer(),
     config :: map(),
-    selector :: module(),
-    selector_opts :: map(),
     db :: binary(),
     dir :: binary(),
     manifest :: barrel_ngram_manifest:manifest(),
@@ -89,10 +94,15 @@ get_manifest(Corpus) ->
 buffer_keys(Corpus) ->
     gen_server:call(via(Corpus), buffer_keys, infinity).
 
-%% @doc The live segments and the buffered ids in one atomic read, so a
-%% query never straddles a freeze (which could move a doc out of the buffer
-%% into a segment the query did not see).
--spec snapshot(term()) -> {ok, [{non_neg_integer(), binary()}], [binary()]}.
+%% @doc The live segments and an immutable copy of the buffer in one
+%% atomic read, so a query never straddles a freeze (which could move a
+%% doc out of the buffer into a segment the query did not see). The
+%% buffer snapshot carries each key's change HLC and whether it is live
+%% or a tombstone -- not just the key -- because the query layer's
+%% buffer/segment precedence rule needs to tell a live buffered update
+%% from a buffered delete (see barrel_ngram_query's confirm pass).
+-spec snapshot(term()) ->
+    {ok, [{non_neg_integer(), binary()}], #{binary() => {binary(), live | deleted}}}.
 snapshot(Corpus) ->
     gen_server:call(via(Corpus), snapshot, infinity).
 
@@ -110,29 +120,73 @@ init({Ref, Config}) ->
     Corpus = maps:get(corpus, Config),
     ShardIndex = maps:get(shard_index, Config, 0),
     Shards = maps:get(shards, Config, 1),
-    Selector = maps:get(selector, Config, barrel_ngram_selector_dense),
-    SelectorOpts = maps:get(selector_opts, Config, #{}),
     Db = maps:get(db, Config),
     Dir = shard_dir(Corpus, ShardIndex, Shards, Config),
-    {ok, Manifest0} = barrel_ngram_manifest:load(Dir),
-    ok = barrel_ngram_manifest:cleanup_orphans(Dir, Manifest0),
-    State0 = #state{
-        ref = Ref,
-        corpus = Corpus,
-        shard_index = ShardIndex,
-        shards = Shards,
-        config = Config,
-        selector = Selector,
-        selector_opts = SelectorOpts,
-        db = Db,
-        dir = Dir,
-        manifest = Manifest0,
-        watermark = barrel_ngram_manifest:watermark(Manifest0),
-        freeze_threshold = maps:get(freeze_threshold, Config, ?DEFAULT_FREEZE_THRESHOLD),
-        compact_threshold = maps:get(compact_threshold, Config, ?DEFAULT_COMPACT_THRESHOLD),
-        merge_worker = undefined
-    },
-    {ok, subscribe(State0)}.
+    case open_manifest(Dir, Config) of
+        {ok, Manifest0} ->
+            State0 = #state{
+                ref = Ref,
+                corpus = Corpus,
+                shard_index = ShardIndex,
+                shards = Shards,
+                config = Config,
+                db = Db,
+                dir = Dir,
+                manifest = Manifest0,
+                watermark = barrel_ngram_manifest:watermark(Manifest0),
+                freeze_threshold = maps:get(freeze_threshold, Config, ?DEFAULT_FREEZE_THRESHOLD),
+                compact_threshold = maps:get(compact_threshold, Config, ?DEFAULT_COMPACT_THRESHOLD),
+                merge_worker = undefined
+            },
+            {ok, subscribe(State0)};
+        {error, Reason} ->
+            {stop, Reason}
+    end.
+
+%% @private Load the manifest, eagerly validate every segment it lists
+%% (fail closed on any pre-v4 segment rather than surfacing it lazily on
+%% first query), and reconcile the corpus's persisted config against this
+%% open's request. Runs before `cleanup_orphans/2' so a rejected open
+%% never deletes anything.
+open_manifest(Dir, Config) ->
+    case barrel_ngram_manifest:load(Dir) of
+        {ok, Manifest0} ->
+            case validate_segments(Dir, Manifest0) of
+                ok ->
+                    Requested = #{
+                        phase2_selector_opts => maps:get(phase2_selector_opts, Config, #{}),
+                        fields => maps:get(fields, Config, all)
+                    },
+                    case barrel_ngram_manifest:reconcile_config(Manifest0, Requested) of
+                        {ok, Manifest1} ->
+                            ok = barrel_ngram_manifest:cleanup_orphans(Dir, Manifest1),
+                            {ok, Manifest1};
+                        {error, _} = Err ->
+                            Err
+                    end;
+                {error, _} = Err ->
+                    Err
+            end;
+        {error, _} = Err ->
+            Err
+    end.
+
+validate_segments(Dir, Manifest) ->
+    validate_segment_files(Dir, barrel_ngram_manifest:list_segments(Manifest)).
+
+validate_segment_files(_Dir, []) ->
+    ok;
+validate_segment_files(Dir, [#{file := File} | Rest]) ->
+    Path = filename:join(Dir, File),
+    case barrel_ngram_segment:open(Path) of
+        {ok, H} ->
+            barrel_ngram_segment:close(H),
+            validate_segment_files(Dir, Rest);
+        {error, {unsupported_segment_version, Got, Expected}} ->
+            {error, {unsupported_segment_version, Path, Got, Expected}};
+        {error, _} = Err ->
+            Err
+    end.
 
 handle_call(refresh, _From, State) ->
     State1 = maybe_compact(do_freeze(drain(State))),
@@ -173,7 +227,9 @@ handle_call(buffer_keys, _From, #state{buffer = Buffer} = State) ->
 handle_call(snapshot, _From, #state{dir = Dir, manifest = M, buffer = Buffer} = State) ->
     Segs = [{maps:get(gen, S), filename:join(Dir, maps:get(file, S))}
             || S <- barrel_ngram_manifest:list_segments(M)],
-    {reply, {ok, Segs, maps:keys(Buffer)}, State};
+    BufferSnapshot = maps:map(fun(_K, {Hlc, Content}) -> {Hlc, content_kind(Content)} end,
+                              Buffer),
+    {reply, {ok, Segs, BufferSnapshot}, State};
 
 handle_call(get_config, _From, #state{config = Config} = State) ->
     {reply, {ok, Config}, State}.
@@ -242,20 +298,23 @@ subscribe(#state{db = Db, watermark = Wm} = State) ->
 %% Applying changes
 %%====================================================================
 
+%% Phase-1 (dense, non-positional) is the always-on selector; there is no
+%% longer a corpus-wide selector choice (see the app moduledoc).
+-define(PHASE1_SELECTOR, barrel_ngram_selector_dense).
+
 %% @private Apply a batch to the buffer, advancing the watermark. Changes
 %% at or below the current watermark are skipped (idempotent replay).
-apply_changes(Changes, #state{buffer = Buffer, watermark = Wm, selector = Sel,
-                              selector_opts = SelOpts, config = Cfg,
+apply_changes(Changes, #state{buffer = Buffer, watermark = Wm, config = Cfg,
                               shard_index = I, shards = N} = State) ->
     {Buffer1, Wm1} = lists:foldl(
-        fun(Change, Acc) -> apply_change(Change, Acc, Sel, SelOpts, Cfg, I, N) end,
+        fun(Change, Acc) -> apply_change(Change, Acc, Cfg, I, N) end,
         {Buffer, Wm}, Changes),
     State#state{buffer = Buffer1, watermark = Wm1}.
 
 %% Advance the watermark for every change above it (owned or not, so the
 %% shard never reprocesses the feed), but only buffer a change this shard
 %% owns by rendezvous.
-apply_change(Change, {Buffer, Wm}, Sel, SelOpts, Cfg, I, N) ->
+apply_change(Change, {Buffer, Wm}, Cfg, I, N) ->
     EncHlc = barrel_hlc:encode(maps:get(hlc, Change)),
     case Wm =/= first andalso EncHlc =< Wm of
         true ->
@@ -273,8 +332,7 @@ apply_change(Change, {Buffer, Wm}, Sel, SelOpts, Cfg, I, N) ->
                             case maps:get(doc, Change, undefined) of
                                 Doc when is_map(Doc) ->
                                     Text = barrel_ngram_corpus:doc_text(Doc, Cfg),
-                                    Grams = barrel_ngram_selector:select_grams(Sel, SelOpts, Text),
-                                    Buffer#{Id => {EncHlc, {live, Grams}}};
+                                    Buffer#{Id => {EncHlc, {live, Text}}};
                                 _ ->
                                     Buffer
                             end
@@ -319,13 +377,15 @@ do_freeze(#state{buffer = Buffer} = State) when map_size(Buffer) =:= 0 ->
 do_freeze(#state{buffer = Buffer, manifest = M, dir = Dir,
                  watermark = Wm, config = Config} = State) ->
     Keys = maps:keys(Buffer),
-    {Entries, Postings} = build_segment(Buffer, Keys),
+    PositionalOpts = maps:get(phase2_selector_opts, Config, #{}),
+    {Entries, Postings, PositionalPostings} = build_segment(Buffer, Keys, PositionalOpts),
     Gen = barrel_ngram_manifest:next_gen(M),
     File = segment_file(Gen),
     Path = filename:join(Dir, File),
     WmBin = wm_bin(Wm),
     Spec = #{doc_count => length(Keys), watermark => WmBin,
-             postings => Postings, entries => Entries,
+             postings => Postings, positional_postings => PositionalPostings,
+             entries => Entries,
              codec => maps:get(postings, Config, varint)},
     case barrel_ngram_segment:write(Path, Spec) of
         ok ->
@@ -349,27 +409,48 @@ do_freeze(#state{buffer = Buffer, manifest = M, dir = Dir,
             State
     end.
 
-%% @private Build ordinal-ordered entries and the {Gram, Ordinals} postings
-%% from the keyed buffer. Ordinal i is Keys!!i (the freeze order); a
-%% tombstone contributes an entry but no grams.
-build_segment(Buffer, Keys) ->
+%% @private Build ordinal-ordered entries and both phases' postings from
+%% the keyed buffer. Ordinal i is Keys!!i (the freeze order); a tombstone
+%% contributes an entry but no grams. Both phase-1 (dense) grams and
+%% phase-2 (positional) grams are selected from the same buffered text,
+%% here at freeze time -- see the moduledoc for why.
+build_segment(Buffer, Keys, PositionalOpts) ->
     KeyToOrd = maps:from_list(
         lists:zip(Keys, lists:seq(0, length(Keys) - 1))),
     Entries = [begin
                    {Hlc, Content} = maps:get(K, Buffer),
                    #{key => K, hlc => Hlc, deleted => Content =:= deleted}
                end || K <- Keys],
-    GramMap = maps:fold(
-        fun(Key, {_Hlc, {live, Grams}}, Acc) ->
+    {GramMap, PosMap} = maps:fold(
+        fun(Key, {_Hlc, {live, Text}}, {GM, PM}) ->
                 Ord = maps:get(Key, KeyToOrd),
-                lists:foldl(
+                Grams = barrel_ngram_selector:select_grams(?PHASE1_SELECTOR, #{}, Text),
+                GM1 = lists:foldl(
                     fun(G, A) -> maps:update_with(G, fun(L) -> [Ord | L] end, [Ord], A) end,
-                    Acc, Grams);
+                    GM, Grams),
+                PosGrams = barrel_ngram_selector_sparse:select_grams_positional(
+                             Text, PositionalOpts),
+                PM1 = lists:foldl(
+                    fun({G, Off}, A) ->
+                        maps:update_with(G, fun(L) -> [{Ord, Off} | L] end, [{Ord, Off}], A)
+                    end, PM, PosGrams),
+                {GM1, PM1};
            (_Key, {_Hlc, deleted}, Acc) ->
                 Acc
-        end, #{}, Buffer),
+        end, {#{}, #{}}, Buffer),
     Postings = [{G, lists:usort(Os)} || {G, Os} <- maps:to_list(GramMap)],
-    {Entries, Postings}.
+    PositionalPostings = [{G, group_offsets(Pairs)} || {G, Pairs} <- maps:to_list(PosMap)],
+    {Entries, Postings, PositionalPostings}.
+
+%% @private [{Ordinal, Offset}] (one entry per sampled position, possibly
+%% several per ordinal for a repeated gram) -> [{Ordinal, [Offset]}]
+%% (barrel_ngram_postings_positional's entry shape).
+group_offsets(Pairs) ->
+    Grouped = lists:foldl(
+        fun({Ord, Off}, Acc) ->
+            maps:update_with(Ord, fun(L) -> [Off | L] end, [Off], Acc)
+        end, #{}, Pairs),
+    [{Ord, lists:usort(Offs)} || {Ord, Offs} <- maps:to_list(Grouped)].
 
 %%====================================================================
 %% Compaction
@@ -435,6 +516,9 @@ apply_merge_result(TempPath, DocCount, InputFiles,
 
 via(Ref) ->
     {via, barrel_ngram_registry, {shard, Ref}}.
+
+content_kind({live, _Text}) -> live;
+content_kind(deleted) -> deleted.
 
 segment_file(Gen) ->
     iolist_to_binary(io_lib:format("segment-~6..0b.ngseg", [Gen])).

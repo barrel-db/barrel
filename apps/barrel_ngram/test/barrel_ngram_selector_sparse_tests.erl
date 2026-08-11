@@ -73,6 +73,91 @@ interior_subset_invariant_test() ->
         end, lists:seq(1, 50)).
 
 %%====================================================================
+%% Positional callbacks (phase-2 index/query)
+%%====================================================================
+
+sgp(Bytes) -> ?M:select_grams_positional(Bytes, opts()).
+rgp(Query) -> ?M:reliable_grams_positional(Query, opts()).
+
+%% select_grams/2 is implemented as select_grams_positional/2 with the
+%% offsets dropped -- this is definitional (guaranteed by the shared
+%% implementation), asserted here as documentation and a regression guard.
+select_grams_positional_gram_set_matches_select_grams_test() ->
+    Bin = <<"error: connect_timeout exceeded in the pool">>,
+    ?assertEqual(ordsets:from_list(sg(Bin)),
+                 ordsets:from_list([G || {G, _I} <- sgp(Bin)])).
+
+%% Every returned offset really is where that gram occurs, and stays
+%% within the byte string's trigram-position range.
+select_grams_positional_offsets_are_real_positions_test() ->
+    Bin = <<"the quick brown fox jumps over the lazy dog">>,
+    N = byte_size(Bin),
+    lists:foreach(
+        fun({G, I}) ->
+            ?assert(I >= 0 andalso I =< N - 3),
+            <<_:I/binary, A, B, C, _/binary>> = Bin,
+            ?assertEqual((A bsl 16) bor (B bsl 8) bor C, G)
+        end, sgp(Bin)).
+
+select_grams_positional_below_trigram_is_empty_test() ->
+    ?assertEqual([], sgp(<<>>)),
+    ?assertEqual([], sgp(<<"ab">>)).
+
+%% reliable_grams/2 is the gram set of reliable_grams_positional/2 with
+%% the offsets dropped, same relationship as the index-side pair above.
+reliable_grams_positional_gram_set_matches_reliable_grams_test() ->
+    Q = <<"connect_timeout_exceeded_in_the_pool">>,
+    case {rg(Q), rgp(Q)} of
+        {brute_force, brute_force} -> ok;
+        {{reliable, Grams}, {reliable, GramOffs}} ->
+            ?assertEqual(ordsets:from_list(Grams),
+                         ordsets:from_list([G || {G, _I} <- GramOffs]))
+    end.
+
+%% Offsets from the query side are always interior positions (the
+%% boundary rule): [R, N-3-R], never touching the literal's own edges.
+reliable_grams_positional_offsets_are_interior_test() ->
+    #{radius := R} = opts(),
+    Q = <<"connect_timeout_exceeded_in_the_pool">>,
+    N = byte_size(Q),
+    case rgp(Q) of
+        brute_force -> ok;
+        {reliable, GramOffs} ->
+            lists:foreach(
+                fun({_G, I}) -> ?assert(I >= R andalso I =< N - 3 - R) end,
+                GramOffs)
+    end.
+
+reliable_grams_positional_short_literal_brute_force_test() ->
+    ?assertEqual(brute_force, rgp(<<>>)),
+    ?assertEqual(brute_force, rgp(<<"abc">>)),
+    ?assertEqual(brute_force, rgp(<<"12345678">>)).
+
+%%====================================================================
+%% normalize_opts/1 (config persisted/compared across corpus reopens)
+%%====================================================================
+
+normalize_opts_fills_defaults_test() ->
+    ?assertEqual(#{radius => 3, sample_rate => 4}, ?M:normalize_opts(#{})).
+
+normalize_opts_keeps_explicit_values_test() ->
+    ?assertEqual(#{radius => 5, sample_rate => 8},
+                 ?M:normalize_opts(#{radius => 5, sample_rate => 8})).
+
+normalize_opts_partial_fills_the_rest_test() ->
+    ?assertEqual(#{radius => 3, sample_rate => 8},
+                 ?M:normalize_opts(#{sample_rate => 8})),
+    ?assertEqual(#{radius => 5, sample_rate => 4},
+                 ?M:normalize_opts(#{radius => 5})).
+
+%% Equivalent option maps (explicit-default vs omitted) must normalize
+%% identically -- this is what makes reopening a corpus with the same
+%% effective tuning, phrased differently, not a spurious config_mismatch.
+normalize_opts_equivalent_maps_agree_test() ->
+    ?assertEqual(?M:normalize_opts(#{}),
+                 ?M:normalize_opts(#{radius => 3, sample_rate => 4})).
+
+%%====================================================================
 %% Helpers
 %%====================================================================
 

@@ -3,8 +3,8 @@
 %%%
 %%% The same database indexed under a `postings => varint' corpus and a
 %%% `postings => roaring' corpus must return byte-identical `search' and
-%%% `regex' results. Covered statically, across the lifecycle
-%%% (updates/deletes/compaction), and with the sparse selector.
+%%% `regex' results. Covered statically and across the lifecycle
+%%% (updates/deletes/compaction).
 %%% @end
 %%%-------------------------------------------------------------------
 -module(barrel_ngram_roaring_SUITE).
@@ -15,10 +15,10 @@
 -export([all/0, init_per_suite/1, end_per_suite/1,
          init_per_testcase/2, end_per_testcase/2]).
 
--export([oracle_static/1, oracle_lifecycle/1, oracle_sparse/1]).
+-export([oracle_static/1, oracle_lifecycle/1]).
 
 all() ->
-    [oracle_static, oracle_lifecycle, oracle_sparse].
+    [oracle_static, oracle_lifecycle].
 
 docs() ->
     [{iolist_to_binary([<<"doc">>, integer_to_binary(K)]), body(K)}
@@ -52,18 +52,12 @@ init_per_testcase(TC, Config) ->
     Base = filename:join(?config(priv_dir, Config), atom_to_list(TC)),
     _ = barrel_docdb:delete_db(Db),
     {ok, _} = barrel_docdb:create_db(Db),
-    Sel = case TC of
-        oracle_sparse -> #{selector => barrel_ngram_selector_sparse};
-        _ -> #{}
-    end,
     V = <<Db/binary, "_v">>,
     R = <<Db/binary, "_r">>,
-    ok = barrel_ngram:open(V, maps:merge(Sel,
-                           #{db => Db, data_dir => filename:join(Base, "v"),
-                             postings => varint, compact_threshold => infinity})),
-    ok = barrel_ngram:open(R, maps:merge(Sel,
-                           #{db => Db, data_dir => filename:join(Base, "r"),
-                             postings => roaring, compact_threshold => infinity})),
+    ok = barrel_ngram:open(V, #{db => Db, data_dir => filename:join(Base, "v"),
+                                postings => varint, compact_threshold => infinity}),
+    ok = barrel_ngram:open(R, #{db => Db, data_dir => filename:join(Base, "r"),
+                                postings => roaring, compact_threshold => infinity}),
     [{db, Db}, {varint, V}, {roaring, R} | Config].
 
 end_per_testcase(_TC, Config) ->
@@ -77,12 +71,6 @@ end_per_testcase(_TC, Config) ->
 %%====================================================================
 
 oracle_static(Config) ->
-    Db = ?config(db, Config),
-    lists:foreach(fun({Id, T}) -> put_doc(Db, Id, T) end, docs()),
-    refresh_both(Config),
-    assert_agree(Config).
-
-oracle_sparse(Config) ->
     Db = ?config(db, Config),
     lists:foreach(fun({Id, T}) -> put_doc(Db, Id, T) end, docs()),
     refresh_both(Config),

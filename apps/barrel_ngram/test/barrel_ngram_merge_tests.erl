@@ -17,7 +17,10 @@ merge_test_() ->
       fun collapse_supersede/1,
       fun tombstone_retained/1,
       fun tombstone_dropped/1,
-      fun tombstone_superseded_by_live/1
+      fun tombstone_superseded_by_live/1,
+      fun positional_survives_supersede/1,
+      fun positional_ordinal_remap/1,
+      fun positional_dropped_with_tombstone/1
      ]}.
 
 setup() ->
@@ -35,9 +38,14 @@ gram(A, B, C) -> (A bsl 16) bor (B bsl 8) bor C.
 entry(K, N, Del) -> #{key => K, hlc => hlc(N), deleted => Del}.
 
 write_seg(Dir, Name, Postings, Entries) ->
+    write_seg(Dir, Name, Postings, [], Entries).
+
+write_seg(Dir, Name, Postings, PositionalPostings, Entries) ->
     Path = filename:join(Dir, Name),
     ok = ?SEG:write(Path, #{doc_count => length(Entries), watermark => <<0:96>>,
-                            postings => Postings, entries => Entries}),
+                            postings => Postings,
+                            positional_postings => PositionalPostings,
+                            entries => Entries}),
     Path.
 
 %% Open a merged segment and return {DocCount, SortedEntries, SortedPostings}.
@@ -48,6 +56,14 @@ inspect(Path) ->
         {?SEG:doc_count(H),
          lists:sort(Entries),
          lists:sort(?SEG:all_postings(H))}
+    after
+        ?SEG:close(H)
+    end.
+
+inspect_positional(Path) ->
+    {ok, H} = ?SEG:open(Path),
+    try
+        lists:sort(?SEG:all_positional_postings(H))
     after
         ?SEG:close(H)
     end.
@@ -107,6 +123,59 @@ tombstone_superseded_by_live(Dir) ->
         ?assertEqual(1, DocCount),
         ?assertEqual([{<<"a">>, hlc(20), false}], Entries),
         ?assertEqual([{Gabc, [0]}], Postings)
+    end.
+
+%% Phase-2 offsets for the surviving (newest) version of a superseded key
+%% must appear in the merged output, keyed by the NEW ordinal the merge
+%% assigns -- not the old ordinal from either input segment. The
+%% superseded version's positional data is dropped along with its grams.
+positional_survives_supersede(Dir) ->
+    fun() ->
+        Gabc = gram($a, $b, $c),
+        Gxyz = gram($x, $y, $z),
+        S0 = write_seg(Dir, "s0.ngseg", [{Gabc, [0]}], [{Gabc, [{0, [5]}]}],
+                       [entry(<<"a">>, 10, false)]),
+        S1 = write_seg(Dir, "s1.ngseg", [{Gxyz, [0]}], [{Gxyz, [{0, [9]}]}],
+                       [entry(<<"a">>, 20, false)]),
+        {ok, Out, _DocCount, _Wm} = ?M:merge([S0, S1], false),
+        NewOrd = ord_of(Out, <<"a">>),
+        ?assertEqual([{Gxyz, [{NewOrd, [9]}]}], inspect_positional(Out))
+    end.
+
+%% Multiple surviving keys, sorted differently than the input's ordinals,
+%% so the merge genuinely reassigns ordinals -- proves offsets follow the
+%% reassignment, not the stale input ordinal.
+positional_ordinal_remap(Dir) ->
+    fun() ->
+        Ga = gram($a, $a, $a),
+        Gb = gram($b, $b, $b),
+        %% "zebra" is ordinal 0 in s0 (frozen first) and "apple" is
+        %% ordinal 1, but the merge re-sorts by key, so the output swaps
+        %% them: apple -> 0, zebra -> 1. Offsets must follow the swap.
+        S0 = write_seg(Dir, "s0.ngseg", [{Ga, [0]}, {Gb, [1]}],
+                       [{Ga, [{0, [2]}]}, {Gb, [{1, [4]}]}],
+                       [entry(<<"zebra">>, 10, false), entry(<<"apple">>, 11, false)]),
+        {ok, Out, DocCount, _Wm} = ?M:merge([S0], false),
+        ?assertEqual(2, DocCount),
+        AppleOrd = ord_of(Out, <<"apple">>),
+        ZebraOrd = ord_of(Out, <<"zebra">>),
+        ?assertEqual(0, AppleOrd),   %% "apple" < "zebra"
+        ?assertEqual(1, ZebraOrd),
+        ?assertEqual(lists:sort([{Ga, [{ZebraOrd, [2]}]}, {Gb, [{AppleOrd, [4]}]}]),
+                     inspect_positional(Out))
+    end.
+
+%% A tombstone carries no grams (already asserted for phase-1 in
+%% tombstone_retained/1); the same must hold for phase-2.
+positional_dropped_with_tombstone(Dir) ->
+    fun() ->
+        Gabc = gram($a, $b, $c),
+        S0 = write_seg(Dir, "s0.ngseg", [{Gabc, [0]}], [{Gabc, [{0, [3]}]}],
+                       [entry(<<"a">>, 10, false)]),
+        S1 = write_seg(Dir, "s1.ngseg", [], [], [entry(<<"a">>, 20, true)]),
+        {ok, Out, DocCount, _Wm} = ?M:merge([S0, S1], false),
+        ?assertEqual(1, DocCount),
+        ?assertEqual([], inspect_positional(Out))
     end.
 
 %% @private ordinal of a key in a written segment

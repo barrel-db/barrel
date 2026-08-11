@@ -5,6 +5,82 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-08-10
+
+### Added
+
+- Phase-2 (the sparse, content-defined positional index) now drives query
+  results. A literal's reliable phase-2 grams are distance-checked to
+  narrow candidates down to a specific byte position, not just a
+  candidate document; with `open/2`'s new `source => {Module, InitArg}`
+  option (a small byte-source behaviour, `barrel_ngram_source`), that
+  candidate is confirmed by reading just the matched region instead of
+  fetching the whole document. Without a `source`, phase-2 still narrows
+  which documents get fetched, it just fetches them in full.
+- Regex search gets the same treatment for a bounded subset of patterns: a
+  clean AND-chain of literal runs with no alternation and no `^`/`$`/`\b`
+  anchor or boundary picks its longest windowable literal run as an
+  anchor and confirms with a windowed `re:run` instead of a full-document
+  one. Everything else (unsupported constructs, alternation, anchors, an
+  unbounded gap) still gets full-content confirmation, same as before --
+  always exact either way.
+- `case_sensitive => false` option on both `search/3` and `regex/3`. An
+  ASCII literal or pattern narrows through phase-1's per-position
+  case-variant expansion and verifies with `[caseless]`; a non-ASCII one
+  skips narrowing entirely and verifies with `[caseless, unicode]`, with
+  `{error, {invalid_literal_encoding, _}}` for a non-UTF-8 query and
+  `{error, {invalid_document_encoding, DocId}}` if a candidate document
+  turns out not to be valid UTF-8. Phase-2/windowing never applies here:
+  its sampling is itself case-sensitive. A pattern with its own leading
+  `(?i)` is caseless automatically, without the option.
+- The regex analyzer gained a strict `unsupported` outcome for anything
+  outside its supported subset -- lookarounds, backreferences, named
+  groups, `\x{...}` escapes, `\Q...\E`, conditionals, a scoped or
+  mid-pattern inline modifier -- so an unfamiliar construct falls back to
+  full-content confirmation instead of risking a wrong (too-narrow)
+  trigram query from being silently mis-parsed as literal text. It also
+  now tracks per-literal-run prefix/suffix width bounds and a
+  leading-`(?i)`/`(?s)`/`(?m)` flag, both needed for the windowing above.
+
+### Changed
+
+- **Breaking**: `open/2`'s `selector` option is retired -- every corpus now
+  builds both a dense (phase-1, exhaustive) and a sparse (phase-2,
+  content-defined, positional) index unconditionally. `selector_opts` is
+  renamed `phase2_selector_opts` and now tunes phase-2 sampling
+  specifically. `open/2` rejects `selector` outright with
+  `{error, {unsupported_option, selector}}`.
+- Segment format bumped to v4: posting blocks are now a self-delimiting
+  composite of a phase-1 sub-block and an optional phase-2 (positional)
+  sub-block, plus a new per-segment gram -> doc-count table. A pre-v4
+  segment is rejected with a distinguishable
+  `{unsupported_segment_version, _, _}` error rather than a generic one;
+  there is no migration, reindex into a fresh corpus.
+- Manifest format bumped to v2: it now persists and validates a corpus's
+  `phase2_selector_opts`/`fields` across reopens, rejecting a mismatch
+  with `{error, {config_mismatch, Field, Persisted, Requested}}` instead
+  of silently reindexing under the new value. `open/2` also now eagerly
+  validates every listed segment before returning, rather than surfacing
+  a stale segment's error lazily on first query.
+
+### Fixed
+
+- Regex candidate gathering (`regex_segment_keys/2`) no longer silently
+  swallows a segment-open error into an incomplete result; it now
+  propagates, matching literal search's existing strict behavior.
+- Windowed verification (literal and regex) could report overlapping
+  matches that a plain left-to-right scan (`binary:matches/2`, `re:run`
+  `global`) would not, when two distance-checked candidates genuinely
+  overlapped (e.g. `"aaa"` at both offset 0 and 1 of `"aaaa"`). Spans are
+  now reduced to that same non-overlapping set, matching every other
+  verification path.
+- A candidate whose sole reliable phase-2 gram also occurs many times
+  elsewhere in the same document (repetitive content) no longer gets one
+  windowed read per occurrence -- past 32 candidates in one document,
+  verification falls back to a single full-content read instead. Found
+  via profiling: a bounded regex query over a 100 KB repetitive document
+  dropped from ~160ms to ~22ms.
+
 ## [0.7.1] - 2026-07-19
 
 ### Fixed

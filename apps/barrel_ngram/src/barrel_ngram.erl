@@ -15,6 +15,12 @@
 %%% '''
 %%%
 %%% Requires the barrel_ngram application to be started.
+%%%
+%%% A second, positional (phase-2) index narrows candidates to a specific
+%%% byte position and, with a `source' configured (see
+%%% {@link barrel_ngram_source}), verifies by reading just that window
+%%% instead of the whole document. See {@link barrel_ngram_planner}'s
+%%% moduledoc for how narrowing and case-insensitive search interact.
 %%% @end
 %%%-------------------------------------------------------------------
 -module(barrel_ngram).
@@ -29,16 +35,22 @@
 %%
 %% There is no separate create step: this creates the corpus if it does not
 %% exist and re-attaches (resuming from its on-disk state) if it does. It
-%% starts a feed subscription that keeps the index in sync. `selector',
-%% `shards', and `postings' are fixed for the life of a corpus.
+%% starts a feed subscription that keeps the index in sync. `phase2_selector_opts',
+%% `fields', `shards', and `postings' are fixed for the life of a corpus:
+%% reopening with a different `phase2_selector_opts' or `fields' fails with
+%% `{error, {config_mismatch, Field, Persisted, Requested}}' rather than
+%% silently reindexing under the new value.
+%%
+%% Every corpus indexes both a dense (phase-1, exhaustive) and a sparse
+%% (phase-2, positional) index; there is no longer a corpus-wide selector
+%% choice. `selector' is rejected outright with
+%% `{error, {unsupported_option, selector}}'.
 %%
 %% Options:
 %% <ul>
 %%   <li>`db' (required) - the barrel_docdb database name to index.</li>
-%%   <li>`selector' - gram selector module (default
-%%       `barrel_ngram_selector_dense').</li>
-%%   <li>`selector_opts' - selector tuning map (default `#{}'), e.g. the
-%%       sparse selector's `radius' and `sample_rate'.</li>
+%%   <li>`phase2_selector_opts' - phase-2 sampling tuning map (default
+%%       `#{}'): `radius' and `sample_rate'.</li>
 %%   <li>`fields' - `all' or a list of field names to index (default
 %%       `all').</li>
 %%   <li>`shards' - number of shards to spread the corpus across by
@@ -51,8 +63,14 @@
 %%       (default 1000).</li>
 %%   <li>`compact_threshold' - live segment count before an automatic
 %%       compaction (default 16; `infinity' disables it).</li>
+%%   <li>`source' - `{Module, InitArg}', a {@link barrel_ngram_source} for
+%%       verifying candidates without a full `barrel_docdb' fetch
+%%       (optional; falls back to `barrel_docdb:get_docs/2' when
+%%       absent).</li>
 %% </ul>
 -spec open(corpus(), map()) -> ok | {error, term()}.
+open(_Corpus, Opts) when is_map_key(selector, Opts) ->
+    {error, {unsupported_option, selector}};
 open(Corpus, Opts) ->
     case maps:is_key(db, Opts) of
         false ->
@@ -188,12 +206,18 @@ normalize(Corpus, Opts) ->
     Base = #{
         corpus => Corpus,
         db => maps:get(db, Opts),
-        selector => maps:get(selector, Opts, barrel_ngram_selector_dense),
-        fields => maps:get(fields, Opts, all),
+        fields => normalize_fields(maps:get(fields, Opts, all)),
+        phase2_selector_opts =>
+            barrel_ngram_selector_sparse:normalize_opts(
+              maps:get(phase2_selector_opts, Opts, #{})),
         data_dir => maps:get(data_dir, Opts,
                              application:get_env(barrel_ngram, data_dir,
                                                  "data/barrel_ngram"))
     },
-    %% pass tuning options through to the shard (defaults live there)
-    maps:merge(Base, maps:with([freeze_threshold, compact_threshold,
-                                selector_opts, postings], Opts)).
+    %% pass tuning options through to the shard (defaults live there);
+    %% `source' is a runtime verification detail, not index-critical, so
+    %% it is not part of the persisted/validated config above.
+    maps:merge(Base, maps:with([freeze_threshold, compact_threshold, postings, source], Opts)).
+
+normalize_fields(all) -> all;
+normalize_fields(List) when is_list(List) -> lists:usort(List).

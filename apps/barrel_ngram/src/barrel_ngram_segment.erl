@@ -8,6 +8,7 @@
 %%% [0, 4096)                      header (magic, offsets, doc_count, watermark)
 %%% [4096, +offset_table_len)      offset table: u32 per gram, direct-addressed
 %%% [postings_off, +postings_len)  postings region (byte 0 is a sentinel)
+%%% [dct_off, +dct_len)            gram -> phase-2 doc_count table (planner cost ranking)
 %%% [sidecar_off, +sidecar_len)    ordinal -> {key, hlc, deleted} sidecar
 %%% '''
 %%%
@@ -19,9 +20,19 @@
 %%% past the table and is treated as empty. The table also serves as the
 %%% gram directory for {@link all_postings/1}.
 %%%
-%%% Each posting block is stored length-prefixed: `[Len:32][block]' where
-%%% the block is a delta+varint list of ordinals (see
-%%% {@link barrel_ngram_postings}).
+%%% Each posting block is a composite of independently length-prefixed
+%%% phase-1 and phase-2 sub-blocks: `[Phase1Len:32][Phase1Block]
+%%% [Phase2Len:32][Phase2Block]' -- so a reader never has to decode one to
+%%% find the other (the phase-1 sub-block goes straight to the roaring NIF
+%%% as an opaque binary; trailing phase-2 bytes would corrupt it).
+%%% `Phase1Block' is delta+varint or roaring per the segment's codec;
+%%% `Phase2Block' is always {@link barrel_ngram_postings_positional}
+%%% encoded, `Phase2Len =:= 0' meaning none. {@link lookup_block/2}/
+%%% {@link lookup_postings/2} only ever read `Phase1Block'.
+%%%
+%%% The doc-count table is a sorted, binary-searchable
+%%% `<<Gram:24, DocCount:32>>*' index, one entry per gram with phase-2
+%%% data, for cheap query-planner cost ranking (never correctness).
 %%%
 %%% The sidecar maps a local ordinal to its document key, the change HLC
 %%% that produced it (the recency sequence number used when merging), and
@@ -38,15 +49,17 @@
 -module(barrel_ngram_segment).
 
 -export([write/2, open/1, close/1]).
--export([lookup_postings/2, lookup_block/2, keys/2, entries/1, all_postings/1,
-         doc_count/1, watermark/1, codec/1]).
+-export([lookup_postings/2, lookup_block/2, lookup_positional_block/2,
+         positional_doc_count/2, keys/2, entries/1, all_postings/1,
+         all_positional_postings/1, doc_count/1, watermark/1, codec/1]).
 
 -define(MAGIC, <<"NGRAMSEG">>).
--define(VERSION, 3).
+-define(VERSION, 4).
 -define(SECTOR, 4096).
 -define(GRAM_COUNT, (1 bsl 24)).
 -define(ENTRY_BYTES, 4).
 -define(SIDECAR_ENTRY, 21).   %% KeyOff:32 + KeyLen:32 + Deleted:8 + Hlc:96
+-define(DOC_COUNT_ENTRY, 7).  %% Gram:24 + DocCount:32
 
 -type codec() :: varint | roaring.
 -export_type([codec/0]).
@@ -61,6 +74,7 @@
     sidecar_off :: non_neg_integer(),
     key_data_start :: non_neg_integer(),
     key_index :: tuple(),        %% ordinal -> {KeyOff, KeyLen, Deleted, Hlc}
+    positional_doc_count_table :: binary(),  %% sorted <<Gram:24, DocCount:32>>*
     watermark :: binary()
 }).
 
@@ -75,8 +89,10 @@
     doc_count := non_neg_integer(),
     watermark := binary(),
     postings := [{barrel_ngram_selector:gram(), [barrel_ngram_postings:ordinal()]}],
+    positional_postings => [{barrel_ngram_selector:gram(),
+                             [barrel_ngram_postings_positional:entry()]}],  %% default []
     entries := [entry()],    %% entry for ordinal 0, 1, ... in order
-    codec => codec()         %% posting-block codec (default varint)
+    codec => codec()         %% posting-block codec (default varint; phase-1 only)
 }.
 -export_type([spec/0, entry/0]).
 
@@ -92,9 +108,11 @@ write(Path, #{doc_count := DocCount, watermark := Wm,
     12 = byte_size(Wm),
     DocCount = length(Entries),
     Codec = maps:get(codec, Spec, varint),
+    PositionalMap = maps:from_list(maps:get(positional_postings, Spec, [])),
 
     SortedGrams = lists:keysort(1, Postings),
-    {PostingsRegion, GramOffsets} = build_postings(SortedGrams, Codec),
+    {PostingsRegion, GramOffsets, DocCountEntries} =
+        build_postings(SortedGrams, Codec, PositionalMap),
     PostingsLen = byte_size(PostingsRegion),
 
     OffsetTableLen = case GramOffsets of
@@ -104,13 +122,17 @@ write(Path, #{doc_count := DocCount, watermark := Wm,
     OffsetTable = iolist_to_binary(build_table(GramOffsets, 0, [])),
     OffsetTableLen = byte_size(OffsetTable),
 
+    DocCountTable = encode_doc_count_table(DocCountEntries),
+    DocCountTableLen = byte_size(DocCountTable),
+
     {SidecarIndex, KeyData} = build_sidecar(Entries),
     Sidecar = <<SidecarIndex/binary, KeyData/binary>>,
     SidecarLen = byte_size(Sidecar),
 
     OffsetTableOff = ?SECTOR,
     PostingsOff = OffsetTableOff + OffsetTableLen,
-    SidecarOff = PostingsOff + PostingsLen,
+    DocCountTableOff = PostingsOff + PostingsLen,
+    SidecarOff = DocCountTableOff + DocCountTableLen,
 
     Header = encode_header(#{
         doc_count => DocCount,
@@ -118,6 +140,8 @@ write(Path, #{doc_count := DocCount, watermark := Wm,
         offset_table_len => OffsetTableLen,
         postings_off => PostingsOff,
         postings_len => PostingsLen,
+        doc_count_table_off => DocCountTableOff,
+        doc_count_table_len => DocCountTableLen,
         sidecar_off => SidecarOff,
         sidecar_len => SidecarLen,
         watermark => Wm,
@@ -129,7 +153,8 @@ write(Path, #{doc_count := DocCount, watermark := Wm,
     Tmp = iolist_to_binary([to_binary(Path), <<".tmp">>]),
     case file:open(Tmp, [write, binary, raw]) of
         {ok, Fd} ->
-            Res = write_all(Fd, [PaddedHeader, OffsetTable, PostingsRegion, Sidecar]),
+            Res = write_all(Fd, [PaddedHeader, OffsetTable, PostingsRegion,
+                                  DocCountTable, Sidecar]),
             _ = file:close(Fd),
             case Res of
                 ok -> file:rename(Tmp, Path);
@@ -149,18 +174,42 @@ write_all(Fd, [Bin | Rest]) ->
         {error, _} = Err -> Err
     end.
 
-%% @private Lay out the postings region and collect gram -> region-offset.
-build_postings(SortedGrams, Codec) ->
+%% @private Lay out the postings region as composite `[Phase1Len][Phase1Block]
+%% [Phase2Len][Phase2Block]' entries and collect gram -> region-offset plus
+%% the phase-2 doc-count-table entries (grams with phase-2 data only).
+build_postings(SortedGrams, Codec, PositionalMap) ->
     %% Region byte 0 is the empty sentinel; blocks start at offset 1.
-    build_postings(SortedGrams, Codec, [<<0>>], 1, []).
+    build_postings(SortedGrams, Codec, PositionalMap, [<<0>>], 1, [], []).
 
-build_postings([], _Codec, RegionAcc, _NextOff, GramOffAcc) ->
-    {iolist_to_binary(lists:reverse(RegionAcc)), lists:reverse(GramOffAcc)};
-build_postings([{Gram, Ords} | Rest], Codec, RegionAcc, NextOff, GramOffAcc) ->
-    Block = encode_block(Codec, Ords),
-    Entry = <<(byte_size(Block)):32/little, Block/binary>>,
-    build_postings(Rest, Codec, [Entry | RegionAcc], NextOff + byte_size(Entry),
-                   [{Gram, NextOff} | GramOffAcc]).
+build_postings([], _Codec, _PosMap, RegionAcc, _NextOff, GramOffAcc, DocCountAcc) ->
+    {iolist_to_binary(lists:reverse(RegionAcc)),
+     lists:reverse(GramOffAcc),
+     lists:reverse(DocCountAcc)};
+build_postings([{Gram, Ords} | Rest], Codec, PosMap, RegionAcc, NextOff,
+               GramOffAcc, DocCountAcc) ->
+    Phase1Block = encode_block(Codec, Ords),
+    Phase1Len = byte_size(Phase1Block),
+    {Phase2Block, Phase2DocCount} = case maps:get(Gram, PosMap, []) of
+        [] -> {<<>>, 0};
+        PosEntries -> {barrel_ngram_postings_positional:encode(PosEntries),
+                       length(PosEntries)}
+    end,
+    Phase2Len = byte_size(Phase2Block),
+    Entry = <<Phase1Len:32/little, Phase1Block/binary,
+              Phase2Len:32/little, Phase2Block/binary>>,
+    DocCountAcc1 = case Phase2DocCount of
+        0 -> DocCountAcc;
+        _ -> [{Gram, Phase2DocCount} | DocCountAcc]
+    end,
+    build_postings(Rest, Codec, PosMap, [Entry | RegionAcc], NextOff + byte_size(Entry),
+                   [{Gram, NextOff} | GramOffAcc], DocCountAcc1).
+
+%% @private Encode the sorted-by-gram doc-count table. `DocCountEntries'
+%% arrives gram-ascending already (built alongside GramOffsets, which is
+%% ascending by construction), so no extra sort is needed.
+encode_doc_count_table(DocCountEntries) ->
+    iolist_to_binary(
+      [<<Gram:24, DocCount:32/little>> || {Gram, DocCount} <- DocCountEntries]).
 
 encode_block(varint, Ords) -> barrel_ngram_postings:encode(Ords);
 encode_block(roaring, Ords) -> barrel_ngram_roaring:encode(Ords).
@@ -207,20 +256,27 @@ open(Path) ->
                 {ok, H} ->
                     case read_key_index(Fd, H) of
                         {ok, KeyIndex} ->
-                            {ok, #segment{
-                                fd = Fd,
-                                codec = maps:get(codec, H),
-                                doc_count = maps:get(doc_count, H),
-                                offset_table_off = maps:get(offset_table_off, H),
-                                offset_table_len = maps:get(offset_table_len, H),
-                                postings_off = maps:get(postings_off, H),
-                                sidecar_off = maps:get(sidecar_off, H),
-                                key_data_start =
-                                    maps:get(sidecar_off, H)
-                                    + maps:get(doc_count, H) * ?SIDECAR_ENTRY,
-                                key_index = KeyIndex,
-                                watermark = maps:get(watermark, H)
-                            }};
+                            case read_doc_count_table(Fd, H) of
+                                {ok, DCT} ->
+                                    {ok, #segment{
+                                        fd = Fd,
+                                        codec = maps:get(codec, H),
+                                        doc_count = maps:get(doc_count, H),
+                                        offset_table_off = maps:get(offset_table_off, H),
+                                        offset_table_len = maps:get(offset_table_len, H),
+                                        postings_off = maps:get(postings_off, H),
+                                        sidecar_off = maps:get(sidecar_off, H),
+                                        key_data_start =
+                                            maps:get(sidecar_off, H)
+                                            + maps:get(doc_count, H) * ?SIDECAR_ENTRY,
+                                        key_index = KeyIndex,
+                                        positional_doc_count_table = DCT,
+                                        watermark = maps:get(watermark, H)
+                                    }};
+                                {error, _} = Err ->
+                                    _ = file:close(Fd),
+                                    Err
+                            end;
                         {error, _} = Err ->
                             _ = file:close(Fd),
                             Err
@@ -292,6 +348,71 @@ read_raw_block(Fd, At) ->
         {error, _} = Err -> Err
     end.
 
+%% @doc The raw (undecoded) phase-2 positional posting block for a gram,
+%% or `not_found' (no phase-2 data for that gram -- most grams). Decode
+%% with {@link barrel_ngram_postings_positional}.
+-spec lookup_positional_block(handle(), barrel_ngram_selector:gram()) ->
+    {ok, binary()} | not_found | {error, term()}.
+lookup_positional_block(#segment{offset_table_len = TableLen}, Gram)
+        when Gram * ?ENTRY_BYTES + ?ENTRY_BYTES > TableLen ->
+    not_found;
+lookup_positional_block(#segment{fd = Fd, offset_table_off = TableOff,
+                                 postings_off = PostingsOff}, Gram) ->
+    case file:pread(Fd, TableOff + Gram * ?ENTRY_BYTES, ?ENTRY_BYTES) of
+        {ok, <<0:32/little>>} ->
+            not_found;
+        {ok, <<RegionOff:32/little>>} ->
+            read_positional_block(Fd, PostingsOff + RegionOff);
+        eof ->
+            not_found;
+        {error, _} = Err ->
+            Err
+    end.
+
+%% @private Skip past the phase-1 sub-block (using its own length prefix)
+%% to reach the phase-2 sub-block at the same composite entry.
+read_positional_block(Fd, At) ->
+    case file:pread(Fd, At, 4) of
+        {ok, <<Phase1Len:32/little>>} ->
+            Phase2LenAt = At + 4 + Phase1Len,
+            case file:pread(Fd, Phase2LenAt, 4) of
+                {ok, <<0:32/little>>} ->
+                    not_found;
+                {ok, <<Phase2Len:32/little>>} ->
+                    case file:pread(Fd, Phase2LenAt + 4, Phase2Len) of
+                        {ok, Block} -> {ok, Block};
+                        eof -> {error, truncated_postings};
+                        {error, _} = Err -> Err
+                    end;
+                eof ->
+                    not_found;
+                {error, _} = Err ->
+                    Err
+            end;
+        eof -> {error, truncated_postings};
+        {error, _} = Err -> Err
+    end.
+
+%% @doc The number of documents a gram's phase-2 postings cover, or
+%% `not_found' -- a cheap read for the planner's cost ranking, not a
+%% partial decode of the postings block itself.
+-spec positional_doc_count(handle(), barrel_ngram_selector:gram()) ->
+    {ok, non_neg_integer()} | not_found.
+positional_doc_count(#segment{positional_doc_count_table = Table}, Gram) ->
+    N = byte_size(Table) div ?DOC_COUNT_ENTRY,
+    doc_count_bsearch(Table, Gram, 0, N - 1).
+
+doc_count_bsearch(_Table, _Gram, Lo, Hi) when Lo > Hi ->
+    not_found;
+doc_count_bsearch(Table, Gram, Lo, Hi) ->
+    Mid = (Lo + Hi) div 2,
+    <<_:(Mid * ?DOC_COUNT_ENTRY)/binary, G:24, DocCount:32/little, _/binary>> = Table,
+    if
+        G =:= Gram -> {ok, DocCount};
+        G < Gram -> doc_count_bsearch(Table, Gram, Mid + 1, Hi);
+        true -> doc_count_bsearch(Table, Gram, Lo, Mid - 1)
+    end.
+
 %% @doc Resolve ordinals to `{Ordinal, Key}' pairs (one batched pread).
 %% Out-of-range ordinals are dropped.
 -spec keys(handle(), [barrel_ngram_postings:ordinal()]) ->
@@ -348,13 +469,39 @@ scan_table(<<RegionOff:32/little, Rest/binary>>, Gram, Fd, Codec, POff, Acc) ->
     scan_table(Rest, Gram + 1, Fd, Codec, POff,
                [{Gram, decode_block(Codec, Block)} | Acc]).
 
+%% @doc Every present `{Gram, [{Ordinal, [Offset]}]}' phase-2 payload in
+%% the segment (only grams that actually carry one -- most don't). Reads
+%% the same offset table as {@link all_postings/1} but decodes each
+%% composite entry's Phase2Block instead of Phase1Block. Used by the
+%% merger to rebuild per-ordinal positional data across a compaction.
+-spec all_positional_postings(handle()) ->
+    [{barrel_ngram_selector:gram(), [barrel_ngram_postings_positional:entry()]}].
+all_positional_postings(#segment{offset_table_len = 0}) ->
+    [];
+all_positional_postings(#segment{fd = Fd, offset_table_off = TOff,
+                                 offset_table_len = TLen, postings_off = POff}) ->
+    {ok, Table} = file:pread(Fd, TOff, TLen),
+    scan_table_positional(Table, 0, Fd, POff, []).
+
+scan_table_positional(<<>>, _Gram, _Fd, _POff, Acc) ->
+    lists:reverse(Acc);
+scan_table_positional(<<0:32/little, Rest/binary>>, Gram, Fd, POff, Acc) ->
+    scan_table_positional(Rest, Gram + 1, Fd, POff, Acc);
+scan_table_positional(<<RegionOff:32/little, Rest/binary>>, Gram, Fd, POff, Acc) ->
+    Acc1 = case read_positional_block(Fd, POff + RegionOff) of
+        {ok, Block} -> [{Gram, barrel_ngram_postings_positional:decode(Block)} | Acc];
+        not_found -> Acc
+    end,
+    scan_table_positional(Rest, Gram + 1, Fd, POff, Acc1).
+
 %%====================================================================
 %% Header + sidecar-index parsing
 %%====================================================================
 
 encode_header(#{doc_count := DocCount, offset_table_off := OTOff,
                 offset_table_len := OTLen, postings_off := POff,
-                postings_len := PLen, sidecar_off := SOff,
+                postings_len := PLen, doc_count_table_off := DCTOff,
+                doc_count_table_len := DCTLen, sidecar_off := SOff,
                 sidecar_len := SLen, watermark := Wm, codec := Codec}) ->
     <<?MAGIC/binary,
       ?VERSION:32/little,
@@ -363,6 +510,8 @@ encode_header(#{doc_count := DocCount, offset_table_off := OTOff,
       OTLen:64/little,
       POff:64/little,
       PLen:64/little,
+      DCTOff:64/little,
+      DCTLen:64/little,
       SOff:64/little,
       SLen:64/little,
       Wm:12/binary,
@@ -383,7 +532,8 @@ read_header(Fd) ->
 
 parse_header(<<Magic:8/binary, Version:32/little, DocCount:32/little,
                OTOff:64/little, OTLen:64/little, POff:64/little,
-               PLen:64/little, SOff:64/little, SLen:64/little,
+               PLen:64/little, DCTOff:64/little, DCTLen:64/little,
+               SOff:64/little, SLen:64/little,
                Wm:12/binary, CodecByte:8, _/binary>>)
         when Magic =:= ?MAGIC, Version =:= ?VERSION ->
     {ok, #{
@@ -392,6 +542,8 @@ parse_header(<<Magic:8/binary, Version:32/little, DocCount:32/little,
         offset_table_len => OTLen,
         postings_off => POff,
         postings_len => PLen,
+        doc_count_table_off => DCTOff,
+        doc_count_table_len => DCTLen,
         sidecar_off => SOff,
         sidecar_len => SLen,
         watermark => Wm,
@@ -399,6 +551,9 @@ parse_header(<<Magic:8/binary, Version:32/little, DocCount:32/little,
     }};
 parse_header(<<Magic:8/binary, _/binary>>) when Magic =/= ?MAGIC ->
     {error, invalid_magic};
+parse_header(<<Magic:8/binary, Version:32/little, _/binary>>)
+        when Magic =:= ?MAGIC ->
+    {error, {unsupported_segment_version, Version, ?VERSION}};
 parse_header(_) ->
     {error, invalid_header}.
 
@@ -422,6 +577,20 @@ parse_index(<<>>, Acc) ->
 parse_index(<<Off:32/little, Len:32/little, Del:8, Hlc:12/binary, Rest/binary>>, Acc) ->
     Deleted = Del =/= 0,
     parse_index(Rest, [{Off, Len, Deleted, Hlc} | Acc]).
+
+read_doc_count_table(_Fd, #{doc_count_table_len := 0}) ->
+    {ok, <<>>};
+read_doc_count_table(Fd, #{doc_count_table_off := Off, doc_count_table_len := Len}) ->
+    case file:pread(Fd, Off, Len) of
+        {ok, Bin} when byte_size(Bin) =:= Len ->
+            {ok, Bin};
+        {ok, _} ->
+            {error, truncated_doc_count_table};
+        eof ->
+            {error, truncated_doc_count_table};
+        {error, _} = Err ->
+            Err
+    end.
 
 %%====================================================================
 %% Helpers

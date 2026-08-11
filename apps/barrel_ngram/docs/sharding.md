@@ -34,4 +34,4 @@ For small or moderate databases, a single shard (the default) is simpler and eno
   reindexing into a new corpus (a different data dir).
 - Each shard keeps its own segments under `data_dir/<corpus>/shard-<i>/`; a single-shard
   corpus keeps them directly under `data_dir/<corpus>/`.
-- Sharding is orthogonal to the selector: a corpus can be sparse and sharded.
+- Sharding is orthogonal to `phase2_selector_opts`: either can be tuned independently.

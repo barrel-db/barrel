@@ -58,7 +58,7 @@ open_all([P | Ps], Acc) ->
 
 do_merge(Handles, InputPaths, DropTombstones) ->
     KeyState = collect(Handles),
-    {Entries, Postings, DocCount} = build_output(KeyState, DropTombstones),
+    {Entries, Postings, PositionalPostings, DocCount} = build_output(KeyState, DropTombstones),
     Wm = max_watermark(Handles),
     %% preserve the inputs' codec on the merged output
     Codec = barrel_ngram_segment:codec(hd(Handles)),
@@ -67,26 +67,32 @@ do_merge(Handles, InputPaths, DropTombstones) ->
            ++ ".ngseg",
     Temp = filename:join(Dir, Name),
     Spec = #{doc_count => DocCount, watermark => Wm,
-             postings => Postings, entries => Entries, codec => Codec},
+             postings => Postings, positional_postings => PositionalPostings,
+             entries => Entries, codec => Codec},
     case barrel_ngram_segment:write(Temp, Spec) of
         ok -> {ok, iolist_to_binary(Temp), DocCount, Wm};
         {error, _} = Err -> Err
     end.
 
-%% @private Fold inputs into Key -> {MaxHlc, Deleted, Grams}, keeping the
-%% max-HLC occurrence of each key.
+%% @private Fold inputs into Key -> {MaxHlc, Deleted, Grams, Positional},
+%% keeping the max-HLC occurrence of each key. `Positional' is
+%% `[{Gram, [Offset]}]', keyed by document (not ordinal, which is about to
+%% be reassigned below) so it survives the ordinal reshuffle correctly --
+%% same reasoning as phase-1's `Grams' already keying by document.
 collect(Handles) ->
     lists:foldl(
         fun(H, Acc) ->
             OrdGrams = invert(barrel_ngram_segment:all_postings(H)),
+            OrdPositional = invert_positional(barrel_ngram_segment:all_positional_postings(H)),
             lists:foldl(
                 fun({Ord, Key, Hlc, Deleted}, A) ->
                     case maps:find(Key, A) of
-                        {ok, {PrevHlc, _, _}} when PrevHlc >= Hlc ->
+                        {ok, {PrevHlc, _, _, _}} when PrevHlc >= Hlc ->
                             A;
                         _ ->
                             Grams = maps:get(Ord, OrdGrams, []),
-                            A#{Key => {Hlc, Deleted, Grams}}
+                            Positional = maps:get(Ord, OrdPositional, []),
+                            A#{Key => {Hlc, Deleted, Grams, Positional}}
                     end
                 end, Acc, barrel_ngram_segment:entries(H))
         end, #{}, Handles).
@@ -100,33 +106,51 @@ invert(GramOrds) ->
                 Acc, Ords)
         end, #{}, GramOrds).
 
+%% @private gram -> [{ordinal, [offset]}] into ordinal -> [{gram, [offset]}].
+invert_positional(GramPositional) ->
+    lists:foldl(
+        fun({Gram, Entries}, Acc) ->
+            lists:foldl(
+                fun({O, Offsets}, A) ->
+                    maps:update_with(O, fun(L) -> [{Gram, Offsets} | L] end,
+                                     [{Gram, Offsets}], A)
+                end, Acc, Entries)
+        end, #{}, GramPositional).
+
 %% @private Assign dense ordinals to the surviving keys and build the
-%% output entries + postings.
+%% output entries + both phases' postings.
 build_output(KeyState, DropTombstones) ->
     Kept = maps:fold(
-        fun(Key, {Hlc, Deleted, Grams}, Acc) ->
+        fun(Key, {Hlc, Deleted, Grams, Positional}, Acc) ->
             case Deleted andalso DropTombstones of
                 true -> Acc;
-                false -> [{Key, Hlc, Deleted, Grams} | Acc]
+                false -> [{Key, Hlc, Deleted, Grams, Positional} | Acc]
             end
         end, [], KeyState),
-    Sorted = lists:sort(fun({A, _, _, _}, {B, _, _, _}) -> A =< B end, Kept),
-    {EntriesRev, GramMap, _Ord} =
+    Sorted = lists:sort(fun({A, _, _, _, _}, {B, _, _, _, _}) -> A =< B end, Kept),
+    {EntriesRev, GramMap, PosMap, _Ord} =
         lists:foldl(
-            fun({Key, Hlc, Deleted, Grams}, {Es, GM, Ord}) ->
+            fun({Key, Hlc, Deleted, Grams, Positional}, {Es, GM, PM, Ord}) ->
                 E = #{key => Key, hlc => Hlc, deleted => Deleted},
-                GM1 = case Deleted of
-                    true -> GM;   %% tombstones carry no grams
+                {GM1, PM1} = case Deleted of
+                    true -> {GM, PM};   %% tombstones carry no grams
                     false ->
-                        lists:foldl(
+                        GM_ = lists:foldl(
                             fun(G, M) ->
                                 maps:update_with(G, fun(L) -> [Ord | L] end, [Ord], M)
-                            end, GM, Grams)
+                            end, GM, Grams),
+                        PM_ = lists:foldl(
+                            fun({G, Offsets}, M) ->
+                                maps:update_with(G, fun(L) -> [{Ord, Offsets} | L] end,
+                                                 [{Ord, Offsets}], M)
+                            end, PM, Positional),
+                        {GM_, PM_}
                 end,
-                {[E | Es], GM1, Ord + 1}
-            end, {[], #{}, 0}, Sorted),
+                {[E | Es], GM1, PM1, Ord + 1}
+            end, {[], #{}, #{}, 0}, Sorted),
     Postings = [{G, lists:usort(Os)} || {G, Os} <- maps:to_list(GramMap)],
-    {lists:reverse(EntriesRev), Postings, length(Sorted)}.
+    PositionalPostings = [{G, Entries} || {G, Entries} <- maps:to_list(PosMap)],
+    {lists:reverse(EntriesRev), Postings, PositionalPostings, length(Sorted)}.
 
 max_watermark(Handles) ->
     lists:foldl(

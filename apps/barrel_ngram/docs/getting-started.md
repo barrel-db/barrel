@@ -36,22 +36,21 @@ ok = barrel_ngram:open(<<"code">>, #{db => <<"mydb">>}).
 | Option | Default | What it does |
 |--------|---------|--------------|
 | `db` | (required) | the barrel_docdb database to index |
-| `selector` | `barrel_ngram_selector_dense` | which trigrams to index (see [selectors](selectors.md)) |
-| `selector_opts` | `#{}` | selector tuning, e.g. sparse `radius`/`sample_rate` |
+| `phase2_selector_opts` | `#{}` | phase-2 sampling tuning: `radius`/`sample_rate` (see [selectors](selectors.md)) |
 | `fields` | `all` | `all`, or a list of document field names to index |
 | `shards` | `1` | spread the corpus across N shards (see [sharding](sharding.md)) |
 | `postings` | `varint` | posting codec; `roaring` for large dense corpora (see [design](design.md)) |
 | `data_dir` | app env | where segments are stored (`<data_dir>/<corpus>/`) |
 | `freeze_threshold` | 1000 | buffer size before an automatic freeze |
 | `compact_threshold` | 16 | live segment count before an automatic compaction (`infinity` disables) |
+| `source` | none | a `{Module, InitArg}` byte-source for windowed verification (see [design](design.md)) |
 
 Some examples:
 
 ```erlang
-%% a sparse, sharded, roaring corpus for a large code database
+%% a sharded, roaring corpus for a large code database
 ok = barrel_ngram:open(<<"code">>,
                        #{db => <<"repo">>,
-                         selector => barrel_ngram_selector_sparse,
                          shards => 8,
                          postings => roaring,
                          data_dir => "/var/lib/barrel/ngram"}),
@@ -63,11 +62,11 @@ ok = barrel_ngram:open(<<"notes">>,
 
 The corpus persists on disk under `data_dir/<corpus>/`. After a restart, calling
 `open/2` again with the same name and `data_dir` re-attaches and resumes from where it
-left off (it replays only the feed tail since its last commit). Its options (`selector`,
-`shards`, `postings`) are fixed for the life of the corpus; to change one, open a new
-corpus under a different name or `data_dir` and let it reindex. You can run several
-corpora over the same database at once (for example a dense and a sparse one) as long as
-each uses a distinct `data_dir`.
+left off (it replays only the feed tail since its last commit). Its options
+(`phase2_selector_opts`, `fields`, `shards`, `postings`) are fixed for the life of the
+corpus: reopening with a different `phase2_selector_opts` or `fields` fails with
+`{error, {config_mismatch, Field, Persisted, Requested}}` rather than silently reindexing.
+To change one, open a new corpus under a different name or `data_dir` and let it reindex.
 
 ## Index and search
 
@@ -92,7 +91,20 @@ document's indexed text.
 ```
 
 Regex uses PCRE syntax (it compiles with `re`). A malformed pattern returns
-`{error, {bad_regex, Reason}}`.
+`{error, {bad_regex, Reason}}`. See [regex](regex.md) for what accelerates.
+
+## Case-insensitive search
+
+Both `search` and `regex` take `case_sensitive => false` as a third-argument option
+(default `true`):
+
+```erlang
+{ok, Hits} = barrel_ngram:search(<<"code">>, <<"connect_timeout">>, #{case_sensitive => false}),
+{ok, More} = barrel_ngram:regex(<<"code">>, <<"error">>, #{case_sensitive => false}).
+```
+
+See [regex](regex.md#case-insensitive-search) for the ASCII/non-ASCII split and the
+errors a non-ASCII pattern or a non-UTF-8 document can return.
 
 ## Close a corpus
 

@@ -22,6 +22,89 @@ grams(Bin) ->
 and_of(Bin) -> {'and', [{gram, G} || G <- ordsets:to_list(grams(Bin))]}.
 
 %%====================================================================
+%% literal_runs/1
+%%====================================================================
+
+literal_runs_bare_literal_test() ->
+    ?assertEqual([#{bytes => <<"abc">>, prefix_max => 0, suffix_max => 0}],
+                 ?M:literal_runs(?M:parse(<<"abc">>))).
+
+%% Prefix/SuffixMax sum the width of EVERYTHING on that side of the
+%% chain, not just the gap to the next literal -- the window has to cover
+%% the whole match, and another literal run is itself part of what must
+%% be present and checked. So "foo"'s suffix includes "." (conservatively
+%% 1-4 bytes, see width_bound/1's own moduledoc: upper bound 4) AND
+%% "bar" (3 bytes) = 7; symmetrically "bar"'s prefix is "foo" (3) + "."
+%% (4) = 7.
+literal_runs_chain_prefix_suffix_test() ->
+    Runs = ?M:literal_runs(?M:parse(<<"foo.bar">>)),
+    ?assertEqual([#{bytes => <<"foo">>, prefix_max => 0, suffix_max => 7},
+                  #{bytes => <<"bar">>, prefix_max => 7, suffix_max => 0}],
+                 Runs).
+
+%% Two single-char classes ({2} exactly) ahead of "foobar": each class is
+%% conservatively 1-4 bytes, so PrefixMax is 8 (2*4), not 2, even though
+%% real ASCII digits would only ever consume 2 bytes.
+literal_runs_bounded_prefix_test() ->
+    [Run] = ?M:literal_runs(?M:parse(<<"[0-9]{2}foobar">>)),
+    ?assertEqual(<<"foobar">>, maps:get(bytes, Run)),
+    ?assertEqual(8, maps:get(prefix_max, Run)),
+    ?assertEqual(0, maps:get(suffix_max, Run)).
+
+%% An unbounded quantifier ahead of the literal makes that side unbounded.
+literal_runs_unbounded_prefix_test() ->
+    [Run] = ?M:literal_runs(?M:parse(<<".*foo">>)),
+    ?assertEqual(unbounded, maps:get(prefix_max, Run)),
+    ?assertEqual(0, maps:get(suffix_max, Run)).
+
+%% A top-level alternation has no single definite anchor -- a real match
+%% could come from either branch.
+literal_runs_top_level_alternation_is_ineligible_test() ->
+    ?assertEqual(ineligible, ?M:literal_runs(?M:parse(<<"foo|bar">>))).
+
+%% An alternation nested as a sibling inside a chain: the whole chain is
+%% ineligible (deliberately conservative -- see literal_runs/1's doc),
+%% even though "foo" and "qux" are themselves unambiguous literals.
+literal_runs_nested_alternation_is_ineligible_test() ->
+    ?assertEqual(ineligible, ?M:literal_runs(?M:parse(<<"foo(bar|baz)qux">>))).
+
+%% A genuine multi-node chain (build_cat unwraps a single-node chain to
+%% the bare node itself, so this needs >= 2 non-literal atoms to actually
+%% produce a {cat, _}) with no literal runs at all -- eligible (it IS a
+%% chain), just nothing to anchor on.
+literal_runs_no_literal_in_chain_is_empty_test() ->
+    ?assertEqual([], ?M:literal_runs(?M:parse(<<".+.*">>))).
+
+%%====================================================================
+%% Leading inline modifiers ( (?i) (?s) (?m), whole-pattern only )
+%%====================================================================
+
+leading_flags(Bin) ->
+    {ok, _Node, _Query, #{leading_flags := Flags}} = ?M:analyze(Bin),
+    Flags.
+
+no_leading_modifier_is_empty_flags_test() ->
+    ?assertEqual([], leading_flags(<<"connect_timeout">>)).
+
+leading_i_reports_caseless_test() ->
+    ?assertEqual([caseless], leading_flags(<<"(?i)connect_timeout">>)).
+
+leading_s_reports_dotall_test() ->
+    ?assertEqual([dotall], leading_flags(<<"(?s)connect_timeout">>)).
+
+leading_m_reports_multiline_test() ->
+    ?assertEqual([multiline], leading_flags(<<"(?m)connect_timeout">>)).
+
+leading_ism_reports_all_three_test() ->
+    ?assertEqual(lists:sort([caseless, dotall, multiline]),
+                 lists:sort(leading_flags(<<"(?ism)connect_timeout">>))).
+
+%% The modifier group itself is stripped from the body the parser sees --
+%% it does not leak into the AST/trigram query as literal text.
+leading_i_is_stripped_from_body_test() ->
+    ?assertEqual(and_of(<<"connect_timeout">>), ?M:trigram_query(<<"(?i)connect_timeout">>)).
+
+%%====================================================================
 %% Analysis of representative patterns
 %%====================================================================
 
