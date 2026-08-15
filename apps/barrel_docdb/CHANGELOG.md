@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-08-15
+
+### Added
+- `db_instance_id/1`: a stable per-database-INSTANCE identifier, not
+  per-name -- deleting a database and recreating one under the same name
+  mints a fresh id. Wraps the already-computed, already-persisted
+  `source_id` (now exported from `barrel_db_server` as `source_id/1`).
+  Added for `barrel_ngram`'s corpus lifecycle, which needs to detect a
+  database recreated under the same name while a corpus stays bound to
+  it; no new persisted state.
+
 ## [1.2.0] - 2026-08-09
 
 ### Added

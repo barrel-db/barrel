@@ -3,6 +3,15 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.5.0] - 2026-08-15
+
+### Fixed
+- `ngram_search` no longer silently stops returning results for a
+  database whose corpus was indexed before `barrel_ngram` 0.9.0 (which
+  now rejects a corpus with no `corpus.meta` on open). It now reindexes
+  automatically on first use after the upgrade instead of leaving every
+  subsequent search permanently returning nothing.
+
 ## [1.4.0] - 2026-08-09
 
 ### Added
