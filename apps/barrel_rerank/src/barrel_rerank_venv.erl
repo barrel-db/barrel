@@ -194,8 +194,6 @@ venv_bin_dir(VenvPath) ->
     end.
 
 %% @private Install packages using pip
-install_packages(_Pip, []) ->
-    ok;
 install_packages(Pip, Packages) ->
     PackageStr = string:join(Packages, " "),
     Cmd = io_lib:format("~s install ~s", [Pip, PackageStr]),

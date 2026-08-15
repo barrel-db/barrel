@@ -428,7 +428,40 @@ ensure_corpus(Name) ->
             ok;
         false ->
             DataDir = filename:join(server_data_dir(), "ngram"),
-            _ = barrel_ngram:open(Name, #{db => Name, data_dir => DataDir}),
+            Opts = #{db => Name, data_dir => DataDir},
+            case barrel_ngram:open(Name, Opts) of
+                ok ->
+                    ok;
+                {error, {legacy_corpus_requires_reindex, _}} ->
+                    %% a corpus indexed before barrel_ngram 0.9.0 has no
+                    %% corpus.meta and is rejected outright, with no
+                    %% migration path (db/shards were never recoverable
+                    %% from what a pre-0.9.0 corpus persisted) -- it is a
+                    %% purely derived index over the underlying database's
+                    %% changes feed, so wiping and reopening is safe: the
+                    %% background subscription rebuilds it from scratch.
+                    CorpusDir = filename:join(DataDir, Name),
+                    logger:warning(
+                        "barrel_server: ngram corpus ~s at ~s predates "
+                        "corpus.meta -- reindexing", [Name, CorpusDir]),
+                    ok = del_dir_r(CorpusDir),
+                    _ = barrel_ngram:open(Name, Opts),
+                    ok;
+                {error, _} ->
+                    %% any other failure: leave it be, exactly as before --
+                    %% a real problem surfaces downstream as
+                    %% {error, corpus_not_open} from run_ngram/3
+                    ok
+            end
+    end.
+
+del_dir_r(Dir) ->
+    case file:del_dir_r(Dir) of
+        ok -> ok;
+        {error, enoent} -> ok;
+        {error, Reason} ->
+            logger:warning("barrel_server: could not remove stale ngram "
+                            "corpus dir ~s: ~p", [Dir, Reason]),
             ok
     end.
 

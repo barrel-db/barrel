@@ -4,6 +4,32 @@ All notable changes to the Barrel umbrella are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and each app
 is versioned independently under [Semantic Versioning](https://semver.org/).
 
+## [2026-08-15] barrel_ngram corpus lifecycle hardening
+
+`barrel_ngram`'s `open/2`/`close/1` are now serialized per corpus by a
+one-shot lifecycle coordinator, backed by a corpus-level config file
+(database, shard count, tuning, postings codec) checked before any shard
+starts and committed only once every shard is up -- a mismatched reopen is
+now rejected instead of silently reindexing, rebinding to a different
+database, or orphaning an old shard set on a shard-count change. A
+database deleted and recreated under the same name is now detected both
+at open and continuously on every shard resubscribe. The regex analyzer
+fails closed on lazy/possessive quantifiers, PCRE control verbs, and
+unrecognized escapes instead of mis-parsing them as literal text; a
+positive `source`-verified match is now always re-confirmed against live
+`barrel_docdb` content before being returned. `open/2` validates every
+option up front, including the corpus name itself (closing a
+path-traversal risk). `barrel_docdb` gains `db_instance_id/1`, the
+read-only accessor this needed. `barrel_server`'s `ngram_search` MCP tool
+no longer silently stops returning results for a corpus indexed before
+this change -- it reindexes automatically on first use instead.
+
+| App | Version | Change |
+|-----|---------|--------|
+| barrel_ngram | 0.9.0 | corpus lifecycle lock + corpus-level config; database-instance recreation detection; regex parser soundness; live re-confirmation of `source`-verified matches; full `open/2` option validation. Breaking: `close/1` now returns `ok \| {error, term()}`; a corpus indexed before this change needs a fresh `data_dir` |
+| barrel_docdb | 1.3.0 | `db_instance_id/1` |
+| barrel_server | 1.5.0 | `ngram_search` auto-reindexes a pre-0.9.0 corpus instead of silently going empty |
+
 ## [2026-08-09] S3-compatible attachment backend
 
 New sibling app `barrel_att_s3` implements `barrel_att_backend` against

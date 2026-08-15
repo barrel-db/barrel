@@ -960,7 +960,6 @@ vector_add(Req) ->
             end,
             case Res of
                 ok -> json_resp(201, #{ok => true, id => Id});
-                {ok, R} -> json_resp(201, jsonable(R));
                 Err -> error_resp(Err)
             end
         end)
@@ -1030,7 +1029,6 @@ read_body(Req) ->
 
 %% @private Render one batch element ({ok, Map} | {error, Reason}) as JSON.
 batch_result({ok, Map}) when is_map(Map) -> jsonable(Map);
-batch_result({ok, Other}) -> #{ok => true, result => Other};
 batch_result({error, Reason}) -> #{error => err_bin(Reason)}.
 
 %% Vectors are opt-in reads. The reader returns _embedding as a float
@@ -1080,16 +1078,13 @@ search_opts(Body) ->
 
 search_reply({ok, Hits}) when is_list(Hits) ->
     json_resp(200, #{hits => [hit(H) || H <- Hits]});
-search_reply(Hits) when is_list(Hits) ->
-    json_resp(200, #{hits => [hit(H) || H <- Hits]});
 search_reply(Err) ->
     error_resp(Err).
 
 %% @private Normalise a search hit to a JSON-safe map. Vector hits are already
 %% maps; BM25 hits are {Id, Score} tuples.
 hit({Id, Score}) -> #{key => Id, score => Score};
-hit(Map) when is_map(Map) -> jsonable(Map);
-hit(Other) -> Other.
+hit(Map) when is_map(Map) -> jsonable(Map).
 
 att_content_type(Db, Id, Name) ->
     case barrel:attachment_info(Db, Id, Name) of
@@ -1126,11 +1121,7 @@ wants_sse(Req) ->
     end.
 
 param(Key, Req) ->
-    case livery_req:query(Req) of
-        undefined -> undefined;
-        Raw ->
-            find_param(Key, uri_string:dissect_query(to_bin(Raw)))
-    end.
+    find_param(Key, uri_string:dissect_query(to_bin(livery_req:query(Req)))).
 
 find_param(_Key, []) -> undefined;
 find_param(Key, [{K, V} | T]) ->

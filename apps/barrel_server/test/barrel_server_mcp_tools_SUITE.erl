@@ -18,6 +18,7 @@
     t_query_subscribe_rejected/1,
     t_search/1,
     t_ngram_search/1,
+    t_ngram_search_legacy_reindex/1,
     t_changes_cursor/1,
     t_branch_merge/1,
     t_capability_scoping/1,
@@ -36,6 +37,7 @@ groups() ->
     [
         {open, [], [t_tools_list, t_db_doc_roundtrip, t_query_paging,
                     t_query_subscribe_rejected, t_search, t_ngram_search,
+                    t_ngram_search_legacy_reindex,
                     t_changes_cursor, t_branch_merge]},
         {locked, [], [t_capability_scoping, t_server_token_full]}
     ].
@@ -231,6 +233,38 @@ t_ngram_search(_Config) ->
         call(C, <<"ngram_search">>, #{<<"db">> => <<"mcp_ng">>,
                                       <<"mode">> => <<"regex">>,
                                       <<"query">> => <<"(unclosed">>}),
+    barrel_mcp_client:close(C),
+    ok.
+
+%% A corpus indexed before barrel_ngram 0.9.0 has real segments/manifest
+%% but no corpus.meta, and open/2 now rejects that outright with
+%% legacy_corpus_requires_reindex. ensure_corpus/1 must not let that
+%% leave ngram_search permanently returning nothing -- it wipes and
+%% reindexes automatically instead.
+t_ngram_search_legacy_reindex(_Config) ->
+    C = connect(#{}),
+    Db = <<"mcp_ng_legacy">>,
+    {false, _} = call(C, <<"db_create">>, #{<<"db">> => Db}),
+    {false, _} = call(C, <<"doc_put">>,
+                      #{<<"db">> => Db,
+                        <<"doc">> => #{<<"id">> => <<"a">>,
+                                       <<"body">> => <<"connect_timeout in the pool">>}}),
+    {false, #{<<"hits">> := H1}} =
+        call(C, <<"ngram_search">>, #{<<"db">> => Db,
+                                      <<"query">> => <<"connect_timeout">>}),
+    ?assertEqual([<<"a">>], [maps:get(<<"id">>, H) || H <- H1]),
+    %% close, then strip corpus.meta -- simulating a corpus indexed
+    %% before corpus.meta existed (real manifest/segments survive)
+    ok = barrel_ngram:close(Db),
+    DataDir0 = application:get_env(barrel_server, data_dir, "data"),
+    MetaPath = filename:join([DataDir0, "ngram", Db, "corpus.meta"]),
+    ?assert(filelib:is_regular(MetaPath)),
+    ok = file:delete(MetaPath),
+    %% the next search must not go permanently blind
+    {false, #{<<"hits">> := H2}} =
+        call(C, <<"ngram_search">>, #{<<"db">> => Db,
+                                      <<"query">> => <<"connect_timeout">>}),
+    ?assertEqual([<<"a">>], [maps:get(<<"id">>, H) || H <- H2]),
     barrel_mcp_client:close(C),
     ok.
 
