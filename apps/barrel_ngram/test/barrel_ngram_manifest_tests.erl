@@ -17,7 +17,11 @@ manifest_test_() ->
       fun save_load_roundtrip/1,
       fun atomic_replace/1,
       fun add_segment_advances_gen/1,
-      fun orphan_cleanup/1
+      fun orphan_cleanup/1,
+      fun unsupported_version_rejected/1,
+      fun config_first_open_persists/1,
+      fun config_matching_reopen_ok/1,
+      fun config_mismatch_rejected/1
      ]}.
 
 setup() ->
@@ -85,4 +89,47 @@ orphan_cleanup(Dir) ->
         ?assert(filelib:is_file(filename:join(Dir, "segment-000000.ngseg"))),
         ?assertNot(filelib:is_file(filename:join(Dir, "segment-000001.ngseg"))),
         ?assertNot(filelib:is_file(filename:join(Dir, "manifest.tmp")))
+    end.
+
+%% A manifest written by a different version (here, forced back to 1, the
+%% pre-config-persistence format) is rejected outright -- no migration.
+unsupported_version_rejected(Dir) ->
+    fun() ->
+        ok = ?M:save(Dir, ?M:empty()),
+        Path = filename:join(Dir, "manifest"),
+        {ok, Bin} = file:read_file(Path),
+        M = binary_to_term(Bin),
+        ok = file:write_file(Path, term_to_binary(M#{version => 1})),
+        ?assertEqual({error, {unsupported_manifest_version, 1, 2}}, ?M:load(Dir))
+    end.
+
+config_first_open_persists(_Dir) ->
+    fun() ->
+        Config = #{phase2_selector_opts => #{radius => 3, sample_rate => 4},
+                   fields => all},
+        {ok, M1} = ?M:reconcile_config(?M:empty(), Config),
+        ?assertEqual(Config, ?M:config(M1))
+    end.
+
+config_matching_reopen_ok(_Dir) ->
+    fun() ->
+        Config = #{phase2_selector_opts => #{radius => 3, sample_rate => 4},
+                   fields => all},
+        {ok, M1} = ?M:reconcile_config(?M:empty(), Config),
+        ?assertEqual({ok, M1}, ?M:reconcile_config(M1, Config))
+    end.
+
+config_mismatch_rejected(_Dir) ->
+    fun() ->
+        Persisted = #{phase2_selector_opts => #{radius => 3, sample_rate => 4},
+                      fields => all},
+        {ok, M1} = ?M:reconcile_config(?M:empty(), Persisted),
+        Requested1 = Persisted#{phase2_selector_opts => #{radius => 5, sample_rate => 4}},
+        ?assertEqual({error, {config_mismatch, phase2_selector_opts,
+                              #{radius => 3, sample_rate => 4},
+                              #{radius => 5, sample_rate => 4}}},
+                     ?M:reconcile_config(M1, Requested1)),
+        Requested2 = Persisted#{fields => [<<"title">>]},
+        ?assertEqual({error, {config_mismatch, fields, all, [<<"title">>]}},
+                     ?M:reconcile_config(M1, Requested2))
     end.

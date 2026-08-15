@@ -8,10 +8,9 @@ identifiers, error strings, config keys, punctuation-heavy literals.
 [HexDocs](https://hexdocs.pm/barrel_ngram) |
 [Repository](https://github.com/barrel-db/barrel)
 
-A corpus is bound to a `barrel_docdb` database and a gram selector.
-Indexing is driven by the database's changes feed, and every query
-result is confirmed against the real document text, so a trigram false
-positive is never returned.
+A corpus is bound to a `barrel_docdb` database. Indexing is driven by the
+database's changes feed, and every query result is confirmed against the
+real document text, so a trigram false positive is never returned.
 
 ## Use
 
@@ -26,12 +25,15 @@ ok = barrel_ngram:open(<<"code">>, #{db => <<"mydb">>}),
 
 %% Regex search (PCRE syntax).
 {ok, More} = barrel_ngram:regex(<<"code">>, <<"connect_\\w+timeout">>).
+
+%% Case-insensitive, either mode.
+{ok, Ci} = barrel_ngram:search(<<"code">>, <<"connect_timeout">>, #{case_sensitive => false}).
 ```
 
 ## Documentation
 
 - [Getting started](docs/getting-started.md) - open, index, search, regex.
-- [Selectors](docs/selectors.md) - dense vs sparse, tuning.
+- [Selectors](docs/selectors.md) - what gets indexed, phase-2 tuning.
 - [Regex](docs/regex.md) - patterns, what accelerates.
 - [Sharding](docs/sharding.md) - spread a corpus across N shards.
 - [Operations](docs/operations.md) - refresh, compact, recovery, deletes.
@@ -50,22 +52,30 @@ ok = barrel_ngram:open(<<"code">>, #{db => <<"mydb">>}),
   back to its document key through a sidecar.
 - A query turns the literal into its overlapping trigrams, intersects
   their posting lists, then fetches the candidates and runs the real
-  substring match (trigram presence is necessary, not sufficient).
+  substring match (trigram presence is necessary, not sufficient). A
+  second, content-defined (sparse) index narrows further to a candidate
+  byte position, and, with a `source` configured, confirms by reading
+  just a window of the document instead of the whole thing.
 - Literals shorter than a trigram fall back to a scan of the live set.
+- `case_sensitive => false` on either `search` or `regex` for
+  case-insensitive matching.
 
 ## Status
 
-Substring and regex search over dense and sparse (content-defined)
-trigram selection, across multiple immutable segments kept live by a push
-subscription to the changes feed (updates and deletes reflected via the
-confirm pass), with crash-safe manifest recovery and compaction that
-evicts superseded and deleted entries. A corpus can be sharded across N
-nodes by rendezvous hashing (`open` option `shards => N`), and barrel_server
-exposes it as the read-only `ngram_search` MCP tool (mode literal or regex).
+Substring and regex search over a dense trigram index, across multiple
+immutable segments kept live by a push subscription to the changes feed
+(updates and deletes reflected via the confirm pass), with crash-safe
+manifest recovery and compaction that evicts superseded and deleted
+entries. A corpus can be sharded across N nodes by rendezvous hashing
+(`open` option `shards => N`), and barrel_server exposes it as the
+read-only `ngram_search` MCP tool (mode literal or regex).
 
-Choose the selector per corpus: dense (default, indexes every trigram) or
-sparse (`selector => barrel_ngram_selector_sparse`, indexes a sampled
-subset for a smaller index).
+Every corpus also builds a second, content-defined (sparse) positional
+index alongside the dense one (tuned with `phase2_selector_opts`): it
+narrows candidates to specific byte positions and, with a `source`
+configured, verifies a match by reading a small window instead of the
+whole document, for both substring and (a bounded subset of) regex
+queries. See [selectors](docs/selectors.md).
 
 ## License
 

@@ -198,6 +198,8 @@
     new_hlc/0
 ]).
 
+-export([db_instance_id/1]).
+
 %% Path Subscriptions (real-time document change notifications)
 -export([
     subscribe/2,
@@ -2105,6 +2107,30 @@ fold_system_docs(Prefix, Fun, Acc0) ->
 -spec get_hlc() -> barrel_hlc:timestamp().
 get_hlc() ->
     barrel_hlc:get_hlc().
+
+%% @doc This database's stable per-instance source id (the version
+%% author). Per database INSTANCE, not per name: deleting a database and
+%% recreating one under the same name mints a fresh id, since the
+%% underlying `ensure_source_id/2' keys off what is actually persisted,
+%% not the name alone. Callers that need to detect "this is still the
+%% same database I originally bound to, not a same-named replacement"
+%% (see barrel_ngram's corpus lifecycle) compare this value, not the
+%% name.
+%%
+%% `{error, not_found}' if `Db' does not resolve to a currently-open
+%% database (an invalid ref, or one that was never opened in this VM).
+-spec db_instance_id(binary() | pid()) -> {ok, binary()} | {error, term()}.
+db_instance_id(Db) ->
+    case resolve_db_name(Db) of
+        {ok, DbName} ->
+            try
+                {ok, barrel_db_server:source_id(DbName)}
+            catch
+                error:badarg -> {error, not_found}
+            end;
+        {error, _} = Err ->
+            Err
+    end.
 
 %% @doc Synchronize with a remote HLC timestamp.
 %%

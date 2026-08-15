@@ -73,6 +73,31 @@ intersect_skewed_test() ->
     Large = lists:seq(0, 100000),
     ?assertEqual([7, 5000, 99999], ?M:intersect_all([Large, Small])).
 
+%% Finding 9: intersect_all/1's fold must call the private
+%% gallop_intersect(Small, Large) with the shrinking accumulator (the
+%% shortest list) as `Small' and each fresh list from `Rest' as `Large' --
+%% the reverse was the actual bug (correctness is unaffected either way,
+%% only performance for skewed sizes, so this is a call-order/contract
+%% test, not a correctness one). gallop_intersect/2 is private, and meck
+%% cannot intercept a local (same-module) call, so this uses erlang
+%% call tracing (dbg), which works at the VM level regardless of export.
+gallop_intersect_argument_order_test() ->
+    TestPid = self(),
+    {ok, _} = dbg:tracer(process, {fun(Msg, _) -> TestPid ! Msg end, none}),
+    {ok, _} = dbg:p(self(), call),
+    {ok, _} = dbg:tpl(barrel_ngram_postings, gallop_intersect, 2, []),
+    Small = [7, 5000, 99999],
+    Large = lists:seq(0, 100000),
+    _ = ?M:intersect_all([Large, Small]),
+    Result = receive
+        {trace, _Pid, call, {barrel_ngram_postings, gallop_intersect, [ArgSmall, ArgLarge]}} ->
+            {ArgSmall, ArgLarge}
+    after 2000 ->
+        timeout
+    end,
+    dbg:stop(),
+    ?assertEqual({Small, Large}, Result).
+
 %%====================================================================
 %% Helpers
 %%====================================================================

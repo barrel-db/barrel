@@ -5,8 +5,7 @@
 %%% asserts substring search returns exactly the documents whose corpus
 %%% text contains the literal. The decisive test (`oracle_equivalence')
 %%% checks the trigram pipeline against a brute-force substring scan over
-%%% the same corpus: byte-identical results are what make M1 the oracle
-%%% for the sparse selector.
+%%% the same corpus: byte-identical results.
 %%% @end
 %%%-------------------------------------------------------------------
 -module(barrel_ngram_SUITE).

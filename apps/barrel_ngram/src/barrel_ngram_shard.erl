@@ -5,9 +5,15 @@
 %%% The shard keeps a corpus in sync with its barrel_docdb database. It
 %%% subscribes to the changes feed in push mode and applies each batch to
 %%% an in-memory buffer keyed by document id (an update replaces, a delete
-%%% becomes a tombstone). When the buffer passes a threshold it freezes to
-%%% a new immutable segment and commits the manifest, advancing the
-%%% persisted watermark.
+%%% becomes a tombstone). The buffer holds each live key's corpus TEXT, not
+%%% pre-computed grams: gram selection (both phase-1 dense and phase-2
+%%% positional) happens once, at freeze time, from that text, rather than
+%%% once per change -- a document updated several times before a freeze
+%%% only ever has its final version's grams computed once, and the buffer
+%%% is not searched directly (every buffered key is always a candidate),
+%%% so nothing needs its grams before freeze. When the buffer passes a
+%%% threshold it freezes to a new immutable segment and commits the
+%%% manifest, advancing the persisted watermark.
 %%%
 %%% Segments only ever accumulate on their own, so when the live count
 %%% crosses a threshold the shard compacts: an offloaded worker merges the
@@ -36,8 +42,9 @@
 -define(REFRESH_BATCH, 1000).
 -define(SUBSCRIBE_RETRY_MS, 1000).
 
-%% Buffer content: live grams, or a tombstone.
--type content() :: {live, [barrel_ngram_selector:gram()]} | deleted.
+%% Buffer content: live corpus text (grams are derived at freeze time,
+%% from both phases -- see the moduledoc), or a tombstone.
+-type content() :: {live, binary()} | deleted.
 
 -record(state, {
     ref :: term(),
@@ -45,9 +52,14 @@
     shard_index :: non_neg_integer(),
     shards :: pos_integer(),
     config :: map(),
-    selector :: module(),
-    selector_opts :: map(),
     db :: binary(),
+    %% pinned once at init/1, from Config's db_instance_id (see
+    %% barrel_ngram_corpus_config); re-checked on every subscribe/
+    %% resubscribe so a database deleted and recreated under the same
+    %% name mid-lifetime cannot be silently re-attached to (finding 2's
+    %% "recreated under the same name" gap, closed for the ONGOING
+    %% subscription case, not just at open/2 time)
+    expected_db_instance_id :: binary() | undefined,
     dir :: binary(),
     manifest :: barrel_ngram_manifest:manifest(),
     watermark :: binary() | first,   %% applied HLC (12-byte) or first
@@ -89,10 +101,15 @@ get_manifest(Corpus) ->
 buffer_keys(Corpus) ->
     gen_server:call(via(Corpus), buffer_keys, infinity).
 
-%% @doc The live segments and the buffered ids in one atomic read, so a
-%% query never straddles a freeze (which could move a doc out of the buffer
-%% into a segment the query did not see).
--spec snapshot(term()) -> {ok, [{non_neg_integer(), binary()}], [binary()]}.
+%% @doc The live segments and an immutable copy of the buffer in one
+%% atomic read, so a query never straddles a freeze (which could move a
+%% doc out of the buffer into a segment the query did not see). The
+%% buffer snapshot carries each key's change HLC and whether it is live
+%% or a tombstone -- not just the key -- because the query layer's
+%% buffer/segment precedence rule needs to tell a live buffered update
+%% from a buffered delete (see barrel_ngram_query's confirm pass).
+-spec snapshot(term()) ->
+    {ok, [{non_neg_integer(), binary()}], #{binary() => {binary(), live | deleted}}}.
 snapshot(Corpus) ->
     gen_server:call(via(Corpus), snapshot, infinity).
 
@@ -110,37 +127,94 @@ init({Ref, Config}) ->
     Corpus = maps:get(corpus, Config),
     ShardIndex = maps:get(shard_index, Config, 0),
     Shards = maps:get(shards, Config, 1),
-    Selector = maps:get(selector, Config, barrel_ngram_selector_dense),
-    SelectorOpts = maps:get(selector_opts, Config, #{}),
     Db = maps:get(db, Config),
     Dir = shard_dir(Corpus, ShardIndex, Shards, Config),
-    {ok, Manifest0} = barrel_ngram_manifest:load(Dir),
-    ok = barrel_ngram_manifest:cleanup_orphans(Dir, Manifest0),
-    State0 = #state{
-        ref = Ref,
-        corpus = Corpus,
-        shard_index = ShardIndex,
-        shards = Shards,
-        config = Config,
-        selector = Selector,
-        selector_opts = SelectorOpts,
-        db = Db,
-        dir = Dir,
-        manifest = Manifest0,
-        watermark = barrel_ngram_manifest:watermark(Manifest0),
-        freeze_threshold = maps:get(freeze_threshold, Config, ?DEFAULT_FREEZE_THRESHOLD),
-        compact_threshold = maps:get(compact_threshold, Config, ?DEFAULT_COMPACT_THRESHOLD),
-        merge_worker = undefined
-    },
-    {ok, subscribe(State0)}.
+    case open_manifest(Dir, Config) of
+        {ok, Manifest0} ->
+            State0 = #state{
+                ref = Ref,
+                corpus = Corpus,
+                shard_index = ShardIndex,
+                shards = Shards,
+                config = Config,
+                db = Db,
+                %% `undefined' (a direct/test start_link/2 that never went
+                %% through the corpus lifecycle) leaves the check below a
+                %% no-op rather than rejecting every subscribe
+                expected_db_instance_id = maps:get(db_instance_id, Config, undefined),
+                dir = Dir,
+                manifest = Manifest0,
+                watermark = barrel_ngram_manifest:watermark(Manifest0),
+                freeze_threshold = maps:get(freeze_threshold, Config, ?DEFAULT_FREEZE_THRESHOLD),
+                compact_threshold = maps:get(compact_threshold, Config, ?DEFAULT_COMPACT_THRESHOLD),
+                merge_worker = undefined
+            },
+            case subscribe(State0) of
+                {ok, State1} -> {ok, State1};
+                {stop, Reason, _State1} -> {stop, Reason}
+            end;
+        {error, Reason} ->
+            {stop, Reason}
+    end.
+
+%% @private Load the manifest, eagerly validate every segment it lists
+%% (fail closed on any pre-v4 segment rather than surfacing it lazily on
+%% first query), and reconcile the corpus's persisted config against this
+%% open's request. Runs before `cleanup_orphans/2' so a rejected open
+%% never deletes anything.
+open_manifest(Dir, Config) ->
+    case barrel_ngram_manifest:load(Dir) of
+        {ok, Manifest0} ->
+            case validate_segments(Dir, Manifest0) of
+                ok ->
+                    Requested = #{
+                        phase2_selector_opts => maps:get(phase2_selector_opts, Config, #{}),
+                        fields => maps:get(fields, Config, all)
+                    },
+                    case barrel_ngram_manifest:reconcile_config(Manifest0, Requested) of
+                        {ok, Manifest1} ->
+                            ok = barrel_ngram_manifest:cleanup_orphans(Dir, Manifest1),
+                            {ok, Manifest1};
+                        {error, _} = Err ->
+                            Err
+                    end;
+                {error, _} = Err ->
+                    Err
+            end;
+        {error, _} = Err ->
+            Err
+    end.
+
+validate_segments(Dir, Manifest) ->
+    validate_segment_files(Dir, barrel_ngram_manifest:list_segments(Manifest)).
+
+validate_segment_files(_Dir, []) ->
+    ok;
+validate_segment_files(Dir, [#{file := File} | Rest]) ->
+    Path = filename:join(Dir, File),
+    case barrel_ngram_segment:open(Path) of
+        {ok, H} ->
+            barrel_ngram_segment:close(H),
+            validate_segment_files(Dir, Rest);
+        {error, {unsupported_segment_version, Got, Expected}} ->
+            {error, {unsupported_segment_version, Path, Got, Expected}};
+        {error, _} = Err ->
+            Err
+    end.
 
 handle_call(refresh, _From, State) ->
-    State1 = maybe_compact(do_freeze(drain(State))),
-    Reply = {ok, #{
-        segments => length(barrel_ngram_manifest:list_segments(State1#state.manifest)),
-        watermark => State1#state.watermark
-    }},
-    {reply, Reply, State1};
+    Target = barrel_docdb:get_hlc(),
+    case drain(State, Target) of
+        {ok, State1} ->
+            State2 = maybe_compact(do_freeze(State1)),
+            Reply = {ok, #{
+                segments => length(barrel_ngram_manifest:list_segments(State2#state.manifest)),
+                watermark => State2#state.watermark
+            }},
+            {reply, Reply, State2};
+        {error, Reason, State1} ->
+            {reply, {error, {refresh_incomplete, Reason}}, State1}
+    end;
 
 handle_call(compact, _From, #state{merge_worker = undefined} = State0) ->
     State1 = do_freeze(State0),
@@ -173,7 +247,9 @@ handle_call(buffer_keys, _From, #state{buffer = Buffer} = State) ->
 handle_call(snapshot, _From, #state{dir = Dir, manifest = M, buffer = Buffer} = State) ->
     Segs = [{maps:get(gen, S), filename:join(Dir, maps:get(file, S))}
             || S <- barrel_ngram_manifest:list_segments(M)],
-    {reply, {ok, Segs, maps:keys(Buffer)}, State};
+    BufferSnapshot = maps:map(fun(_K, {Hlc, Content}) -> {Hlc, content_kind(Content)} end,
+                              Buffer),
+    {reply, {ok, Segs, BufferSnapshot}, State};
 
 handle_call(get_config, _From, #state{config = Config} = State) ->
     {reply, {ok, Config}, State}.
@@ -209,18 +285,48 @@ handle_info({'DOWN', MRef, process, _Pid, Reason},
     {noreply, State#state{merge_worker = undefined}};
 
 handle_info({'EXIT', Pid, _Reason}, #state{stream_pid = Pid} = State) ->
-    {noreply, subscribe(State#state{stream_pid = undefined})};
+    case subscribe(State#state{stream_pid = undefined}) of
+        {ok, State1} -> {noreply, State1};
+        {stop, Reason, State1} -> {stop, Reason, State1}
+    end;
 
 handle_info(subscribe_retry, #state{stream_pid = undefined} = State) ->
-    {noreply, subscribe(State)};
+    case subscribe(State) of
+        {ok, State1} -> {noreply, State1};
+        {stop, Reason, State1} -> {stop, Reason, State1}
+    end;
 
 handle_info(_Info, State) ->
     {noreply, State}.
 
-terminate(_Reason, #state{stream_pid = Pid}) ->
+terminate(_Reason, #state{stream_pid = Pid, merge_worker = Worker,
+                          dir = Dir, manifest = M}) ->
     _ = case Pid of
         undefined -> ok;
         _ -> (try barrel_changes_stream:stop(Pid) catch _:_ -> ok end)
+    end,
+    case Worker of
+        undefined ->
+            ok;
+        {WPid, MRef} ->
+            %% the shard traps exits specifically so an ordinary shutdown
+            %% signal lands here, in terminate/2, instead of killing it
+            %% outright -- meaning the link's automatic "take the worker
+            %% down when I die" has NOT fired yet (we have not died yet).
+            %% Kill the worker explicitly FIRST, then wait for its
+            %% confirmed DOWN -- waiting first, without signaling it,
+            %% would just wait for the merge to finish on its own,
+            %% reintroducing the bug this exists to close. Unconditional,
+            %% no timeout: a kill-induced death is only ever slow due to
+            %% scheduler latency (bounded by however long the worker's
+            %% current NIF call takes, see the moduledoc), never worker
+            %% misbehavior, and the supervisor's own outer shutdown
+            %% timeout is the higher-level backstop.
+            exit(WPid, kill),
+            receive
+                {'DOWN', MRef, process, WPid, _} -> ok
+            end,
+            barrel_ngram_manifest:cleanup_orphans(Dir, M)
     end,
     ok.
 
@@ -228,34 +334,76 @@ terminate(_Reason, #state{stream_pid = Pid}) ->
 %% Subscription
 %%====================================================================
 
-subscribe(#state{db = Db, watermark = Wm} = State) ->
+%% @private Every subscribe AND resubscribe -- not just the first, at
+%% init/1 -- funnels through here (the EXIT-triggered resubscribe and the
+%% subscribe_retry path both call this same function), so checking
+%% identity here once closes the gap for all three call sites. A mismatch
+%% is fail-closed via a non-restarting {shutdown, _} reason, NOT an
+%% ordinary stop reason: this shard is `transient' under
+%% barrel_ngram_shard_sup, and an ABNORMAL exit would auto-restart it --
+%% which fixes nothing (the underlying database is still wrong) and,
+%% because every shard shares one supervisor, a persistent mismatch would
+%% crash-loop and could exceed the supervisor's restart intensity,
+%% wiping out every OTHER corpus's shards too (see
+%% barrel_ngram_corpus_lifecycle's "Binding shard subscriptions" note).
+subscribe(#state{db = Db, watermark = Wm,
+                 expected_db_instance_id = Expected} = State) ->
     Opts = #{mode => push, owner => self(), include_docs => true},
     case barrel_docdb:subscribe_changes(Db, since(Wm), Opts) of
         {ok, Pid} ->
-            State#state{stream_pid = Pid};
+            check_db_instance(Expected, Pid, Db, State);
         {error, _} ->
             erlang:send_after(?SUBSCRIBE_RETRY_MS, self(), subscribe_retry),
-            State#state{stream_pid = undefined}
+            {ok, State#state{stream_pid = undefined}}
+    end.
+
+%% @private `undefined' (a direct/test start not carrying db_instance_id)
+%% skips the check entirely -- see init/1.
+check_db_instance(undefined, Pid, _Db, State) ->
+    {ok, State#state{stream_pid = Pid}};
+check_db_instance(Expected, Pid, Db, State) ->
+    case barrel_docdb:db_instance_id(Db) of
+        {ok, Expected} ->
+            {ok, State#state{stream_pid = Pid}};
+        {ok, Got} ->
+            logger:error(
+              "barrel_ngram db_instance_id mismatch for ~p (ref ~p): "
+              "expected ~p, got ~p -- database was deleted and recreated "
+              "under the same name while this shard was live",
+              [State#state.corpus, State#state.ref, Expected, Got]),
+            _ = (try barrel_changes_stream:stop(Pid) catch _:_ -> ok end),
+            {stop, {shutdown, {db_instance_mismatch, Expected, Got}},
+             State#state{stream_pid = undefined}};
+        {error, _} ->
+            %% could not verify identity either way -- treat like an
+            %% ordinary subscribe failure (retry) rather than assuming a
+            %% mismatch or a match
+            _ = (try barrel_changes_stream:stop(Pid) catch _:_ -> ok end),
+            erlang:send_after(?SUBSCRIBE_RETRY_MS, self(), subscribe_retry),
+            {ok, State#state{stream_pid = undefined}}
     end.
 
 %%====================================================================
 %% Applying changes
 %%====================================================================
 
+%% Phase-1 (dense, non-positional) is the always-on selector; there is no
+%% longer a corpus-wide selector choice (see the app moduledoc).
+-define(PHASE1_SELECTOR, barrel_ngram_selector_dense).
+
 %% @private Apply a batch to the buffer, advancing the watermark. Changes
 %% at or below the current watermark are skipped (idempotent replay).
-apply_changes(Changes, #state{buffer = Buffer, watermark = Wm, selector = Sel,
-                              selector_opts = SelOpts, config = Cfg,
+apply_changes(Changes, #state{buffer = Buffer, watermark = Wm, config = Cfg,
                               shard_index = I, shards = N} = State) ->
     {Buffer1, Wm1} = lists:foldl(
-        fun(Change, Acc) -> apply_change(Change, Acc, Sel, SelOpts, Cfg, I, N) end,
+        fun(Change, Acc) -> apply_change(Change, Acc, Cfg, I, N) end,
         {Buffer, Wm}, Changes),
     State#state{buffer = Buffer1, watermark = Wm1}.
 
 %% Advance the watermark for every change above it (owned or not, so the
 %% shard never reprocesses the feed), but only buffer a change this shard
 %% owns by rendezvous.
-apply_change(Change, {Buffer, Wm}, Sel, SelOpts, Cfg, I, N) ->
+apply_change(Change, {Buffer, Wm}, Cfg, I, N) ->
     EncHlc = barrel_hlc:encode(maps:get(hlc, Change)),
     case Wm =/= first andalso EncHlc =< Wm of
         true ->
@@ -273,8 +421,7 @@ apply_change(Change, {Buffer, Wm}, Sel, SelOpts, Cfg, I, N) ->
                             case maps:get(doc, Change, undefined) of
                                 Doc when is_map(Doc) ->
                                     Text = barrel_ngram_corpus:doc_text(Doc, Cfg),
-                                    Grams = barrel_ngram_selector:select_grams(Sel, SelOpts, Text),
-                                    Buffer#{Id => {EncHlc, {live, Grams}}};
+                                    Buffer#{Id => {EncHlc, {live, Text}}};
                                 _ ->
                                     Buffer
                             end
@@ -287,21 +434,37 @@ apply_change(Change, {Buffer, Wm}, Sel, SelOpts, Cfg, I, N) ->
 %% Refresh (synchronous drain + freeze)
 %%====================================================================
 
-drain(#state{db = Db, watermark = Wm} = State) ->
+%% @private Drain the feed up to a FIXED target HLC captured once at
+%% `refresh''s entry (not the moving "now" the OLD single-arg `drain/1'
+%% chased) -- under sustained writes producing >= ?REFRESH_BATCH changes
+%% per call indefinitely, re-querying against a moving target could
+%% recurse forever. Each batch already carries its own last HLC
+%% (`{ok, Changes, LastHlc}'); once that reaches `Target', draining is
+%% done, bounding the iteration count by `(changes up to Target) /
+%% ?REFRESH_BATCH' regardless of how many MORE writes arrive meanwhile.
+%% Propagates a `get_changes' error to the caller instead of silently
+%% discarding it and reporting success on partial progress.
+drain(#state{db = Db, watermark = Wm} = State, Target) ->
     case barrel_docdb:get_changes(Db, since(Wm), #{include_docs => true,
                                                    limit => ?REFRESH_BATCH}) of
-        {ok, [], _Last} ->
-            State;
-        {ok, Changes, _Last} ->
+        {ok, [], _LastHlc} ->
+            {ok, State};
+        {ok, Changes, LastHlc} ->
             #state{watermark = Wm1} = State1 = apply_changes(Changes, State),
-            %% continue only on a full batch that made progress; a full batch
-            %% that does not advance the watermark would otherwise loop forever
-            case length(Changes) >= ?REFRESH_BATCH andalso Wm1 =/= Wm of
-                true -> drain(State1);
-                false -> State1
+            case barrel_hlc:compare(LastHlc, Target) =/= lt of
+                true ->
+                    {ok, State1};
+                false ->
+                    %% continue only on a full batch that made progress; a
+                    %% full batch that does not advance the watermark would
+                    %% otherwise loop forever
+                    case length(Changes) >= ?REFRESH_BATCH andalso Wm1 =/= Wm of
+                        true -> drain(State1, Target);
+                        false -> {ok, State1}
+                    end
             end;
-        {error, _} ->
-            State
+        {error, Reason} ->
+            {error, Reason, State}
     end.
 
 %%====================================================================
@@ -319,13 +482,15 @@ do_freeze(#state{buffer = Buffer} = State) when map_size(Buffer) =:= 0 ->
 do_freeze(#state{buffer = Buffer, manifest = M, dir = Dir,
                  watermark = Wm, config = Config} = State) ->
     Keys = maps:keys(Buffer),
-    {Entries, Postings} = build_segment(Buffer, Keys),
+    PositionalOpts = maps:get(phase2_selector_opts, Config, #{}),
+    {Entries, Postings, PositionalPostings} = build_segment(Buffer, Keys, PositionalOpts),
     Gen = barrel_ngram_manifest:next_gen(M),
     File = segment_file(Gen),
     Path = filename:join(Dir, File),
     WmBin = wm_bin(Wm),
     Spec = #{doc_count => length(Keys), watermark => WmBin,
-             postings => Postings, entries => Entries,
+             postings => Postings, positional_postings => PositionalPostings,
+             entries => Entries,
              codec => maps:get(postings, Config, varint)},
     case barrel_ngram_segment:write(Path, Spec) of
         ok ->
@@ -349,27 +514,48 @@ do_freeze(#state{buffer = Buffer, manifest = M, dir = Dir,
             State
     end.
 
-%% @private Build ordinal-ordered entries and the {Gram, Ordinals} postings
-%% from the keyed buffer. Ordinal i is Keys!!i (the freeze order); a
-%% tombstone contributes an entry but no grams.
-build_segment(Buffer, Keys) ->
+%% @private Build ordinal-ordered entries and both phases' postings from
+%% the keyed buffer. Ordinal i is Keys!!i (the freeze order); a tombstone
+%% contributes an entry but no grams. Both phase-1 (dense) grams and
+%% phase-2 (positional) grams are selected from the same buffered text,
+%% here at freeze time -- see the moduledoc for why.
+build_segment(Buffer, Keys, PositionalOpts) ->
     KeyToOrd = maps:from_list(
         lists:zip(Keys, lists:seq(0, length(Keys) - 1))),
     Entries = [begin
                    {Hlc, Content} = maps:get(K, Buffer),
                    #{key => K, hlc => Hlc, deleted => Content =:= deleted}
                end || K <- Keys],
-    GramMap = maps:fold(
-        fun(Key, {_Hlc, {live, Grams}}, Acc) ->
+    {GramMap, PosMap} = maps:fold(
+        fun(Key, {_Hlc, {live, Text}}, {GM, PM}) ->
                 Ord = maps:get(Key, KeyToOrd),
-                lists:foldl(
+                Grams = barrel_ngram_selector:select_grams(?PHASE1_SELECTOR, #{}, Text),
+                GM1 = lists:foldl(
                     fun(G, A) -> maps:update_with(G, fun(L) -> [Ord | L] end, [Ord], A) end,
-                    Acc, Grams);
+                    GM, Grams),
+                PosGrams = barrel_ngram_selector_sparse:select_grams_positional(
+                             Text, PositionalOpts),
+                PM1 = lists:foldl(
+                    fun({G, Off}, A) ->
+                        maps:update_with(G, fun(L) -> [{Ord, Off} | L] end, [{Ord, Off}], A)
+                    end, PM, PosGrams),
+                {GM1, PM1};
            (_Key, {_Hlc, deleted}, Acc) ->
                 Acc
-        end, #{}, Buffer),
+        end, {#{}, #{}}, Buffer),
     Postings = [{G, lists:usort(Os)} || {G, Os} <- maps:to_list(GramMap)],
-    {Entries, Postings}.
+    PositionalPostings = [{G, group_offsets(Pairs)} || {G, Pairs} <- maps:to_list(PosMap)],
+    {Entries, Postings, PositionalPostings}.
+
+%% @private [{Ordinal, Offset}] (one entry per sampled position, possibly
+%% several per ordinal for a repeated gram) -> [{Ordinal, [Offset]}]
+%% (barrel_ngram_postings_positional's entry shape).
+group_offsets(Pairs) ->
+    Grouped = lists:foldl(
+        fun({Ord, Off}, Acc) ->
+            maps:update_with(Ord, fun(L) -> [Off | L] end, [Off], Acc)
+        end, #{}, Pairs),
+    [{Ord, lists:usort(Offs)} || {Ord, Offs} <- maps:to_list(Grouped)].
 
 %%====================================================================
 %% Compaction
@@ -385,11 +571,18 @@ maybe_compact(#state{merge_worker = undefined, compact_threshold = T,
             InputFiles = [maps:get(file, S) || S <- Segs],
             InputPaths = [filename:join(Dir, F) || F <- InputFiles],
             Self = self(),
-            {Pid, MRef} = spawn_monitor(
+            %% linked (not just monitored): if the SHARD itself dies for
+            %% any reason, the link unconditionally takes the worker down
+            %% too, via the VM, with no cooperation needed. A WORKER crash
+            %% still arrives to the shard as an ordinary message (it traps
+            %% exits, see init/1) rather than crashing the shard -- the
+            %% existing 'DOWN' handler below (via the monitor half) is
+            %% what actually resets merge_worker either way.
+            {Pid, MRef} = spawn_opt(
                 fun() ->
                     Result = barrel_ngram_merge:merge(InputPaths, true),
                     Self ! {merge_done, Result, InputFiles}
-                end),
+                end, [link, monitor]),
             State#state{merge_worker = {Pid, MRef}};
         false ->
             State
@@ -435,6 +628,9 @@ apply_merge_result(TempPath, DocCount, InputFiles,
 
 via(Ref) ->
     {via, barrel_ngram_registry, {shard, Ref}}.
+
+content_kind({live, _Text}) -> live;
+content_kind(deleted) -> deleted.
 
 segment_file(Gen) ->
     iolist_to_binary(io_lib:format("segment-~6..0b.ngseg", [Gen])).

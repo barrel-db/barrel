@@ -1,5 +1,6 @@
 %%%-------------------------------------------------------------------
-%%% @doc Regex to mandatory-trigram query (Russ Cox / Google Code Search).
+%%% @doc Regex to mandatory-trigram query (Russ Cox / Google Code Search),
+%%% plus width/anchor analysis for the positional planner.
 %%%
 %%% Turns a regex into a boolean trigram query that every matching
 %%% document must satisfy, so intersecting it over the index yields a
@@ -16,11 +17,18 @@
 %%% its trigrams. This deliberately stops short of the full Cox
 %%% exact/prefix/suffix cross-product (boundary trigrams spanning
 %%% alternations); literal-run coalescing already covers the common case.
+%%%
+%%% `analyze/1' is the strict entry point: any construct outside an
+%%% explicitly-supported list (lookarounds, backreferences, named groups,
+%%% `\x' escapes, `\Q...\E', conditionals, a scoped/mid-pattern inline
+%%% modifier) makes the whole pattern `unsupported' rather than being
+%%% silently mis-parsed as literal text. A leading `(?i)'/`(?s)'/`(?m)' is
+%%% the one inline-modifier form understood.
 %%% @end
 %%%-------------------------------------------------------------------
 -module(barrel_ngram_regex).
 
--export([trigram_query/1]).
+-export([trigram_query/1, analyze/1, width_bound/1, literal_runs/1]).
 %% exported for tests
 -export([parse/1]).
 
@@ -28,23 +36,101 @@
                | {gram, barrel_ngram_selector:gram()} | all | none.
 -export_type([query/0]).
 
-%% @doc The mandatory-trigram query for a regex. Always sound; returns
-%% `all' when the pattern carries no usable trigram constraint.
+-type width() :: {fixed, non_neg_integer()}
+                | {bounded, non_neg_integer(), non_neg_integer() | infinity}
+                | unbounded.
+-export_type([width/0]).
+
+-type width_info() :: #{
+    width => width(),
+    has_anchor_or_boundary => boolean(),
+    leading_flags => [dotall | multiline | caseless]
+}.
+-export_type([width_info/0]).
+
+-type literal_run() :: #{bytes := binary(),
+                         prefix_max := non_neg_integer() | unbounded,
+                         suffix_max := non_neg_integer() | unbounded}.
+-export_type([literal_run/0]).
+
+%% @doc The mandatory-trigram query for a regex -- always sound (never a
+%% guessed-at partial parse of an unsupported construct); `all' when the
+%% pattern is unsupported or carries no usable trigram constraint.
 -spec trigram_query(binary()) -> query().
-trigram_query(Bin) when is_binary(Bin) ->
-    try
-        {Node, _Rest} = p_alt(binary_to_list(Bin)),
-        {_CanEmpty, Q} = info(Node),
-        simplify(Q)
-    catch
-        _:_ -> all
+trigram_query(Bin) ->
+    case analyze(Bin) of
+        unsupported -> all;
+        {ok, _AST, Query, _WidthInfo} -> Query
     end.
 
-%% @doc Parse to the internal AST (exported for tests).
+%% @doc Full analysis: AST, trigram query, and width/anchor/leading-modifier
+%% info. See the moduledoc for exactly what makes a pattern `unsupported'.
+-spec analyze(binary()) -> {ok, term(), query(), width_info()} | unsupported.
+analyze(Bin) when is_binary(Bin) ->
+    try
+        {LeadingFlags, Body0} = strip_leading_modifiers(binary_to_list(Bin)),
+        Body = apply_extended(LeadingFlags, Body0),
+        {Node, Rest} = p_alt(Body),
+        [] = Rest, %% must consume the whole pattern -- a stray ')' etc. is malformed
+        {_CanEmpty, Query} = info(Node),
+        WidthInfo = #{
+            width => width_bound(Node),
+            has_anchor_or_boundary => has_anchor_or_boundary(Node),
+            leading_flags => LeadingFlags
+        },
+        {ok, Node, simplify(Query), WidthInfo}
+    catch
+        _:_ -> unsupported
+    end.
+
+%% @doc Parse to the internal AST (exported for tests). Raises on any
+%% construct `analyze/1' treats as unsupported -- callers wanting the
+%% fail-closed behavior should use `analyze/1', not this directly.
 -spec parse(binary()) -> term().
 parse(Bin) ->
-    {Node, _Rest} = p_alt(binary_to_list(Bin)),
+    {LeadingFlags, Body0} = strip_leading_modifiers(binary_to_list(Bin)),
+    Body = apply_extended(LeadingFlags, Body0),
+    {Node, _Rest} = p_alt(Body),
     Node.
+
+%% @private analyze/1 and parse/1 both apply this identically, so
+%% parse/1-based tests see the real post-`/x' AST.
+apply_extended(LeadingFlags, Body) ->
+    case lists:member(extended, LeadingFlags) of
+        true -> strip_extended_whitespace(Body);
+        false -> Body
+    end.
+
+%%====================================================================
+%% Leading inline-modifier detection ( (?i) (?s) (?m), whole-pattern only )
+%%====================================================================
+
+strip_leading_modifiers(Chars) ->
+    case take_leading_modifier_group(Chars) of
+        {ok, Flags, Rest} -> {lists:usort(Flags), Rest};
+        no -> {[], Chars}
+    end.
+
+take_leading_modifier_group([$(, $? | R]) ->
+    case take_modifier_flags(R, []) of
+        {ok, Flags, [$) | Rest]} -> {ok, Flags, Rest};
+        _ -> no
+    end;
+take_leading_modifier_group(_) ->
+    no.
+
+take_modifier_flags([$i | R], Acc) -> take_modifier_flags(R, [caseless | Acc]);
+take_modifier_flags([$s | R], Acc) -> take_modifier_flags(R, [dotall | Acc]);
+take_modifier_flags([$m | R], Acc) -> take_modifier_flags(R, [multiline | Acc]);
+take_modifier_flags([$x | R], Acc) -> take_modifier_flags(R, [extended | Acc]);
+take_modifier_flags(R, Acc) when Acc =/= [] orelse R =/= [] ->
+    %% stops at the first non-flag char; caller checks it's ')'
+    case R of
+        [$) | _] -> {ok, Acc, R};
+        _ -> error
+    end;
+take_modifier_flags(_, _) ->
+    error.
 
 %%====================================================================
 %% Parser (recursive descent over a char list)
@@ -74,11 +160,35 @@ p_cat([C | _] = Chars, Items) when C =/= $|, C =/= $) ->
 p_cat(Chars, Items) ->
     {build_cat(lists:reverse(Items)), Chars}.
 
-%% atom
-p_atom([$( | R]) ->
-    {Node, R2} = p_alt(R),
-    R3 = case R2 of [$) | Rr] -> Rr; _ -> R2 end,
-    {{group, Node}, R3};
+%% atom -- (?...) forms are checked before the plain '(' fallback; order
+%% matters (longer/more-specific prefixes first) since e.g. "(?<=" must
+%% not be caught by the shorter "(?<" named-group clause.
+p_atom([$(, $?, $:  | R]) -> p_group(R);          %% non-capturing: same as a plain group
+p_atom([$(, $?, $=  | _R]) -> throw(unsupported); %% lookahead
+p_atom([$(, $?, $!  | _R]) -> throw(unsupported); %% negative lookahead
+p_atom([$(, $?, $<, $= | _R]) -> throw(unsupported); %% lookbehind
+p_atom([$(, $?, $<, $! | _R]) -> throw(unsupported); %% negative lookbehind
+p_atom([$(, $?, $<  | _R]) -> throw(unsupported); %% named group (?<name>...)
+p_atom([$(, $?, $'  | _R]) -> throw(unsupported); %% named group (?'name'...)
+p_atom([$(, $?, $P  | _R]) -> throw(unsupported); %% named group (?P<name>...)
+p_atom([$(, $?, $(  | _R]) -> throw(unsupported); %% conditional
+p_atom([$(, $?      | _R]) -> throw(unsupported); %% any other (?... -- mid-pattern/
+                                                    %% scoped inline modifier, or
+                                                    %% unrecognized -- fail closed
+p_atom([$(, $*      | _R]) -> throw(unsupported); %% PCRE control verb, e.g.
+                                                    %% (*ACCEPT), (*SKIP), (*UTF),
+                                                    %% (*UCP) -- a completely
+                                                    %% different syntactic form from
+                                                    %% (?...) groups; unrecognized by
+                                                    %% the parser otherwise, which
+                                                    %% would fall through to treating
+                                                    %% its contents as literal text
+                                                    %% (confirmed: (*ACCEPT) produced
+                                                    %% mandatory trigrams for the
+                                                    %% literal bytes "ACCEPT", a real
+                                                    %% match not requiring them at
+                                                    %% all -- a false negative)
+p_atom([$( | R]) -> p_group(R);
 p_atom([$[ | R]) ->
     R2 = skip_class(R),
     {{class, ignored}, R2};
@@ -86,33 +196,56 @@ p_atom([$. | R]) -> {any, R};
 p_atom([$^ | R]) -> {bol, R};
 p_atom([$$ | R]) -> {eol, R};
 p_atom([$\\, E | R]) -> {escape_atom(E), R};
-p_atom([$\\]) -> {{lit, <<$\\>>}, []};
+p_atom([$\\]) -> throw(unsupported); %% trailing bare backslash: malformed
 p_atom([C | R]) -> {{lit, <<C>>}, R}.
+%% p_atom is only called from p_cat's guarded clause ([C|_] = Chars, C =/=
+%% $|, C =/= $)), so Chars is never empty here -- an empty pattern/empty
+%% remainder is handled one level up, by p_cat's own base clause.
 
-%% quantifier
-p_quant([$* | R]) -> {star, R};
-p_quant([$+ | R]) -> {plus, R};
-p_quant([$? | R]) -> {quest, R};
+p_group(R) ->
+    {Node, R2} = p_alt(R),
+    case R2 of
+        [$) | Rr] -> {{group, Node}, Rr};
+        _ -> throw(unsupported) %% unclosed group: malformed
+    end.
+
+%% quantifier -- a lazy (`?' suffix) or possessive (`+' suffix) modifier
+%% on ANY of the four quantifier kinds is unsupported (previously silently
+%% swallowed as literal text by p_atom's catch-all, an unsound too-narrow
+%% trigram query) -- checked uniformly via quant_tail/2 immediately after
+%% the base quantifier is recognized.
+p_quant([$* | R]) -> quant_tail(R, star);
+p_quant([$+ | R]) -> quant_tail(R, plus);
+p_quant([$? | R]) -> quant_tail(R, quest);
 p_quant([${ | R] = All) ->
     case try_brace(R) of
-        {ok, Min, R2} -> {{rep, Min}, R2};
+        {ok, Min, Max, R2} -> quant_tail(R2, {rep, Min, Max});
         error -> {none, All}
     end;
 p_quant(R) ->
     {none, R}.
 
+quant_tail([C | _], _Q) when C =:= $?; C =:= $+ -> throw(unsupported);
+quant_tail(R, star) -> {star, R};
+quant_tail(R, plus) -> {plus, R};
+quant_tail(R, quest) -> {quest, R};
+quant_tail(R, {rep, Min, Max}) -> {{rep, Min, Max}, R}.
+
+%% {n}, {n,}, {n,m} -- both bounds are preserved (the original parser
+%% discarded the max, which made a correct width bound impossible).
 try_brace(Chars) ->
     case take_digits(Chars, []) of
         {[], _} -> error;
         {Ds, Rest} ->
             Min = list_to_integer(Ds),
             case Rest of
-                [$} | R] -> {ok, Min, R};
+                [$} | R] -> {ok, Min, Min, R};
                 [$, | R1] ->
-                    {_Max, R2} = take_digits(R1, []),
-                    case R2 of
-                        [$} | R] -> {ok, Min, R};
-                        _ -> error
+                    case take_digits(R1, []) of
+                        {[], [$} | R]} -> {ok, Min, infinity, R};
+                        {[], _} -> error;
+                        {MaxDs, [$} | R]} -> {ok, Min, list_to_integer(MaxDs), R};
+                        {_, _} -> error
                     end;
                 _ -> error
             end
@@ -132,10 +265,83 @@ skip_class(R) -> skip_class_body(strip_leading_bracket(R)).
 strip_leading_bracket([$] | R]) -> R;
 strip_leading_bracket(R) -> R.
 
+%% [:name:], [.symbol.], [=class=] POSIX sub-syntax each need their own
+%% terminator-aware skip: stopping at the FIRST unescaped ']' (the naive
+%% approach) is one character short of the true outer close for e.g.
+%% "[[:space:]]", leaving a stray literal ']' coalesced into an adjacent
+%% literal run.
 skip_class_body([$\\, _ | R]) -> skip_class_body(R);
+skip_class_body([$[, $: | R]) -> skip_class_body(skip_posix_sub(R, $:));
+skip_class_body([$[, $. | R]) -> skip_class_body(skip_posix_sub(R, $.));
+skip_class_body([$[, $= | R]) -> skip_class_body(skip_posix_sub(R, $=));
 skip_class_body([$] | R]) -> R;
 skip_class_body([_ | R]) -> skip_class_body(R);
-skip_class_body([]) -> [].
+skip_class_body([]) -> throw(unsupported). %% unclosed class: malformed
+
+%% @private Skip to the D,']' terminator pair of a POSIX sub-expression
+%% (D is one of $:/$./$=). No proper terminator -> unsupported for the
+%% whole pattern (fail closed, consistent with this module's philosophy),
+%% not a guess.
+skip_posix_sub([D, $] | R], D) -> R;
+skip_posix_sub([_ | R], D) -> skip_posix_sub(R, D);
+skip_posix_sub([], _D) -> throw(unsupported).
+
+%%====================================================================
+%% `(?x)' extended-mode whitespace/comment stripping
+%%====================================================================
+
+%% @doc Strip unescaped whitespace and `#'-to-end-of-line comments from
+%% an `(?x)'-flagged pattern's body, BEFORE the real parser ever sees it
+%% -- a forward, pair-consuming scan (the same technique
+%% skip_class_body/1 uses for escape-pairs).
+-spec strip_extended_whitespace(string()) -> string().
+strip_extended_whitespace(Chars) -> lists:reverse(sxws(Chars, [])).
+
+sxws([], Acc) -> Acc;
+%% pair-consume: a backslash and whatever immediately follows it move
+%% through together, verbatim -- this tracks escape parity "for free",
+%% with no separate state. `(?x)abc\\#comment' (two backslashes): the
+%% first `\' pairs with the SECOND `\' (not `#'), so the scanner resumes
+%% at `#' completely fresh and treats it as an unescaped comment-starter
+%% (matches real PCRE: `\\' is one escaped backslash, leaving `#'
+%% unescaped). `(?x)abc\#comment' (one backslash): `\' pairs with `#'
+%% and BOTH are emitted verbatim, so `#' is never even offered to the
+%% comment-detection clause below -- it reaches the real parser as `\#',
+%% which escape_atom($#) (punctuation) correctly turns into a literal `#'.
+sxws([$\\, C | R], Acc) -> sxws(R, [C, $\\ | Acc]);
+sxws([$[ | R], Acc) -> sxws_class(R, [$[ | Acc]);
+sxws([C | R], Acc) when C =:= $ ; C =:= $\t; C =:= $\n;
+                        C =:= $\r; C =:= $\f; C =:= $\v ->
+    sxws(R, Acc);
+sxws([$# | R], Acc) -> sxws(sxws_skip_comment(R), Acc);
+sxws([C | R], Acc) -> sxws(R, [C | Acc]).
+
+sxws_skip_comment([$\n | R]) -> R;
+sxws_skip_comment([_ | R]) -> sxws_skip_comment(R);
+sxws_skip_comment([]) -> [].
+
+%% @private Inside a `[...]' class, whitespace and `#' are literal class
+%% members -- never stripped, passed through verbatim. Mirrors
+%% skip_class/skip_class_body/skip_posix_sub exactly (including the
+%% POSIX [:name:]/[.symbol.]/[=class=] boundary handling) so the real
+%% parser and this `/x' scanner never disagree about where a class ends.
+sxws_class([$^ | R], Acc) -> sxws_class_after_bracket(R, [$^ | Acc]);
+sxws_class(R, Acc) -> sxws_class_after_bracket(R, Acc).
+
+sxws_class_after_bracket([$] | R], Acc) -> sxws_class_body(R, [$] | Acc]);
+sxws_class_after_bracket(R, Acc) -> sxws_class_body(R, Acc).
+
+sxws_class_body([$\\, C | R], Acc) -> sxws_class_body(R, [C, $\\ | Acc]);
+sxws_class_body([$[, $: | R], Acc) -> sxws_posix_sub(R, $:, [$:, $[ | Acc]);
+sxws_class_body([$[, $. | R], Acc) -> sxws_posix_sub(R, $., [$., $[ | Acc]);
+sxws_class_body([$[, $= | R], Acc) -> sxws_posix_sub(R, $=, [$=, $[ | Acc]);
+sxws_class_body([$] | R], Acc) -> sxws(R, [$] | Acc]);
+sxws_class_body([C | R], Acc) -> sxws_class_body(R, [C | Acc]);
+sxws_class_body([], _Acc) -> throw(unsupported).
+
+sxws_posix_sub([D, $] | R], D, Acc) -> sxws_class_body(R, [$], D | Acc]);
+sxws_posix_sub([C | R], D, Acc) -> sxws_posix_sub(R, D, [C | Acc]);
+sxws_posix_sub([], _D, _Acc) -> throw(unsupported).
 
 escape_atom($n) -> {lit, <<10>>};
 escape_atom($t) -> {lit, <<9>>};
@@ -152,7 +358,25 @@ escape_atom($B) -> bol;
 escape_atom($A) -> bol;
 escape_atom($Z) -> bol;
 escape_atom($z) -> bol;
-escape_atom(C) -> {lit, <<C>>}.   %% escaped literal (\. \* \( ...)
+escape_atom($x) -> throw(unsupported); %% \xHH / \x{...} -- not interpreted
+escape_atom($Q) -> throw(unsupported); %% \Q...\E -- not interpreted
+escape_atom($k) -> throw(unsupported); %% \k<name> backreference
+escape_atom(C) when C >= $1, C =< $9 -> throw(unsupported); %% \1-\9 backreference
+%% Any OTHER unrecognized ASCII alphanumeric escape is fail-closed, not
+%% silently reduced to a bare-letter literal: \0, \R, \h, \H, \p{...},
+%% \P{...}, \K, \C, \v, \V, \N, \G, \a, \e, bare \E, \X and more are all
+%% real, PCRE2-accepted constructs with real special meaning (verified
+%% exhaustively: every one is either a genuine PCRE compile error or has
+%% real special meaning under this OTP's `re', zero false-positive
+%% rejections from this rule) -- none of them mean "the literal letter".
+escape_atom(C) when (C >= $a andalso C =< $z) orelse
+                     (C >= $A andalso C =< $Z) orelse
+                     (C >= $0 andalso C =< $9) ->
+    throw(unsupported);
+escape_atom(C) -> {lit, <<C>>}.   %% unrecognized PUNCTUATION is literal --
+                                    %% matches real PCRE's own rule: an
+                                    %% escaped non-alphanumeric character is
+                                    %% always literal (\. \* \( ...)
 
 %% Build a concatenation node, coalescing runs of unquantified literal
 %% bytes into a single {lit, Bytes}.
@@ -186,8 +410,7 @@ apply_quant(Node, none) -> Node;
 apply_quant(Node, star) -> {star, Node};
 apply_quant(Node, plus) -> {plus, Node};
 apply_quant(Node, quest) -> {quest, Node};
-apply_quant(Node, {rep, Min}) when Min >= 1 -> Node;
-apply_quant(Node, {rep, _}) -> {star, Node}.
+apply_quant(Node, {rep, Min, Max}) -> {rep, Node, Min, Max}.
 
 %%====================================================================
 %% Analysis: node -> {CanEmpty, Query}
@@ -206,6 +429,8 @@ info({alt, Xs}) ->
 info({star, _}) -> {true, all};
 info({quest, _}) -> {true, all};
 info({plus, X}) -> info(X);
+info({rep, X, Min, _Max}) when Min >= 1 -> info(X);
+info({rep, _X, 0, _Max}) -> {true, all};
 info(any) -> {false, all};
 info(bol) -> {true, all};
 info(eol) -> {true, all};
@@ -222,6 +447,129 @@ gram_at(B, I) ->
     Bb = binary:at(B, I + 1),
     C = binary:at(B, I + 2),
     (A bsl 16) bor (Bb bsl 8) bor C.
+
+%%====================================================================
+%% Width bound: node -> {fixed, N} | {bounded, Min, Max} | unbounded
+%%
+%% `.' and a character class are conservatively bounded at 1-4 bytes (one
+%% UTF-8 codepoint's worst case) -- too wide just costs a larger read,
+%% too narrow could truncate a real match.
+%%====================================================================
+
+-spec width_bound(term()) -> width().
+width_bound(Node) ->
+    collapse(width_raw(Node)).
+
+collapse(unbounded) -> unbounded;
+collapse({Mn, Mn}) -> {fixed, Mn};
+collapse({Mn, Mx}) -> {bounded, Mn, Mx}.
+
+width_raw({lit, B}) ->
+    N = byte_size(B),
+    {N, N};
+width_raw({cat, Xs}) ->
+    lists:foldl(fun(X, Acc) -> add_w(width_raw(X), Acc) end, {0, 0}, Xs);
+width_raw({alt, [First | Rest]}) ->
+    lists:foldl(fun(X, Acc) -> union_w(width_raw(X), Acc) end, width_raw(First), Rest);
+width_raw({star, _}) -> unbounded;
+width_raw({plus, _}) -> unbounded;
+width_raw({quest, X}) -> quest_w(width_raw(X));
+width_raw({rep, X, Min, Max}) -> rep_w(width_raw(X), Min, Max);
+width_raw(any) -> {1, 4};
+width_raw({class, _}) -> {1, 4};
+width_raw(bol) -> {0, 0};
+width_raw(eol) -> {0, 0};
+width_raw({group, X}) -> width_raw(X).
+
+add_w(unbounded, _) -> unbounded;
+add_w(_, unbounded) -> unbounded;
+add_w({MnA, MxA}, {MnB, MxB}) -> {MnA + MnB, add_inf(MxA, MxB)}.
+
+union_w(unbounded, _) -> unbounded;
+union_w(_, unbounded) -> unbounded;
+union_w({MnA, MxA}, {MnB, MxB}) -> {min(MnA, MnB), max_inf(MxA, MxB)}.
+
+quest_w(unbounded) -> unbounded;
+quest_w({_Mn, Mx}) -> {0, Mx}.
+
+rep_w(_, _Min, infinity) -> unbounded;
+rep_w(unbounded, _Min, _Max) -> unbounded;
+rep_w({Mn, Mx}, Min, Max) -> {Mn * Min, mult_inf(Mx, Max)}.
+
+add_inf(infinity, _) -> infinity;
+add_inf(_, infinity) -> infinity;
+add_inf(A, B) -> A + B.
+
+max_inf(infinity, _) -> infinity;
+max_inf(_, infinity) -> infinity;
+max_inf(A, B) -> max(A, B).
+
+mult_inf(_, infinity) -> infinity;
+mult_inf(infinity, _) -> infinity;
+mult_inf(A, B) -> A * B.
+
+%%====================================================================
+%% Literal runs eligible as a windowing anchor
+%%====================================================================
+
+%% @doc Literal runs a positional planner may anchor a window on: only a
+%% pure AND-chain (a `{cat, Nodes}' with no `{alt, _}' child, or a bare
+%% `{lit, _}'), each paired with its own `PrefixMax'/`SuffixMax' (the
+%% upper-bound width of everything before/after it in the chain,
+%% `unbounded' if that side has an unbounded quantifier). `ineligible'
+%% for anything else, including a `{lit, _}' merely sitting next to an
+%% `{alt, _}' -- a real match could come from a different branch, so the
+%% whole chain is rejected rather than reasoning about which literals
+%% would still be safe.
+-spec literal_runs(term()) -> [literal_run()] | ineligible.
+literal_runs({lit, Bytes}) ->
+    [#{bytes => Bytes, prefix_max => 0, suffix_max => 0}];
+literal_runs({cat, Nodes}) ->
+    case lists:any(fun({alt, _}) -> true; (_) -> false end, Nodes) of
+        true -> ineligible;
+        false -> chain_literal_runs(Nodes)
+    end;
+literal_runs(_) ->
+    ineligible.
+
+chain_literal_runs(Nodes) ->
+    N = length(Nodes),
+    Widths = [width_bound(Node) || Node <- Nodes],
+    Indexed = lists:zip(lists:seq(1, N), Nodes),
+    lists:filtermap(
+        fun({I, {lit, Bytes}}) ->
+            {true, #{bytes => Bytes,
+                    prefix_max => sum_upper(lists:sublist(Widths, I - 1)),
+                    suffix_max => sum_upper(lists:nthtail(I, Widths))}};
+           ({_I, _Node}) ->
+            false
+        end, Indexed).
+
+%% @private Sum of upper bounds; `unbounded' if any width is unbounded or
+%% an unbounded-max `{bounded, _, infinity}'.
+sum_upper(Widths) ->
+    lists:foldl(fun add_upper/2, 0, Widths).
+
+add_upper(_, unbounded) -> unbounded;
+add_upper({fixed, M}, Acc) -> Acc + M;
+add_upper({bounded, _Min, infinity}, _Acc) -> unbounded;
+add_upper({bounded, _Min, Max}, Acc) -> Acc + Max;
+add_upper(unbounded, _Acc) -> unbounded.
+
+%%====================================================================
+%% Anchor/boundary detection ( ^ $ \b \B \A \z \Z -- all parsed as bol/eol )
+%%====================================================================
+
+has_anchor_or_boundary(bol) -> true;
+has_anchor_or_boundary(eol) -> true;
+has_anchor_or_boundary({cat, Xs}) -> lists:any(fun has_anchor_or_boundary/1, Xs);
+has_anchor_or_boundary({alt, Xs}) -> lists:any(fun has_anchor_or_boundary/1, Xs);
+has_anchor_or_boundary({star, X}) -> has_anchor_or_boundary(X);
+has_anchor_or_boundary({plus, X}) -> has_anchor_or_boundary(X);
+has_anchor_or_boundary({quest, X}) -> has_anchor_or_boundary(X);
+has_anchor_or_boundary({rep, X, _, _}) -> has_anchor_or_boundary(X);
+has_anchor_or_boundary({group, X}) -> has_anchor_or_boundary(X);
+has_anchor_or_boundary(_) -> false.
 
 %%====================================================================
 %% Simplify

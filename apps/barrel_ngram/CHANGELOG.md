@@ -5,6 +5,154 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-08-15
+
+### Changed
+
+- **Breaking**: `close/1` now returns `ok | {error, term()}` instead of
+  an unconditional `ok` -- `{error, busy}` on lock contention, or an
+  error if a shard could not be confirmed stopped.
+- **Breaking**: a corpus with on-disk segments/manifests but no
+  `corpus.meta` (indexed before this release) is rejected on open with
+  `{error, {legacy_corpus_requires_reindex, Corpus}}`. There is no
+  migration path -- `db`/`shards` were never recoverable from what a
+  pre-release corpus persisted -- reindex into a fresh `data_dir`.
+- `open/2` validates every option up front (bounds, types, shape)
+  before any side effect, including the corpus name itself: a name
+  containing `/`, `\`, a NUL byte, or equal to `.`/`..` is now rejected
+  outright. It was previously used unvalidated as a filesystem path
+  component (security-relevant: closes a path-traversal risk).
+- `open/2` and `close/1` for the same corpus are now serialized by a
+  one-shot lifecycle coordinator, so a reopen of an already-live corpus
+  is always reconciled against the running one instead of silently
+  overwriting its metadata out from under it.
+- `open/2` now persists a corpus-level `corpus.meta` (database, shard
+  count, `phase2_selector_opts`, `fields`, `postings` codec), checked
+  before any shard starts and committed only once every shard is up.
+  A mismatched reopen is rejected with
+  `{error, {config_mismatch, Field, Persisted, Requested}}` instead of
+  silently reindexing, rebinding to a different database, or changing
+  shard count and orphaning the old shard set.
+- A corpus now detects its bound database being deleted and recreated
+  under the same name, both at open time and continuously on every
+  shard resubscribe. A mismatch stops the affected shard instead of
+  silently reattaching and indexing under a stale watermark.
+
+### Fixed
+
+- `(?x)` extended-mode regex patterns are now interpreted for real
+  (unescaped whitespace and `#`-comments stripped before analysis)
+  instead of treating whitespace as a mandatory literal trigram, a
+  false negative for every real match of an extended-mode pattern.
+- The regex analyzer now fails closed (falls back to full-content
+  confirmation) on lazy/possessive quantifiers, PCRE control verbs
+  (`(*ACCEPT)`, `(*SKIP)`, ...), and unrecognized alphanumeric escapes
+  (`\p{L}`, `\K`, `\R`, ...) instead of silently mis-parsing them as
+  literal text, which could produce an unsound trigram query. POSIX
+  class syntax (`[[:space:]]`, `[[.ch.]]`, `[[=e=]]`) is now scanned to
+  its real closing bracket instead of stopping one character short.
+- A positive `source`-verified match (literal or regex, buffer or
+  segment) is now always re-confirmed against live `barrel_docdb`
+  content before being returned, closing a false-positive window where
+  a stale `source` could serve an outdated or deleted document's
+  content as if current. A top-level `get_docs` error now propagates
+  as a query error instead of a silent empty result; a per-document
+  error other than `not_found` now propagates as
+  `{confirm_failed, DocId, Reason}` instead of a silent non-match.
+- `refresh/1` now drains up to a captured HLC target instead of
+  re-querying its own moving watermark, so sustained concurrent writes
+  can no longer make it recurse indefinitely. A drain error now
+  propagates as `{error, {refresh_incomplete, Reason}}` instead of
+  being silently discarded.
+- Positional distance-checking (`match_starts/4`) now merge-joins the
+  two offset lists instead of comparing every pair, closing an O(n*m)
+  blowup on a document with many repeats of both grams.
+- The compaction worker is now linked (and monitored) to its shard, so
+  a shard stop or crash during compaction no longer leaves the worker
+  running unsupervised with an orphaned temp segment.
+- `gallop_intersect/2`'s arguments in `intersect_all/1`'s fold were
+  reversed relative to its own documented contract (results were
+  unaffected; only performance for a skewed pair of list sizes).
+- A query against a corpus that was never opened, or is already
+  closed, now returns `{error, corpus_not_open}` instead of crashing
+  the caller.
+
+## [0.8.0] - 2026-08-10
+
+### Added
+
+- Phase-2 (the sparse, content-defined positional index) now drives query
+  results. A literal's reliable phase-2 grams are distance-checked to
+  narrow candidates down to a specific byte position, not just a
+  candidate document; with `open/2`'s new `source => {Module, InitArg}`
+  option (a small byte-source behaviour, `barrel_ngram_source`), that
+  candidate is confirmed by reading just the matched region instead of
+  fetching the whole document. Without a `source`, phase-2 still narrows
+  which documents get fetched, it just fetches them in full.
+- Regex search gets the same treatment for a bounded subset of patterns: a
+  clean AND-chain of literal runs with no alternation and no `^`/`$`/`\b`
+  anchor or boundary picks its longest windowable literal run as an
+  anchor and confirms with a windowed `re:run` instead of a full-document
+  one. Everything else (unsupported constructs, alternation, anchors, an
+  unbounded gap) still gets full-content confirmation, same as before --
+  always exact either way.
+- `case_sensitive => false` option on both `search/3` and `regex/3`. An
+  ASCII literal or pattern narrows through phase-1's per-position
+  case-variant expansion and verifies with `[caseless]`; a non-ASCII one
+  skips narrowing entirely and verifies with `[caseless, unicode]`, with
+  `{error, {invalid_literal_encoding, _}}` for a non-UTF-8 query and
+  `{error, {invalid_document_encoding, DocId}}` if a candidate document
+  turns out not to be valid UTF-8. Phase-2/windowing never applies here:
+  its sampling is itself case-sensitive. A pattern with its own leading
+  `(?i)` is caseless automatically, without the option.
+- The regex analyzer gained a strict `unsupported` outcome for anything
+  outside its supported subset -- lookarounds, backreferences, named
+  groups, `\x{...}` escapes, `\Q...\E`, conditionals, a scoped or
+  mid-pattern inline modifier -- so an unfamiliar construct falls back to
+  full-content confirmation instead of risking a wrong (too-narrow)
+  trigram query from being silently mis-parsed as literal text. It also
+  now tracks per-literal-run prefix/suffix width bounds and a
+  leading-`(?i)`/`(?s)`/`(?m)` flag, both needed for the windowing above.
+
+### Changed
+
+- **Breaking**: `open/2`'s `selector` option is retired -- every corpus now
+  builds both a dense (phase-1, exhaustive) and a sparse (phase-2,
+  content-defined, positional) index unconditionally. `selector_opts` is
+  renamed `phase2_selector_opts` and now tunes phase-2 sampling
+  specifically. `open/2` rejects `selector` outright with
+  `{error, {unsupported_option, selector}}`.
+- Segment format bumped to v4: posting blocks are now a self-delimiting
+  composite of a phase-1 sub-block and an optional phase-2 (positional)
+  sub-block, plus a new per-segment gram -> doc-count table. A pre-v4
+  segment is rejected with a distinguishable
+  `{unsupported_segment_version, _, _}` error rather than a generic one;
+  there is no migration, reindex into a fresh corpus.
+- Manifest format bumped to v2: it now persists and validates a corpus's
+  `phase2_selector_opts`/`fields` across reopens, rejecting a mismatch
+  with `{error, {config_mismatch, Field, Persisted, Requested}}` instead
+  of silently reindexing under the new value. `open/2` also now eagerly
+  validates every listed segment before returning, rather than surfacing
+  a stale segment's error lazily on first query.
+
+### Fixed
+
+- Regex candidate gathering (`regex_segment_keys/2`) no longer silently
+  swallows a segment-open error into an incomplete result; it now
+  propagates, matching literal search's existing strict behavior.
+- Windowed verification (literal and regex) could report overlapping
+  matches that a plain left-to-right scan (`binary:matches/2`, `re:run`
+  `global`) would not, when two distance-checked candidates genuinely
+  overlapped (e.g. `"aaa"` at both offset 0 and 1 of `"aaaa"`). Spans are
+  now reduced to that same non-overlapping set, matching every other
+  verification path.
+- A candidate whose sole reliable phase-2 gram also occurs many times
+  elsewhere in the same document (repetitive content) no longer gets one
+  windowed read per occurrence -- past 32 candidates in one document,
+  verification falls back to a single full-content read instead. Found
+  via profiling: a bounded regex query over a 100 KB repetitive document
+  dropped from ~160ms to ~22ms.
+
 ## [0.7.1] - 2026-07-19
 
 ### Fixed

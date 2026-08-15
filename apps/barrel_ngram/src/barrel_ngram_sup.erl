@@ -1,9 +1,19 @@
 %%%-------------------------------------------------------------------
 %%% @doc barrel_ngram top-level supervisor.
 %%%
-%%% Owns the name registry and the dynamic shard supervisor. Isolation
-%%% from the rest of the umbrella is this subtree: a shard crash never
-%%% escapes it.
+%%% Owns the name registry, the dynamic shard supervisor, and the
+%%% corpus-lifecycle coordinator supervisor. Isolation from the rest of
+%%% the umbrella is this subtree: a shard crash never escapes it.
+%%%
+%%% `rest_for_one', with children ordered `Registry', `ShardSup',
+%%% `CorpusLifecycleSup': a `Registry' crash (a fresh, empty ETS table on
+%%% restart) cascades to force-terminate and freshly restart BOTH
+%%% `ShardSup' (so no now-unregistered shard can collide with a
+%%% duplicate started against the same directory later) AND
+%%% `CorpusLifecycleSup' (so no orphaned lifecycle coordinator can keep
+%%% mutating shards/metadata after losing its `via'-name mutex) --
+%%% neither is possible under a plain `one_for_one', which would restart
+%%% only the registry itself and leave both siblings' state stale.
 %%% @end
 %%%-------------------------------------------------------------------
 -module(barrel_ngram_sup).
@@ -22,7 +32,7 @@ start_link() ->
 -spec init([]) -> {ok, {supervisor:sup_flags(), [supervisor:child_spec()]}}.
 init([]) ->
     SupFlags = #{
-        strategy => one_for_one,
+        strategy => rest_for_one,
         intensity => 5,
         period => 60
     },
@@ -45,4 +55,13 @@ init([]) ->
         modules => [barrel_ngram_shard_sup]
     },
 
-    {ok, {SupFlags, [Registry, ShardSup]}}.
+    CorpusLifecycleSup = #{
+        id => barrel_ngram_corpus_lifecycle_sup,
+        start => {barrel_ngram_corpus_lifecycle_sup, start_link, []},
+        restart => permanent,
+        shutdown => infinity,
+        type => supervisor,
+        modules => [barrel_ngram_corpus_lifecycle_sup]
+    },
+
+    {ok, {SupFlags, [Registry, ShardSup, CorpusLifecycleSup]}}.
