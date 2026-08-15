@@ -8,7 +8,10 @@ name: CI
 #   - server:   network server leg (pulls livery + transports)
 #   - s3:       optional S3 attachment-backend leg (real MinIO + Garage)
 #   - barrel-lite: TypeScript client (typecheck, build, unit tests)
-# Dev target is OTP 29; CI pins OTP 28 (image guaranteed, code builds on both).
+# Dev target is OTP 29; CI pins OTP 28 everywhere (image guaranteed, code
+# builds on both), except the leaf/barrel_embed leg, piloting the move to
+# OTP 29 (no NIF, no sibling umbrella deps -- an incompatibility surfaces
+# there cleanly before rolling OTP 29 out to the rest of CI).
 
 on:
   push:
@@ -52,11 +55,24 @@ jobs:
     name: Leaf (${{ matrix.app }})
     runs-on: ubuntu-latest
     container:
-      image: erlang:28
+      image: erlang:${{ matrix.otp }}
     strategy:
       fail-fast: false
       matrix:
-        app: [barrel_crypto, barrel_docdb, barrel_ngram, barrel_rerank, barrel_embed]
+        # otp pinned to 28 to match every other leg, except barrel_embed:
+        # piloting the OTP 29 dev target here first (no NIF, no sibling
+        # umbrella deps, so an incompatibility surfaces cleanly).
+        include:
+          - app: barrel_crypto
+            otp: '28'
+          - app: barrel_docdb
+            otp: '28'
+          - app: barrel_ngram
+            otp: '28'
+          - app: barrel_rerank
+            otp: '28'
+          - app: barrel_embed
+            otp: '29'
     steps:
       - uses: actions/checkout@v4
       - name: System dependencies

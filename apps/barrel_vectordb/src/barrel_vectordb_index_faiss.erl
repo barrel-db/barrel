@@ -48,7 +48,7 @@
 %%====================================================================
 
 -record(faiss_state, {
-    index :: reference(),                              %% FAISS NIF reference
+    index :: barrel_faiss:index(),                     %% FAISS NIF handle (opaque)
     dimension :: pos_integer(),                        %% Vector dimension
     metric :: l2 | inner_product,                      %% FAISS metric type
     distance_fn :: cosine | euclidean,                 %% User-facing distance

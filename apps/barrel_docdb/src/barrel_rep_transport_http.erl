@@ -531,8 +531,7 @@ ssl_options(#{url := Url}) ->
 method_bin(get) -> <<"GET">>;
 method_bin(post) -> <<"POST">>;
 method_bin(put) -> <<"PUT">>;
-method_bin(delete) -> <<"DELETE">>;
-method_bin(M) when is_binary(M) -> M.
+method_bin(delete) -> <<"DELETE">>.
 
 origin(Url) ->
     case binary:match(Url, <<"/db/">>) of
