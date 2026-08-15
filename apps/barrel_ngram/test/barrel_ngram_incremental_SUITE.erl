@@ -19,13 +19,19 @@
 -export([live_subscription/1, live_update/1, live_delete/1,
          multi_segment_fan/1, recovery/1, incremental_oracle/1,
          superseded_collapse/1, delete_eviction/1, auto_compaction/1,
-         compaction_crash_safety/1, post_compaction_oracle/1]).
+         compaction_crash_safety/1, post_compaction_oracle/1,
+         compaction_worker_prompt_close/1, compaction_worker_killed_via_link/1,
+         refresh_error_propagation/1,
+         db_recreated_same_name_resubscribe/1]).
 
 all() ->
     [live_subscription, live_update, live_delete, multi_segment_fan,
      recovery, incremental_oracle,
      superseded_collapse, delete_eviction, auto_compaction,
-     compaction_crash_safety, post_compaction_oracle].
+     compaction_crash_safety, post_compaction_oracle,
+     compaction_worker_prompt_close, compaction_worker_killed_via_link,
+     refresh_error_propagation,
+     db_recreated_same_name_resubscribe].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(barrel_docdb),
@@ -41,9 +47,15 @@ init_per_testcase(TC, Config) ->
     Dir = filename:join(?config(priv_dir, Config), atom_to_list(TC)),
     _ = barrel_docdb:delete_db(Db),
     {ok, _} = barrel_docdb:create_db(Db),
-    %% auto-compaction is exercised only by its own case; elsewhere disable
-    %% it so the synchronous compact/1 tests stay deterministic.
-    Threshold = case TC of auto_compaction -> 3; _ -> infinity end,
+    %% auto-compaction is exercised only by the cases that need a
+    %% background merge worker in flight; elsewhere disable it so the
+    %% synchronous compact/1 tests stay deterministic.
+    Threshold = case TC of
+        auto_compaction -> 3;
+        compaction_worker_prompt_close -> 3;
+        compaction_worker_killed_via_link -> 3;
+        _ -> infinity
+    end,
     ok = barrel_ngram:open(Corpus, #{db => Db, data_dir => Dir,
                                      compact_threshold => Threshold}),
     [{db, Db}, {corpus, Corpus}, {dir, Dir} | Config].
@@ -193,6 +205,134 @@ compaction_crash_safety(Config) ->
                                 compact_threshold => infinity}),
     ?assertNot(filelib:is_file(Stray)),
     ?assertEqual([<<"a">>], search(C, <<"survives">>)).
+
+%% Finding 8: close/1 must not block waiting for an in-flight background
+%% compaction to finish. barrel_ngram_merge:merge/2 is mocked to block
+%% until signaled, standing in for a slow merge; close/1 must still
+%% return promptly, and no orphaned segment-merge-*.ngseg temp file may
+%% exist immediately afterward (the explicit kill-then-sweep in
+%% terminate/2, not the next reopen's cleanup_orphans/2 pass).
+compaction_worker_prompt_close(Config) ->
+    Db = ?config(db, Config), C = ?config(corpus, Config), Dir = ?config(dir, Config),
+    Self = self(),
+    meck:new(barrel_ngram_merge, [passthrough]),
+    meck:expect(barrel_ngram_merge, merge,
+        fun(Paths, Drop) ->
+            Self ! {merge_started, self()},
+            receive proceed -> ok after 5000 -> ok end,
+            meck:passthrough([Paths, Drop])
+        end),
+    _ = put_doc(Db, <<"a">>, <<"one common">>), refresh(C),
+    _ = put_doc(Db, <<"b">>, <<"two common">>), refresh(C),
+    _ = put_doc(Db, <<"c">>, <<"three common">>), refresh(C),
+    WorkerPid = receive
+        {merge_started, WPid} -> WPid
+    after 2000 -> ct:fail(merge_not_started)
+    end,
+    T0 = erlang:monotonic_time(millisecond),
+    ok = barrel_ngram:close(C),
+    T1 = erlang:monotonic_time(millisecond),
+    ?assert((T1 - T0) < 2000),
+    %% the worker must be genuinely gone by the time close/1 returns, not
+    %% merely "close returned quickly while the worker keeps running
+    %% unsupervised in the background" -- terminate/2's explicit kill,
+    %% waited on synchronously, is what makes this true
+    ?assertNot(is_process_alive(WorkerPid)),
+    CorpusDir = filename:join(Dir, binary_to_list(C)),
+    {ok, Files} = file:list_dir(CorpusDir),
+    ?assertNot(lists:any(fun(F) -> lists:prefix("segment-merge-", F) end, Files)),
+    meck:unload(barrel_ngram_merge),
+    %% fresh reopen afterward still works cleanly
+    ok = barrel_ngram:open(C, #{db => Db, data_dir => Dir, compact_threshold => infinity}),
+    ?assertEqual([<<"a">>, <<"b">>, <<"c">>], search(C, <<"common">>)).
+
+%% Finding 8: an external exit(ShardPid, kill) bypasses terminate/2
+%% entirely (kill is untrappable even with trap_exit) -- the worker must
+%% still go down promptly, via the LINK alone, demonstrating that
+%% property specifically rather than the terminate/2-side explicit kill.
+compaction_worker_killed_via_link(Config) ->
+    Db = ?config(db, Config), C = ?config(corpus, Config),
+    Self = self(),
+    meck:new(barrel_ngram_merge, [passthrough]),
+    meck:expect(barrel_ngram_merge, merge,
+        fun(Paths, Drop) ->
+            Self ! {merge_started, self()},
+            receive proceed -> ok after 5000 -> ok end,
+            meck:passthrough([Paths, Drop])
+        end),
+    _ = put_doc(Db, <<"a">>, <<"one common">>), refresh(C),
+    _ = put_doc(Db, <<"b">>, <<"two common">>), refresh(C),
+    _ = put_doc(Db, <<"c">>, <<"three common">>), refresh(C),
+    WorkerPid = receive
+        {merge_started, WPid} -> WPid
+    after 2000 -> ct:fail(merge_not_started)
+    end,
+    ShardPid = barrel_ngram_registry:whereis_name({shard, C}),
+    true = is_pid(ShardPid),
+    true = is_process_alive(WorkerPid),
+    exit(ShardPid, kill),
+    ok = wait_until(fun() -> not is_process_alive(WorkerPid) end, 100),
+    ?assertNot(is_process_alive(WorkerPid)),
+    meck:unload(barrel_ngram_merge).
+
+%% Finding 6: refresh/1 must propagate a get_changes failure as
+%% {error, {refresh_incomplete, Reason}} instead of the old behavior of
+%% silently discarding it and reporting {ok, _} on partial progress.
+refresh_error_propagation(Config) ->
+    Db = ?config(db, Config), C = ?config(corpus, Config),
+    _ = put_doc(Db, <<"a">>, <<"alpha">>),
+    meck:new(barrel_docdb, [passthrough]),
+    meck:expect(barrel_docdb, get_changes,
+                fun(_Db, _Since, _Opts) -> {error, injected} end),
+    Result = barrel_ngram:refresh(C),
+    meck:unload(barrel_docdb),
+    ?assertEqual({error, {refresh_incomplete, injected}}, Result),
+    %% no partial state lost: an ordinary (unmocked) refresh right after
+    %% still fully drains and finds the document
+    ?assertMatch({ok, _}, barrel_ngram:refresh(C)),
+    ?assertEqual([<<"a">>], search(C, <<"alpha">>)).
+
+%% Finding 2's "recreated under the same name" gap, closed for the
+%% ONGOING subscription case, not just at open/2 time: the shard pins
+%% db_instance_id once at init/1 and re-checks it on every subscribe AND
+%% resubscribe. Recreate the database under the same name without ever
+%% closing the corpus, then force the shard's stream to drop -- the
+%% resubscribe must detect the mismatch and stop the shard with
+%% {shutdown, {db_instance_mismatch, _, _}} (not restart-looping: a
+%% {shutdown, _} reason does not trigger a `transient' child's
+%% auto-restart) rather than silently reattaching to the new instance.
+db_recreated_same_name_resubscribe(Config) ->
+    Db = ?config(db, Config), C = ?config(corpus, Config),
+    _ = put_doc(Db, <<"a">>, <<"original content">>),
+    refresh(C),
+    ?assertEqual([<<"a">>], search(C, <<"original">>)),
+    ShardPid = barrel_ngram_registry:whereis_name({shard, C}),
+    true = is_pid(ShardPid),
+    SupPid = whereis(barrel_ngram_shard_sup),
+    StreamPid = stream_pid_of(ShardPid, SupPid),
+    true = is_pid(StreamPid),
+    ok = barrel_docdb:delete_db(Db),
+    {ok, _} = barrel_docdb:create_db(Db),
+    %% force the drop -> resubscribe path (both current call sites funnel
+    %% through subscribe/1 -> check_db_instance/4)
+    exit(StreamPid, kill),
+    ok = wait_until(fun() -> not is_process_alive(ShardPid) end, 100),
+    ?assertNot(is_process_alive(ShardPid)),
+    %% no restart loop: the ref stays unregistered, not crash-restarted
+    ?assertEqual(undefined, barrel_ngram_registry:whereis_name({shard, C})),
+    %% fail-closed, not silently reattached: a query surfaces the shard's
+    %% absence cleanly rather than a noproc crash or a stale/wrong hit
+    ?assertEqual({error, corpus_not_open}, barrel_ngram:search(C, <<"original">>)).
+
+%% The shard's only two links right after a normal subscribe are its own
+%% supervisor and the changes-feed stream process -- identify the stream
+%% by elimination rather than reaching into #state{} internals.
+stream_pid_of(ShardPid, SupPid) ->
+    {links, Links} = process_info(ShardPid, links),
+    case [P || P <- Links, is_pid(P), P =/= SupPid] of
+        [StreamPid] -> StreamPid;
+        Other -> ct:fail({unexpected_shard_links, Other})
+    end.
 
 post_compaction_oracle(Config) ->
     Db = ?config(db, Config), C = ?config(corpus, Config),

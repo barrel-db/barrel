@@ -130,7 +130,7 @@ reopen_after_stale_segment_version_rejected(Config) ->
     ok = barrel_ngram:close(Corpus),
     corrupt_segment_version(Path, 3),
     Result = barrel_ngram:open(Corpus, Opts),
-    ?assertEqual({error, {unsupported_segment_version, Path, 3, 4}}, Result),
+    ?assertEqual({error, {open_failed, {unsupported_segment_version, Path, 3, 4}, ok}}, Result),
     ?assertEqual(false, barrel_ngram:is_open(Corpus)).
 
 %% After a rejected reopen, the corpus is fully closed -- a caller can

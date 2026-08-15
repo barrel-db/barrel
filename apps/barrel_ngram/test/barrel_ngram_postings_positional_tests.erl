@@ -201,6 +201,41 @@ naive_distance_check(EntriesA, D1, EntriesB, D2) ->
                end || {O, OffsA} <- EntriesA, maps:is_key(O, MapB)],
     lists:sort([R || {_O, Starts} = R <- Results, Starts =/= []]).
 
+%% Finding 7: an explicit D2 < D1 (negative Dist) case, not just the
+%% occasional negative draw inside the random property test above -- the
+%% planner picks a gram pair by doc-count cost, not literal-offset order,
+%% so D2 < D1 is a real, reachable case, not just the common D2 > D1.
+distance_check_negative_dist_test() ->
+    %% literal offsets: gram A at 4, gram B at 0 (D1=4, D2=0, Dist=-4) --
+    %% a real occurrence has OffA - OffB =:= 4, i.e. OffB =:= OffA - 4.
+    BlockA = ?M:encode([{0, [14]}, {1, [3]}]),
+    BlockB = ?M:encode([{0, [10]}, {1, [999]}]),
+    ?assertEqual([{0, [10]}], ?M:distance_check(BlockA, 4, BlockB, 0)).
+
+%% Finding 7 (the actual reported bug): a document with a heavily repeated
+%% gram on both sides -- the old Cartesian product paid O(|OffsA|*|OffsB|)
+%% per document (1000x1000 offsets forces a million-element comprehension
+%% for that ONE document); the merge-join is O(|OffsA|+|OffsB|). This
+%% asserts CORRECTNESS against the naive reference at a size an O(n*m)
+%% implementation would still complete, but that makes the algorithmic
+%% shape's cost difference obvious rather than timed.
+distance_check_heavily_repeated_offsets_matches_naive_test() ->
+    lists:foreach(
+        fun(Seed) ->
+            rand:seed(exsss, {Seed, Seed * 37 + 3, Seed * 41 + 9}),
+            OffsA = lists:usort([rand:uniform(2000000) || _ <- lists:seq(1, 800)]),
+            OffsB = lists:usort([rand:uniform(2000000) || _ <- lists:seq(1, 800)]),
+            D1 = rand:uniform(50) - 1,
+            D2 = rand:uniform(50) - 1,
+            EntriesA = [{0, OffsA}],
+            EntriesB = [{0, OffsB}],
+            BlockA = ?M:encode(EntriesA),
+            BlockB = ?M:encode(EntriesB),
+            Expected = naive_distance_check(EntriesA, D1, EntriesB, D2),
+            Actual = lists:sort(?M:distance_check(BlockA, D1, BlockB, D2)),
+            ?assertEqual(Expected, Actual)
+        end, lists:seq(1, 5)).
+
 %%====================================================================
 %% single_gram_candidates/2
 %%====================================================================

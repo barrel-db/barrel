@@ -110,13 +110,38 @@ walk({OA, _OffsA, _CA} = NA, D1, {OB, _OffsB, CB}, D2, Acc) when OB < OA ->
 
 %% @private Every (OffA, OffB) pair whose document-space distance matches
 %% the grams' literal-space distance, converted to the (deduplicated,
-%% ascending) list of candidate match starts.
+%% ascending) list of candidate match starts. `OffsA'/`OffsB' are each
+%% ascending and duplicate-free (decoded straight from the codec, and
+%% built from a usort'd offset set at freeze time -- see
+%% barrel_ngram_shard:group_offsets/1), so a two-pointer merge-join finds
+%% every matching pair in O(|OffsA| + |OffsB|) instead of the Cartesian
+%% product's O(|OffsA| * |OffsB|), which a document with a heavily
+%% repeated gram could otherwise force into millions of comparisons.
+%% `Dist' can be either sign (the planner picks a gram pair by doc-count
+%% cost, not literal-offset order) -- merge_join/4 does not care: `Target
+%% = OffA + Dist' still ascends in lockstep with `OffA' regardless of
+%% `Dist''s sign, since it is a fixed constant.
 match_starts(OffsA, D1, OffsB, D2) ->
     Dist = D2 - D1,
     lists:usort(
-      [OffA - D1
-       || OffA <- OffsA, OffB <- OffsB,
-          OffB - OffA =:= Dist, OffA - D1 >= 0]).
+      [OffA - D1 || OffA <- merge_join(OffsA, OffsB, Dist), OffA - D1 >= 0]).
+
+%% @private Ascending list of every OffA in OffsA for which OffA + Dist
+%% is present in OffsB.
+merge_join(OffsA, OffsB, Dist) ->
+    lists:reverse(merge_join(OffsA, OffsB, Dist, [])).
+
+merge_join([], _OffsB, _Dist, Acc) ->
+    Acc;
+merge_join(_OffsA, [], _Dist, Acc) ->
+    Acc;
+merge_join([OffA | RestA] = A, [OffB | RestB] = B, Dist, Acc) ->
+    Target = OffA + Dist,
+    if
+        Target =:= OffB -> merge_join(RestA, RestB, Dist, [OffA | Acc]);
+        Target < OffB -> merge_join(RestA, B, Dist, Acc);
+        true -> merge_join(A, RestB, Dist, Acc)
+    end.
 
 %% @doc The one-gram case: every offset of `Block''s gram is itself a
 %% candidate start (`off - D'). Same negative-start rejection as

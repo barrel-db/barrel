@@ -62,11 +62,19 @@ ok = barrel_ngram:open(<<"notes">>,
 
 The corpus persists on disk under `data_dir/<corpus>/`. After a restart, calling
 `open/2` again with the same name and `data_dir` re-attaches and resumes from where it
-left off (it replays only the feed tail since its last commit). Its options
-(`phase2_selector_opts`, `fields`, `shards`, `postings`) are fixed for the life of the
-corpus: reopening with a different `phase2_selector_opts` or `fields` fails with
-`{error, {config_mismatch, Field, Persisted, Requested}}` rather than silently reindexing.
-To change one, open a new corpus under a different name or `data_dir` and let it reindex.
+left off (it replays only the feed tail since its last commit). Its options (`db`,
+`phase2_selector_opts`, `fields`, `shards`, `postings`) are fixed for the life of the
+corpus: reopening with a different value fails with
+`{error, {config_mismatch, Field, Persisted, Requested}}` rather than silently reindexing,
+rebinding to a different database, or orphaning the old shard set. To change one, open a
+new corpus under a different name or `data_dir` and let it reindex.
+
+A corpus name is a filesystem path component: it must not be empty, `.`, `..`, or contain
+`/`, `\`, or a NUL byte -- `open/2` rejects an unsafe name with
+`{error, {invalid_option, corpus, Corpus}}` before touching anything on disk.
+
+`open/2` and `close/1` for the same corpus never run concurrently; a second call for a
+corpus already mid-open/close waits for the first to finish rather than racing it.
 
 ## Index and search
 
@@ -112,6 +120,9 @@ errors a non-ASCII pattern or a non-UTF-8 document can return.
 ok = barrel_ngram:close(<<"code">>).
 ```
 
+`close/1` returns `ok | {error, term()}`. It is idempotent: closing a corpus that is
+already closed, or was never opened, is `ok`.
+
 ## Notes
 
 - `index/1` is an alias of `refresh/1`.
@@ -119,3 +130,6 @@ ok = barrel_ngram:close(<<"code">>).
   fields (see [selectors](selectors.md) and [design](design.md) for what gets indexed).
 - Results are always exact: the trigram index only narrows candidates, and a confirm pass
   re-checks each candidate against the current document.
+- A corpus indexed by a version of `barrel_ngram` older than 0.9.0 has no `corpus.meta` on
+  disk; `open/2` rejects it with `{error, {legacy_corpus_requires_reindex, Corpus}}` since
+  its `db`/`shards` binding was never recoverable. Reindex it into a fresh `data_dir`.

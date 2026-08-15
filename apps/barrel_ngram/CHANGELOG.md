@@ -5,6 +5,78 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-08-15
+
+### Changed
+
+- **Breaking**: `close/1` now returns `ok | {error, term()}` instead of
+  an unconditional `ok` -- `{error, busy}` on lock contention, or an
+  error if a shard could not be confirmed stopped.
+- **Breaking**: a corpus with on-disk segments/manifests but no
+  `corpus.meta` (indexed before this release) is rejected on open with
+  `{error, {legacy_corpus_requires_reindex, Corpus}}`. There is no
+  migration path -- `db`/`shards` were never recoverable from what a
+  pre-release corpus persisted -- reindex into a fresh `data_dir`.
+- `open/2` validates every option up front (bounds, types, shape)
+  before any side effect, including the corpus name itself: a name
+  containing `/`, `\`, a NUL byte, or equal to `.`/`..` is now rejected
+  outright. It was previously used unvalidated as a filesystem path
+  component (security-relevant: closes a path-traversal risk).
+- `open/2` and `close/1` for the same corpus are now serialized by a
+  one-shot lifecycle coordinator, so a reopen of an already-live corpus
+  is always reconciled against the running one instead of silently
+  overwriting its metadata out from under it.
+- `open/2` now persists a corpus-level `corpus.meta` (database, shard
+  count, `phase2_selector_opts`, `fields`, `postings` codec), checked
+  before any shard starts and committed only once every shard is up.
+  A mismatched reopen is rejected with
+  `{error, {config_mismatch, Field, Persisted, Requested}}` instead of
+  silently reindexing, rebinding to a different database, or changing
+  shard count and orphaning the old shard set.
+- A corpus now detects its bound database being deleted and recreated
+  under the same name, both at open time and continuously on every
+  shard resubscribe. A mismatch stops the affected shard instead of
+  silently reattaching and indexing under a stale watermark.
+
+### Fixed
+
+- `(?x)` extended-mode regex patterns are now interpreted for real
+  (unescaped whitespace and `#`-comments stripped before analysis)
+  instead of treating whitespace as a mandatory literal trigram, a
+  false negative for every real match of an extended-mode pattern.
+- The regex analyzer now fails closed (falls back to full-content
+  confirmation) on lazy/possessive quantifiers, PCRE control verbs
+  (`(*ACCEPT)`, `(*SKIP)`, ...), and unrecognized alphanumeric escapes
+  (`\p{L}`, `\K`, `\R`, ...) instead of silently mis-parsing them as
+  literal text, which could produce an unsound trigram query. POSIX
+  class syntax (`[[:space:]]`, `[[.ch.]]`, `[[=e=]]`) is now scanned to
+  its real closing bracket instead of stopping one character short.
+- A positive `source`-verified match (literal or regex, buffer or
+  segment) is now always re-confirmed against live `barrel_docdb`
+  content before being returned, closing a false-positive window where
+  a stale `source` could serve an outdated or deleted document's
+  content as if current. A top-level `get_docs` error now propagates
+  as a query error instead of a silent empty result; a per-document
+  error other than `not_found` now propagates as
+  `{confirm_failed, DocId, Reason}` instead of a silent non-match.
+- `refresh/1` now drains up to a captured HLC target instead of
+  re-querying its own moving watermark, so sustained concurrent writes
+  can no longer make it recurse indefinitely. A drain error now
+  propagates as `{error, {refresh_incomplete, Reason}}` instead of
+  being silently discarded.
+- Positional distance-checking (`match_starts/4`) now merge-joins the
+  two offset lists instead of comparing every pair, closing an O(n*m)
+  blowup on a document with many repeats of both grams.
+- The compaction worker is now linked (and monitored) to its shard, so
+  a shard stop or crash during compaction no longer leaves the worker
+  running unsupervised with an orphaned temp segment.
+- `gallop_intersect/2`'s arguments in `intersect_all/1`'s fold were
+  reversed relative to its own documented contract (results were
+  unaffected; only performance for a skewed pair of list sizes).
+- A query against a corpus that was never opened, or is already
+  closed, now returns `{error, corpus_not_open}` instead of crashing
+  the caller.
+
 ## [0.8.0] - 2026-08-10
 
 ### Added

@@ -95,7 +95,11 @@ intersect_all(Lists) ->
         false ->
             [Shortest | Rest] =
                 lists:sort(fun(A, B) -> length(A) =< length(B) end, Lists),
-            lists:foldl(fun gallop_intersect/2, Shortest, Rest)
+            %% foldl calls Fun(Elem, AccIn); the accumulator (shrinking,
+            %% started as the shortest list) is gallop_intersect/2's
+            %% documented `Small' side, the fresh list from Rest is `Large'
+            lists:foldl(fun(Large, Small) -> gallop_intersect(Small, Large) end,
+                        Shortest, Rest)
     end.
 
 %% @private Intersect ascending list `Small' against ascending list

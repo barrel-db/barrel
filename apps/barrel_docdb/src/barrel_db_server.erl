@@ -18,6 +18,7 @@
 -export([info/1, stop/1]).
 -export([get_store_ref/1, get_att_ref/1]).
 -export([sweep_ttl/1]).
+-export([source_id/1]).
 
 %% Document API
 -export([

@@ -21,7 +21,11 @@
          buffer_update_masks_older_segment_content/1,
          buffered_delete_masks_older_segment_hit/1,
          same_key_across_multiple_segments_resolves_to_newest/1,
-         source_configured_buffer_verification_uses_source/1]).
+         source_configured_buffer_verification_uses_source/1,
+         stale_source_rejected_after_update/1,
+         stale_source_regex_rejected_after_delete/1,
+         confirm_top_level_error_propagates/1,
+         confirm_per_document_error_propagates/1]).
 -export([windowed_search_returns_correct_spans/1,
          windowed_search_finds_multiple_occurrences/1,
          pread_size_bounded_proof/1]).
@@ -39,6 +43,10 @@ all() ->
      buffered_delete_masks_older_segment_hit,
      same_key_across_multiple_segments_resolves_to_newest,
      source_configured_buffer_verification_uses_source,
+     stale_source_rejected_after_update,
+     stale_source_regex_rejected_after_delete,
+     confirm_top_level_error_propagates,
+     confirm_per_document_error_propagates,
      windowed_search_returns_correct_spans,
      windowed_search_finds_multiple_occurrences,
      pread_size_bounded_proof,
@@ -185,22 +193,130 @@ same_key_across_multiple_segments_resolves_to_newest(Config) ->
 %% the two: docdb's content does not contain the literal, the source's
 %% (mem-backed) content for the same key does -- a hit proves the source
 %% path fired.
+%% Finding 4: a genuine `source' POSITIVE is always live-reconfirmed
+%% against real barrel_docdb content before being trusted, so `source'
+%% and docdb must AGREE here (unlike an earlier version of this test,
+%% which deliberately made them disagree to "prove" source alone decided
+%% the result -- that was exercising the exact stale-source false-positive
+%% bug finding 4 closes, not a property to preserve). What this test
+%% actually needs to prove -- that buffer verification really consults
+%% `source' for its cheap pre-filter, not silently falling through to a
+%% docdb-only path -- is proved by call-counting instead: at least one
+%% `pread' through `source' must happen.
 source_configured_buffer_verification_uses_source(Config) ->
     Db = ?config(db, Config),
     Corpus = ?config(corpus, Config),
     DataDir = ?config(data_dir, Config),
     ok = barrel_ngram:close(Corpus),
-    SourceMap = #{<<"doc1">> => <<"totally different text with connect_timeout inside">>},
+    Text = <<"totally different text with connect_timeout inside">>,
+    CounterKey = buffer_source_pread_count,
+    erase(CounterKey),
+    Source = {barrel_ngram_source_count_calls, {CounterKey, #{<<"doc1">> => Text}}},
     ok = barrel_ngram:open(Corpus, #{db => Db, data_dir => DataDir,
-                                     source => {barrel_ngram_source_mem, SourceMap}}),
-    {ok, _} = barrel_docdb:put_doc(Db, #{<<"id">> => <<"doc1">>,
-                                         <<"body">> => <<"nothing interesting in docdb">>}),
+                                     phase2_selector_opts => ?POS_OPTS, source => Source}),
+    {ok, _} = barrel_docdb:put_doc(Db, #{<<"id">> => <<"doc1">>, <<"body">> => Text}),
     %% no refresh -- doc1 stays in the buffer, reachable only via the
     %% async push subscription (poll), exercising the source-aware
     %% buffer verification path specifically
     ok = wait_until(fun() -> search_ids(Corpus, <<"connect_timeout">>) =:= [<<"doc1">>] end, 100),
     ?assertEqual([<<"doc1">>], search_ids(Corpus, <<"connect_timeout">>)),
-    ?assertEqual([], search_ids(Corpus, <<"nothing interesting">>)).
+    ?assertEqual([], search_ids(Corpus, <<"nothing interesting">>)),
+    PreadCalls = case get(CounterKey) of undefined -> 0; N -> N end,
+    ?assert(PreadCalls > 0).
+
+%% Finding 4: a stale `source' -- still serving an OLD document version
+%% after a real update -- must NOT produce a false positive. The corpus
+%% reopens with `source' snapshotting the doc's ORIGINAL content; the
+%% document is then updated for real (a new revision, no longer
+%% containing the literal, frozen into a NEW segment via refresh); the
+%% search MUST reflect the new, live content, not `source''s stale
+%% snapshot -- proving live re-confirmation, not `source' alone, decides
+%% a positive result, at the segment/positional lane specifically (not
+%% just buffer, which source_configured_buffer_verification_uses_source
+%% above already covers).
+stale_source_rejected_after_update(Config) ->
+    Db = ?config(db, Config),
+    Corpus = ?config(corpus, Config),
+    DataDir = ?config(data_dir, Config),
+    OldText = <<"error: connect_timeout exceeded in the pool">>,
+    {ok, R1} = barrel_docdb:put_doc(Db, #{<<"id">> => <<"doc1">>, <<"body">> => OldText}),
+    {ok, _} = barrel_ngram:refresh(Corpus),
+    ok = barrel_ngram:close(Corpus),
+    ok = barrel_ngram:open(Corpus, #{db => Db, data_dir => DataDir,
+                                     phase2_selector_opts => ?POS_OPTS,
+                                     source => {barrel_ngram_source_mem,
+                                               #{<<"doc1">> => OldText}}}),
+    ?assertEqual([<<"doc1">>], search_ids(Corpus, <<"connect_timeout">>)),
+    NewText = <<"nothing relevant in this document anymore">>,
+    Rev1 = maps:get(<<"rev">>, R1),
+    {ok, _} = barrel_docdb:put_doc(Db, #{<<"id">> => <<"doc1">>, <<"body">> => NewText,
+                                         <<"_rev">> => Rev1}),
+    {ok, _} = barrel_ngram:refresh(Corpus),
+    %% source is now stale (still serving OldText), but the live document
+    %% no longer contains "connect_timeout" -- must not be found. (Not
+    %% asserting the reverse -- that a NEW word like "relevant" IS found
+    %% -- here: whichever lane a given literal falls into, a stale
+    %% `source' pre-filter that doesn't contain the new word can validly
+    %% produce a true negative at phase 1, an already-documented,
+    %% accepted `source' limitation, not something this test is about.)
+    ?assertEqual([], search_ids(Corpus, <<"connect_timeout">>)).
+
+%% Finding 4, regex + delete: the same stale-source scenario via
+%% regex/2, and via a delete instead of an update -- the document is
+%% genuinely gone, but a stale `source' would still happily serve its
+%% old (matching) content if ever consulted without live re-confirmation.
+stale_source_regex_rejected_after_delete(Config) ->
+    Db = ?config(db, Config),
+    Corpus = ?config(corpus, Config),
+    DataDir = ?config(data_dir, Config),
+    Text = <<"error: connect_42_backoff_ms exceeded in the pool">>,
+    {ok, R1} = barrel_docdb:put_doc(Db, #{<<"id">> => <<"doc1">>, <<"body">> => Text}),
+    {ok, _} = barrel_ngram:refresh(Corpus),
+    ok = barrel_ngram:close(Corpus),
+    ok = barrel_ngram:open(Corpus, #{db => Db, data_dir => DataDir,
+                                     phase2_selector_opts => ?POS_OPTS,
+                                     source => {barrel_ngram_source_mem, #{<<"doc1">> => Text}}}),
+    Regex = <<"connect_[0-9]{2}_backoff_ms">>,
+    {ok, [_]} = barrel_ngram:regex(Corpus, Regex),
+    Rev1 = maps:get(<<"rev">>, R1),
+    {ok, _} = barrel_docdb:delete_doc(Db, <<"doc1">>, #{rev => Rev1}),
+    {ok, _} = barrel_ngram:refresh(Corpus),
+    %% source is stale (still serving the deleted doc's old content), but
+    %% the document is genuinely gone -- must not be found
+    ?assertEqual({ok, []}, barrel_ngram:regex(Corpus, Regex)).
+
+%% Finding 4: a top-level get_docs/2 failure during the confirm pass
+%% propagates as a query-level error, not a silent empty/incomplete
+%% result (the pre-existing bug this finding's error-handling fix also
+%% closes: lists:zip/2 would otherwise crash on a non-list Results).
+confirm_top_level_error_propagates(Config) ->
+    Db = ?config(db, Config),
+    Corpus = ?config(corpus, Config),
+    Text = <<"error: connect_timeout exceeded in the pool">>,
+    {ok, _} = barrel_docdb:put_doc(Db, #{<<"id">> => <<"doc1">>, <<"body">> => Text}),
+    {ok, _} = barrel_ngram:refresh(Corpus),
+    meck:new(barrel_docdb, [passthrough]),
+    meck:expect(barrel_docdb, get_docs, fun(_Db, _Keys) -> {error, injected} end),
+    Result = barrel_ngram:search(Corpus, <<"connect_timeout">>),
+    meck:unload(barrel_docdb),
+    ?assertEqual({error, injected}, Result).
+
+%% Finding 4: a per-document error OTHER than not_found propagates as
+%% {confirm_failed, DocId, Reason} -- a genuine transient error is a
+%% false negative if silently treated as "no match", contradicting exact
+%% results just as much as trusting a false positive would.
+confirm_per_document_error_propagates(Config) ->
+    Db = ?config(db, Config),
+    Corpus = ?config(corpus, Config),
+    Text = <<"error: connect_timeout exceeded in the pool">>,
+    {ok, _} = barrel_docdb:put_doc(Db, #{<<"id">> => <<"doc1">>, <<"body">> => Text}),
+    {ok, _} = barrel_ngram:refresh(Corpus),
+    meck:new(barrel_docdb, [passthrough]),
+    meck:expect(barrel_docdb, get_docs,
+                fun(_Db, Keys) -> [{error, injected_transient} || _ <- Keys] end),
+    Result = barrel_ngram:search(Corpus, <<"connect_timeout">>),
+    meck:unload(barrel_docdb),
+    ?assertMatch({error, {confirm_failed, <<"doc1">>, injected_transient}}, Result).
 
 %%====================================================================
 %% Windowed literal verification (Step 5a: the positional lane end to end)

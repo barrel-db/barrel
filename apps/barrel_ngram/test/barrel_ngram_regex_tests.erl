@@ -105,6 +105,131 @@ leading_i_is_stripped_from_body_test() ->
     ?assertEqual(and_of(<<"connect_timeout">>), ?M:trigram_query(<<"(?i)connect_timeout">>)).
 
 %%====================================================================
+%% Finding 3: lazy/possessive quantifiers -- fail closed, all four kinds
+%%====================================================================
+
+lazy_possessive_star_test() ->
+    ?assertEqual(unsupported, ?M:analyze(<<"abc*?def">>)),
+    ?assertEqual(unsupported, ?M:analyze(<<"abc*+def">>)).
+
+lazy_possessive_plus_test() ->
+    ?assertEqual(unsupported, ?M:analyze(<<"abc+?def">>)),
+    ?assertEqual(unsupported, ?M:analyze(<<"abc++def">>)).
+
+lazy_possessive_quest_test() ->
+    ?assertEqual(unsupported, ?M:analyze(<<"abc??def">>)),
+    ?assertEqual(unsupported, ?M:analyze(<<"abc?+def">>)).
+
+lazy_possessive_rep_test() ->
+    ?assertEqual(unsupported, ?M:analyze(<<"abc{2,3}?def">>)),
+    ?assertEqual(unsupported, ?M:analyze(<<"abc{2,3}+def">>)).
+
+%% An ordinary (greedy) quantifier of each kind is still accepted --
+%% these fixes must not overreject.
+ordinary_quantifiers_still_supported_test() ->
+    ?assertMatch({ok, _, _, _}, ?M:analyze(<<"abc*def">>)),
+    ?assertMatch({ok, _, _, _}, ?M:analyze(<<"abc+def">>)),
+    ?assertMatch({ok, _, _, _}, ?M:analyze(<<"abc?def">>)),
+    ?assertMatch({ok, _, _, _}, ?M:analyze(<<"abc{2,3}def">>)).
+
+%%====================================================================
+%% Finding 3: unrecognized alphanumeric escapes -- fail closed
+%%====================================================================
+
+unsupported_escapes_test() ->
+    Escapes = [<<"\\0">>, <<"\\R">>, <<"\\h">>, <<"\\H">>, <<"\\p{L}">>,
+               <<"\\P{L}">>, <<"\\K">>, <<"\\C">>, <<"\\v">>, <<"\\V">>,
+               <<"\\N">>, <<"\\G">>, <<"\\a">>, <<"\\e">>, <<"\\E">>, <<"\\X">>],
+    lists:foreach(
+        fun(Esc) ->
+            Pattern = <<"abc", Esc/binary, "def">>,
+            ?assertEqual({Esc, unsupported}, {Esc, ?M:analyze(Pattern)})
+        end, Escapes).
+
+%% Punctuation escapes stay literal (matches real PCRE's own rule) --
+%% this fix must not overreject those either.
+punctuation_escapes_still_literal_test() ->
+    ?assertEqual(and_of(<<"a.b*c">>), ?M:trigram_query(<<"a\\.b\\*c">>)).
+
+%%====================================================================
+%% Finding 3: PCRE control verbs -- fail closed
+%%====================================================================
+
+control_verbs_unsupported_test() ->
+    ?assertEqual(unsupported, ?M:analyze(<<"(*ACCEPT)">>)),
+    ?assertEqual(unsupported, ?M:analyze(<<"(*SKIP)abc">>)),
+    ?assertEqual(unsupported, ?M:analyze(<<"(*UTF)abc">>)),
+    ?assertEqual(unsupported, ?M:analyze(<<"(*UCP)abc">>)).
+
+%%====================================================================
+%% Finding 3: POSIX class sub-syntax boundary
+%%====================================================================
+
+posix_class_space_test() ->
+    %% the class is now correctly bounded (no stray literal ']'
+    %% coalesced into "def"). "def" is only 3 bytes (one trigram), which
+    %% simplify/1 collapses a single-element 'and' down to the bare
+    %% {gram, _} -- compare against trigram_query/1 directly rather than
+    %% re-deriving the (unsimplified) shape via and_of/1.
+    ?assertEqual(?M:trigram_query(<<"def">>), ?M:trigram_query(<<"[[:space:]]def">>)).
+
+posix_class_symbol_test() ->
+    ?assertEqual(?M:trigram_query(<<"def">>), ?M:trigram_query(<<"[[.ch.]]def">>)).
+
+posix_class_equiv_test() ->
+    ?assertEqual(?M:trigram_query(<<"def">>), ?M:trigram_query(<<"[[=e=]]def">>)).
+
+posix_class_unclosed_is_unsupported_test() ->
+    ?assertEqual(unsupported, ?M:analyze(<<"[[:space:]">>)).
+
+%%====================================================================
+%% Finding 3: `(?x)' extended mode
+%%====================================================================
+
+extended_mode_strips_whitespace_test() ->
+    ?assertEqual(?M:trigram_query(<<"abcdef">>), ?M:trigram_query(<<"(?x)abc def">>)).
+
+extended_mode_flag_reported_test() ->
+    ?assertMatch({ok, _, _, #{leading_flags := [extended]}},
+                 ?M:analyze(<<"(?x)abc def">>)).
+
+%% An escaped space is preserved as a literal, not stripped.
+extended_mode_escaped_space_is_literal_test() ->
+    ?assertEqual(?M:trigram_query(<<"a b">>), ?M:trigram_query(<<"(?x)a\\ b">>)).
+
+extended_mode_comment_test() ->
+    ?assertEqual(?M:trigram_query(<<"abcdef">>),
+                 ?M:trigram_query(<<"(?x)abc # a trailing comment\ndef">>)).
+
+%% Odd/even backslash-parity oracle pair (a naive "previous-char" check
+%% gets this wrong without tracking parity; the pair-consuming scanner
+%% gets it right by construction).
+extended_mode_even_backslashes_is_comment_test() ->
+    %% two raw backslash BYTES in the pattern = one escaped backslash,
+    %% leaving '#' unescaped and starting a comment. The /x scanner's
+    %% pair-consume clause preserves BOTH backslash bytes verbatim into
+    %% the stripped output (it does not itself interpret escape
+    %% semantics, only tracks parity) -- the real parser is what then
+    %% collapses that surviving `\\' pair into one literal backslash
+    %% character, exactly as it would for the same two raw bytes OUTSIDE
+    %% `/x' mode. Comparison target: <<"abc\\\\">> in Erlang source is
+    %% ALSO two raw backslash bytes (Erlang's own string escaping), so
+    %% this is comparing against the equivalent non-extended pattern.
+    ?assertEqual(?M:trigram_query(<<"abc\\\\">>),
+                 ?M:trigram_query(<<"(?x)abc\\\\# comment\n">>)).
+
+extended_mode_odd_backslashes_is_literal_test() ->
+    %% one backslash escapes '#' itself, which stays literal
+    ?assertEqual(?M:trigram_query(<<"abc#comment">>),
+                 ?M:trigram_query(<<"(?x)abc\\#comment">>)).
+
+%% Whitespace and '#' inside a class are literal class members, never
+%% stripped, even in extended mode.
+extended_mode_class_contents_untouched_test() ->
+    ?assertEqual(?M:trigram_query(<<"[a #]def">>),
+                 ?M:trigram_query(<<"(?x)[a #]def">>)).
+
+%%====================================================================
 %% Analysis of representative patterns
 %%====================================================================
 

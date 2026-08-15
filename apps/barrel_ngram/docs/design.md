@@ -46,6 +46,37 @@ own configuration -- `phase2_selector_opts` and `fields` -- and validates it on 
 `{error, {config_mismatch, Field, Persisted, Requested}}` rather than silently reindexing
 under the new value.
 
+## Opening and closing a corpus
+
+`open/2` and `close/1` for the same corpus name never interleave: a one-shot coordinator
+serializes them, so a reopen of an already-live corpus is always reconciled against the
+running one, not raced against it.
+
+Alongside the per-shard manifest, a corpus persists a corpus-level `corpus.meta` --
+`db`, the database's instance id, `shards`, `phase2_selector_opts`, `fields`, and
+`postings` -- checked before any shard starts and committed only once every shard is up.
+A reopen that disagrees with it, or with the corpus's own currently-running configuration,
+fails with `{error, {config_mismatch, Field, Persisted, Requested}}` before anything is
+touched, closing two gaps a per-shard-only check could not: rebinding a corpus to a
+different (or recreated) database, and changing `shards` on a live corpus, which would
+otherwise spawn an entirely disjoint set of shard directories and silently orphan the old
+ones.
+
+That database-instance id is also re-checked continuously, on every shard resubscribe, not
+just at open. If the bound database is deleted and recreated under the same name while the
+corpus stays open, the affected shard detects the mismatch on its next resubscribe and
+stops itself instead of silently reattaching and indexing under a stale watermark.
+
+A corpus indexed before corpus-level metadata existed (real segments on disk, no
+`corpus.meta`) has no safe migration -- `db` and `shards` were never recoverable from what
+it persisted -- so `open/2` rejects it with
+`{error, {legacy_corpus_requires_reindex, Corpus}}`. Reindex it into a fresh `data_dir`.
+
+`close/1` returns `ok | {error, term()}`: `{error, busy}` if another `open/2`/`close/1` for
+the same corpus is already in flight and contention isn't resolved within the retry
+window, or an error if a shard could not be confirmed stopped. It is otherwise idempotent
+-- closing an already-closed or never-opened corpus is `ok`.
+
 ## The live lifecycle
 
 The corpus tracks the database, so segments come and go:

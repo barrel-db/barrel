@@ -68,7 +68,8 @@ trigram_query(Bin) ->
 -spec analyze(binary()) -> {ok, term(), query(), width_info()} | unsupported.
 analyze(Bin) when is_binary(Bin) ->
     try
-        {LeadingFlags, Body} = strip_leading_modifiers(binary_to_list(Bin)),
+        {LeadingFlags, Body0} = strip_leading_modifiers(binary_to_list(Bin)),
+        Body = apply_extended(LeadingFlags, Body0),
         {Node, Rest} = p_alt(Body),
         [] = Rest, %% must consume the whole pattern -- a stray ')' etc. is malformed
         {_CanEmpty, Query} = info(Node),
@@ -87,9 +88,18 @@ analyze(Bin) when is_binary(Bin) ->
 %% fail-closed behavior should use `analyze/1', not this directly.
 -spec parse(binary()) -> term().
 parse(Bin) ->
-    {_LeadingFlags, Body} = strip_leading_modifiers(binary_to_list(Bin)),
+    {LeadingFlags, Body0} = strip_leading_modifiers(binary_to_list(Bin)),
+    Body = apply_extended(LeadingFlags, Body0),
     {Node, _Rest} = p_alt(Body),
     Node.
+
+%% @private analyze/1 and parse/1 both apply this identically, so
+%% parse/1-based tests see the real post-`/x' AST.
+apply_extended(LeadingFlags, Body) ->
+    case lists:member(extended, LeadingFlags) of
+        true -> strip_extended_whitespace(Body);
+        false -> Body
+    end.
 
 %%====================================================================
 %% Leading inline-modifier detection ( (?i) (?s) (?m), whole-pattern only )
@@ -112,7 +122,7 @@ take_leading_modifier_group(_) ->
 take_modifier_flags([$i | R], Acc) -> take_modifier_flags(R, [caseless | Acc]);
 take_modifier_flags([$s | R], Acc) -> take_modifier_flags(R, [dotall | Acc]);
 take_modifier_flags([$m | R], Acc) -> take_modifier_flags(R, [multiline | Acc]);
-take_modifier_flags([$x | R], Acc) -> take_modifier_flags(R, Acc);
+take_modifier_flags([$x | R], Acc) -> take_modifier_flags(R, [extended | Acc]);
 take_modifier_flags(R, Acc) when Acc =/= [] orelse R =/= [] ->
     %% stops at the first non-flag char; caller checks it's ')'
     case R of
@@ -165,6 +175,19 @@ p_atom([$(, $?, $(  | _R]) -> throw(unsupported); %% conditional
 p_atom([$(, $?      | _R]) -> throw(unsupported); %% any other (?... -- mid-pattern/
                                                     %% scoped inline modifier, or
                                                     %% unrecognized -- fail closed
+p_atom([$(, $*      | _R]) -> throw(unsupported); %% PCRE control verb, e.g.
+                                                    %% (*ACCEPT), (*SKIP), (*UTF),
+                                                    %% (*UCP) -- a completely
+                                                    %% different syntactic form from
+                                                    %% (?...) groups; unrecognized by
+                                                    %% the parser otherwise, which
+                                                    %% would fall through to treating
+                                                    %% its contents as literal text
+                                                    %% (confirmed: (*ACCEPT) produced
+                                                    %% mandatory trigrams for the
+                                                    %% literal bytes "ACCEPT", a real
+                                                    %% match not requiring them at
+                                                    %% all -- a false negative)
 p_atom([$( | R]) -> p_group(R);
 p_atom([$[ | R]) ->
     R2 = skip_class(R),
@@ -186,17 +209,27 @@ p_group(R) ->
         _ -> throw(unsupported) %% unclosed group: malformed
     end.
 
-%% quantifier
-p_quant([$* | R]) -> {star, R};
-p_quant([$+ | R]) -> {plus, R};
-p_quant([$? | R]) -> {quest, R};
+%% quantifier -- a lazy (`?' suffix) or possessive (`+' suffix) modifier
+%% on ANY of the four quantifier kinds is unsupported (previously silently
+%% swallowed as literal text by p_atom's catch-all, an unsound too-narrow
+%% trigram query) -- checked uniformly via quant_tail/2 immediately after
+%% the base quantifier is recognized.
+p_quant([$* | R]) -> quant_tail(R, star);
+p_quant([$+ | R]) -> quant_tail(R, plus);
+p_quant([$? | R]) -> quant_tail(R, quest);
 p_quant([${ | R] = All) ->
     case try_brace(R) of
-        {ok, Min, Max, R2} -> {{rep, Min, Max}, R2};
+        {ok, Min, Max, R2} -> quant_tail(R2, {rep, Min, Max});
         error -> {none, All}
     end;
 p_quant(R) ->
     {none, R}.
+
+quant_tail([C | _], _Q) when C =:= $?; C =:= $+ -> throw(unsupported);
+quant_tail(R, star) -> {star, R};
+quant_tail(R, plus) -> {plus, R};
+quant_tail(R, quest) -> {quest, R};
+quant_tail(R, {rep, Min, Max}) -> {{rep, Min, Max}, R}.
 
 %% {n}, {n,}, {n,m} -- both bounds are preserved (the original parser
 %% discarded the max, which made a correct width bound impossible).
@@ -232,10 +265,83 @@ skip_class(R) -> skip_class_body(strip_leading_bracket(R)).
 strip_leading_bracket([$] | R]) -> R;
 strip_leading_bracket(R) -> R.
 
+%% [:name:], [.symbol.], [=class=] POSIX sub-syntax each need their own
+%% terminator-aware skip: stopping at the FIRST unescaped ']' (the naive
+%% approach) is one character short of the true outer close for e.g.
+%% "[[:space:]]", leaving a stray literal ']' coalesced into an adjacent
+%% literal run.
 skip_class_body([$\\, _ | R]) -> skip_class_body(R);
+skip_class_body([$[, $: | R]) -> skip_class_body(skip_posix_sub(R, $:));
+skip_class_body([$[, $. | R]) -> skip_class_body(skip_posix_sub(R, $.));
+skip_class_body([$[, $= | R]) -> skip_class_body(skip_posix_sub(R, $=));
 skip_class_body([$] | R]) -> R;
 skip_class_body([_ | R]) -> skip_class_body(R);
 skip_class_body([]) -> throw(unsupported). %% unclosed class: malformed
+
+%% @private Skip to the D,']' terminator pair of a POSIX sub-expression
+%% (D is one of $:/$./$=). No proper terminator -> unsupported for the
+%% whole pattern (fail closed, consistent with this module's philosophy),
+%% not a guess.
+skip_posix_sub([D, $] | R], D) -> R;
+skip_posix_sub([_ | R], D) -> skip_posix_sub(R, D);
+skip_posix_sub([], _D) -> throw(unsupported).
+
+%%====================================================================
+%% `(?x)' extended-mode whitespace/comment stripping
+%%====================================================================
+
+%% @doc Strip unescaped whitespace and `#'-to-end-of-line comments from
+%% an `(?x)'-flagged pattern's body, BEFORE the real parser ever sees it
+%% -- a forward, pair-consuming scan (the same technique
+%% skip_class_body/1 uses for escape-pairs).
+-spec strip_extended_whitespace(string()) -> string().
+strip_extended_whitespace(Chars) -> lists:reverse(sxws(Chars, [])).
+
+sxws([], Acc) -> Acc;
+%% pair-consume: a backslash and whatever immediately follows it move
+%% through together, verbatim -- this tracks escape parity "for free",
+%% with no separate state. `(?x)abc\\#comment' (two backslashes): the
+%% first `\' pairs with the SECOND `\' (not `#'), so the scanner resumes
+%% at `#' completely fresh and treats it as an unescaped comment-starter
+%% (matches real PCRE: `\\' is one escaped backslash, leaving `#'
+%% unescaped). `(?x)abc\#comment' (one backslash): `\' pairs with `#'
+%% and BOTH are emitted verbatim, so `#' is never even offered to the
+%% comment-detection clause below -- it reaches the real parser as `\#',
+%% which escape_atom($#) (punctuation) correctly turns into a literal `#'.
+sxws([$\\, C | R], Acc) -> sxws(R, [C, $\\ | Acc]);
+sxws([$[ | R], Acc) -> sxws_class(R, [$[ | Acc]);
+sxws([C | R], Acc) when C =:= $ ; C =:= $\t; C =:= $\n;
+                        C =:= $\r; C =:= $\f; C =:= $\v ->
+    sxws(R, Acc);
+sxws([$# | R], Acc) -> sxws(sxws_skip_comment(R), Acc);
+sxws([C | R], Acc) -> sxws(R, [C | Acc]).
+
+sxws_skip_comment([$\n | R]) -> R;
+sxws_skip_comment([_ | R]) -> sxws_skip_comment(R);
+sxws_skip_comment([]) -> [].
+
+%% @private Inside a `[...]' class, whitespace and `#' are literal class
+%% members -- never stripped, passed through verbatim. Mirrors
+%% skip_class/skip_class_body/skip_posix_sub exactly (including the
+%% POSIX [:name:]/[.symbol.]/[=class=] boundary handling) so the real
+%% parser and this `/x' scanner never disagree about where a class ends.
+sxws_class([$^ | R], Acc) -> sxws_class_after_bracket(R, [$^ | Acc]);
+sxws_class(R, Acc) -> sxws_class_after_bracket(R, Acc).
+
+sxws_class_after_bracket([$] | R], Acc) -> sxws_class_body(R, [$] | Acc]);
+sxws_class_after_bracket(R, Acc) -> sxws_class_body(R, Acc).
+
+sxws_class_body([$\\, C | R], Acc) -> sxws_class_body(R, [C, $\\ | Acc]);
+sxws_class_body([$[, $: | R], Acc) -> sxws_posix_sub(R, $:, [$:, $[ | Acc]);
+sxws_class_body([$[, $. | R], Acc) -> sxws_posix_sub(R, $., [$., $[ | Acc]);
+sxws_class_body([$[, $= | R], Acc) -> sxws_posix_sub(R, $=, [$=, $[ | Acc]);
+sxws_class_body([$] | R], Acc) -> sxws(R, [$] | Acc]);
+sxws_class_body([C | R], Acc) -> sxws_class_body(R, [C | Acc]);
+sxws_class_body([], _Acc) -> throw(unsupported).
+
+sxws_posix_sub([D, $] | R], D, Acc) -> sxws_class_body(R, [$], D | Acc]);
+sxws_posix_sub([C | R], D, Acc) -> sxws_posix_sub(R, D, [C | Acc]);
+sxws_posix_sub([], _D, _Acc) -> throw(unsupported).
 
 escape_atom($n) -> {lit, <<10>>};
 escape_atom($t) -> {lit, <<9>>};
@@ -256,7 +362,21 @@ escape_atom($x) -> throw(unsupported); %% \xHH / \x{...} -- not interpreted
 escape_atom($Q) -> throw(unsupported); %% \Q...\E -- not interpreted
 escape_atom($k) -> throw(unsupported); %% \k<name> backreference
 escape_atom(C) when C >= $1, C =< $9 -> throw(unsupported); %% \1-\9 backreference
-escape_atom(C) -> {lit, <<C>>}.   %% escaped literal (\. \* \( ...)
+%% Any OTHER unrecognized ASCII alphanumeric escape is fail-closed, not
+%% silently reduced to a bare-letter literal: \0, \R, \h, \H, \p{...},
+%% \P{...}, \K, \C, \v, \V, \N, \G, \a, \e, bare \E, \X and more are all
+%% real, PCRE2-accepted constructs with real special meaning (verified
+%% exhaustively: every one is either a genuine PCRE compile error or has
+%% real special meaning under this OTP's `re', zero false-positive
+%% rejections from this rule) -- none of them mean "the literal letter".
+escape_atom(C) when (C >= $a andalso C =< $z) orelse
+                     (C >= $A andalso C =< $Z) orelse
+                     (C >= $0 andalso C =< $9) ->
+    throw(unsupported);
+escape_atom(C) -> {lit, <<C>>}.   %% unrecognized PUNCTUATION is literal --
+                                    %% matches real PCRE's own rule: an
+                                    %% escaped non-alphanumeric character is
+                                    %% always literal (\. \* \( ...)
 
 %% Build a concatenation node, coalescing runs of unquantified literal
 %% bytes into a single {lit, Bytes}.

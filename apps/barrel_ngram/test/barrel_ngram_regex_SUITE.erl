@@ -16,12 +16,13 @@
          init_per_testcase/2, end_per_testcase/2]).
 
 -export([oracle_dense/1, oracle_lifecycle/1, bad_regex/1,
-         segment_error_propagates/1]).
+         segment_error_propagates/1, extended_mode_oracle/1]).
 
 -define(RE_LIMIT, 100000).
 
 all() ->
-    [oracle_dense, oracle_lifecycle, bad_regex, segment_error_propagates].
+    [oracle_dense, oracle_lifecycle, bad_regex, segment_error_propagates,
+     extended_mode_oracle].
 
 docs() ->
     [
@@ -114,6 +115,40 @@ segment_error_propagates(Config) ->
     ok = corrupt_magic(Path),
     ?assertEqual({error, invalid_magic}, barrel_ngram:regex(Dense, <<"connect_timeout">>)),
     ?assertEqual({error, invalid_magic}, barrel_ngram:search(Dense, <<"connect_timeout">>)).
+
+%% Finding 3: `(?x)' extended mode against real content, through the
+%% actual trigram-accelerated query path, compared against re:run with
+%% `[extended]' compiled directly (an independent route to the same
+%% semantics: barrel_ngram:regex/2 sees the `(?x)'-prefixed pattern --
+%% this module's own inline-flag path -- the oracle reference compiles
+%% the SAME body without the prefix but with re:compile's `[extended]'
+%% option instead).
+extended_mode_oracle(Config) ->
+    Db = ?config(db, Config),
+    Seed = seed(Db, docs()),
+    {ok, _} = barrel_ngram:refresh(?config(dense, Config)),
+    Cases = [{<<"(?x) connect _ timeout">>, <<" connect _ timeout">>},
+             {<<"(?x) retry _ \\w+ _ ms # trailing comment\n">>,
+              <<" retry _ \\w+ _ ms # trailing comment\n">>},
+             {<<"(?x) [0-9] + \\s* budget">>, <<" [0-9] + \\s* budget">>}],
+    lists:foreach(
+        fun({Inline, Body}) ->
+            {ok, RE} = re:compile(Body, [extended]),
+            Expected = lists:sort(
+                [Id || {Id, Text} <- maps:to_list(Seed), re_matches(Text, RE)]),
+            Actual = regex(?config(dense, Config), Inline),
+            ?assertEqual({Inline, Expected}, {Inline, Actual})
+        end, Cases).
+
+re_matches(Text, RE) ->
+    DocText = barrel_ngram_corpus:doc_text(#{<<"body">> => Text}, #{fields => all}),
+    case re:run(DocText, RE,
+                [global, {capture, first, index},
+                 {match_limit, ?RE_LIMIT},
+                 {match_limit_recursion, ?RE_LIMIT}]) of
+        {match, _} -> true;
+        _ -> false
+    end.
 
 %%====================================================================
 %% Helpers

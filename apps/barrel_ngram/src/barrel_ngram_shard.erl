@@ -53,6 +53,13 @@
     shards :: pos_integer(),
     config :: map(),
     db :: binary(),
+    %% pinned once at init/1, from Config's db_instance_id (see
+    %% barrel_ngram_corpus_config); re-checked on every subscribe/
+    %% resubscribe so a database deleted and recreated under the same
+    %% name mid-lifetime cannot be silently re-attached to (finding 2's
+    %% "recreated under the same name" gap, closed for the ONGOING
+    %% subscription case, not just at open/2 time)
+    expected_db_instance_id :: binary() | undefined,
     dir :: binary(),
     manifest :: barrel_ngram_manifest:manifest(),
     watermark :: binary() | first,   %% applied HLC (12-byte) or first
@@ -131,6 +138,10 @@ init({Ref, Config}) ->
                 shards = Shards,
                 config = Config,
                 db = Db,
+                %% `undefined' (a direct/test start_link/2 that never went
+                %% through the corpus lifecycle) leaves the check below a
+                %% no-op rather than rejecting every subscribe
+                expected_db_instance_id = maps:get(db_instance_id, Config, undefined),
                 dir = Dir,
                 manifest = Manifest0,
                 watermark = barrel_ngram_manifest:watermark(Manifest0),
@@ -138,7 +149,10 @@ init({Ref, Config}) ->
                 compact_threshold = maps:get(compact_threshold, Config, ?DEFAULT_COMPACT_THRESHOLD),
                 merge_worker = undefined
             },
-            {ok, subscribe(State0)};
+            case subscribe(State0) of
+                {ok, State1} -> {ok, State1};
+                {stop, Reason, _State1} -> {stop, Reason}
+            end;
         {error, Reason} ->
             {stop, Reason}
     end.
@@ -189,12 +203,18 @@ validate_segment_files(Dir, [#{file := File} | Rest]) ->
     end.
 
 handle_call(refresh, _From, State) ->
-    State1 = maybe_compact(do_freeze(drain(State))),
-    Reply = {ok, #{
-        segments => length(barrel_ngram_manifest:list_segments(State1#state.manifest)),
-        watermark => State1#state.watermark
-    }},
-    {reply, Reply, State1};
+    Target = barrel_docdb:get_hlc(),
+    case drain(State, Target) of
+        {ok, State1} ->
+            State2 = maybe_compact(do_freeze(State1)),
+            Reply = {ok, #{
+                segments => length(barrel_ngram_manifest:list_segments(State2#state.manifest)),
+                watermark => State2#state.watermark
+            }},
+            {reply, Reply, State2};
+        {error, Reason, State1} ->
+            {reply, {error, {refresh_incomplete, Reason}}, State1}
+    end;
 
 handle_call(compact, _From, #state{merge_worker = undefined} = State0) ->
     State1 = do_freeze(State0),
@@ -265,18 +285,48 @@ handle_info({'DOWN', MRef, process, _Pid, Reason},
     {noreply, State#state{merge_worker = undefined}};
 
 handle_info({'EXIT', Pid, _Reason}, #state{stream_pid = Pid} = State) ->
-    {noreply, subscribe(State#state{stream_pid = undefined})};
+    case subscribe(State#state{stream_pid = undefined}) of
+        {ok, State1} -> {noreply, State1};
+        {stop, Reason, State1} -> {stop, Reason, State1}
+    end;
 
 handle_info(subscribe_retry, #state{stream_pid = undefined} = State) ->
-    {noreply, subscribe(State)};
+    case subscribe(State) of
+        {ok, State1} -> {noreply, State1};
+        {stop, Reason, State1} -> {stop, Reason, State1}
+    end;
 
 handle_info(_Info, State) ->
     {noreply, State}.
 
-terminate(_Reason, #state{stream_pid = Pid}) ->
+terminate(_Reason, #state{stream_pid = Pid, merge_worker = Worker,
+                          dir = Dir, manifest = M}) ->
     _ = case Pid of
         undefined -> ok;
         _ -> (try barrel_changes_stream:stop(Pid) catch _:_ -> ok end)
+    end,
+    case Worker of
+        undefined ->
+            ok;
+        {WPid, MRef} ->
+            %% the shard traps exits specifically so an ordinary shutdown
+            %% signal lands here, in terminate/2, instead of killing it
+            %% outright -- meaning the link's automatic "take the worker
+            %% down when I die" has NOT fired yet (we have not died yet).
+            %% Kill the worker explicitly FIRST, then wait for its
+            %% confirmed DOWN -- waiting first, without signaling it,
+            %% would just wait for the merge to finish on its own,
+            %% reintroducing the bug this exists to close. Unconditional,
+            %% no timeout: a kill-induced death is only ever slow due to
+            %% scheduler latency (bounded by however long the worker's
+            %% current NIF call takes, see the moduledoc), never worker
+            %% misbehavior, and the supervisor's own outer shutdown
+            %% timeout is the higher-level backstop.
+            exit(WPid, kill),
+            receive
+                {'DOWN', MRef, process, WPid, _} -> ok
+            end,
+            barrel_ngram_manifest:cleanup_orphans(Dir, M)
     end,
     ok.
 
@@ -284,14 +334,53 @@ terminate(_Reason, #state{stream_pid = Pid}) ->
 %% Subscription
 %%====================================================================
 
-subscribe(#state{db = Db, watermark = Wm} = State) ->
+%% @private Every subscribe AND resubscribe -- not just the first, at
+%% init/1 -- funnels through here (the EXIT-triggered resubscribe and the
+%% subscribe_retry path both call this same function), so checking
+%% identity here once closes the gap for all three call sites. A mismatch
+%% is fail-closed via a non-restarting {shutdown, _} reason, NOT an
+%% ordinary stop reason: this shard is `transient' under
+%% barrel_ngram_shard_sup, and an ABNORMAL exit would auto-restart it --
+%% which fixes nothing (the underlying database is still wrong) and,
+%% because every shard shares one supervisor, a persistent mismatch would
+%% crash-loop and could exceed the supervisor's restart intensity,
+%% wiping out every OTHER corpus's shards too (see
+%% barrel_ngram_corpus_lifecycle's "Binding shard subscriptions" note).
+subscribe(#state{db = Db, watermark = Wm,
+                 expected_db_instance_id = Expected} = State) ->
     Opts = #{mode => push, owner => self(), include_docs => true},
     case barrel_docdb:subscribe_changes(Db, since(Wm), Opts) of
         {ok, Pid} ->
-            State#state{stream_pid = Pid};
+            check_db_instance(Expected, Pid, Db, State);
         {error, _} ->
             erlang:send_after(?SUBSCRIBE_RETRY_MS, self(), subscribe_retry),
-            State#state{stream_pid = undefined}
+            {ok, State#state{stream_pid = undefined}}
+    end.
+
+%% @private `undefined' (a direct/test start not carrying db_instance_id)
+%% skips the check entirely -- see init/1.
+check_db_instance(undefined, Pid, _Db, State) ->
+    {ok, State#state{stream_pid = Pid}};
+check_db_instance(Expected, Pid, Db, State) ->
+    case barrel_docdb:db_instance_id(Db) of
+        {ok, Expected} ->
+            {ok, State#state{stream_pid = Pid}};
+        {ok, Got} ->
+            logger:error(
+              "barrel_ngram db_instance_id mismatch for ~p (ref ~p): "
+              "expected ~p, got ~p -- database was deleted and recreated "
+              "under the same name while this shard was live",
+              [State#state.corpus, State#state.ref, Expected, Got]),
+            _ = (try barrel_changes_stream:stop(Pid) catch _:_ -> ok end),
+            {stop, {shutdown, {db_instance_mismatch, Expected, Got}},
+             State#state{stream_pid = undefined}};
+        {error, _} ->
+            %% could not verify identity either way -- treat like an
+            %% ordinary subscribe failure (retry) rather than assuming a
+            %% mismatch or a match
+            _ = (try barrel_changes_stream:stop(Pid) catch _:_ -> ok end),
+            erlang:send_after(?SUBSCRIBE_RETRY_MS, self(), subscribe_retry),
+            {ok, State#state{stream_pid = undefined}}
     end.
 
 %%====================================================================
@@ -345,21 +434,37 @@ apply_change(Change, {Buffer, Wm}, Cfg, I, N) ->
 %% Refresh (synchronous drain + freeze)
 %%====================================================================
 
-drain(#state{db = Db, watermark = Wm} = State) ->
+%% @private Drain the feed up to a FIXED target HLC captured once at
+%% `refresh''s entry (not the moving "now" the OLD single-arg `drain/1'
+%% chased) -- under sustained writes producing >= ?REFRESH_BATCH changes
+%% per call indefinitely, re-querying against a moving target could
+%% recurse forever. Each batch already carries its own last HLC
+%% (`{ok, Changes, LastHlc}'); once that reaches `Target', draining is
+%% done, bounding the iteration count by `(changes up to Target) /
+%% ?REFRESH_BATCH' regardless of how many MORE writes arrive meanwhile.
+%% Propagates a `get_changes' error to the caller instead of silently
+%% discarding it and reporting success on partial progress.
+drain(#state{db = Db, watermark = Wm} = State, Target) ->
     case barrel_docdb:get_changes(Db, since(Wm), #{include_docs => true,
                                                    limit => ?REFRESH_BATCH}) of
-        {ok, [], _Last} ->
-            State;
-        {ok, Changes, _Last} ->
+        {ok, [], _LastHlc} ->
+            {ok, State};
+        {ok, Changes, LastHlc} ->
             #state{watermark = Wm1} = State1 = apply_changes(Changes, State),
-            %% continue only on a full batch that made progress; a full batch
-            %% that does not advance the watermark would otherwise loop forever
-            case length(Changes) >= ?REFRESH_BATCH andalso Wm1 =/= Wm of
-                true -> drain(State1);
-                false -> State1
+            case barrel_hlc:compare(LastHlc, Target) =/= lt of
+                true ->
+                    {ok, State1};
+                false ->
+                    %% continue only on a full batch that made progress; a
+                    %% full batch that does not advance the watermark would
+                    %% otherwise loop forever
+                    case length(Changes) >= ?REFRESH_BATCH andalso Wm1 =/= Wm of
+                        true -> drain(State1, Target);
+                        false -> {ok, State1}
+                    end
             end;
-        {error, _} ->
-            State
+        {error, Reason} ->
+            {error, Reason, State}
     end.
 
 %%====================================================================
@@ -466,11 +571,18 @@ maybe_compact(#state{merge_worker = undefined, compact_threshold = T,
             InputFiles = [maps:get(file, S) || S <- Segs],
             InputPaths = [filename:join(Dir, F) || F <- InputFiles],
             Self = self(),
-            {Pid, MRef} = spawn_monitor(
+            %% linked (not just monitored): if the SHARD itself dies for
+            %% any reason, the link unconditionally takes the worker down
+            %% too, via the VM, with no cooperation needed. A WORKER crash
+            %% still arrives to the shard as an ordinary message (it traps
+            %% exits, see init/1) rather than crashing the shard -- the
+            %% existing 'DOWN' handler below (via the monitor half) is
+            %% what actually resets merge_worker either way.
+            {Pid, MRef} = spawn_opt(
                 fun() ->
                     Result = barrel_ngram_merge:merge(InputPaths, true),
                     Self ! {merge_done, Result, InputFiles}
-                end),
+                end, [link, monitor]),
             State#state{merge_worker = {Pid, MRef}};
         false ->
             State
