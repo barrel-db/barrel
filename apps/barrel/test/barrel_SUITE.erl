@@ -153,6 +153,12 @@ t_vectors(Config) ->
     %% covered where a model is available.
     ?assertEqual({error, embedder_not_configured},
                  barrel:search_hybrid(Db, <<"hello">>, #{k => 5})),
+    %% The embed accessors go through the store's embedder on a plain
+    %% database, so they report the same thing.
+    ?assertEqual({error, embedder_not_configured}, barrel:embed(Db, <<"hello">>)),
+    ?assertEqual({error, embedder_not_configured},
+                 barrel:embed_batch(Db, [<<"hello">>])),
+    ?assertEqual({ok, #{configured => false}}, barrel:embedder_info(Db)),
     ok = barrel:vector_delete(Db, <<"a">>),
     ?assertEqual(not_found, barrel:vector_get(Db, <<"a">>)),
     ok.

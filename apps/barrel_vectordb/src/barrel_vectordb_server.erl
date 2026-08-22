@@ -368,36 +368,47 @@ init_crypto(Config, DbPath) ->
 %% @doc Handle a batch of operations.
 %% Partitions operations into reads (processed immediately) and writes (batched atomically).
 handle_batch(Ops, State) ->
-    %% Separate reads from writes
-    {Reads, Writes} = partition_ops(Ops),
+    {Others, Reads, Writes} = partition_ops(Ops),
+
+    %% Stray info/cast ops first: no reply, no storage access
+    {_, State1} = process_reads(Others, State),
 
     %% Process reads immediately (they don't modify state)
-    {ReadActions, State1} = process_reads(Reads, State),
+    {ReadActions, State2} = process_reads(Reads, State1),
 
     %% Process writes atomically in a single batch
-    {WriteActions, State2} = process_writes_atomic(Writes, State1),
+    {WriteActions, State3} = process_writes_atomic(Writes, State2),
 
-    {ok, ReadActions ++ WriteActions, State2}.
+    {ok, ReadActions ++ WriteActions, State3}.
 
-%% Partition operations into reads and writes
+%% Route ops: add/index calls go into one RocksDB batch, other calls run
+%% one by one, info/cast ops (no From) are handled explicitly, never crash.
 partition_ops(Ops) ->
-    lists:partition(fun(Op) ->
-        case Op of
-            {_, _, {add, _, _, _}} -> false;
-            {_, _, {add_vector, _, _, _, _}} -> false;
-            {_, _, {add_batch, _}} -> false;
-            {_, _, {add_vector_batch, _}} -> false;
-            {_, _, {index_only, _, _, _}} -> false;
-            {_, _, {index_only_batch, _}} -> false;
-            _ -> true  % reads: get, search, peek, stats, count, delete, update, upsert
+    lists:foldr(fun(Op, {Others, Reads, Writes}) ->
+        case classify_op(Op) of
+            write -> {Others, Reads, [Op | Writes]};
+            read -> {Others, [Op | Reads], Writes};
+            other -> {[Op | Others], Reads, Writes}
         end
-    end, Ops).
+    end, {[], [], []}, Ops).
 
-%% Process read operations (and delete/update/upsert which need immediate state access)
+classify_op({call, _, {add, _, _, _}}) -> write;
+classify_op({call, _, {add_vector, _, _, _, _}}) -> write;
+classify_op({call, _, {add_batch, _}}) -> write;
+classify_op({call, _, {add_vector_batch, _}}) -> write;
+classify_op({call, _, {index_only, _, _, _}}) -> write;
+classify_op({call, _, {index_only_batch, _}}) -> write;
+classify_op({call, _, _}) -> read;
+classify_op({cast, _}) -> other;
+classify_op({info, _}) -> other.
+
+%% Process ops one at a time; info/cast ops yield no reply action.
 process_reads(Reads, State) ->
     lists:foldl(fun(Op, {AccActions, AccState}) ->
-        {Action, NewState} = process_single_op(Op, AccState),
-        {[Action | AccActions], NewState}
+        case process_single_op(Op, AccState) of
+            {[], NewState} -> {AccActions, NewState};
+            {Action, NewState} -> {[Action | AccActions], NewState}
+        end
     end, {[], State}, Reads).
 
 %% Process a single operation (for reads and non-batched operations)
@@ -566,7 +577,24 @@ process_single_op({call, From, bm25_compact}, State) ->
     end;
 
 process_single_op({call, From, _Unknown}, State) ->
-    {{reply, From, {error, unknown_request}}, State}.
+    {{reply, From, {error, unknown_request}}, State};
+
+%% Non-call ops: 'EXIT' signals (init traps exits, so a port ended in the
+%% store's context delivers one), bare messages, casts. Never fatal.
+process_single_op({info, {'EXIT', _Pid, normal}}, State) ->
+    {[], State};
+process_single_op({info, {'EXIT', Pid, Reason}}, State) ->
+    logger:warning("barrel_vectordb_server ~p: linked process ~p exited: ~p",
+                   [self(), Pid, Reason]),
+    {[], State};
+process_single_op({info, Msg}, State) ->
+    logger:debug("barrel_vectordb_server ~p: ignoring message ~p",
+                 [self(), Msg]),
+    {[], State};
+process_single_op({cast, Msg}, State) ->
+    logger:debug("barrel_vectordb_server ~p: ignoring cast ~p",
+                 [self(), Msg]),
+    {[], State}.
 
 %% Process write operations atomically in a single RocksDB batch
 process_writes_atomic([], State) ->

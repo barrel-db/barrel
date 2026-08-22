@@ -94,6 +94,10 @@ Notes:
 - BM25 is opt-in: open with `vectordb => #{bm25_backend => memory}` (or `disk`).
 - `search_hybrid/3` and auto-embedding adds need an embedder configured via
   `barrel_embed`; without one they return `{error, embedder_not_configured}`.
+- To embed text yourself with the database's own embedder (same model and
+  dimension as the indexed vectors), use `barrel:embed/2`,
+  `barrel:embed_batch/2` and `barrel:embedder_info/1` on the handle; keep
+  the handle opaque rather than reading its fields.
 
 ## Changes
 

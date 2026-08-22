@@ -43,6 +43,16 @@ install_deps_test_() ->
      ]
     }.
 
+%% run_cmd/2 must never leave port or 'EXIT' messages in the caller's
+%% mailbox (a trap_exit caller such as barrel_vectordb_server would
+%% otherwise see them as stray ops).
+run_cmd_test_() ->
+    [
+     {"success leaves the caller's mailbox empty", fun test_run_cmd_mailbox_ok/0},
+     {"non-zero exit leaves the caller's mailbox empty", fun test_run_cmd_mailbox_error/0},
+     {"timeout leaves the caller's mailbox empty", fun test_run_cmd_mailbox_timeout/0}
+    ].
+
 %% Tests for barrel_embed wrapper functions
 barrel_embed_api_test_() ->
     {foreach,
@@ -290,4 +300,41 @@ check_python3(Python) ->
         "3\n" -> {ok, Python};
         "3" -> {ok, Python};
         _ -> {error, not_python3}
+    end.
+
+%%====================================================================
+%% Test Cases - run_cmd
+%%====================================================================
+
+test_run_cmd_mailbox_ok() ->
+    {Result, Msgs} = run_cmd_trapping("echo hello", 5000),
+    ?assertEqual({ok, "hello\n"}, Result),
+    ?assertEqual([], Msgs).
+
+test_run_cmd_mailbox_error() ->
+    {Result, Msgs} = run_cmd_trapping("sh -c 'echo oops; exit 3'", 5000),
+    ?assertEqual({error, {exit_status, 3, "oops\n"}}, Result),
+    ?assertEqual([], Msgs).
+
+test_run_cmd_mailbox_timeout() ->
+    {Result, Msgs} = run_cmd_trapping("sleep 5", 200),
+    ?assertEqual({error, timeout}, Result),
+    ?assertEqual([], Msgs).
+
+%% Run Cmd from a process that traps exits and report its mailbox once
+%% the port (and its owner) had time to finish.
+run_cmd_trapping(Cmd, Timeout) ->
+    Parent = self(),
+    Ref = make_ref(),
+    spawn(fun() ->
+        process_flag(trap_exit, true),
+        Result = barrel_embed_venv:run_cmd(Cmd, Timeout),
+        timer:sleep(200),
+        {messages, Msgs} = erlang:process_info(self(), messages),
+        Parent ! {Ref, Result, Msgs}
+    end),
+    receive
+        {Ref, Result, Msgs} -> {Result, Msgs}
+    after 15000 ->
+        error(run_cmd_test_timeout)
     end.

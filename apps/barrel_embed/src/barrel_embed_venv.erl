@@ -19,6 +19,10 @@
 %%%-------------------------------------------------------------------
 -module(barrel_embed_venv).
 
+-ifdef(TEST).
+-export([run_cmd/2]).
+-endif.
+
 -export([
     ensure_venv/0,
     create_venv/0,
@@ -258,11 +262,28 @@ run_cmd(Cmd) ->
     run_cmd(Cmd, 60000).  %% 60 second default timeout
 
 run_cmd(Cmd, Timeout) ->
-    Port = open_port(
-        {spawn, Cmd},
-        [exit_status, stderr_to_stdout, binary]
-    ),
-    collect_output(Port, [], Timeout).
+    %% A throwaway process owns the port so no port message (nor the 'EXIT'
+    %% a trap_exit caller would get) lands in the caller's mailbox.
+    Caller = self(),
+    Ref = make_ref(),
+    {Pid, MRef} = spawn_monitor(fun() ->
+        Caller ! {Ref, run_cmd_owner(Cmd, Timeout)}
+    end),
+    receive
+        {Ref, Result} ->
+            erlang:demonitor(MRef, [flush]),
+            Result;
+        {'DOWN', MRef, process, Pid, Reason} ->
+            {error, {port_owner_exit, Reason}}
+    end.
+
+%% Runs inside the owner process; its mailbox dies with it.
+run_cmd_owner(Cmd, Timeout) ->
+    try open_port({spawn, Cmd}, [exit_status, stderr_to_stdout, binary]) of
+        Port -> collect_output(Port, [], Timeout)
+    catch
+        error:Reason -> {error, {open_port, Reason}}
+    end.
 
 collect_output(Port, Acc, Timeout) ->
     receive
@@ -275,7 +296,7 @@ collect_output(Port, Acc, Timeout) ->
             Output = iolist_to_binary(lists:reverse(Acc)),
             {error, {exit_status, Status, binary_to_list(Output)}}
     after Timeout ->
-        port_close(Port),
+        _ = try port_close(Port) catch error:badarg -> ok end,
         {error, timeout}
     end.
 

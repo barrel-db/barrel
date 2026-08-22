@@ -81,3 +81,5 @@ Large attachments stream: `open_attachment_writer/4` + `write_attachment/2` +
 - Vectors: `vector_add/4,5`, `vector_add_batch/2`, `vector_get/2`,
   `vector_delete/2`, `search/3`, `search_vector/3`, `search_bm25/3`,
   `search_hybrid/3`, `vector_stats/1`
+- Embedding with the database's own embedder: `embed/2`, `embed_batch/2`,
+  `embedder_info/1`

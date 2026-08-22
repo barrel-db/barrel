@@ -1,6 +1,6 @@
 {application, barrel_docdb, [
     {description, "Erlang document database with MVCC, queries, and replication"},
-    {vsn, "1.3.0"},
+    {vsn, "1.3.1"},
     {registered, [barrel_docdb_sup]},
     {mod, {barrel_docdb_app, []}},
     {applications, [
@@ -11,6 +11,7 @@
         rocksdb,
         hlc,
         match_trie,
+        mimerl,
         instrument,
         hackney,
         barrel_crypto

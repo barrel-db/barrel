@@ -50,6 +50,17 @@ hybrid_test_() ->
      ]
     }.
 
+stray_message_test_() ->
+    {foreach,
+     fun setup_store/0,
+     fun cleanup_store/1,
+     [
+       {"a bare message does not kill the store", fun test_stray_info/0},
+       {"a cast does not kill the store", fun test_stray_cast/0},
+       {"an 'EXIT' signal does not kill the store", fun test_stray_exit/0}
+     ]
+    }.
+
 restart_rebuild_test() ->
     %% Standalone (owns its dir): the ANN index rebuilds from the vectors
     %% CF on restart, which includes index-only rows.
@@ -267,3 +278,38 @@ test_hybrid_query_vector_skips_embed() ->
     {ok, [_ | _]} = barrel_vectordb:search_hybrid(
         ?STORE, <<"alpha">>, #{k => 1, query_vector => [1.0, 0.0, 0.0]}),
     ok.
+
+%%====================================================================
+%% Stray messages (init traps exits, so these reach handle_batch as
+%% {info, _} / {cast, _} ops)
+%%====================================================================
+
+test_stray_info() ->
+    Pid = whereis_store(),
+    Pid ! {unexpected, make_ref()},
+    assert_store_alive(Pid).
+
+test_stray_cast() ->
+    Pid = whereis_store(),
+    ok = gen_batch_server:cast(Pid, unexpected_cast),
+    assert_store_alive(Pid).
+
+test_stray_exit() ->
+    Pid = whereis_store(),
+    %% What a port opened (and ended) inside the store delivers under
+    %% trap_exit; a non-normal reason must not kill it either.
+    Pid ! {'EXIT', self(), normal},
+    Pid ! {'EXIT', self(), {shutdown, stray}},
+    assert_store_alive(Pid).
+
+whereis_store() ->
+    Pid = barrel_vectordb_registry:whereis_name(
+        {vstore, atom_to_binary(?STORE, utf8)}),
+    ?assert(is_pid(Pid)),
+    Pid.
+
+assert_store_alive(Pid) ->
+    ok = barrel_vectordb:add_index_only(
+        ?STORE, <<"a">>, <<"text">>, [1.0, 0.0, 0.0]),
+    ?assertEqual(1, barrel_vectordb:count(?STORE)),
+    ?assert(is_process_alive(Pid)).

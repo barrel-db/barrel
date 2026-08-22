@@ -3,6 +3,14 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.3.0] - 2026-08-23
+
+### Added
+- `embed/2`, `embed_batch/2` and `embedder_info/1` on the database handle:
+  embed text with the database's own embedder (the policy's on a record-mode
+  database, the vector store's on a plain one), so consumers no longer need to
+  reach into the handle's `embed` field.
+
 ## [1.2.0] - 2026-08-09
 
 ### Added
