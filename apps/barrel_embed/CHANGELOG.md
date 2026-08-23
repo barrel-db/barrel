@@ -3,6 +3,17 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.3.2] - 2026-08-23
+
+### Fixed
+- The managed-venv shell commands (venv creation, pip install, uvloop check,
+  directory removal) run their port in a short-lived owner process. The port
+  used to be opened in the caller's process, leaving `{Port, _}` and, for a
+  caller trapping exits, `{'EXIT', Port, normal}` messages in its mailbox
+  after the command ended; `barrel_vectordb_server` (which traps exits and
+  initializes the embedder in its own process) crashed on that stray message.
+  A timeout no longer raises `badarg` when the port already closed.
+
 ## [2.3.1] - 2026-07-18
 
 ### Fixed

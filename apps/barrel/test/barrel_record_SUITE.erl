@@ -34,6 +34,7 @@
          sync_delete_immediate/1,
          sync_batch_put/1,
          explicit_vector_skips_embedder/1,
+         embed_accessors/1,
          explicit_vector_dimension_check/1,
          search_end_to_end/1,
          vector_add_guards/1,
@@ -72,6 +73,7 @@ all() ->
      explicit_vector_skips_embedder,
      explicit_vector_dimension_check,
      search_end_to_end,
+     embed_accessors,
      vector_add_guards,
      byo_embedding_async,
      byo_embedding_sync_and_precedence,
@@ -130,6 +132,7 @@ meck_cases() ->
      explicit_vector_skips_embedder,
      explicit_vector_dimension_check,
      search_end_to_end,
+     embed_accessors,
      vector_add_guards,
      byo_embedding_async,
      byo_embedding_sync_and_precedence,
@@ -637,6 +640,19 @@ byo_embedding_not_path_indexed(Config) ->
     ?assertEqual(1, length(Rows)),
     {ok, NoRows, _} = barrel:find(Db, #{where => [{exists, [<<"_embedding">>]}]}),
     ?assertEqual(0, length(NoRows)),
+    ok = barrel:close(Db).
+
+embed_accessors(Config) ->
+    {ok, Db} = open_record(embed_acc_db, Config, #{fields => [<<"title">>]}),
+    %% Same embedder as the indexer: the vector matches what search_vector
+    %% is indexed with.
+    ?assertEqual({ok, mock_vec(<<"hello">>)}, barrel:embed(Db, <<"hello">>)),
+    ?assertEqual({ok, [mock_vec(<<"a">>), mock_vec(<<"b">>)]},
+                 barrel:embed_batch(Db, [<<"a">>, <<"b">>])),
+    ?assertEqual({ok, []}, barrel:embed_batch(Db, [])),
+    ?assertEqual({error, poison}, barrel:embed(Db, <<"poison">>)),
+    {ok, Info} = barrel:embedder_info(Db),
+    ?assertMatch(#{configured := _}, Info),
     ok = barrel:close(Db).
 
 vector_add_guards(Config) ->

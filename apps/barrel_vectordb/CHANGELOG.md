@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.1] - 2026-08-23
+
+### Fixed
+- The store server no longer crashes on a message that is not a call. `init`
+  traps exits, so an `'EXIT'` from a port or linked helper ended in the store's
+  context (the managed-venv pip install of `barrel_embed` did exactly that), or
+  any message sent with `!` or `cast`, reached `handle_batch` as an
+  `{info, _}`/`{cast, _}` op with no matching clause and killed the store.
+  Such ops are now routed explicitly and ignored (`'EXIT' normal` silently,
+  the rest logged).
+- `iommap` is declared in the application's `applications`. It is a hard
+  runtime dependency of the disk BM25 and DiskANN files but was only listed as
+  a rebar dep, so a release that derives its app list from `applications`
+  shipped without it.
+
 ## [2.2.0] - 2026-07-18
 
 ### Added

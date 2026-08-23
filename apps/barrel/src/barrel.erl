@@ -109,6 +109,13 @@
     vector_stats/1
 ]).
 
+%% Embedding through the database's own embedder
+-export([
+    embed/2,
+    embed_batch/2,
+    embedder_info/1
+]).
+
 -export_type([db/0, db_name/0]).
 
 %% Outbox tag carried by every record-mode write (and, via docdb
@@ -896,6 +903,31 @@ search_hybrid(#{embedding := _, embed := Embed, vstore := Store}, Query, Opts) -
     end;
 search_hybrid(#{vstore := Store}, Query, Opts) ->
     barrel_vectordb:search_hybrid(Store, Query, Opts).
+
+%% @doc Embed a text with the database's own embedder: the one the
+%% embedding policy configured on a record-mode database, the vector
+%% store's on a plain one. Same model and dimension as the indexed
+%% vectors, so the result can be passed to {@link search_vector/3}.
+-spec embed(db(), binary()) -> {ok, [float()]} | {error, term()}.
+embed(#{embedding := _, embed := Embed}, Text) ->
+    embed_one(Text, Embed);
+embed(#{vstore := Store}, Text) ->
+    barrel_vectordb:embed(Store, Text).
+
+%% @doc Embed several texts in one provider call (see {@link embed/2}).
+-spec embed_batch(db(), [binary()]) -> {ok, [[float()]]} | {error, term()}.
+embed_batch(#{embedding := _, embed := Embed}, Texts) ->
+    embed_many(Texts, Embed);
+embed_batch(#{vstore := Store}, Texts) ->
+    barrel_vectordb:embed_batch(Store, Texts).
+
+%% @doc Describe the database's embedder: `configured', `providers' and
+%% `dimension' (see `barrel_embed:info/1').
+-spec embedder_info(db()) -> {ok, map()}.
+embedder_info(#{embedding := _, embed := Embed}) ->
+    {ok, barrel_embed:info(Embed)};
+embedder_info(#{vstore := Store}) ->
+    barrel_vectordb:embedder_info(Store).
 
 %% @doc Vector store statistics.
 -spec vector_stats(db()) -> term().

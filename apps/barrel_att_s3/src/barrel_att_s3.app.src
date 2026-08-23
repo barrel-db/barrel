@@ -1,6 +1,6 @@
 {application, barrel_att_s3, [
     {description, "S3-compatible attachment storage backend for barrel_docdb"},
-    {vsn, "0.1.0"},
+    {vsn, "0.1.1"},
     {registered, [barrel_att_s3_sup, barrel_att_s3_multipart_gc]},
     {mod, {barrel_att_s3_app, []}},
     {applications, [
@@ -17,6 +17,8 @@
         %% true in practice; declared for anything that loads this app in
         %% isolation.
         barrel_docdb,
+        mimerl,
+        livery,
         livery_s3
     ]},
     {env, []},

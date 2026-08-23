@@ -60,6 +60,16 @@ Hits carry `key`, `score`, and the document-derived `text` and `metadata`.
 Updates re-embed; deletes remove the vector; documents without policy fields
 get no vector.
 
+To embed text with the policy's embedder yourself (for a `search_vector/3`
+query, or to store the vector elsewhere), use the handle rather than its
+fields:
+
+```erlang
+{ok, Vector}  = barrel:embed(Db, <<"fast fox">>),
+{ok, Vectors} = barrel:embed_batch(Db, [<<"a">>, <<"b">>]),
+{ok, #{dimension := Dim}} = barrel:embedder_info(Db).
+```
+
 ## Async and sync
 
 `mode => async` (default): writes return immediately and a supervised
