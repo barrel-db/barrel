@@ -188,6 +188,8 @@
     bm25_disk => map(),
     %% Read-through document backend (record mode)
     docstore => {module(), map()},
+    %% Queued writes merged into one RocksDB batch (default 256)
+    batch => #{max_batch_size => pos_integer(), _ => _},
     _ => _
 }.
 %% Store configuration options.

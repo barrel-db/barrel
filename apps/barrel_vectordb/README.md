@@ -160,9 +160,8 @@ barrel_vectordb:start_link(#{
         m => 16,
         ef_construction => 200
     },
-    batch => #{                    %% Write batching options
-        min_batch_size => 4,       %% Min requests before batching
-        max_batch_size => 256      %% Max batch size
+    batch => #{                    %% Write coalescing
+        max_batch_size => 256      %% Max queued writes merged into one RocksDB batch
     }
 }).
 ```
@@ -653,7 +652,7 @@ rebar3 as test_full eunit
 
 ### Optimizations
 
-- **Batch writes**: Concurrent writes are automatically batched via gen_batch_server
+- **Batch writes**: a write call pulls the other writes already queued into the same atomic RocksDB batch
 - **Batch lookups**: Search uses `rocksdb:multi_get` for efficient result fetching
 - **Skip options**: Use `include_text => false` to skip unnecessary RocksDB reads
 - **HNSW optimization**: O(log N) candidate management with balanced trees
@@ -694,7 +693,7 @@ barrel_vectordb_backend_bench:run_all().
 - **Index**: HNSW for approximate nearest neighbor search
 - **Vectors**: 8-bit quantization with norm caching
 - **Embeddings**: Pluggable providers with fallback
-- **Batching**: gen_batch_server for automatic write coalescing
+- **Batching**: write coalescing in the store's gen_server, bounded by `max_batch_size`
 
 See the API documentation for detailed architecture information.
 

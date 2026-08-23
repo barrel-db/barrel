@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.0] - 2026-08-23
+
+### Changed
+- The store server is a plain `gen_server`. Write coalescing is kept: a write
+  call pulls the other calls already queued (up to `batch.max_batch_size`,
+  default 256) so the queued writes share one atomic RocksDB batch, while the
+  reads in between are answered in arrival order. `batch.min_batch_size` is
+  accepted and ignored.
+
+### Removed
+- The `gen_batch_server` dependency, whose prefix `catch` uses warn on every
+  OTP 29 build. Requires OTP 26 or later (`init/1` returning `{error, _}`).
+
 ## [2.2.1] - 2026-08-23
 
 ### Fixed

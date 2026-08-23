@@ -61,6 +61,17 @@ stray_message_test_() ->
      ]
     }.
 
+coalesce_test_() ->
+    {foreach,
+     fun setup_store/0,
+     fun cleanup_store/1,
+     [
+       {"queued writes coalesce into one batch", fun test_concurrent_writes/0},
+       {"reads interleaved with queued writes", fun test_reads_interleaved/0},
+       {"a bad write in a batch fails only its caller", fun test_bad_write_in_batch/0}
+     ]
+    }.
+
 restart_rebuild_test() ->
     %% Standalone (owns its dir): the ANN index rebuilds from the vectors
     %% CF on restart, which includes index-only rows.
@@ -280,8 +291,8 @@ test_hybrid_query_vector_skips_embed() ->
     ok.
 
 %%====================================================================
-%% Stray messages (init traps exits, so these reach handle_batch as
-%% {info, _} / {cast, _} ops)
+%% Stray messages (init traps exits, so 'EXIT' signals arrive as
+%% handle_info messages)
 %%====================================================================
 
 test_stray_info() ->
@@ -291,7 +302,7 @@ test_stray_info() ->
 
 test_stray_cast() ->
     Pid = whereis_store(),
-    ok = gen_batch_server:cast(Pid, unexpected_cast),
+    ok = gen_server:cast(Pid, unexpected_cast),
     assert_store_alive(Pid).
 
 test_stray_exit() ->
@@ -301,6 +312,66 @@ test_stray_exit() ->
     Pid ! {'EXIT', self(), normal},
     Pid ! {'EXIT', self(), {shutdown, stray}},
     assert_store_alive(Pid).
+
+%%====================================================================
+%% Write coalescing (sys:suspend queues the calls so the first write
+%% drains the others in one batch)
+%%====================================================================
+
+test_concurrent_writes() ->
+    N = 50,
+    Results = run_queued([fun() ->
+        barrel_vectordb:add_index_only(?STORE, integer_to_binary(I), <<"t">>, angle_vec(I, N))
+    end || I <- lists:seq(1, N)]),
+    ?assertEqual(lists:duplicate(N, ok), Results),
+    ?assertEqual(N, barrel_vectordb:count(?STORE)),
+    {ok, Hits} = barrel_vectordb:search_vector(?STORE, angle_vec(7, N), #{k => 3}),
+    ?assertEqual(3, length(Hits)).
+
+test_reads_interleaved() ->
+    N = 20,
+    Calls = lists:append([[fun() ->
+        barrel_vectordb:add_index_only(?STORE, integer_to_binary(I), <<"t">>, angle_vec(I, N))
+    end, fun() -> barrel_vectordb:count(?STORE) end] || I <- lists:seq(1, N)]),
+    Results = run_queued(Calls),
+    Writes = [R || R <- Results, R =:= ok],
+    Counts = [R || R <- Results, is_integer(R)],
+    ?assertEqual(N, length(Writes)),
+    ?assertEqual(N, length(Counts)),
+    ?assertEqual(N, barrel_vectordb:count(?STORE)).
+
+test_bad_write_in_batch() ->
+    Results = run_queued([
+        fun() -> barrel_vectordb:add_index_only(?STORE, <<"a">>, <<"t">>, [1.0, 0.0, 0.0]) end,
+        fun() -> barrel_vectordb:add_index_only(?STORE, <<"bad">>, <<"t">>, [1.0, 0.0]) end,
+        fun() -> barrel_vectordb:add_index_only(?STORE, <<"b">>, <<"t">>, [0.0, 1.0, 0.0]) end]),
+    ?assertMatch([ok, {error, {dimension_mismatch, 3, 2}}, ok], Results),
+    ?assertEqual(2, barrel_vectordb:count(?STORE)).
+
+%% Suspend the store, issue the calls so they queue in arrival order,
+%% resume, and collect the replies in the same order.
+run_queued(Funs) ->
+    Pid = whereis_store(),
+    ok = sys:suspend(Pid),
+    Self = self(),
+    Refs = [begin
+        Ref = make_ref(),
+        spawn_link(fun() -> Self ! {Ref, F()} end),
+        Ref
+    end || F <- Funs],
+    wait_queued(Pid, length(Funs)),
+    ok = sys:resume(Pid),
+    [receive {Ref, R} -> R after 10000 -> error({timeout, Ref}) end || Ref <- Refs].
+
+wait_queued(Pid, N) ->
+    case erlang:process_info(Pid, message_queue_len) of
+        {message_queue_len, L} when L >= N -> ok;
+        _ -> timer:sleep(5), wait_queued(Pid, N)
+    end.
+
+angle_vec(I, N) ->
+    A = 2 * math:pi() * I / N,
+    [math:cos(A), math:sin(A), 0.0].
 
 whereis_store() ->
     Pid = barrel_vectordb_registry:whereis_name(

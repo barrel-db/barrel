@@ -128,7 +128,7 @@ Add support for new embedding provider
 ### Core Components
 
 - **barrel_vectordb.erl**: Main API module
-- **barrel_vectordb_store.erl**: Store process (gen_batch_server)
+- **barrel_vectordb_server.erl**: Store process (gen_server with write coalescing)
 - **barrel_vectordb_hnsw.erl**: HNSW index implementation
 - **barrel_embed.erl** (apps/barrel_embed): Embedding provider abstraction
 
