@@ -130,9 +130,8 @@ barrel_vectordb:start_link(#{
         m => 16,
         ef_construction => 200
     },
-    batch => #{                    %% Write batching options
-        min_batch_size => 4,
-        max_batch_size => 256
+    batch => #{                    %% Write coalescing
+        max_batch_size => 256      %% Max queued writes merged into one RocksDB batch
     }
 }).
 ```

@@ -261,7 +261,7 @@ bench_index_build_10k(#{dimension := Dim}) ->
     end.
 
 %% Concurrent writers benchmark - measures throughput under concurrent load
-%% This tests how well gen_batch_server batches concurrent writes
+%% This tests how well the store coalesces concurrent writes
 bench_concurrent_writers(#{dimension := Dim}) ->
     NumWriters = 10,
     DocsPerWriter = 100,

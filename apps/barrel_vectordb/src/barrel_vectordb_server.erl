@@ -1,12 +1,15 @@
 %%%-------------------------------------------------------------------
-%%% @doc Per-store gen_batch_server managing RocksDB, vector index, and embeddings
+%%% @doc Per-store gen_server managing RocksDB, vector index, and embeddings
 %%%
-%%% Each store runs as a separate gen_batch_server registered under its name.
+%%% Each store runs as a separate gen_server registered under its name.
 %%% Handles all document operations, search, and embedding coordination.
 %%%
-%%% Uses gen_batch_server to automatically batch concurrent write operations
-%%% into single atomic RocksDB WriteBatch operations, improving throughput
-%%% under concurrent load.
+%%% Calls are served in arrival order. A write call (add, add_vector,
+%%% add_batch, add_vector_batch, index_only, index_only_batch) also pulls
+%%% the other calls already queued, up to `max_batch_size' writes: those
+%%% writes join its single atomic RocksDB WriteBatch, reads in between are
+%%% answered on the spot. Concurrent writers therefore coalesce into one
+%%% commit, without touching casts, infos, or system messages.
 %%%
 %%% Supports pluggable vector index backends:
 %%% - hnsw: Pure Erlang HNSW implementation (default)
@@ -15,13 +18,15 @@
 %%% @end
 %%%-------------------------------------------------------------------
 -module(barrel_vectordb_server).
--behaviour(gen_batch_server).
+-behaviour(gen_server).
 
 -include("barrel_vectordb.hrl").
 
 %% Long timeout for operations that may take a while (1 hour in ms)
-%% Using explicit value instead of infinity for gen_batch_server compatibility
 -define(LONG_TIMEOUT, 3600000).
+
+%% Upper bound on queued writes merged into one RocksDB batch.
+-define(DEFAULT_MAX_BATCH, 256).
 
 %% API
 -export([
@@ -53,13 +58,15 @@
     bm25_compact/1
 ]).
 
-%% gen_batch_server callbacks
--export([init/1, handle_batch/2, terminate/2]).
+%% gen_server callbacks
+-export([init/1, handle_call/3, handle_cast/2, handle_info/2,
+         terminate/2, code_change/3]).
 
 -type store_ref() :: atom() | binary() | pid().
 
 -record(state, {
     name :: binary(),
+    max_batch :: pos_integer(),
     db :: rocksdb:db_handle(),
     cf_vectors :: rocksdb:cf_handle(),
     cf_metadata :: rocksdb:cf_handle(),
@@ -92,11 +99,8 @@
 %%   - db_path: RocksDB storage path
 %%   - dimension: Vector dimension
 %%   - hnsw: HNSW index configuration
-%%   - batch: gen_batch_server options (max_batch_size, min_batch_size)
-%%
-%% Default batch settings optimized for vector DB workloads:
-%%   - min_batch_size: 4 (responsive for single inserts, batches concurrent ones)
-%%   - max_batch_size: 256 (reasonable upper bound for memory/latency)
+%%   - batch: #{max_batch_size => N}, queued writes merged into one RocksDB
+%%     batch (default 256); min_batch_size is accepted and ignored
 -spec start_link(atom() | binary(), map()) -> {ok, pid()} | {error, term()}.
 start_link(Name, Config) ->
     %% Names are binaries internally: stores register in
@@ -104,22 +108,13 @@ start_link(Name, Config) ->
     %% dynamically named ephemeral stores never grow the atom table.
     ok = barrel_vectordb_registry:ensure(),
     NameBin = to_name(Name),
-    BatchOpts = maps:get(batch, Config, #{}),
-    %% Apply sensible defaults for vector DB workload
-    DefaultBatch = #{min_batch_size => 4, max_batch_size => 256},
-    MergedBatch = maps:merge(DefaultBatch, BatchOpts),
-    GBOpts = maps:fold(fun
-        (max_batch_size, V, Acc) -> [{max_batch_size, V} | Acc];
-        (min_batch_size, V, Acc) -> [{min_batch_size, V} | Acc];
-        (_, _, Acc) -> Acc
-    end, [], MergedBatch),
-    gen_batch_server:start_link(
+    gen_server:start_link(
         {via, barrel_vectordb_registry, {vstore, NameBin}}, ?MODULE,
-        {NameBin, Config}, [{gen_batch_server, GBOpts}]).
+        {NameBin, Config}, []).
 
-%% Resolve a caller-supplied store reference to something
-%% gen_batch_server accepts: pids pass through, names (atom or binary)
-%% go through the registry.
+%% Resolve a caller-supplied store reference to something gen_server
+%% accepts: pids pass through, names (atom or binary) go through the
+%% registry.
 ref(Pid) when is_pid(Pid) -> Pid;
 ref(Name) ->
     {via, barrel_vectordb_registry, {vstore, to_name(Name)}}.
@@ -130,137 +125,137 @@ to_name(Name) when is_atom(Name) -> atom_to_binary(Name, utf8).
 %% @doc Stop a store.
 -spec stop(store_ref()) -> ok.
 stop(Store) ->
-    gen_batch_server:stop(ref(Store)).
+    gen_server:stop(ref(Store)).
 
 %% @doc The store's storage path (RocksDB dir; bm25/diskann nest
 %% under it).
 -spec get_db_path(store_ref()) -> {ok, string()}.
 get_db_path(Store) ->
-    gen_batch_server:call(ref(Store), get_db_path).
+    gen_server:call(ref(Store), get_db_path).
 
 %% @doc Add document with auto-embedding.
 -spec add(store_ref(), binary(), binary(), map()) -> ok | {error, term()}.
 add(Store, Id, Text, Metadata) ->
-    gen_batch_server:call(ref(Store), {add, Id, Text, Metadata}, ?LONG_TIMEOUT).
+    gen_server:call(ref(Store), {add, Id, Text, Metadata}, ?LONG_TIMEOUT).
 
 %% @doc Add document with explicit vector.
 -spec add_vector(store_ref(), binary(), binary(), map(), [float()]) -> ok | {error, term()}.
 add_vector(Store, Id, Text, Metadata, Vector) ->
-    gen_batch_server:call(ref(Store), {add_vector, Id, Text, Metadata, Vector}, ?LONG_TIMEOUT).
+    gen_server:call(ref(Store), {add_vector, Id, Text, Metadata, Vector}, ?LONG_TIMEOUT).
 
 %% @doc Add multiple documents.
 -spec add_batch(store_ref(), [{binary(), binary(), map()}]) ->
     {ok, #{inserted := non_neg_integer()}} | {error, term()}.
 add_batch(Store, Docs) ->
-    gen_batch_server:call(ref(Store), {add_batch, Docs}, ?LONG_TIMEOUT).
+    gen_server:call(ref(Store), {add_batch, Docs}, ?LONG_TIMEOUT).
 
 %% @doc Add multiple documents with pre-computed vectors (bulk insert).
 -spec add_vector_batch(store_ref(), [{binary(), binary(), map(), [float()]}]) ->
     {ok, #{inserted := non_neg_integer()}} | {error, term()}.
 add_vector_batch(Store, Docs) ->
-    gen_batch_server:call(ref(Store), {add_vector_batch, Docs}, ?LONG_TIMEOUT).
+    gen_server:call(ref(Store), {add_vector_batch, Docs}, ?LONG_TIMEOUT).
 
 %% @doc Index a vector without storing text/metadata (see barrel_vectordb).
 -spec add_index_only(store_ref(), binary(), binary(), [float()]) ->
     ok | {error, term()}.
 add_index_only(Store, Id, Text, Vector) ->
-    gen_batch_server:call(ref(Store), {index_only, Id, Text, Vector}, ?LONG_TIMEOUT).
+    gen_server:call(ref(Store), {index_only, Id, Text, Vector}, ?LONG_TIMEOUT).
 
 %% @doc Index multiple vectors without storing text/metadata.
 -spec add_index_only_batch(store_ref(), [{binary(), binary(), [float()]}]) ->
     {ok, #{inserted := non_neg_integer()}} | {error, term()}.
 add_index_only_batch(Store, Entries) ->
-    gen_batch_server:call(ref(Store), {index_only_batch, Entries}, ?LONG_TIMEOUT).
+    gen_server:call(ref(Store), {index_only_batch, Entries}, ?LONG_TIMEOUT).
 
 %% @doc Get document by ID.
 -spec get(store_ref(), binary()) -> {ok, map()} | not_found | {error, term()}.
 get(Store, Id) ->
-    gen_batch_server:call(ref(Store), {get, Id}).
+    gen_server:call(ref(Store), {get, Id}).
 
 %% @doc Update document metadata (re-embeds the text).
 -spec update(store_ref(), binary(), binary(), map()) -> ok | not_found | {error, term()}.
 update(Store, Id, Text, Metadata) ->
-    gen_batch_server:call(ref(Store), {update, Id, Text, Metadata}, ?LONG_TIMEOUT).
+    gen_server:call(ref(Store), {update, Id, Text, Metadata}, ?LONG_TIMEOUT).
 
 %% @doc Insert or update document.
 -spec upsert(store_ref(), binary(), binary(), map()) -> ok | {error, term()}.
 upsert(Store, Id, Text, Metadata) ->
-    gen_batch_server:call(ref(Store), {upsert, Id, Text, Metadata}, ?LONG_TIMEOUT).
+    gen_server:call(ref(Store), {upsert, Id, Text, Metadata}, ?LONG_TIMEOUT).
 
 %% @doc Delete document.
 -spec delete(store_ref(), binary()) -> ok | {error, term()}.
 delete(Store, Id) ->
-    gen_batch_server:call(ref(Store), {delete, Id}).
+    gen_server:call(ref(Store), {delete, Id}).
 
 %% @doc Peek at documents (sample without search).
 -spec peek(store_ref(), pos_integer()) -> {ok, [map()]}.
 peek(Store, Limit) ->
-    gen_batch_server:call(ref(Store), {peek, Limit}).
+    gen_server:call(ref(Store), {peek, Limit}).
 
 %% @doc Search with text query.
 -spec search(store_ref(), binary(), map()) -> {ok, [map()]} | {error, term()}.
 search(Store, Query, Opts) ->
-    gen_batch_server:call(ref(Store), {search, Query, Opts}, ?LONG_TIMEOUT).
+    gen_server:call(ref(Store), {search, Query, Opts}, ?LONG_TIMEOUT).
 
 %% @doc Search with vector query.
 -spec search_vector(store_ref(), [float()], map()) -> {ok, [map()]} | {error, term()}.
 search_vector(Store, Vector, Opts) ->
-    gen_batch_server:call(ref(Store), {search_vector, Vector, Opts}, ?LONG_TIMEOUT).
+    gen_server:call(ref(Store), {search_vector, Vector, Opts}, ?LONG_TIMEOUT).
 
 %% @doc Search with BM25 text query.
 %% Opts: #{k => integer()}
 -spec search_bm25(store_ref(), binary(), map()) -> {ok, [{binary(), float()}]} | {error, term()}.
 search_bm25(Store, Query, Opts) ->
-    gen_batch_server:call(ref(Store), {search_bm25, Query, Opts}, ?LONG_TIMEOUT).
+    gen_server:call(ref(Store), {search_bm25, Query, Opts}, ?LONG_TIMEOUT).
 
 %% @doc Hybrid search combining BM25 and vector search.
 %% Opts: #{k => integer(), bm25_weight => float(), vector_weight => float(), fusion => rrf | linear}
 -spec search_hybrid(store_ref(), binary(), map()) -> {ok, [map()]} | {error, term()}.
 search_hybrid(Store, Query, Opts) ->
-    gen_batch_server:call(ref(Store), {search_hybrid, Query, Opts}, ?LONG_TIMEOUT).
+    gen_server:call(ref(Store), {search_hybrid, Query, Opts}, ?LONG_TIMEOUT).
 
 %% @doc Get BM25 index information.
 -spec bm25_info(store_ref()) -> {ok, map()} | {error, bm25_not_enabled}.
 bm25_info(Store) ->
-    gen_batch_server:call(ref(Store), bm25_info).
+    gen_server:call(ref(Store), bm25_info).
 
 %% @doc Trigger BM25 index compaction (disk backend only).
 -spec bm25_compact(store_ref()) -> ok | {error, term()}.
 bm25_compact(Store) ->
-    gen_batch_server:call(ref(Store), bm25_compact, ?LONG_TIMEOUT).
+    gen_server:call(ref(Store), bm25_compact, ?LONG_TIMEOUT).
 
 %% @doc Embed single text.
 -spec embed(store_ref(), binary()) -> {ok, [float()]} | {error, term()}.
 embed(Store, Text) ->
-    gen_batch_server:call(ref(Store), {embed, Text}, ?LONG_TIMEOUT).
+    gen_server:call(ref(Store), {embed, Text}, ?LONG_TIMEOUT).
 
 %% @doc Embed multiple texts.
 -spec embed_batch(store_ref(), [binary()]) -> {ok, [[float()]]} | {error, term()}.
 embed_batch(Store, Texts) ->
-    gen_batch_server:call(ref(Store), {embed_batch, Texts}, ?LONG_TIMEOUT).
+    gen_server:call(ref(Store), {embed_batch, Texts}, ?LONG_TIMEOUT).
 
 %% @doc Get store statistics.
 -spec stats(store_ref()) -> {ok, map()}.
 stats(Store) ->
-    gen_batch_server:call(ref(Store), stats).
+    gen_server:call(ref(Store), stats).
 
 %% @doc Get document count.
 -spec count(store_ref()) -> non_neg_integer().
 count(Store) ->
-    gen_batch_server:call(ref(Store), count).
+    gen_server:call(ref(Store), count).
 
 %% @doc Get embedder information.
 -spec embedder_info(store_ref()) -> {ok, map()}.
 embedder_info(Store) ->
-    gen_batch_server:call(ref(Store), embedder_info).
+    gen_server:call(ref(Store), embedder_info).
 
 %% @doc Checkpoint HNSW index to disk.
 -spec checkpoint(store_ref()) -> ok.
 checkpoint(Store) ->
-    gen_batch_server:call(ref(Store), checkpoint).
+    gen_server:call(ref(Store), checkpoint).
 
 %%====================================================================
-%% gen_batch_server callbacks
+%% gen_server callbacks
 %%====================================================================
 
 init({Name, Config}) ->
@@ -299,7 +294,7 @@ init({Name, Config}) ->
                     init_stores(Name, Config, DbPath, Dimension, Docstore,
                                 IndexModule, IndexConfig, EmbedState, Crypto);
                 {error, CryptoReason} ->
-                    %% {error, _} (not {stop, _}): gen_batch_server exits
+                    %% {error, _} (not {stop, _}): gen_server (OTP 26+) exits
                     %% normal on it, so a linked caller survives the
                     %% failed open and gets {error, CryptoReason}
                     {error, CryptoReason}
@@ -333,6 +328,7 @@ init_stores(Name, Config, DbPath, Dimension, Docstore, IndexModule,
                         {ok, BM25Index} ->
                             State = #state{
                                 name = Name,
+                                max_batch = max_batch(Config),
                                 db = Db,
                                 cf_vectors = maps:get(vectors, CfHandles),
                                 cf_metadata = maps:get(metadata, CfHandles),
@@ -365,66 +361,67 @@ init_stores(Name, Config, DbPath, Dimension, Docstore, IndexModule,
 init_crypto(Config, DbPath) ->
     barrel_vectordb_crypto:init(maps:get(crypto, Config, none), DbPath).
 
-%% @doc Handle a batch of operations.
-%% Partitions operations into reads (processed immediately) and writes (batched atomically).
-handle_batch(Ops, State) ->
-    {Others, Reads, Writes} = partition_ops(Ops),
+max_batch(Config) ->
+    maps:get(max_batch_size, maps:get(batch, Config, #{}), ?DEFAULT_MAX_BATCH).
 
-    %% Stray info/cast ops first: no reply, no storage access
-    {_, State1} = process_reads(Others, State),
+%% The write requests; everything else is served one by one.
+write_op({add, _, _, _}) -> true;
+write_op({add_vector, _, _, _, _}) -> true;
+write_op({add_batch, _}) -> true;
+write_op({add_vector_batch, _}) -> true;
+write_op({index_only, _, _, _}) -> true;
+write_op({index_only_batch, _}) -> true;
+write_op(_) -> false.
 
-    %% Process reads immediately (they don't modify state)
-    {ReadActions, State2} = process_reads(Reads, State1),
+handle_call(Req, From, State) ->
+    case write_op(Req) of
+        true ->
+            handle_write(Req, From, State);
+        false ->
+            {Reply, State1} = handle_read(Req, State),
+            {reply, Reply, State1}
+    end.
 
-    %% Process writes atomically in a single batch
-    {WriteActions, State3} = process_writes_atomic(Writes, State2),
+%% One RocksDB batch for this write and the writes already queued.
+handle_write(Req, From, #state{max_batch = Max} = State) ->
+    {Ops, State1} = drain_calls(Max - 1, [{call, From, Req}], State),
+    {Replies, State2} = process_writes_atomic(Ops, State1),
+    lists:foreach(fun({reply, F, R}) -> gen_server:reply(F, R) end, Replies),
+    {noreply, State2}.
 
-    {ok, ReadActions ++ WriteActions, State3}.
+%% Take the calls already queued, in order: writes join the batch (up to
+%% max_batch_size), reads are answered now, so call order is preserved.
+drain_calls(0, Acc, State) ->
+    {lists:reverse(Acc), State};
+drain_calls(N, Acc, State) ->
+    receive
+        {'$gen_call', From, Req} ->
+            case write_op(Req) of
+                true ->
+                    drain_calls(N - 1, [{call, From, Req} | Acc], State);
+                false ->
+                    {Reply, State1} = handle_read(Req, State),
+                    gen_server:reply(From, Reply),
+                    drain_calls(N, Acc, State1)
+            end
+    after 0 ->
+        {lists:reverse(Acc), State}
+    end.
 
-%% Route ops: add/index calls go into one RocksDB batch, other calls run
-%% one by one, info/cast ops (no From) are handled explicitly, never crash.
-partition_ops(Ops) ->
-    lists:foldr(fun(Op, {Others, Reads, Writes}) ->
-        case classify_op(Op) of
-            write -> {Others, Reads, [Op | Writes]};
-            read -> {Others, [Op | Reads], Writes};
-            other -> {[Op | Others], Reads, Writes}
-        end
-    end, {[], [], []}, Ops).
-
-classify_op({call, _, {add, _, _, _}}) -> write;
-classify_op({call, _, {add_vector, _, _, _, _}}) -> write;
-classify_op({call, _, {add_batch, _}}) -> write;
-classify_op({call, _, {add_vector_batch, _}}) -> write;
-classify_op({call, _, {index_only, _, _, _}}) -> write;
-classify_op({call, _, {index_only_batch, _}}) -> write;
-classify_op({call, _, _}) -> read;
-classify_op({cast, _}) -> other;
-classify_op({info, _}) -> other.
-
-%% Process ops one at a time; info/cast ops yield no reply action.
-process_reads(Reads, State) ->
-    lists:foldl(fun(Op, {AccActions, AccState}) ->
-        case process_single_op(Op, AccState) of
-            {[], NewState} -> {AccActions, NewState};
-            {Action, NewState} -> {[Action | AccActions], NewState}
-        end
-    end, {[], State}, Reads).
-
-%% Process a single operation (for reads and non-batched operations)
-process_single_op({call, From, {get, Id}}, State) ->
+%% Serve one non-write request: {Reply, NewState}.
+handle_read({get, Id}, State) ->
     Result = do_get(Id, State),
-    {{reply, From, Result}, State};
+    {Result, State};
 
-process_single_op({call, From, {delete, Id}}, State) ->
+handle_read({delete, Id}, State) ->
     case do_delete(Id, State) of
         {ok, NewState} ->
-            {{reply, From, ok}, NewState};
+            {ok, NewState};
         {error, _} = Error ->
-            {{reply, From, Error}, State}
+            {Error, State}
     end;
 
-process_single_op({call, From, {update, Id, Text, Metadata}}, State) ->
+handle_read({update, Id, Text, Metadata}, State) ->
     case do_get(Id, State) of
         {ok, _Existing} ->
             case do_delete(Id, State) of
@@ -433,23 +430,23 @@ process_single_op({call, From, {update, Id, Text, Metadata}}, State) ->
                         {ok, Vector} ->
                             case do_add(Id, Text, Metadata, Vector, State1) of
                                 {ok, NewState} ->
-                                    {{reply, From, ok}, NewState};
+                                    {ok, NewState};
                                 {error, _} = Error ->
-                                    {{reply, From, Error}, State}
+                                    {Error, State}
                             end;
                         {error, _} = Error ->
-                            {{reply, From, Error}, State}
+                            {Error, State}
                     end;
                 {error, _} = Error ->
-                    {{reply, From, Error}, State}
+                    {Error, State}
             end;
         not_found ->
-            {{reply, From, not_found}, State};
+            {not_found, State};
         {error, _} = Error ->
-            {{reply, From, Error}, State}
+            {Error, State}
     end;
 
-process_single_op({call, From, {upsert, Id, Text, Metadata}}, State) ->
+handle_read({upsert, Id, Text, Metadata}, State) ->
     case do_get(Id, State) of
         {ok, _Existing} ->
             case do_delete(Id, State) of
@@ -458,63 +455,63 @@ process_single_op({call, From, {upsert, Id, Text, Metadata}}, State) ->
                         {ok, Vector} ->
                             case do_add(Id, Text, Metadata, Vector, State1) of
                                 {ok, NewState} ->
-                                    {{reply, From, ok}, NewState};
+                                    {ok, NewState};
                                 {error, _} = Error ->
-                                    {{reply, From, Error}, State}
+                                    {Error, State}
                             end;
                         {error, _} = Error ->
-                            {{reply, From, Error}, State}
+                            {Error, State}
                     end;
                 {error, _} = Error ->
-                    {{reply, From, Error}, State}
+                    {Error, State}
             end;
         not_found ->
             case do_embed(Text, State) of
                 {ok, Vector} ->
                     case do_add(Id, Text, Metadata, Vector, State) of
                         {ok, NewState} ->
-                            {{reply, From, ok}, NewState};
+                            {ok, NewState};
                         {error, _} = Error ->
-                            {{reply, From, Error}, State}
+                            {Error, State}
                     end;
                 {error, _} = Error ->
-                    {{reply, From, Error}, State}
+                    {Error, State}
             end;
         {error, _} = Error ->
-            {{reply, From, Error}, State}
+            {Error, State}
     end;
 
-process_single_op({call, From, {peek, Limit}}, State) ->
+handle_read({peek, Limit}, State) ->
     Result = do_peek(Limit, State),
-    {{reply, From, Result}, State};
+    {Result, State};
 
-process_single_op({call, From, {search, Query, Opts}}, State) ->
+handle_read({search, Query, Opts}, State) ->
     case do_embed(Query, State) of
         {ok, Vector} ->
             Result = do_search(Vector, Opts, State),
-            {{reply, From, Result}, State};
+            {Result, State};
         {error, _} = Error ->
-            {{reply, From, Error}, State}
+            {Error, State}
     end;
 
-process_single_op({call, From, {search_vector, Vector, Opts}}, #state{dimension = Dim} = State) ->
+handle_read({search_vector, Vector, Opts}, #state{dimension = Dim} = State) ->
     case length(Vector) of
         Dim ->
             Result = do_search(Vector, Opts, State),
-            {{reply, From, Result}, State};
+            {Result, State};
         Other ->
-            {{reply, From, {error, {dimension_mismatch, Dim, Other}}}, State}
+            {{error, {dimension_mismatch, Dim, Other}}, State}
     end;
 
-process_single_op({call, From, {embed, Text}}, State) ->
+handle_read({embed, Text}, State) ->
     Result = do_embed(Text, State),
-    {{reply, From, Result}, State};
+    {Result, State};
 
-process_single_op({call, From, {embed_batch, Texts}}, State) ->
+handle_read({embed_batch, Texts}, State) ->
     Result = do_embed_batch(Texts, State),
-    {{reply, From, Result}, State};
+    {Result, State};
 
-process_single_op({call, From, stats}, #state{index = Index, index_module = Mod,
+handle_read(stats, #state{index = Index, index_module = Mod,
                                                 dimension = Dim, config = Config} = State) ->
     Stats = #{
         dimension => Dim,
@@ -522,29 +519,29 @@ process_single_op({call, From, stats}, #state{index = Index, index_module = Mod,
         index => Mod:info(Index),
         config => Config
     },
-    {{reply, From, {ok, Stats}}, State};
+    {{ok, Stats}, State};
 
-process_single_op({call, From, count}, #state{index = Index, index_module = Mod} = State) ->
-    {{reply, From, Mod:size(Index)}, State};
+handle_read(count, #state{index = Index, index_module = Mod} = State) ->
+    {Mod:size(Index), State};
 
-process_single_op({call, From, embedder_info}, #state{embed_state = EmbedState} = State) ->
+handle_read(embedder_info, #state{embed_state = EmbedState} = State) ->
     Info = barrel_embed:info(EmbedState),
-    {{reply, From, {ok, Info}}, State};
+    {{ok, Info}, State};
 
-process_single_op({call, From, checkpoint}, #state{db = Db, cf_hnsw = CfHnsw,
+handle_read(checkpoint, #state{db = Db, cf_hnsw = CfHnsw,
                                                     index = Index, index_module = Mod} = State) ->
     _ = persist_index_meta(Db, CfHnsw, Index, Mod),
-    {{reply, From, ok}, State};
+    {ok, State};
 
 %% BM25 search
-process_single_op({call, From, {search_bm25, Query, Opts}}, State) ->
+handle_read({search_bm25, Query, Opts}, State) ->
     Result = do_search_bm25(State, Query, Opts),
-    {{reply, From, Result}, State};
+    {Result, State};
 
 %% Hybrid search (BM25 + vector). A caller-supplied query_vector skips
 %% the internal embedder, so embedder-less stores (callers embedding
 %% queries themselves) can run hybrid search.
-process_single_op({call, From, {search_hybrid, Query, Opts}}, State) ->
+handle_read({search_hybrid, Query, Opts}, State) ->
     Embedded = case maps:get(query_vector, Opts, undefined) of
         undefined -> do_embed(Query, State);
         QueryVector when is_list(QueryVector) -> {ok, QueryVector}
@@ -552,49 +549,53 @@ process_single_op({call, From, {search_hybrid, Query, Opts}}, State) ->
     case Embedded of
         {ok, Vector} ->
             Result = do_search_hybrid(State, Query, Opts, Vector),
-            {{reply, From, Result}, State};
+            {Result, State};
         {error, _} = Error ->
-            {{reply, From, Error}, State}
+            {Error, State}
     end;
 
 %% Storage path (destroy support)
-process_single_op({call, From, get_db_path}, #state{config = Config} = State) ->
+handle_read(get_db_path, #state{config = Config} = State) ->
     DbPath = maps:get(db_path, Config, "priv/barrel_vectordb_data"),
-    {{reply, From, {ok, DbPath}}, State};
+    {{ok, DbPath}, State};
 
 %% BM25 info
-process_single_op({call, From, bm25_info}, State) ->
+handle_read(bm25_info, State) ->
     Result = do_bm25_info(State),
-    {{reply, From, Result}, State};
+    {Result, State};
 
 %% BM25 compaction
-process_single_op({call, From, bm25_compact}, State) ->
+handle_read(bm25_compact, State) ->
     case do_bm25_compact(State) of
         {ok, NewState} ->
-            {{reply, From, ok}, NewState};
+            {ok, NewState};
         {error, _} = Error ->
-            {{reply, From, Error}, State}
+            {Error, State}
     end;
 
-process_single_op({call, From, _Unknown}, State) ->
-    {{reply, From, {error, unknown_request}}, State};
+handle_read(_Unknown, State) ->
+    {{error, unknown_request}, State}.
 
-%% Non-call ops: 'EXIT' signals (init traps exits, so a port ended in the
-%% store's context delivers one), bare messages, casts. Never fatal.
-process_single_op({info, {'EXIT', _Pid, normal}}, State) ->
-    {[], State};
-process_single_op({info, {'EXIT', Pid, Reason}}, State) ->
-    logger:warning("barrel_vectordb_server ~p: linked process ~p exited: ~p",
-                   [self(), Pid, Reason]),
-    {[], State};
-process_single_op({info, Msg}, State) ->
-    logger:debug("barrel_vectordb_server ~p: ignoring message ~p",
-                 [self(), Msg]),
-    {[], State};
-process_single_op({cast, Msg}, State) ->
+handle_cast(Msg, State) ->
     logger:debug("barrel_vectordb_server ~p: ignoring cast ~p",
                  [self(), Msg]),
-    {[], State}.
+    {noreply, State}.
+
+%% 'EXIT' signals (init traps exits, so a port ended in the store's
+%% context delivers one) and bare messages are never fatal.
+handle_info({'EXIT', _Pid, normal}, State) ->
+    {noreply, State};
+handle_info({'EXIT', Pid, Reason}, State) ->
+    logger:warning("barrel_vectordb_server ~p: linked process ~p exited: ~p",
+                   [self(), Pid, Reason]),
+    {noreply, State};
+handle_info(Msg, State) ->
+    logger:debug("barrel_vectordb_server ~p: ignoring message ~p",
+                 [self(), Msg]),
+    {noreply, State}.
+
+code_change(_OldVsn, State, _Extra) ->
+    {ok, State}.
 
 %% Process write operations atomically in a single RocksDB batch
 process_writes_atomic([], State) ->

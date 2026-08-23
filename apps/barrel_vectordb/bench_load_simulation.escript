@@ -1,6 +1,6 @@
 #!/usr/bin/env escript
 %% -*- erlang -*-
-%%! -pa _build/default/lib/barrel_vectordb/ebin -pa _build/default/lib/rocksdb/ebin -pa _build/default/lib/ra/ebin -pa _build/default/lib/aten/ebin -pa _build/default/lib/gen_batch_server/ebin
+%%! -pa _build/default/lib/barrel_vectordb/ebin -pa _build/default/lib/rocksdb/ebin
 
 -mode(compile).
 

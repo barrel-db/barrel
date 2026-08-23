@@ -4,6 +4,19 @@ All notable changes to the Barrel umbrella are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and each app
 is versioned independently under [Semantic Versioning](https://semver.org/).
 
+## [2026-08-23] barrel_vectordb store server without gen_batch_server
+
+`barrel_vectordb`'s per-store process is a plain `gen_server` again. The only
+thing `gen_batch_server` provided, merging the writes queued at the same time
+into one RocksDB batch, is now done by the write handler itself, bounded by
+`batch.max_batch_size`; reads are served in arrival order instead of waiting
+for a whole batch. The library's prefix `catch` uses warned on every OTP 29
+build, for the umbrella and for every Hex consumer.
+
+| App | Version | Change |
+|-----|---------|--------|
+| barrel_vectordb | 2.3.0 | store server is a gen_server with write coalescing; gen_batch_server removed; requires OTP 26+ |
+
 ## [2026-08-23] Stray-message hardening and embed accessors
 
 `barrel_vectordb`'s store server traps exits but only handled call ops, so

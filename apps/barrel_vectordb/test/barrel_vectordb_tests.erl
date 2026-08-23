@@ -374,7 +374,7 @@ test_persistence_reload() ->
 
 test_concurrent_add_vector() ->
     %% Spawn multiple processes adding vectors concurrently
-    %% gen_batch_server should batch these into fewer atomic writes
+    %% The store should coalesce these into fewer atomic writes
     Self = self(),
     NumProcs = 20,
 
