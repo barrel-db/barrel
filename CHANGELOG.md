@@ -11,7 +11,8 @@ any `'EXIT'` or plain message reaching it killed the store; the managed-venv
 pip install in `barrel_embed`, run inside the store at startup, left exactly
 such an `'EXIT'` behind. The server now routes info/cast ops explicitly and
 ignores them, and `barrel_embed` runs its venv shell commands in a throwaway
-owner process so no port message can reach the caller. `barrel_vectordb` also
+owner process so no port message can reach the caller (`barrel_rerank`'s venv
+helper had the same leak and gets the same fix). `barrel_vectordb` also
 declares `iommap` (disk BM25 / DiskANN) in `applications`. `barrel` gains
 `embed/2`, `embed_batch/2` and `embedder_info/1` on the handle, so callers can
 embed through the database's own embedder without reading handle fields. The
@@ -25,6 +26,7 @@ same `applications` audit caught `mimerl` in `barrel_docdb`, `crypto` in
 | barrel | 1.3.0 | `embed/2`, `embed_batch/2`, `embedder_info/1` |
 | barrel_docdb | 1.3.1 | `mimerl` in `applications` |
 | barrel_att_s3 | 0.1.1 | `mimerl` and `livery` in `applications` |
+| barrel_rerank | 1.0.2 | venv commands run their port in an owner process; no mailbox leak |
 
 ## [2026-08-15] barrel_ngram corpus lifecycle hardening
 

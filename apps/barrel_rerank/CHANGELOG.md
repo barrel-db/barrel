@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.2 (2026-08-23)
+
+- The venv shell commands (venv creation, pip install, uvloop check) run
+  their port in a short-lived owner process. The port used to be opened in
+  the caller's process, leaving `{Port, _}` and, for a caller trapping exits,
+  `{'EXIT', Port, normal}` messages in its mailbox after the command ended.
+  Same fix as barrel_embed 2.3.2.
+
 ## 1.0.1 (2026-07-18)
 
 - Fail fast on a Python startup exit instead of hanging the full timeout: the
