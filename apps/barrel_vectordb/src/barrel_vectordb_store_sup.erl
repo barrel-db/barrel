@@ -1,7 +1,7 @@
 %%%-------------------------------------------------------------------
 %%% @doc Dynamic supervisor for vector store processes.
 %%%
-%%% Mirrors {@link barrel_db_sup} for the docdb side: stores start under a
+%%% Mirrors barrel_docdb's `barrel_db_sup' for the docdb side: stores start under a
 %%% simple_one_for_one supervisor (temporary children) instead of being
 %%% linked to the caller, so a composed database opened on behalf of a
 %%% manager is not tied to the transient process that opened it. The store

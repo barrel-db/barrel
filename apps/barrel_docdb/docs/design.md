@@ -106,7 +106,7 @@ Documents are versioned with Hybrid Logical Clocks, not revision trees. Each wri
 **Version token:** `<hex(hlc)>@<author>`
 
 - The HLC (fixed-width hex) gives causally meaningful ordering, so token order equals causal order.
-- The author is the writing database's stable source id (per-database, 8 random bytes; see `barrel_version` and `barrel_db_server:ensure_source_id/2`). Authorship is per-database, not per-node, so two databases on one node detect each other's writes as concurrent.
+- The author is the writing database's stable source id (per-database, 8 random bytes; see `barrel_version` and the private `ensure_source_id` helper in `barrel_db_server`). Authorship is per-database, not per-node, so two databases on one node detect each other's writes as concurrent.
 - The winner among siblings is the maximum under `barrel_version:compare/2` (HLC first, author as tie-break), a commutative rule: any replica seeing the same version set picks the same winner.
 
 ### 3. Storage Layer

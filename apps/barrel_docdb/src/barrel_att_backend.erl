@@ -9,9 +9,9 @@
 %%% example a local filesystem or an S3 object store) can be added without
 %%% touching the document layer.
 %%%
-%%% `AttRef' is the opaque handle returned by {@link open/2}; the dispatcher tags
+%%% `AttRef' is the opaque handle returned by the `open' callback; the dispatcher tags
 %%% it with the backend module. `Stream' is the opaque streaming handle returned
-%%% by {@link put_stream/5} / {@link get_stream/4} and embeds its `att_ref'.
+%%% by the `put_stream' / `get_stream' callbacks and embeds its `att_ref'.
 %%% @end
 %%%-------------------------------------------------------------------
 -module(barrel_att_backend).

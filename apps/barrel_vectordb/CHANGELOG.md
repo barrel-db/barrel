@@ -44,7 +44,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [2.1.1] - 2026-07-10
 
 ### Fixed
-- `barrel_vectordb_docdb_backend:init/2` raised `badarg` on every start. It
+- `barrel_vectordb_docdb_backend` raised `badarg` at init on every start. It
   called `atom_to_binary/2` on a store name the store had already normalised to
   a binary, and `maps:get/3` evaluates its default eagerly, so it crashed even
   when `db` was supplied. The `docstore` seam was unusable.

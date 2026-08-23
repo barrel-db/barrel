@@ -44,7 +44,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   forever, giving it a periodic chance to check. Adds
   `attachments`/`att_batch_size` task config and a persisted `att_seq`
   watermark.
-- `barrel_timeline:fork/6` returns a clean error instead of crashing when
+- `barrel_timeline`'s internal fork step returns a clean error instead of crashing when
   branching a backend without `checkpoint/2` (any feedless attachment
   backend).
 
