@@ -3,6 +3,13 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.3.1] - 2026-08-23
+
+### Changed
+- Requires `barrel_vectordb` 2.3 (the store server without gen_batch_server)
+  and OTP 26 or later, so a dependency on `barrel` resolves to a build that is
+  warning-free on OTP 29.
+
 ## [1.3.0] - 2026-08-23
 
 ### Added

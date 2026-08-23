@@ -16,6 +16,7 @@ build, for the umbrella and for every Hex consumer.
 | App | Version | Change |
 |-----|---------|--------|
 | barrel_vectordb | 2.3.0 | store server is a gen_server with write coalescing; gen_batch_server removed; requires OTP 26+ |
+| barrel | 1.3.1 | requires barrel_vectordb 2.3 and OTP 26+ |
 
 ## [2026-08-23] Stray-message hardening and embed accessors
 
