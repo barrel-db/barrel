@@ -1148,11 +1148,11 @@ load_index_graph(Db, CfHnsw, Dimension, IndexConfig, IndexModule) ->
                     CurSeq = read_index_seq(Db, CfHnsw),
                     CurFp = index_fingerprint(IndexModule, Dimension,
                                               IndexConfig),
-                    case Seq =:= CurSeq andalso Fp =:= CurFp of
-                        true ->
+                    if
+                        Seq =:= CurSeq, Fp =:= CurFp ->
                             load_graph_chunks(Db, CfHnsw, NChunks, Crc,
                                               IndexModule);
-                        false ->
+                        true ->
                             not_loadable
                     end;
                 _Other ->
