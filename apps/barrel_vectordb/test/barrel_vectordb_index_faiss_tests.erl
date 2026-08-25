@@ -335,4 +335,19 @@ test_faiss_store_persistence() ->
 
     %% Document should still be accessible
     {ok, Doc} = barrel_vectordb:get(faiss_test_store, <<"persist1">>),
-    ?assertEqual(<<"persistent doc">>, maps:get(text, Doc)).
+    ?assertEqual(<<"persistent doc">>, maps:get(text, Doc)),
+
+    %% Restart: the serialized FAISS graph loads instead of rebuilding
+    {ok, Dir} = barrel_vectordb_server:get_db_path(faiss_test_store),
+    ok = barrel_vectordb:stop(faiss_test_store),
+    timer:sleep(100),
+    {ok, _} = barrel_vectordb:start_link(#{
+        name => faiss_test_store,
+        path => Dir,
+        dimension => 4,
+        backend => faiss
+    }),
+    {ok, Stats} = barrel_vectordb:stats(faiss_test_store),
+    ?assertEqual(loaded, maps:get(index_origin, Stats)),
+    {ok, Doc2} = barrel_vectordb:get(faiss_test_store, <<"persist1">>),
+    ?assertEqual(<<"persistent doc">>, maps:get(text, Doc2)).

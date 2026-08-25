@@ -35,6 +35,9 @@ api_test_() ->
         {"stats returns store info", fun test_stats/0},
         {"checkpoint persists index", fun test_checkpoint/0},
         {"persistence reload", fun test_persistence_reload/0},
+        {"reload loads persisted graph", fun test_reload_loaded_graph/0},
+        {"kill after write forces rebuild", fun test_stale_graph_rebuilt/0},
+        {"config change forces rebuild", fun test_config_change_rebuilt/0},
         {"concurrent add_vector batching", fun test_concurrent_add_vector/0},
         {"multiple writers stress test", fun test_multiple_writers/0},
         {"search with include options", fun test_search_include_options/0}
@@ -371,6 +374,77 @@ test_persistence_reload() ->
     %% Cleanup
     ok = barrel_vectordb:stop(persist_test_store),
     os:cmd("rm -rf " ++ PersistDir).
+
+test_reload_loaded_graph() ->
+    Dir = "/tmp/barrel_vectordb_graph_load_test_" ++
+          integer_to_list(erlang:unique_integer([positive])),
+    Cfg = #{name => graph_load_store, path => Dir, dimension => 3,
+            hnsw => #{m => 4, ef_construction => 20}},
+    {ok, _} = barrel_vectordb:start_link(Cfg),
+    ok = barrel_vectordb:add_vector(graph_load_store, <<"g1">>, <<"t1">>,
+                                    #{}, [1.0, 0.0, 0.0]),
+    ok = barrel_vectordb:add_vector(graph_load_store, <<"g2">>, <<"t2">>,
+                                    #{}, [0.0, 1.0, 0.0]),
+    ok = barrel_vectordb:add_vector(graph_load_store, <<"g3">>, <<"t3">>,
+                                    #{}, [0.0, 0.0, 1.0]),
+    ok = barrel_vectordb:delete(graph_load_store, <<"g3">>),
+    ok = barrel_vectordb:stop(graph_load_store),
+    timer:sleep(100),
+
+    {ok, _} = barrel_vectordb:start_link(Cfg),
+    {ok, Stats} = barrel_vectordb:stats(graph_load_store),
+    ?assertEqual(loaded, maps:get(index_origin, Stats)),
+    ?assertEqual(2, barrel_vectordb:count(graph_load_store)),
+    {ok, [First | _]} = barrel_vectordb:search_vector(graph_load_store,
+                                                      [0.0, 1.0, 0.0],
+                                                      #{k => 2}),
+    ?assertEqual(<<"g2">>, maps:get(key, First)),
+    ok = barrel_vectordb:stop(graph_load_store),
+    os:cmd("rm -rf " ++ Dir).
+
+test_stale_graph_rebuilt() ->
+    Dir = "/tmp/barrel_vectordb_graph_stale_test_" ++
+          integer_to_list(erlang:unique_integer([positive])),
+    Cfg = #{name => graph_stale_store, path => Dir, dimension => 3,
+            hnsw => #{m => 4, ef_construction => 20}},
+    {ok, Pid} = barrel_vectordb:start_link(Cfg),
+    ok = barrel_vectordb:add_vector(graph_stale_store, <<"s1">>, <<"t1">>,
+                                    #{}, [1.0, 0.0, 0.0]),
+    ok = barrel_vectordb:persist_index(graph_stale_store),
+    %% a write after the persist makes the stored graph stale
+    ok = barrel_vectordb:add_vector(graph_stale_store, <<"s2">>, <<"t2">>,
+                                    #{}, [0.0, 1.0, 0.0]),
+    unlink(Pid),
+    MRef = monitor(process, Pid),
+    exit(Pid, kill),
+    receive {'DOWN', MRef, _, _, _} -> ok end,
+
+    {ok, _} = barrel_vectordb:start_link(Cfg),
+    {ok, Stats} = barrel_vectordb:stats(graph_stale_store),
+    ?assertEqual(rebuilt, maps:get(index_origin, Stats)),
+    ?assertEqual(2, barrel_vectordb:count(graph_stale_store)),
+    ok = barrel_vectordb:stop(graph_stale_store),
+    os:cmd("rm -rf " ++ Dir).
+
+test_config_change_rebuilt() ->
+    Dir = "/tmp/barrel_vectordb_graph_cfg_test_" ++
+          integer_to_list(erlang:unique_integer([positive])),
+    Cfg = #{name => graph_cfg_store, path => Dir, dimension => 3,
+            hnsw => #{m => 4, ef_construction => 20}},
+    {ok, _} = barrel_vectordb:start_link(Cfg),
+    ok = barrel_vectordb:add_vector(graph_cfg_store, <<"c1">>, <<"t1">>,
+                                    #{}, [1.0, 0.0, 0.0]),
+    ok = barrel_vectordb:stop(graph_cfg_store),
+    timer:sleep(100),
+
+    {ok, _} = barrel_vectordb:start_link(Cfg#{hnsw =>
+                                                  #{m => 8,
+                                                    ef_construction => 20}}),
+    {ok, Stats} = barrel_vectordb:stats(graph_cfg_store),
+    ?assertEqual(rebuilt, maps:get(index_origin, Stats)),
+    ?assertEqual(1, barrel_vectordb:count(graph_cfg_store)),
+    ok = barrel_vectordb:stop(graph_cfg_store),
+    os:cmd("rm -rf " ++ Dir).
 
 test_concurrent_add_vector() ->
     %% Spawn multiple processes adding vectors concurrently

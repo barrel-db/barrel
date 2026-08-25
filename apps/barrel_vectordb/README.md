@@ -687,6 +687,16 @@ rebar3 as bench_faiss shell
 barrel_vectordb_backend_bench:run_all().
 ```
 
+## Index persistence
+
+The in-memory HNSW/FAISS graph persists into the store's RocksDB at close
+and on `barrel_vectordb:checkpoint/1` or `persist_index/1`. On open, a
+graph that still matches the stored vectors (write sequence, config,
+checksum) loads directly; otherwise the index rebuilds from the vectors
+column family. `stats/1` reports how the index came up:
+`index_origin => new | loaded | rebuilt`. A store killed before any
+persist simply rebuilds; no data is lost either way.
+
 ## Architecture
 
 - **Storage**: RocksDB with column families

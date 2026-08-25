@@ -54,6 +54,7 @@
     count/1,
     embedder_info/1,
     checkpoint/1,
+    persist_index/1,
     bm25_info/1,
     bm25_compact/1
 ]).
@@ -63,6 +64,12 @@
          terminate/2, code_change/3]).
 
 -type store_ref() :: atom() | binary() | pid().
+
+%% Reserved hnsw_graph CF keys (doc ids never start with "__hnsw_").
+-define(HNSW_SEQ_KEY, <<"__hnsw_seq__">>).
+-define(HNSW_GRAPH_HEADER_KEY, <<"__hnsw_graph__">>).
+-define(HNSW_GRAPH_CHUNK_PREFIX, <<"__hnsw_graph__:">>).
+-define(GRAPH_CHUNK_SIZE, 8388608).
 
 -record(state, {
     name :: binary(),
@@ -87,7 +94,14 @@
     %% Encryption context: none, or the key + EncryptedEnv shared by
     %% this store's RocksDBs and disk indexes. Retained here because
     %% the NIF frees the env when the handle is garbage collected.
-    crypto = none :: barrel_vectordb_crypto:ctx()
+    crypto = none :: barrel_vectordb_crypto:ctx(),
+    %% Graph persistence: seq is bumped inside every index-mutating
+    %% RocksDB batch; the persisted graph records the seq it reflects,
+    %% so load only trusts an exact match. graph_dirty marks an in-RAM
+    %% index that may diverge from committed data (persist refuses).
+    index_seq = 0 :: non_neg_integer(),
+    graph_dirty = false :: boolean(),
+    index_origin = new :: new | loaded | rebuilt
 }).
 
 %%====================================================================
@@ -254,6 +268,12 @@ embedder_info(Store) ->
 checkpoint(Store) ->
     gen_server:call(ref(Store), checkpoint).
 
+%% @doc Persist the index graph to RocksDB now (also done at close and
+%% checkpoint); the next open loads it instead of rebuilding.
+-spec persist_index(store_ref()) -> ok | {error, term()}.
+persist_index(Store) ->
+    gen_server:call(ref(Store), persist_index, ?LONG_TIMEOUT).
+
 %%====================================================================
 %% gen_server callbacks
 %%====================================================================
@@ -321,7 +341,7 @@ init_stores(Name, Config, DbPath, Dimension, Docstore, IndexModule,
             end,
             %% Load or create vector index
             case load_or_create_index(Db, CfHandles, Dimension, IndexConfig1, IndexModule) of
-                {ok, Index} ->
+                {ok, Index, Origin} ->
                     %% Initialize BM25 index if configured
                     BM25Backend = maps:get(bm25_backend, Config, none),
                     case init_bm25(DbPath, BM25Backend, Config, Crypto) of
@@ -342,7 +362,10 @@ init_stores(Name, Config, DbPath, Dimension, Docstore, IndexModule,
                                 bm25_index = BM25Index,
                                 bm25_backend = BM25Backend,
                                 docstore = Docstore,
-                                crypto = Crypto
+                                crypto = Crypto,
+                                index_seq = read_index_seq(
+                                    Db, maps:get(hnsw, CfHandles)),
+                                index_origin = Origin
                             },
                             {ok, State};
                         {error, BM25Error} ->
@@ -417,8 +440,8 @@ handle_read({delete, Id}, State) ->
     case do_delete(Id, State) of
         {ok, NewState} ->
             {ok, NewState};
-        {error, _} = Error ->
-            {Error, State}
+        {error, Reason, NewState} ->
+            {{error, Reason}, NewState}
     end;
 
 handle_read({update, Id, Text, Metadata}, State) ->
@@ -431,14 +454,14 @@ handle_read({update, Id, Text, Metadata}, State) ->
                             case do_add(Id, Text, Metadata, Vector, State1) of
                                 {ok, NewState} ->
                                     {ok, NewState};
-                                {error, _} = Error ->
-                                    {Error, State}
+                                {error, Reason, NewState} ->
+                                    {{error, Reason}, NewState}
                             end;
                         {error, _} = Error ->
-                            {Error, State}
+                            {Error, State1}
                     end;
-                {error, _} = Error ->
-                    {Error, State}
+                {error, Reason, State1} ->
+                    {{error, Reason}, State1}
             end;
         not_found ->
             {not_found, State};
@@ -456,14 +479,14 @@ handle_read({upsert, Id, Text, Metadata}, State) ->
                             case do_add(Id, Text, Metadata, Vector, State1) of
                                 {ok, NewState} ->
                                     {ok, NewState};
-                                {error, _} = Error ->
-                                    {Error, State}
+                                {error, Reason, NewState} ->
+                                    {{error, Reason}, NewState}
                             end;
                         {error, _} = Error ->
-                            {Error, State}
+                            {Error, State1}
                     end;
-                {error, _} = Error ->
-                    {Error, State}
+                {error, Reason, State1} ->
+                    {{error, Reason}, State1}
             end;
         not_found ->
             case do_embed(Text, State) of
@@ -471,8 +494,8 @@ handle_read({upsert, Id, Text, Metadata}, State) ->
                     case do_add(Id, Text, Metadata, Vector, State) of
                         {ok, NewState} ->
                             {ok, NewState};
-                        {error, _} = Error ->
-                            {Error, State}
+                        {error, Reason, NewState} ->
+                            {{error, Reason}, NewState}
                     end;
                 {error, _} = Error ->
                     {Error, State}
@@ -517,6 +540,7 @@ handle_read(stats, #state{index = Index, index_module = Mod,
         dimension => Dim,
         count => Mod:size(Index),
         index => Mod:info(Index),
+        index_origin => State#state.index_origin,
         config => Config
     },
     {{ok, Stats}, State};
@@ -531,7 +555,11 @@ handle_read(embedder_info, #state{embed_state = EmbedState} = State) ->
 handle_read(checkpoint, #state{db = Db, cf_hnsw = CfHnsw,
                                                     index = Index, index_module = Mod} = State) ->
     _ = persist_index_meta(Db, CfHnsw, Index, Mod),
+    _ = persist_index_graph(State),
     {ok, State};
+
+handle_read(persist_index, State) ->
+    {persist_index_graph(State), State};
 
 %% BM25 search
 handle_read({search_bm25, Query, Opts}, State) ->
@@ -601,7 +629,8 @@ code_change(_OldVsn, State, _Extra) ->
 process_writes_atomic([], State) ->
     {[], State};
 process_writes_atomic(Writes, #state{db = Db, cf_vectors = CfV, cf_metadata = CfM,
-                                      cf_text = CfT, docstore = Docstore,
+                                      cf_text = CfT, cf_hnsw = CfH,
+                                      docstore = Docstore, index_seq = Seq0,
                                       index = Index, index_module = Mod, dimension = Dim} = State) ->
     {ok, Batch} = rocksdb:batch(),
 
@@ -644,6 +673,16 @@ process_writes_atomic(Writes, #state{db = Db, cf_vectors = CfV, cf_metadata = Cf
             %% Insert into index (batch or individual)
             case insert_vectors_to_index(lists:reverse(VectorsForIndex), Index, Mod, SupportsBatchInsert) of
                 {ok, NewIndex} ->
+                    %% Same-batch seq bump keeps load's staleness check
+                    %% exact (skipped when nothing was written).
+                    Seq1 = case VectorsForIndex of
+                        [] -> Seq0;
+                        _ ->
+                            S1 = Seq0 + 1,
+                            ok = rocksdb:batch_put(Batch, CfH,
+                                                   ?HNSW_SEQ_KEY, <<S1:64>>),
+                            S1
+                    end,
                     %% Commit the RocksDB batch atomically, then (for an external
                     %% docstore only) write text/metadata. Vector-first, doc-second.
                     case rocksdb:write_batch(Db, Batch, []) of
@@ -652,7 +691,8 @@ process_writes_atomic(Writes, #state{db = Db, cf_vectors = CfV, cf_metadata = Cf
                             %% so update it once the rocksdb write succeeds.
                             {ok, NewBM25} = bm25_add_all(State#state.bm25_index,
                                                          lists:reverse(Bm25Pairs)),
-                            StateOk = State#state{index = NewIndex, bm25_index = NewBM25},
+                            StateOk = State#state{index = NewIndex, bm25_index = NewBM25,
+                                                  index_seq = Seq1},
                             case docstore_multi_put(Docstore, lists:reverse(DocPairs)) of
                                 ok ->
                                     Replies = [{reply, From, Reply} || {From, Reply} <- Replies0],
@@ -665,7 +705,7 @@ process_writes_atomic(Writes, #state{db = Db, cf_vectors = CfV, cf_metadata = Cf
                         {error, Reason} ->
                             ErrorReplies = [{reply, From, {error, {db_error, Reason}}}
                                            || {From, _} <- Replies0],
-                            {ErrorReplies, State}
+                            {ErrorReplies, maybe_graph_dirty(Mod, State)}
                     end;
                 {error, Reason} ->
                     ErrorReplies = [{reply, From, {error, {index_error, Reason}}}
@@ -948,9 +988,11 @@ prepare_batch_embeddings(Docs, State) ->
 
 terminate(_Reason, #state{db = Db, index = Index, index_module = Mod, cf_hnsw = CfHnsw,
                           bm25_index = BM25, bm25_backend = BM25Backend,
-                          docstore = Docstore}) ->
-    %% Persist index metadata before closing
+                          docstore = Docstore} = State) ->
+    %% Persist index metadata and graph before closing (best effort;
+    %% a kill mid-persist just means a rebuild on the next open)
     _ = persist_index_meta(Db, CfHnsw, Index, Mod),
+    _ = persist_index_graph(State),
     %% Close index if backend supports it (e.g., FAISS releases NIF resources)
     _ = maybe_close_index(Mod, Index),
     %% The disk BM25 backend holds file + nested RocksDB handles
@@ -1006,21 +1048,35 @@ init_rocksdb(DbPath, Env) ->
             {error, Reason}
     end.
 
-%% Load existing index or create new one
+%% Load existing index or create a new one; the third element says
+%% how the index came to be (new | loaded | rebuilt).
 load_or_create_index(Db, CfHandles, Dimension, IndexConfig, IndexModule) ->
     case IndexModule of
         barrel_vectordb_diskann ->
             %% DiskANN manages its own persistence - use open/new directly
             load_or_create_diskann(IndexConfig, Dimension);
         _ ->
-            %% HNSW/FAISS - rebuild from vectors stored in RocksDB
             CfHnsw = maps:get(hnsw, CfHandles),
             CfVectors = maps:get(vectors, CfHandles),
-            case load_index_meta(Db, CfHnsw) of
-                {ok, _IndexMeta} ->
-                    rebuild_from_vectors(Db, CfVectors, Dimension, IndexConfig, IndexModule);
-                not_found ->
-                    IndexModule:new(IndexConfig#{dimension => Dimension})
+            case load_index_graph(Db, CfHnsw, Dimension, IndexConfig,
+                                  IndexModule) of
+                {ok, Index} ->
+                    {ok, Index, loaded};
+                not_loadable ->
+                    %% Always rebuild from the vectors CF (empty CF =
+                    %% fresh index): rebuilding used to be gated on the
+                    %% meta blob, so a killed store that never
+                    %% checkpointed reopened with an empty index.
+                    case rebuild_from_vectors(Db, CfVectors, Dimension, IndexConfig, IndexModule) of
+                        {ok, Index} ->
+                            Origin = case IndexModule:size(Index) of
+                                0 -> new;
+                                _ -> rebuilt
+                            end,
+                            {ok, Index, Origin};
+                        {error, _} = Err ->
+                            Err
+                    end
             end
     end.
 
@@ -1031,7 +1087,7 @@ load_or_create_diskann(Config, Dimension) ->
     ok = filelib:ensure_dir(filename:join(BasePath, "dummy")),
     case barrel_vectordb_diskann:open(BasePath, #{crypto => Crypto}) of
         {ok, Index} ->
-            {ok, Index};
+            {ok, Index, loaded};
         %% key/matrix failures must fail the store open, not silently
         %% recreate a fresh index over the data
         {error, wrong_encryption_key} = Err ->
@@ -1042,26 +1098,150 @@ load_or_create_diskann(Config, Dimension) ->
             Err;
         {error, _} ->
             %% No existing index or failed to open - create new
-            barrel_vectordb_diskann:new(Config#{dimension => Dimension, storage_mode => disk})
-    end.
-
-%% Load index metadata from storage
-load_index_meta(Db, CfHnsw) ->
-    case rocksdb:get(Db, CfHnsw, ?HNSW_META_KEY, []) of
-        {ok, Binary} ->
-            try
-                Meta = binary_to_term(Binary),
-                {ok, Meta}
-            catch
-                _:_ -> not_found
-            end;
-        not_found ->
-            not_found;
-        {error, _} ->
-            not_found
+            case barrel_vectordb_diskann:new(Config#{dimension => Dimension,
+                                                     storage_mode => disk}) of
+                {ok, Index} -> {ok, Index, new};
+                {error, _} = Err -> Err
+            end
     end.
 
 %% Persist index metadata
+%% FAISS mutates its NIF handle during insert; a failed commit after
+%% that leaves the graph ahead of the data, so persisting is unsafe.
+maybe_graph_dirty(barrel_vectordb_index_faiss, State) ->
+    State#state{graph_dirty = true};
+maybe_graph_dirty(_Mod, State) ->
+    State.
+
+read_index_seq(Db, CfHnsw) ->
+    case rocksdb:get(Db, CfHnsw, ?HNSW_SEQ_KEY, []) of
+        {ok, <<Seq:64>>} -> Seq;
+        _ -> 0
+    end.
+
+%% What must match for a stored graph to be loadable; the canonical
+%% term is stored (not a hash) so mismatches are debuggable.
+index_fingerprint(barrel_vectordb_index_hnsw, Dim, IndexConfig) ->
+    #{v => 1, backend => hnsw, dimension => Dim,
+      config => maps:with([m, m_max0, ef_construction, distance_fn,
+                           quantization], IndexConfig)};
+index_fingerprint(barrel_vectordb_index_faiss, Dim, IndexConfig) ->
+    #{v => 1, backend => faiss, dimension => Dim,
+      config => maps:with([index_type, metric, nlist, nprobe],
+                          IndexConfig)};
+index_fingerprint(Mod, Dim, _IndexConfig) ->
+    #{v => 1, backend => Mod, dimension => Dim}.
+
+index_config(barrel_vectordb_index_faiss, Config) ->
+    maps:get(faiss, Config, #{});
+index_config(_Mod, Config) ->
+    maps:get(hnsw, Config, #{}).
+
+%% Load the stored graph when it provably matches the vectors CF:
+%% exact write seq, same config fingerprint, checksum intact.
+load_index_graph(Db, CfHnsw, Dimension, IndexConfig, IndexModule) ->
+    case rocksdb:get(Db, CfHnsw, ?HNSW_GRAPH_HEADER_KEY, []) of
+        {ok, HeaderBin} ->
+            try binary_to_term(HeaderBin) of
+                #{v := 1, seq := Seq, fingerprint := Fp, crc32 := Crc,
+                  nchunks := NChunks} ->
+                    CurSeq = read_index_seq(Db, CfHnsw),
+                    CurFp = index_fingerprint(IndexModule, Dimension,
+                                              IndexConfig),
+                    case Seq =:= CurSeq andalso Fp =:= CurFp of
+                        true ->
+                            load_graph_chunks(Db, CfHnsw, NChunks, Crc,
+                                              IndexModule);
+                        false ->
+                            not_loadable
+                    end;
+                _Other ->
+                    not_loadable
+            catch
+                _:_ -> not_loadable
+            end;
+        _ ->
+            not_loadable
+    end.
+
+load_graph_chunks(Db, CfHnsw, NChunks, Crc, IndexModule) ->
+    try
+        Chunks = [begin
+                      {ok, C} = rocksdb:get(Db, CfHnsw, chunk_key(N), []),
+                      C
+                  end || N <- lists:seq(0, NChunks - 1)],
+        Bin = iolist_to_binary(Chunks),
+        Crc = erlang:crc32(Bin),
+        case IndexModule:deserialize(Bin) of
+            {ok, Index} ->
+                {ok, Index};
+            {error, Reason} ->
+                error_logger:warning_msg(
+                    "barrel_vectordb: stored index graph rejected (~p), rebuilding~n",
+                    [Reason]),
+                not_loadable
+        end
+    catch
+        _:_ -> not_loadable
+    end.
+
+chunk_key(N) ->
+    <<?HNSW_GRAPH_CHUNK_PREFIX/binary, N:32>>.
+
+chunk_binary(Bin, Size) when byte_size(Bin) =< Size ->
+    [Bin];
+chunk_binary(Bin, Size) ->
+    <<C:Size/binary, Rest/binary>> = Bin,
+    [C | chunk_binary(Rest, Size)].
+
+%% Persist the serialized graph in ONE batch (delete-range of old
+%% chunks + chunk puts + header) so a crash never mixes generations.
+persist_index_graph(#state{graph_dirty = true, db = Db,
+                           cf_hnsw = CfHnsw}) ->
+    %% The in-RAM graph may not match committed data: drop the header
+    %% so the next open rebuilds.
+    _ = rocksdb:delete(Db, CfHnsw, ?HNSW_GRAPH_HEADER_KEY, []),
+    {error, graph_dirty};
+persist_index_graph(#state{index_module = barrel_vectordb_diskann}) ->
+    ok;
+persist_index_graph(#state{db = Db, cf_hnsw = CfHnsw, index = Index,
+                           index_module = Mod, dimension = Dim,
+                           config = Config, index_seq = Seq}) ->
+    try Mod:serialize(Index) of
+        Bin when is_binary(Bin) ->
+            Chunks = chunk_binary(Bin, ?GRAPH_CHUNK_SIZE),
+            Header = term_to_binary(#{v => 1, seq => Seq,
+                fingerprint => index_fingerprint(Mod, Dim,
+                                                 index_config(Mod, Config)),
+                crc32 => erlang:crc32(Bin),
+                nchunks => length(Chunks),
+                total_size => byte_size(Bin)}),
+            {ok, Batch} = rocksdb:batch(),
+            try
+                ok = rocksdb:batch_delete_range(Batch, CfHnsw,
+                        ?HNSW_GRAPH_CHUNK_PREFIX,
+                        <<?HNSW_GRAPH_CHUNK_PREFIX/binary,
+                          16#FFFFFFFF:32>>),
+                _ = lists:foldl(
+                    fun(C, N) ->
+                        ok = rocksdb:batch_put(Batch, CfHnsw,
+                                               chunk_key(N), C),
+                        N + 1
+                    end, 0, Chunks),
+                ok = rocksdb:batch_put(Batch, CfHnsw,
+                                       ?HNSW_GRAPH_HEADER_KEY, Header),
+                rocksdb:write_batch(Db, Batch, [])
+            after
+                rocksdb:release_batch(Batch)
+            end
+    catch
+        Class:Reason ->
+            error_logger:warning_msg(
+                "barrel_vectordb: index persist failed: ~p:~p~n",
+                [Class, Reason]),
+            {error, {persist_failed, Reason}}
+    end.
+
 persist_index_meta(Db, CfHnsw, Index, Mod) ->
     %% Use the index module's info function to get metadata
     Info = Mod:info(Index),
@@ -1117,8 +1297,11 @@ do_embed_batch(Texts, #state{embed_state = EmbedState}) ->
     barrel_embed:embed_batch(Texts, EmbedState).
 
 %% Add a document
+%% Returns {ok, State} | {error, Reason, State}: post-commit failures
+%% carry the committed index/seq so it never goes stale vs the data.
 do_add(Id, Text, Metadata, Vector, #state{db = Db, cf_vectors = CfV,
                                           cf_metadata = CfM, cf_text = CfT,
+                                          cf_hnsw = CfH, index_seq = Seq0,
                                           index = Index, index_module = Mod,
                                           bm25_index = BM25Index,
                                           docstore = Docstore} = State) ->
@@ -1129,28 +1312,34 @@ do_add(Id, Text, Metadata, Vector, #state{db = Db, cf_vectors = CfV,
         ok = rocksdb:batch_put(Batch, CfV, Id, VectorBin),
         DocPairs = put_docdata_to_batch(Docstore, Batch, CfM, CfT, Id, Text, Metadata),
 
-        %% Index updated in-memory only (rebuilt from vectors on startup)
         case Mod:insert(Index, Id, Vector) of
             {ok, NewIndex} ->
+                Seq1 = Seq0 + 1,
+                ok = rocksdb:batch_put(Batch, CfH, ?HNSW_SEQ_KEY,
+                                       <<Seq1:64>>),
                 case rocksdb:write_batch(Db, Batch, []) of
                     ok ->
+                        StateOk = State#state{index = NewIndex,
+                                              index_seq = Seq1},
                         case docstore_multi_put(Docstore, DocPairs) of
                             ok ->
-                                %% Also add to BM25 index if enabled
                                 case bm25_add(BM25Index, Id, Text) of
                                     {ok, NewBM25Index} ->
-                                        {ok, State#state{index = NewIndex, bm25_index = NewBM25Index}};
+                                        {ok, StateOk#state{bm25_index = NewBM25Index}};
                                     {error, Reason} ->
-                                        {error, {bm25_error, Reason}}
+                                        {error, {bm25_error, Reason},
+                                         StateOk}
                                 end;
                             {error, DsReason} ->
-                                {error, {docstore_error, DsReason}}
+                                {error, {docstore_error, DsReason},
+                                 StateOk}
                         end;
                     {error, Reason} ->
-                        {error, {db_error, Reason}}
+                        {error, {db_error, Reason},
+                         maybe_graph_dirty(Mod, State)}
                 end;
             {error, Reason} ->
-                {error, Reason}
+                {error, Reason, State}
         end
     after
         rocksdb:release_batch(Batch)
@@ -1181,31 +1370,46 @@ do_get(Id, #state{db = Db, cf_vectors = CfV, cf_metadata = CfM, cf_text = CfT,
     end.
 
 %% Delete a document
+%% Returns {ok, State} | {error, Reason, State} (see do_add). The
+%% index mutates before the commit so both stay in step.
 do_delete(Id, #state{db = Db, cf_vectors = CfV, cf_metadata = CfM,
                      cf_text = CfT, cf_hnsw = CfH, index = Index, index_module = Mod,
+                     index_seq = Seq0,
                      bm25_index = BM25Index, docstore = Docstore} = State) ->
     {ok, Batch} = rocksdb:batch(),
     try
         ok = rocksdb:batch_delete(Batch, CfV, Id),
         ok = delete_docdata_from_batch(Docstore, Batch, CfM, CfT, Id),
-        ok = rocksdb:batch_delete(Batch, CfH, Id),
+        %% Legacy per-id graph keys; never touch the reserved ones.
+        case Id of
+            <<"__hnsw_", _/binary>> -> ok;
+            _ -> ok = rocksdb:batch_delete(Batch, CfH, Id)
+        end,
 
-        case rocksdb:write_batch(Db, Batch, []) of
-            ok ->
-                case docstore_delete(Docstore, Id) of
+        case Mod:delete(Index, Id) of
+            {ok, NewIndex} ->
+                Seq1 = Seq0 + 1,
+                ok = rocksdb:batch_put(Batch, CfH, ?HNSW_SEQ_KEY,
+                                       <<Seq1:64>>),
+                case rocksdb:write_batch(Db, Batch, []) of
                     ok ->
-                        case Mod:delete(Index, Id) of
-                            {ok, NewIndex} ->
-                                %% Also remove from BM25 index if enabled
-                                {ok, NewBM25Index} = bm25_remove(BM25Index, Id),
-                                {ok, State#state{index = NewIndex, bm25_index = NewBM25Index}};
-                            {error, Reason} -> {error, Reason}
+                        {ok, NewBM25Index} = bm25_remove(BM25Index, Id),
+                        StateOk = State#state{index = NewIndex,
+                                              index_seq = Seq1,
+                                              bm25_index = NewBM25Index},
+                        case docstore_delete(Docstore, Id) of
+                            ok ->
+                                {ok, StateOk};
+                            {error, DsReason} ->
+                                {error, {docstore_error, DsReason},
+                                 StateOk}
                         end;
-                    {error, DsReason} ->
-                        {error, {docstore_error, DsReason}}
+                    {error, Reason} ->
+                        {error, {db_error, Reason},
+                         maybe_graph_dirty(Mod, State)}
                 end;
             {error, Reason} ->
-                {error, {db_error, Reason}}
+                {error, Reason, State}
         end
     after
         rocksdb:release_batch(Batch)

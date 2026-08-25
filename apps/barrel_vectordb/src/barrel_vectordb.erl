@@ -123,6 +123,7 @@
 %% API - Maintenance
 -export([
     checkpoint/1,
+    persist_index/1,
     destroy/1
 ]).
 
@@ -739,6 +740,13 @@ embedder_info(Store) ->
 -spec checkpoint(store()) -> ok.
 checkpoint(Store) ->
     barrel_vectordb_server:checkpoint(Store).
+
+%% @doc Persist the in-memory index graph to the store's RocksDB now.
+%% Also done at close and checkpoint; on the next open a graph that
+%% still matches the stored vectors loads instead of rebuilding.
+-spec persist_index(store()) -> ok | {error, term()}.
+persist_index(Store) ->
+    barrel_vectordb_server:persist_index(Store).
 
 %%====================================================================
 %% Internal Functions

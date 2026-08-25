@@ -112,6 +112,8 @@ test_roundtrip() ->
                                         #{}, [0.0, 1.0, 0.0]),
         stop_store(),
         {ok, _} = start_store(TestDir, #{crypto => #{key => ?KEY1}}),
+        %% the persisted graph loads through the EncryptedEnv
+        {ok, #{index_origin := loaded}} = barrel_vectordb:stats(?STORE),
         {ok, [#{key := <<"a">>}]} =
             barrel_vectordb:search_vector(?STORE, [1.0, 0.0, 0.0],
                                           #{k => 1})
