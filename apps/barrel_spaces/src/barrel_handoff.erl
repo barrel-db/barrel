@@ -80,6 +80,12 @@ create(SpaceId, #{task_name := TaskName} = Opts)
                 <<"created_at">> => barrel_spaces:now_ms()
             },
             {ok, _} = barrel_docdb:put_doc(Registry, Doc),
+            TokenId = maps:get(<<"token_id">>, Grant),
+            {ok, _} = barrel_docdb:put_doc(Registry, #{
+                <<"id">> => <<"handoff_token:", TokenId/binary>>,
+                <<"type">> => <<"handoff_token">>,
+                <<"handoff">> => Hid
+            }),
             {ok, #{handoff_id => Hid, token => Token}};
         {error, _} = Err ->
             Err
@@ -113,11 +119,14 @@ get(Hid) when is_binary(Hid) ->
 %% @doc Accept a handoff by presenting its token. Opts: `agent' (the
 %% acceptor's name), `open_opts' (runtime open options for the space,
 %% e.g. its encryption spec), `session' (map passed to
-%% barrel_session:create). Returns the shared space handle and a fresh
-%% session in it; the from-agent's context is read in place.
+%% barrel_session:create, or `false' to accept WITHOUT opening the
+%% space or creating a session: the token discipline alone, for
+%% consumers with their own session model). Returns the shared space
+%% handle and a fresh session in it (both absent with
+%% `session => false'); the from-agent's context is read in place.
 -spec accept(binary(), map()) ->
-    {ok, #{handoff := map(), space := barrel_spaces:space(),
-           session := binary()}} |
+    {ok, #{handoff := map(), space => barrel_spaces:space(),
+           session => binary()}} |
     {error, term()}.
 accept(Token, Opts) when is_binary(Token), is_map(Opts) ->
     case resolve(Token) of
@@ -134,7 +143,15 @@ accept(Token, Opts) when is_binary(Token), is_map(Opts) ->
                     case barrel_docdb:put_doc(
                              barrel_spaces:registry_db(), Flipped) of
                         {ok, _} ->
-                            open_accepted(Hid, SpaceId, Agent, Opts);
+                            case maps:get(session, Opts, #{}) of
+                                false ->
+                                    {ok, Accepted} = get(Hid),
+                                    {ok, #{handoff =>
+                                               public(Accepted)}};
+                                _ ->
+                                    open_accepted(Hid, SpaceId, Agent,
+                                                  Opts)
+                            end;
                         {error, conflict} ->
                             {error, already_accepted};
                         {error, {conflict, _}} ->
@@ -222,19 +239,31 @@ chain(Token, #{task_name := _} = CreateOpts) when is_binary(Token) ->
 %% Internal
 %%====================================================================
 
-%% The handoff of a token: token id -> registry scan (the registry is
-%% small metadata; an index is a later optimization).
+%% The handoff of a token: token id -> `handoff_token:' index doc
+%% (written at create); handoffs created before the index existed
+%% fall back to a registry scan.
 resolve(Token) ->
     case barrel_caps:token_id(Token) of
         {ok, TokenId} ->
-            {ok, Handoffs} = list(#{}),
-            case [H || #{<<"token_id">> := T} = H <- Handoffs,
-                       T =:= TokenId] of
-                [Doc] -> {ok, Doc};
-                [] -> {error, not_found}
+            Registry = barrel_spaces:registry_db(),
+            case barrel_docdb:get_doc(Registry,
+                                      <<"handoff_token:",
+                                        TokenId/binary>>) of
+                {ok, #{<<"handoff">> := Hid}} ->
+                    get(Hid);
+                {error, not_found} ->
+                    resolve_scan(TokenId)
             end;
         error ->
             {error, invalid_token}
+    end.
+
+resolve_scan(TokenId) ->
+    {ok, Handoffs} = list(#{}),
+    case [H || #{<<"token_id">> := T} = H <- Handoffs,
+               T =:= TokenId] of
+        [Doc] -> {ok, Doc};
+        [] -> {error, not_found}
     end.
 
 open_accepted(Hid, SpaceId, Agent, Opts) ->

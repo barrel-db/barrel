@@ -4,6 +4,22 @@ All notable changes to the Barrel umbrella are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and each app
 is versioned independently under [Semantic Versioning](https://semver.org/).
 
+## [2026-08-25] barrel_spaces adoptable for existing session stores
+
+Feedback from adopting the agent layer in an external product: sessions could
+only be caches (every mutation re-armed the TTL), listing filtered in Erlang
+over a full fold, ids were always minted so a corpus could not move in, and
+`accept/2` forced a session into existence. All four are lifted additively:
+`ttl => infinity`, indexed `list/2` filters, caller ids plus
+`import_session/2`/`import_message/3`, and `accept(Token, #{session =>
+false})`. The registry database name becomes configuration, and the two
+behaviors consumers already rely on, replicating the registry and granting
+capabilities on purely logical scopes, are documented as intended.
+
+| App | Version | Change |
+|-----|---------|--------|
+| barrel_spaces | 1.1.0 | durable sessions, indexed listing, import with ids, accept without session, configurable registry |
+
 ## [2026-08-23] barrel_vectordb store server without gen_batch_server
 
 `barrel_vectordb`'s per-store process is a plain `gen_server` again. The only

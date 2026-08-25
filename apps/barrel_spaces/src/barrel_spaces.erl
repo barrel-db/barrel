@@ -44,22 +44,31 @@
 %% holds small metadata docs and needs no vector store).
 -spec ensure_registry() -> ok.
 ensure_registry() ->
-    case barrel_docdb:open_db(?REGISTRY_DB) of
+    Name = configured_registry(),
+    case barrel_docdb:open_db(Name) of
         {ok, _} ->
             ok;
         {error, _} ->
-            case barrel_docdb:create_db(?REGISTRY_DB) of
+            case barrel_docdb:create_db(Name) of
                 {ok, _} -> ok;
                 {error, already_exists} -> ok
             end
     end.
 
 %% @doc The registry database name (documents: `space:Id', `grant:Id',
-%% `handoff:Id').
+%% `handoff:Id', `handoff_token:TokenId'). Configurable through the
+%% `registry_db' application env of barrel_spaces (default
+%% `_barrel_spaces'); set it before first use. The registry is a
+%% regular barrel database: opening it through barrel_dbs alongside
+%% this layer, and replicating it, are both supported (see the spaces
+%% guide on what replicating grants means).
 -spec registry_db() -> binary().
 registry_db() ->
     ok = ensure_registry(),
-    ?REGISTRY_DB.
+    configured_registry().
+
+configured_registry() ->
+    application:get_env(barrel_spaces, registry_db, ?REGISTRY_DB).
 
 %% @doc Create a space. Options:
 %% <ul>

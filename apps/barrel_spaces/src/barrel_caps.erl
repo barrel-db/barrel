@@ -9,6 +9,19 @@
 %%% a ladder: `read < write < admin' (admin covers grants, drops,
 %%% branch/merge, and handoff issuance). A token is shown ONCE at
 %%% grant time; treat it like a password.
+%%%
+%%% The granted scope is any binary id: grant/2 does not require a
+%%% space database to exist, so purely logical scopes (a tenant id, a
+%%% handoff id) get revocable, hash-at-rest, rights-laddered tokens
+%%% without a single space being created. This is intended and
+%%% supported.
+%%%
+%%% The registry is a regular barrel database (name from the
+%%% `registry_db' app env of barrel_spaces). Replicating it is
+%%% intended: grant docs are authorization state, so a token minted on
+%%% one node verifies on any node the registry reaches, and revocation
+%%% (`revoked_at', a normal doc update) propagates at replication
+%%% speed. Verification itself is always a local read.
 %%% @end
 %%%-------------------------------------------------------------------
 -module(barrel_caps).
