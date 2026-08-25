@@ -37,6 +37,8 @@ api_test_() ->
         {"persistence reload", fun test_persistence_reload/0},
         {"reload loads persisted graph", fun test_reload_loaded_graph/0},
         {"kill after write forces rebuild", fun test_stale_graph_rebuilt/0},
+        {"changed object after persist forces rebuild",
+         fun test_changed_object_rebuilt/0},
         {"config change forces rebuild", fun test_config_change_rebuilt/0},
         {"concurrent add_vector batching", fun test_concurrent_add_vector/0},
         {"multiple writers stress test", fun test_multiple_writers/0},
@@ -424,6 +426,37 @@ test_stale_graph_rebuilt() ->
     ?assertEqual(rebuilt, maps:get(index_origin, Stats)),
     ?assertEqual(2, barrel_vectordb:count(graph_stale_store)),
     ok = barrel_vectordb:stop(graph_stale_store),
+    os:cmd("rm -rf " ++ Dir).
+
+test_changed_object_rebuilt() ->
+    Dir = "/tmp/barrel_vectordb_graph_chg_test_" ++
+          integer_to_list(erlang:unique_integer([positive])),
+    Cfg = #{name => graph_chg_store, path => Dir, dimension => 3,
+            hnsw => #{m => 4, ef_construction => 20}},
+    {ok, Pid} = barrel_vectordb:start_link(Cfg),
+    ok = barrel_vectordb:add_vector(graph_chg_store, <<"c1">>, <<"t1">>,
+                                    #{}, [1.0, 0.0, 0.0]),
+    ok = barrel_vectordb:persist_index(graph_chg_store),
+    %% the object CHANGES after the persist (overwrite, then a kill so
+    %% no later persist can catch up)
+    ok = barrel_vectordb:add_vector(graph_chg_store, <<"c1">>, <<"t1b">>,
+                                    #{}, [0.0, 1.0, 0.0]),
+    unlink(Pid),
+    MRef = monitor(process, Pid),
+    exit(Pid, kill),
+    receive {'DOWN', MRef, _, _, _} -> ok end,
+
+    {ok, _} = barrel_vectordb:start_link(Cfg),
+    {ok, Stats} = barrel_vectordb:stats(graph_chg_store),
+    ?assertEqual(rebuilt, maps:get(index_origin, Stats)),
+    %% the rebuilt index serves the CHANGED vector, not the persisted one
+    {ok, Doc} = barrel_vectordb:get(graph_chg_store, <<"c1">>),
+    ?assertEqual([0.0, 1.0, 0.0], maps:get(vector, Doc)),
+    {ok, [First | _]} = barrel_vectordb:search_vector(graph_chg_store,
+                                                     [0.0, 1.0, 0.0],
+                                                     #{k => 1}),
+    ?assertEqual(<<"c1">>, maps:get(key, First)),
+    ok = barrel_vectordb:stop(graph_chg_store),
     os:cmd("rm -rf " ++ Dir).
 
 test_config_change_rebuilt() ->
