@@ -75,6 +75,47 @@ messages.
 ok = barrel_session:delete(Space, Sid).   %% cascades to messages
 ```
 
+### Durable sessions
+
+Pass `ttl => infinity` (or 0) to create a session that never expires: a
+record, not a cache. Mutations on it return `{ok, 0}` instead of an expiry
+time, and the TTL sweeper skips it.
+
+```erlang
+{ok, Rec} = barrel_session:create(Space, #{agent => <<"alice">>,
+                                           ttl => infinity}),
+{ok, 0} = barrel_session:touch(Space, Rec).
+```
+
+### Filtered listing
+
+`list/2` filters through the space database's path indexes, so a space
+holding thousands of sessions does not pay a full fold:
+
+```erlang
+{ok, Mine} = barrel_session:list(Space, #{
+    match => #{<<"data.user_id">> => <<"u1">>},   %% any field path
+    agent => <<"alice">>,                         %% composes with match
+    limit => 50}).
+```
+
+### Importing an existing corpus
+
+Sessions and messages move in with their own ids and timestamps; the
+module keeps owning the document schema:
+
+```erlang
+{ok, _} = barrel_session:create(Space, #{id => <<"legacy-1">>}),
+{ok, _} = barrel_session:import_session(Space, #{
+    id => <<"legacy-2">>, agent => <<"old-bot">>,
+    data => #{<<"user_id">> => <<"u1">>},
+    created_at => 1750000000000, updated_at => 1750000100000}),
+    %% ttl defaults to never for imports; ttl > 0 arms from updated_at
+{ok, _} = barrel_session:import_message(Space, <<"legacy-2">>, #{
+    role => <<"user">>, content => <<"hello">>,
+    ts => 1750000050000, seq => 1}).   %% does not slide the TTL
+```
+
 ### Document TTL (the machinery underneath)
 
 Sessions ride a general primitive that works on any barrel database: the
@@ -111,6 +152,12 @@ read in place, nothing is copied.
 {ok, #{handoff := H, space := BobSpace, session := BobSid}} =
     barrel_handoff:accept(HandoffToken, #{agent => <<"bob">>}),
 
+%% or accept on the token discipline alone (no space opened, no
+%% session created), for consumers with their own session model:
+%% {ok, #{handoff := H2}} =
+%%     barrel_handoff:accept(HandoffToken, #{agent => <<"bob">>,
+%%                                           session => false}),
+
 %% work happens in the shared space, then:
 {ok, _} = barrel_handoff:complete(HandoffToken,
                                   #{result => <<"shipped">>}),
@@ -138,6 +185,18 @@ capability tokens work as bearers there (and only there). See
   and handoff issuance. Verification is local (the registry is a database
   on the same node); tokens are random, stored hashed, compared in constant
   time.
+- The registry database name comes from the `registry_db` app env of
+  `barrel_spaces` (default `_barrel_spaces`); set it before first use. The
+  registry is a regular barrel database: opening it through `barrel_dbs`
+  alongside this layer is supported.
+- Replicating the registry is intended. Grant documents are authorization
+  state, so replication is what makes a token minted on one node verify on
+  another; the flip side is that revocation propagates at replication
+  speed. Keep the registry's replication tight if revocation latency
+  matters to you.
+- `barrel_caps:grant/2` does not require the space to exist. Granting on a
+  purely logical scope (a tenant id, a handoff id) is supported: revocable,
+  hash-at-rest, rights-laddered tokens with no space database behind them.
 - The registry (`_barrel_spaces`) holds space, grant, and handoff documents
   as regular docs: folds and the changes feed see them.
 - An encrypted space needs its encryption spec on every open, including

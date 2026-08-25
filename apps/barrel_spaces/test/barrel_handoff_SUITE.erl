@@ -20,13 +20,15 @@
     t_discovery_via_changes/1
 ]).
 
+-export([t_accept_without_session/1]).
+
 -include_lib("common_test/include/ct.hrl").
 -include_lib("stdlib/include/assert.hrl").
 
 all() ->
     [t_two_agent_by_reference, t_bad_tokens, t_double_accept,
      t_complete_revokes, t_chain, t_list_filters,
-     t_discovery_via_changes].
+     t_discovery_via_changes, t_accept_without_session].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(barrel_spaces),
@@ -184,4 +186,25 @@ t_discovery_via_changes(Config) ->
     {ok, Changes, _} = barrel_docdb:get_changes(Registry, Since),
     Ids = [maps:get(id, C) || C <- Changes],
     ?assert(lists:member(<<"handoff:", Hid/binary>>, Ids)),
+    ok.
+
+t_accept_without_session(Config) ->
+    #{id := SpaceId} = Space = ?config(space, Config),
+    {ok, #{token := Token}} = barrel_handoff:create(Space, #{
+        task_name => <<"external sessions">>,
+        from_agent => <<"a">>, to_agent => <<"b">>}),
+    {ok, Res} = barrel_handoff:accept(Token, #{agent => <<"b">>,
+                                               session => false}),
+    %% only the handoff comes back: no space handle, no session
+    ?assertEqual([handoff], maps:keys(Res)),
+    ?assertEqual(<<"accepted">>,
+                 maps:get(<<"status">>, maps:get(handoff, Res))),
+    {ok, Sessions} = barrel_session:list(Space),
+    ?assertEqual([], Sessions),
+    %% the CAS and the completion discipline are unchanged
+    ?assertEqual({error, already_accepted},
+                 barrel_handoff:accept(Token, #{session => false})),
+    {ok, _} = barrel_handoff:complete(Token, #{result => <<"ok">>}),
+    ?assertEqual({error, revoked},
+                 barrel_caps:verify(Token, SpaceId, read)),
     ok.

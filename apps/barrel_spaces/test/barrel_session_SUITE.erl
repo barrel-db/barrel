@@ -20,13 +20,15 @@
     t_list_by_agent/1
 ]).
 
+-export([t_no_ttl_durable/1, t_import_with_ids/1, t_list_match_indexed/1]).
+
 -include_lib("common_test/include/ct.hrl").
 -include_lib("stdlib/include/assert.hrl").
 
 all() ->
     [t_create_get_touch, t_sliding_ttl, t_messages_chronological,
      t_message_ranges, t_data_summary_pinned, t_delete_cascade,
-     t_janitor_orphans, t_list_by_agent].
+     t_janitor_orphans, t_list_by_agent, t_no_ttl_durable, t_import_with_ids, t_list_match_indexed].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(barrel_spaces),
@@ -188,4 +190,74 @@ t_list_by_agent(Config) ->
     ?assertEqual(2, length(Alice)),
     {ok, Bob} = barrel_session:list(Space, #{agent => <<"bob">>}),
     ?assertEqual(1, length(Bob)),
+    ok.
+
+t_no_ttl_durable(Config) ->
+    #{id := SpaceId} = Space = ?config(space, Config),
+    {ok, Sid} = barrel_session:create(Space, #{agent => <<"keeper">>,
+                                               ttl => infinity}),
+    {ok, Doc} = barrel_session:get(Space, Sid),
+    ?assertEqual(0, maps:get(<<"ttl">>, Doc)),
+    {ok, 0} = barrel_session:touch(Space, Sid),
+    {ok, 0} = barrel_session:set_data(Space, Sid, <<"k">>, 1),
+    %% the TTL sweeper never collects it
+    {ok, _} = barrel_docdb:sweep_ttl(SpaceId),
+    {ok, _} = barrel_session:get(Space, Sid),
+    %% ttl => 0 means the same thing
+    {ok, Sid2} = barrel_session:create(Space, #{ttl => 0}),
+    {ok, 0} = barrel_session:touch(Space, Sid2),
+    ok.
+
+t_import_with_ids(Config) ->
+    Space = ?config(space, Config),
+    %% caller-supplied id on create; duplicates conflict, colons refused
+    {ok, <<"legacy-1">>} =
+        barrel_session:create(Space, #{id => <<"legacy-1">>}),
+    ?assertMatch({error, _},
+                 barrel_session:create(Space, #{id => <<"legacy-1">>})),
+    ?assertEqual({error, invalid_session_id},
+                 barrel_session:create(Space, #{id => <<"a:b">>})),
+    %% import preserves timestamps; default ttl is never
+    T0 = barrel_spaces:now_ms() - 86400000,
+    {ok, <<"legacy-2">>} = barrel_session:import_session(Space, #{
+        id => <<"legacy-2">>, agent => <<"old-bot">>,
+        data => #{<<"user_id">> => <<"u1">>},
+        created_at => T0, updated_at => T0}),
+    {ok, Doc} = barrel_session:get(Space, <<"legacy-2">>),
+    ?assertEqual(T0, maps:get(<<"created_at">>, Doc)),
+    ?assertEqual(0, maps:get(<<"ttl">>, Doc)),
+    ?assertEqual({error, id_required},
+                 barrel_session:import_session(Space, #{agent => <<"x">>})),
+    %% messages with their own timestamps sort chronologically and do
+    %% not slide the session
+    {ok, _} = barrel_session:import_message(Space, <<"legacy-2">>,
+        #{role => <<"user">>, content => <<"first">>,
+          ts => T0, seq => 1}),
+    {ok, _} = barrel_session:import_message(Space, <<"legacy-2">>,
+        #{role => <<"assistant">>, content => <<"second">>,
+          ts => T0 + 1000, seq => 2}),
+    {ok, [M1, M2]} = barrel_session:get_messages(Space, <<"legacy-2">>),
+    ?assertEqual(<<"first">>, maps:get(<<"content">>, M1)),
+    ?assertEqual(<<"second">>, maps:get(<<"content">>, M2)),
+    ok.
+
+t_list_match_indexed(Config) ->
+    Space = ?config(space, Config),
+    {ok, S1} = barrel_session:create(Space, #{agent => <<"a1">>,
+        data => #{<<"user_id">> => <<"u1">>}}),
+    {ok, _S2} = barrel_session:create(Space, #{agent => <<"a1">>,
+        data => #{<<"user_id">> => <<"u2">>}}),
+    {ok, S3} = barrel_session:create(Space, #{agent => <<"a2">>,
+        data => #{<<"user_id">> => <<"u1">>}}),
+    {ok, ByUser} = barrel_session:list(Space, #{
+        match => #{<<"data.user_id">> => <<"u1">>}}),
+    ?assertEqual(lists:sort([S1, S3]),
+                 lists:sort([maps:get(<<"session">>, D) || D <- ByUser])),
+    %% agent composes with match; paths also accept key lists
+    {ok, Both} = barrel_session:list(Space, #{agent => <<"a1">>,
+        match => #{[<<"data">>, <<"user_id">>] => <<"u1">>}}),
+    ?assertEqual([S1], [maps:get(<<"session">>, D) || D <- Both]),
+    {ok, Limited} = barrel_session:list(Space, #{agent => <<"a1">>,
+                                                 limit => 1}),
+    ?assertEqual(1, length(Limited)),
     ok.

@@ -18,12 +18,14 @@
     t_list_strips_hashes/1
 ]).
 
+-export([t_logical_scope_custom_registry/1]).
+
 -include_lib("common_test/include/ct.hrl").
 -include_lib("stdlib/include/assert.hrl").
 
 all() ->
     [t_grant_and_verify, t_rights_ladder, t_verify_matrix, t_revoke,
-     t_auth_context, t_drop_space_revokes, t_list_strips_hashes].
+     t_auth_context, t_drop_space_revokes, t_list_strips_hashes, t_logical_scope_custom_registry].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(barrel_spaces),
@@ -168,3 +170,25 @@ t_list_strips_hashes(Config) ->
 %% shape stays valid but the hash cannot match
 flip_b32($a) -> $b;
 flip_b32(_) -> $a.
+
+t_logical_scope_custom_registry(_Config) ->
+    %% a configured registry name plus a purely logical scope: tokens
+    %% without any space database behind them
+    ok = application:set_env(barrel_spaces, registry_db,
+                             <<"_caps_alt_registry">>),
+    try
+        {ok, Token, Grant} = barrel_caps:grant(<<"tenant-42">>,
+                                               #{rights => [read]}),
+        ?assertEqual(<<"tenant-42">>, maps:get(<<"space">>, Grant)),
+        {ok, _} = barrel_caps:verify(Token, <<"tenant-42">>, read),
+        %% the grant doc lives in the configured registry
+        {ok, TokenId} = barrel_caps:token_id(Token),
+        {ok, _} = barrel_docdb:get_doc(<<"_caps_alt_registry">>,
+                                       <<"grant:", TokenId/binary>>),
+        ok = barrel_caps:revoke(Token),
+        ?assertEqual({error, revoked},
+                     barrel_caps:verify(Token, <<"tenant-42">>, read))
+    after
+        application:unset_env(barrel_spaces, registry_db)
+    end,
+    ok.

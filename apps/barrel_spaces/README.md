@@ -107,8 +107,10 @@ token, not by being granted anything up front.
 ```
 
 `accept/2` opens the shared space and creates a fresh session in it; the
-from-agent's context is read in place, never copied. `chain/2` walks a handoff
-back through the agents that touched it.
+from-agent's context is read in place, never copied. Pass `session => false`
+to accept on the token discipline alone, with no space opened and no session
+created. `chain/2` hands the task forward: it completes the presented handoff
+and mints the next one carrying parent/root/depth lineage.
 
 A runnable version of this whole flow, compiled and executed by
 `barrel_agent_example_SUITE`, lives at
