@@ -425,8 +425,8 @@ clamp(V, _Min, _Max) -> V.
 -spec serialize(hnsw_index()) -> binary().
 serialize(#hnsw_index{entry_point = EP, max_layer = MaxLayer, nodes = Nodes,
                        config = Config, size = Size, dimension = Dim}) ->
-    %% Version 2: includes full graph structure for fast loading
-    Version = 2,
+    %% Version 3: v2 plus a quantization-method byte in the config.
+    Version = 3,
     EPBin = case EP of
         undefined -> <<0:16>>;
         _ -> <<(byte_size(EP)):16, EP/binary>>
@@ -435,7 +435,8 @@ serialize(#hnsw_index{entry_point = EP, max_layer = MaxLayer, nodes = Nodes,
         (Config#hnsw_config.m):16,
         (Config#hnsw_config.m_max0):16,
         (Config#hnsw_config.ef_construction):16,
-        (distance_fn_to_int(Config#hnsw_config.distance_fn)):8
+        (distance_fn_to_int(Config#hnsw_config.distance_fn)):8,
+        (quantization_to_int(Config#hnsw_config.quantization)):8
     >>,
     NodesList = maps:to_list(Nodes),
     NodesBin = << <<(serialize_node_full(Id, Node))/binary>> || {Id, Node} <- NodesList >>,
@@ -443,6 +444,26 @@ serialize(#hnsw_index{entry_point = EP, max_layer = MaxLayer, nodes = Nodes,
 
 %% @doc Deserialize index from binary
 -spec deserialize(binary()) -> {ok, hnsw_index()} | {error, term()}.
+deserialize(<<3:8, Size:32, MaxLayer:8, Dim:16, Rest/binary>>) ->
+    %% Version 3: only scalar-quantized graphs load (the live insert
+    %% path always scalar-quantizes); anything else must rebuild.
+    try
+        {EP, Rest1} = deserialize_entry_point(Rest),
+        {Config, Rest2} = deserialize_config_v3(Rest1),
+        {Nodes, <<>>} = deserialize_nodes(Rest2, Size, #{}),
+        {ok, #hnsw_index{
+            entry_point = EP,
+            max_layer = MaxLayer,
+            nodes = Nodes,
+            config = Config,
+            size = Size,
+            dimension = Dim
+        }}
+    catch
+        throw:unsupported_quantization ->
+            {error, unsupported_quantization};
+        _:Reason -> {error, {deserialization_failed, Reason}}
+    end;
 deserialize(<<2:8, Size:32, MaxLayer:8, Dim:16, Rest/binary>>) ->
     %% Version 2: full graph structure
     try
@@ -872,6 +893,28 @@ deserialize_entry_point(<<0:16, Rest/binary>>) ->
     {undefined, Rest};
 deserialize_entry_point(<<Len:16, EP:Len/binary, Rest/binary>>) ->
     {EP, Rest}.
+
+deserialize_config_v3(<<M:16, MMax0:16, EfC:16, DistFnInt:8, QInt:8,
+                        Rest/binary>>) ->
+    case QInt of
+        0 -> ok;
+        _ -> erlang:throw(unsupported_quantization)
+    end,
+    Config = #hnsw_config{
+        m = M,
+        m_max0 = MMax0,
+        ef_construction = EfC,
+        ml = 1.0 / math:log(M),
+        distance_fn = int_to_distance_fn(DistFnInt),
+        quantization = scalar
+    },
+    {Config, Rest}.
+
+quantization_to_int(scalar) -> 0;
+quantization_to_int(none) -> 1;
+quantization_to_int(turboquant) -> 2;
+quantization_to_int(subspace_turboquant) -> 3;
+quantization_to_int(_Other) -> 255.
 
 deserialize_config(<<M:16, MMax0:16, EfC:16, DistFnInt:8, Rest/binary>>) ->
     Config = #hnsw_config{

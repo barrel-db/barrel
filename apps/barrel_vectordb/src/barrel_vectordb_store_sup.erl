@@ -43,7 +43,7 @@ init([]) ->
     Store = #{id => barrel_vectordb_store,
               start => {barrel_vectordb, start_link, []},
               restart => temporary,
-              shutdown => 5000,
+              shutdown => 30000,
               type => worker,
               modules => [barrel_vectordb_server]},
     {ok, {SupFlags, [Store]}}.

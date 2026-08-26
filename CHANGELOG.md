@@ -4,6 +4,18 @@ All notable changes to the Barrel umbrella are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and each app
 is versioned independently under [Semantic Versioning](https://semver.org/).
 
+## [2026-08-25] barrel_vectordb index persistence
+
+Opening a vector store used to rebuild the whole HNSW/FAISS graph from the
+vectors column family, making cold opens O(N) inserts and minutes-long for
+large stores. The graph now persists at close and checkpoint, versioned by a
+write sequence committed atomically with every vector write, and loads in one
+read when it provably matches the data; any doubt falls back to the rebuild.
+
+| App | Version | Change |
+|-----|---------|--------|
+| barrel_vectordb | 2.4.0 | index graph persisted and loaded at open; write-seq versioning; index_origin in stats |
+
 ## [2026-08-25] barrel_spaces adoptable for existing session stores
 
 Feedback from adopting the agent layer in an external product: sessions could

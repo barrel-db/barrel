@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.4.0] - 2026-08-25
+
+### Added
+- The HNSW/FAISS index graph persists to the store's RocksDB (`hnsw_graph` column family) at close and checkpoint, and `barrel_vectordb:persist_index/1` forces it. On open, a graph that provably matches the vectors column family (write-sequence, config fingerprint, checksum) loads directly instead of being rebuilt vector by vector; anything doubtful falls back to the rebuild. `stats/1` reports `index_origin` (`new` | `loaded` | `rebuilt`).
+- HNSW serializer format v3 records the quantization method (v2/v1 still deserialize).
+
+### Fixed
+- A store killed before its first checkpoint reopened with an empty index: the rebuild was gated on the persisted meta blob, which only close and checkpoint wrote. The index now always rebuilds from the vectors column family when no loadable graph exists.
+- `delete/2` updated the in-RAM index after the RocksDB commit and skipped it on docstore errors; `update`/`upsert` dropped the new index on post-commit errors. Both now mutate before commit and keep the index on post-commit failures, like the batched write path.
+
+### Changed
+- Store supervisor shutdown raised to 30s so a large index persist can finish on close.
+
 ## [2.3.0] - 2026-08-23
 
 ### Changed
