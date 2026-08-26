@@ -113,8 +113,15 @@ module keeps owning the document schema:
     %% ttl defaults to never for imports; ttl > 0 arms from updated_at
 {ok, _} = barrel_session:import_message(Space, <<"legacy-2">>, #{
     role => <<"user">>, content => <<"hello">>,
-    ts => 1750000050000, seq => 1}).   %% does not slide the TTL
+    ts => 1750000050000, id => <<"msg-legacy-1">>}),   %% no TTL slide
+%% pins keep their id, timestamp, and metadata too
+{ok, _} = barrel_session:pin_context(Space, <<"legacy-2">>, #{
+    id => <<"pin-legacy-1">>, content => <<"key fact">>,
+    pinned_at => 1750000060000, metadata => #{<<"src">> => <<"v1">>}}).
 ```
+
+Duplicate caller ids fail with `{error, conflict}` (a session id on
+create, a message id on import, a pin id on pin), never silently.
 
 ### Document TTL (the machinery underneath)
 

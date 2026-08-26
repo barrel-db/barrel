@@ -3,6 +3,15 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.2.0] - 2026-08-26
+
+### Added
+- `pin_context/3` takes caller-supplied `id`, `pinned_at`, and `metadata` (defaults unchanged); a pin id already present in the session fails with `{error, conflict}` instead of quietly duplicating.
+- `import_message/3` takes a caller-supplied `id` that keys the document (an existing id conflicts), closing the last place the API minted an id a consumer might already own.
+
+### Changed
+- `get_messages` orders by timestamp (id as tiebreak) instead of raw id order, so caller-supplied message ids that do not sort chronologically still list in order. Generated ids keep their exact previous order.
+
 ## [1.1.0] - 2026-08-25
 
 ### Added

@@ -219,8 +219,10 @@ add_message(#{db := Db} = Space, Sid, #{role := Role,
 %% @doc Import a message with its own timestamp (the chronological id
 %% derives from it). Map keys: `role' and `content' (required), `ts'
 %% (unix ms, default now), `seq' (disambiguates messages inside one
-%% millisecond, default a fresh monotonic value), `metadata'. Does
-%% not slide the session's TTL.
+%% millisecond, default a fresh monotonic value), `id' (caller-supplied
+%% message id, keys the document instead of the derived id; an id
+%% already used in this session fails with a conflict), `metadata'.
+%% Does not slide the session's TTL.
 -spec import_message(barrel_spaces:space(), binary(), map()) ->
     {ok, binary()} | {error, term()}.
 import_message(#{db := Db} = Space, Sid, #{role := Role,
@@ -228,10 +230,7 @@ import_message(#{db := Db} = Space, Sid, #{role := Role,
     case get(Space, Sid) of
         {ok, _} ->
             Ts = maps:get(ts, Msg, barrel_spaces:now_ms()),
-            MsgId = case maps:find(seq, Msg) of
-                {ok, Seq} -> msg_id(Ts, Seq);
-                error -> msg_id(Ts)
-            end,
+            MsgId = import_msg_id(Msg, Ts),
             Doc = #{
                 <<"id">> => <<"session:", Sid/binary, ":msg:",
                               MsgId/binary>>,
@@ -249,6 +248,14 @@ import_message(#{db := Db} = Space, Sid, #{role := Role,
         {error, _} = Err ->
             Err
     end.
+
+%% The imported message's id: the caller's, else derived from ts+seq.
+import_msg_id(#{id := Id}, _Ts) when is_binary(Id), Id =/= <<>> ->
+    Id;
+import_msg_id(#{seq := Seq}, Ts) ->
+    msg_id(Ts, Seq);
+import_msg_id(_Msg, Ts) ->
+    msg_id(Ts).
 
 %% @doc The session's messages in chronological order.
 -spec get_messages(barrel_spaces:space(), binary()) -> {ok, [map()]}.
@@ -274,7 +281,13 @@ get_messages(#{db := #{docdb := DbBin}}, Sid, Opts) ->
            (_Doc, Acc) ->
                 {ok, Acc}
         end, [], #{id_prefix => <<"session:", Sid/binary, ":msg:">>}),
-    Asc = lists:reverse(Messages),
+    %% caller-supplied message ids need not sort chronologically, so
+    %% order by ts (id as tiebreak keeps generated ids' exact order)
+    Asc = lists:sort(
+        fun(#{<<"ts">> := TA, <<"id">> := IA},
+            #{<<"ts">> := TB, <<"id">> := IB}) ->
+            {TA, IA} =< {TB, IB}
+        end, Messages),
     Limit = maps:get(limit, Opts, infinity),
     case maps:get(order, Opts, asc) of
         asc -> {ok, take(Asc, Limit)};
@@ -315,29 +328,51 @@ set_summary(Space, Sid, Summary) when is_binary(Summary) ->
     update(Space, Sid, fun(Doc) -> Doc#{<<"summary">> => Summary} end).
 
 %% @doc Pin context that must survive truncation: `#{content := term(),
-%% priority => 0..10 (0 highest, default 5)}'. Returns the pin's id.
+%% priority => 0..10 (0 highest, default 5), id => binary()
+%% (caller-supplied pin id, default generated; an id already pinned in
+%% this session fails with conflict), pinned_at => unix ms (default
+%% now), metadata => map()}'. Returns the pin's id.
 -spec pin_context(barrel_spaces:space(), binary(), map()) ->
     {ok, binary()} | {error, term()}.
 pin_context(Space, Sid, #{content := Content} = Pin) ->
-    PinId = barrel_spaces:new_id(<<"pin_">>),
-    Item = #{
-        <<"id">> => PinId,
-        <<"content">> => Content,
-        <<"priority">> => maps:get(priority, Pin, 5),
-        <<"pinned_at">> => barrel_spaces:now_ms()
-    },
-    case update(Space, Sid, fun(Doc) ->
-             Pinned = maps:get(<<"pinned">>, Doc, []),
-             Sorted = lists:sort(
-                 fun(A, B) ->
-                     maps:get(<<"priority">>, A)
-                         =< maps:get(<<"priority">>, B)
-                 end, [Item | Pinned]),
-             Doc#{<<"pinned">> => Sorted}
-         end) of
-        {ok, _} -> {ok, PinId};
-        {error, _} = Err -> Err
+    PinId = maps:get(id, Pin, barrel_spaces:new_id(<<"pin_">>)),
+    case valid_pin_id(PinId) of
+        true ->
+            Item = #{
+                <<"id">> => PinId,
+                <<"content">> => Content,
+                <<"priority">> => maps:get(priority, Pin, 5),
+                <<"metadata">> => maps:get(metadata, Pin, #{}),
+                <<"pinned_at">> => maps:get(pinned_at, Pin,
+                                            barrel_spaces:now_ms())
+            },
+            case update(Space, Sid,
+                        fun(Doc) -> add_pin(Doc, Item) end) of
+                {ok, _} -> {ok, PinId};
+                {error, _} = Err -> Err
+            end;
+        false ->
+            {error, invalid_pin_id}
     end.
+
+%% Reject a duplicate id loudly instead of quietly corrupting the
+%% pinned list (unpin would then remove an arbitrary one of the two).
+add_pin(Doc, #{<<"id">> := PinId} = Item) ->
+    Pinned = maps:get(<<"pinned">>, Doc, []),
+    case [P || #{<<"id">> := I} = P <- Pinned, I =:= PinId] of
+        [_ | _] ->
+            {error, conflict};
+        [] ->
+            Sorted = lists:sort(
+                fun(A, B) ->
+                    maps:get(<<"priority">>, A)
+                        =< maps:get(<<"priority">>, B)
+                end, [Item | Pinned]),
+            Doc#{<<"pinned">> => Sorted}
+    end.
+
+valid_pin_id(Id) when is_binary(Id), byte_size(Id) > 0 -> true;
+valid_pin_id(_) -> false.
 
 %% @doc Remove a pinned item by id.
 -spec unpin_context(barrel_spaces:space(), binary(), binary()) ->
@@ -375,11 +410,16 @@ update(#{db := Db} = Space, Sid, Fun) ->
                 0 -> 0;
                 _ -> Now + Ttl * 1000
             end,
-            Updated = (Fun(Doc))#{<<"updated_at">> => Now},
-            case barrel:put_doc(Db, Updated,
-                                #{expires_at => ExpiresAt}) of
-                {ok, _} -> {ok, ExpiresAt};
-                {error, _} = Err -> Err
+            case Fun(Doc) of
+                {error, _} = Veto ->
+                    Veto;
+                Updated0 ->
+                    Updated = Updated0#{<<"updated_at">> => Now},
+                    case barrel:put_doc(Db, Updated,
+                                        #{expires_at => ExpiresAt}) of
+                        {ok, _} -> {ok, ExpiresAt};
+                        {error, _} = Err -> Err
+                    end
             end;
         {error, _} = Err ->
             Err

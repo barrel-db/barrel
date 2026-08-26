@@ -4,6 +4,19 @@ All notable changes to the Barrel umbrella are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and each app
 is versioned independently under [Semantic Versioning](https://semver.org/).
 
+## [2026-08-26] barrel_spaces caller-owned pin and message ids
+
+Feedback from the barrel_memory migration onto 1.1.0: sessions, data,
+summary and TTL map cleanly, but pins discarded a caller's id, timestamp
+and metadata, and imported messages were keyed by a derived id rather
+than the caller's. Both now accept caller ids, with duplicates refused
+loudly as conflicts, and message listing orders by timestamp so
+non-chronological ids stay in order.
+
+| App | Version | Change |
+|-----|---------|--------|
+| barrel_spaces | 1.2.0 | caller ids for pins and imported messages; get_messages ordered by ts |
+
 ## [2026-08-25] barrel_vectordb index persistence
 
 Opening a vector store used to rebuild the whole HNSW/FAISS graph from the

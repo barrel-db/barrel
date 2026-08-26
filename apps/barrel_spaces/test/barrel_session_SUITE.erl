@@ -22,13 +22,15 @@
 
 -export([t_no_ttl_durable/1, t_import_with_ids/1, t_list_match_indexed/1]).
 
+-export([t_caller_pin_and_message_ids/1]).
+
 -include_lib("common_test/include/ct.hrl").
 -include_lib("stdlib/include/assert.hrl").
 
 all() ->
     [t_create_get_touch, t_sliding_ttl, t_messages_chronological,
      t_message_ranges, t_data_summary_pinned, t_delete_cascade,
-     t_janitor_orphans, t_list_by_agent, t_no_ttl_durable, t_import_with_ids, t_list_match_indexed].
+     t_janitor_orphans, t_list_by_agent, t_no_ttl_durable, t_import_with_ids, t_list_match_indexed, t_caller_pin_and_message_ids].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(barrel_spaces),
@@ -260,4 +262,45 @@ t_list_match_indexed(Config) ->
     {ok, Limited} = barrel_session:list(Space, #{agent => <<"a1">>,
                                                  limit => 1}),
     ?assertEqual(1, length(Limited)),
+    ok.
+
+t_caller_pin_and_message_ids(Config) ->
+    Space = ?config(space, Config),
+    {ok, Sid} = barrel_session:create(Space, #{}),
+    T0 = 1750000000000,
+    %% a pin round-trips caller id, pinned_at, and metadata
+    {ok, <<"pin-a">>} = barrel_session:pin_context(Space, Sid, #{
+        id => <<"pin-a">>, content => <<"fact">>, priority => 1,
+        pinned_at => T0, metadata => #{<<"src">> => <<"legacy">>}}),
+    {ok, [P]} = barrel_session:list_pinned(Space, Sid),
+    ?assertEqual(<<"pin-a">>, maps:get(<<"id">>, P)),
+    ?assertEqual(T0, maps:get(<<"pinned_at">>, P)),
+    ?assertEqual(#{<<"src">> => <<"legacy">>},
+                 maps:get(<<"metadata">>, P)),
+    %% duplicates are refused loudly, bad ids too
+    ?assertEqual({error, conflict},
+                 barrel_session:pin_context(Space, Sid, #{
+                     id => <<"pin-a">>, content => <<"again">>})),
+    ?assertEqual({error, invalid_pin_id},
+                 barrel_session:pin_context(Space, Sid, #{
+                     id => <<>>, content => <<"x">>})),
+    %% the generated-id path is unchanged
+    {ok, GenId} = barrel_session:pin_context(Space, Sid,
+                                             #{content => <<"x">>}),
+    ?assertMatch(<<"pin_", _/binary>>, GenId),
+    {ok, _} = barrel_session:unpin_context(Space, Sid, <<"pin-a">>),
+    %% a message imported under a caller id; a duplicate conflicts
+    {ok, <<"msg-1">>} = barrel_session:import_message(Space, Sid, #{
+        role => <<"user">>, content => <<"hello">>, ts => T0,
+        id => <<"msg-1">>}),
+    ?assertMatch({error, _},
+                 barrel_session:import_message(Space, Sid, #{
+                     role => <<"user">>, content => <<"dup">>,
+                     ts => T0, id => <<"msg-1">>})),
+    %% listing orders by ts even though the id is not chronological
+    {ok, _} = barrel_session:add_message(Space, Sid, #{
+        role => <<"assistant">>, content => <<"later">>}),
+    {ok, [M1, M2]} = barrel_session:get_messages(Space, Sid),
+    ?assertEqual(<<"hello">>, maps:get(<<"content">>, M1)),
+    ?assertEqual(<<"later">>, maps:get(<<"content">>, M2)),
     ok.
