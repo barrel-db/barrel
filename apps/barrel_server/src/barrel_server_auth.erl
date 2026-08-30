@@ -52,16 +52,18 @@ state_from_env() ->
 
 %% Legacy bearer-only config: byte-for-byte the previous behavior.
 legacy_state(#{tokens := Tokens}) when is_list(Tokens), Tokens =/= [] ->
-    base_state([crypto:hash(sha256, T) || T <- Tokens], #{}, [bearer], 300000);
+    base_state([crypto:hash(sha256, T) || T <- Tokens], #{}, [bearer],
+               300000, false);
 legacy_state(#{token := Token}) when is_binary(Token) ->
-    base_state([crypto:hash(sha256, Token)], #{}, [bearer], 300000);
+    base_state([crypto:hash(sha256, Token)], #{}, [bearer], 300000, false);
 legacy_state(Other) ->
     logger:warning("ignoring invalid barrel_server auth config: ~p", [Other]),
     undefined.
 
-%% New-style config: accept => [bearer|signed|mtls], optional signers and
-%% skew. Unknown accept methods are dropped; an empty accept locks the
-%% server (every request 401s) rather than falling open.
+%% New-style config: accept => [bearer|signed|mtls], optional signers,
+%% skew, and `require_nonce' (reject v1 signed requests once every client
+%% sends v2). Unknown accept methods are dropped; an empty accept locks
+%% the server (every request 401s) rather than falling open.
 multi_state(Cfg) ->
     Accept0 = [M || M <- maps:get(accept, Cfg, [bearer]),
                     lists:member(M, [bearer, signed, mtls])],
@@ -69,7 +71,8 @@ multi_state(Cfg) ->
     Hashes = token_hashes(Cfg),
     Signers = maps:get(signers, Cfg, #{}),
     SkewMs = maps:get(skew_ms, Cfg, 300000),
-    base_state(Hashes, Signers, Accept, SkewMs).
+    RequireNonce = maps:get(require_nonce, Cfg, false) =:= true,
+    base_state(Hashes, Signers, Accept, SkewMs, RequireNonce).
 
 %% mtls_ok trusts that a TLS connection carries a verified client cert,
 %% which only holds when the listener actually gates on it. If mtls is
@@ -99,9 +102,10 @@ token_hashes(#{token := Token}) when is_binary(Token) ->
 token_hashes(_) ->
     [].
 
-base_state(Hashes, Signers, Accept, SkewMs) ->
+base_state(Hashes, Signers, Accept, SkewMs, RequireNonce) ->
     #{hashes => Hashes, signers => Signers,
-      accept => Accept, skew_ms => SkewMs}.
+      accept => Accept, skew_ms => SkewMs,
+      require_nonce => RequireNonce}.
 
 %% @doc The configured token hashes (undefined = open server). The
 %% MCP auth provider checks server bearers against the same set.
@@ -147,17 +151,24 @@ authorized(Req, #{accept := Accept} = State) ->
 %% Ed25519 signed request: verify the signature, then consume it against
 %% the replay cache. Any failure (no header, unknown key, bad signature,
 %% stale timestamp, replay, or cache down) is a decline.
-try_signed(Req, #{signers := Signers, skew_ms := SkewMs}) ->
+try_signed(Req, #{signers := Signers, skew_ms := SkewMs} = State) ->
     case barrel_sync_sig:parse_auth(
              livery_req:header(<<"authorization">>, Req, undefined)) of
         {ok, #{key_id := KeyId, ts := Ts, sig := Sig} = Parsed} ->
             Method = livery_req:method(Req),
             Path = livery_req:path(Req),
+            %% raw query bytes as sent: part of the v2 signed target
+            Query = livery_req:query(Req),
             ContentHash = livery_req:header(<<"x-barrel-content-sha256">>,
                                             Req, <<>>),
-            case barrel_sync_sig:verify(Method, Path, ContentHash,
-                                          Parsed, Signers, SkewMs) of
+            Opts = #{skew_ms => SkewMs,
+                     require_nonce => maps:get(require_nonce, State, false)},
+            case barrel_sync_sig:verify(Method, Path, Query, ContentHash,
+                                          Parsed, Signers, Opts) of
                 ok ->
+                    log_v1(Parsed, KeyId),
+                    %% Ed25519 is deterministic and the nonce is inside
+                    %% the signed string, so the sig alone keys replays
                     barrel_server_sig_cache:check_and_insert(
                         {KeyId, Ts, Sig}, 2 * SkewMs) =:= ok;
                 {error, _} ->
@@ -166,6 +177,14 @@ try_signed(Req, #{signers := Signers, skew_ms := SkewMs}) ->
         _ ->
             false
     end.
+
+%% v1 (no nonce) acceptances at debug: shows when a fleet has rolled and
+%% `require_nonce' can be turned on.
+log_v1(#{nonce := _}, _KeyId) ->
+    ok;
+log_v1(_Parsed, KeyId) ->
+    logger:debug("barrel_server: accepted v1 signed request from ~s",
+                 [KeyId]).
 
 %% Constant-time global bearer check (bsp_ tokens never reach here).
 try_bearer(Req, #{hashes := Hashes}) ->
@@ -180,8 +199,10 @@ try_bearer(Req, #{hashes := Hashes}) ->
 
 %% mTLS transport gate: a request that arrived over TLS is authenticated,
 %% relying on the listener's `fail_if_no_peer_cert' so arrival implies a
-%% verified client cert. H1-TLS surfaces `tls => #{}'; H2/H3 surface no
-%% tls today (see the companion livery change), so this is H1-only.
+%% verified client cert. This authenticates the CA, not the peer: livery
+%% surfaces `tls => #{}' with no certificate details, so per-peer
+%% identity and rights come from bearer or signed auth layered on top.
+%% H1-TLS surfaces the marker; H2/H3 do not on livery 0.6, so H1-only.
 mtls_ok(Req) ->
     livery_req:tls(Req) =/= undefined.
 

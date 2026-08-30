@@ -338,3 +338,25 @@ run_cmd_trapping(Cmd, Timeout) ->
     after 15000 ->
         error(run_cmd_test_timeout)
     end.
+
+%%====================================================================
+%% Bootstrap opt-out (managed_venv => false): no Python needed
+%%====================================================================
+
+bootstrap_opt_out_test() ->
+    Saved = application:get_env(barrel_embed, managed_venv),
+    SavedPath = application:get_env(barrel_embed, managed_venv_path),
+    application:unset_env(barrel_embed, managed_venv_path),
+    application:set_env(barrel_embed, managed_venv, false),
+    try
+        ?assertEqual(skipped, barrel_embed_venv:bootstrap()),
+        %% nothing was bootstrapped: providers fall back to their python
+        ?assertEqual(undefined,
+                     application:get_env(barrel_embed, managed_venv_path))
+    after
+        restore_env(managed_venv, Saved),
+        restore_env(managed_venv_path, SavedPath)
+    end.
+
+restore_env(Key, undefined) -> application:unset_env(barrel_embed, Key);
+restore_env(Key, {ok, V}) -> application:set_env(barrel_embed, Key, V).

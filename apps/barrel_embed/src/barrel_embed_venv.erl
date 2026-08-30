@@ -25,6 +25,7 @@
 
 -export([
     ensure_venv/0,
+    bootstrap/0,
     create_venv/0,
     install_deps/1,
     refresh/0,
@@ -46,6 +47,16 @@ venv_path() ->
     case application:get_env(barrel_embed, venv_dir) of
         {ok, Path} -> Path;
         undefined -> default_venv_path()
+    end.
+
+%% @doc The application-start bootstrap: ensure_venv/0 unless the
+%% `managed_venv' app env is false, in which case nothing is touched and
+%% `managed_venv_path' stays unset (providers use their own `python').
+-spec bootstrap() -> {ok, string()} | skipped | {error, term()}.
+bootstrap() ->
+    case application:get_env(barrel_embed, managed_venv, true) of
+        false -> skipped;
+        _ -> ensure_venv()
     end.
 
 %% @doc Ensure venv exists and is valid.

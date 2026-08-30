@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-08-26
+
+### Added
+- Signed sync requests are v2: the `Authorization: Signature` header carries a per-request `nonce`, and the signed string is `ts|keyId|nonce|METHOD|target|sha256`, where `target` is the path plus `?` and the raw query string when there is one. `barrel_sync_sig:sign/7,8`, `verify/7`, `canonical_v2/6`, `target/2`, `new_nonce/0`; `sign/6` and `verify/6` keep the v1 semantics. The HTTP transport sends v2 only.
+
+### Fixed
+- Two identical signed requests inside one millisecond produced byte-identical signatures, and the server refused the second as a replay; replication repeats identical requests back to back, so runs over `accept => [signed]` failed about half the time. The nonce makes every request distinct.
+- The query string was outside the signed scope (`?since=`, `?limit=` on attachment changes were unauthenticated); the v2 target signs it.
+- `barrel_rep_checkpoint` raised `case_clause` when a checkpoint read failed with anything but not_found (an `unauthorized` transport error, for instance); checkpoint failures are now returned as `{error, {checkpoint_failed, source | target, Reason}}` and end the replication run with that error, after the documents are committed.
+
+### Rollover
+- Servers accept v1 and v2 (barrel_server 1.6.0+). Upgrade every server first, then the clients (this app, including embedded users); a 1.4.0 client against a 1.5.x barrel_server gets 401 on every signed request. Once no client sends v1, set `require_nonce => true` on the server. Reverse proxies in front of the sync endpoint must forward path and query unmodified.
+
 ## [1.3.1] - 2026-08-23
 
 ### Fixed

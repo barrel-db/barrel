@@ -94,10 +94,12 @@ application:set_env(barrel_docdb, sync_auth,
 
 Bearer tokens replay without TLS. For per-request Ed25519 authentication, add
 `accept` (the list of accepted methods) and `signers` (keyId to 32-byte raw
-public key). Each request is signed over `ts|keyId|method|path|sha256(body)`,
-with replay protection and a skew window. `accept => [bearer, signed]` accepts
-both, so a fleet rolls over node by node; `accept => [bearer]` (or no `accept`)
-is exactly the bearer-only behavior above.
+public key). Each request is signed over
+`ts|keyId|nonce|METHOD|target|sha256(body)`, where `nonce` is fresh per
+request and `target` is the path plus `?` and the raw query string when there
+is one (signature v2), with replay protection and a skew window.
+`accept => [bearer, signed]` accepts both, so a fleet rolls over node by node;
+`accept => [bearer]` (or no `accept`) is exactly the bearer-only behavior above.
 
 ```erlang
 %% server: know each peer's public key
@@ -117,6 +119,21 @@ application:set_env(barrel_docdb, sync_signing,
 Generate a key pair with `crypto:generate_key(eddsa, ed25519)`. Signing takes
 precedence over a bearer token on the same endpoint. Private keys are never
 written into persisted task configs.
+
+Rolling from signature v1 (barrel_docdb < 1.4.0, no nonce, path only) to v2:
+servers on barrel_server 1.6.0+ accept both, so upgrade every server first,
+then the clients, which send v2 only (a v2 client against an older server is
+refused with 401 on every signed request). Once no client sends v1 (v1
+acceptances log at debug level), close the v1 window:
+
+```erlang
+application:set_env(barrel_server, auth,
+                    #{accept => [signed], signers => Signers,
+                      require_nonce => true}).
+```
+
+A reverse proxy in front of the sync endpoint must forward the path and the
+query string unmodified: the query is part of the signed target.
 
 ## How (TLS and mTLS)
 
@@ -144,8 +161,15 @@ Mtls = Endpoint#{ssl_options => [{certfile, "client.pem"},
 
 Notes: H1-TLS and H2 are full mTLS gates (OTP `ssl`). H3 serves over TLS but is
 not yet a client-cert gate (a QUIC-level change is pending); do not rely on H3
-for mTLS. Mapping a client cert to an identity/allowed-db needs a livery change
-and is not available yet.
+for mTLS.
+
+What mTLS authenticates: that the client holds a certificate chaining to the
+configured CA, not which client it is. `accept => [mtls]` alone treats every
+such client as one trusted peer with access to every database. For identity
+and per-database rights, layer bearer or signed auth on top
+(`accept => [mtls, signed]` gates the transport and identifies the peer by its
+signing key). Mapping a client certificate to an identity needs livery to
+surface the peer certificate, which it does not yet.
 
 ## How (selective replication)
 

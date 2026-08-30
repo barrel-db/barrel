@@ -109,20 +109,26 @@ seq_advanced(_Old, first) -> false;
 seq_advanced(first, _New) -> true;
 seq_advanced(Old, New) -> barrel_hlc:compare(New, Old) =:= gt.
 
-%% @doc Check if checkpoint should be written and write it if needed
--spec maybe_write_checkpoint(checkpoint()) -> checkpoint().
+%% @doc Check if checkpoint should be written and write it if needed.
+-spec maybe_write_checkpoint(checkpoint()) ->
+    {ok, checkpoint()} | {error, term()}.
 maybe_write_checkpoint(#checkpoint{docs_processed = DocsProcessed, options = Options} = Checkpoint) ->
     CheckpointSize = maps:get(checkpoint_size, Options, ?CHECKPOINT_SIZE),
     case DocsProcessed >= CheckpointSize of
         true ->
-            ok = write_checkpoint(Checkpoint),
-            Checkpoint#checkpoint{docs_processed = 0};
+            case write_checkpoint(Checkpoint) of
+                ok -> {ok, Checkpoint#checkpoint{docs_processed = 0}};
+                {error, _} = Err -> Err
+            end;
         false ->
-            Checkpoint
+            {ok, Checkpoint}
     end.
 
-%% @doc Write checkpoint to both source and target databases
--spec write_checkpoint(checkpoint()) -> ok.
+%% @doc Write checkpoint to both source and target databases. A failed
+%% write is reported (with the side that failed) instead of swallowed:
+%% the docs are already committed, the next run just resumes earlier.
+-spec write_checkpoint(checkpoint()) ->
+    ok | {error, {checkpoint_failed, source | target, term()}}.
 write_checkpoint(#checkpoint{
     rep_id = RepId,
     session_id = SessionId,
@@ -144,10 +150,20 @@ write_checkpoint(#checkpoint{
         <<"end_time_microsec">> => erlang:system_time(microsecond)
     },
 
-    %% Write to both source and target
-    _ = add_checkpoint(Source, SourceTransport, RepId, SessionId, HistorySize, Checkpoint),
-    _ = add_checkpoint(Target, TargetTransport, RepId, SessionId, HistorySize, Checkpoint),
-    ok.
+    %% Write both sides before reporting, so one failure never skips
+    %% the other side's checkpoint.
+    SourceRes = add_checkpoint(Source, SourceTransport, RepId, SessionId,
+                               HistorySize, Checkpoint),
+    TargetRes = add_checkpoint(Target, TargetTransport, RepId, SessionId,
+                               HistorySize, Checkpoint),
+    checkpoint_result([{source, SourceRes}, {target, TargetRes}]).
+
+checkpoint_result([]) ->
+    ok;
+checkpoint_result([{_Side, ok} | Rest]) ->
+    checkpoint_result(Rest);
+checkpoint_result([{Side, {error, Reason}} | _Rest]) ->
+    {error, {checkpoint_failed, Side, Reason}}.
 
 %% @doc Delete checkpoints from both databases
 -spec delete(checkpoint()) -> ok.
@@ -167,17 +183,25 @@ delete(#checkpoint{
 %% Internal functions
 %%====================================================================
 
-%% @doc Add a checkpoint entry to history
+%% @doc Add a checkpoint entry to history: ok | {error, Reason}. A
+%% transport error reading the previous doc (unauthorized, network) is
+%% returned, not raised.
 add_checkpoint(Db, Transport, RepId, SessionId, HistorySize, Checkpoint) ->
     DocId = checkpoint_docid(RepId),
-    Doc = case Transport:get_local_doc(Db, DocId) of
+    case Transport:get_local_doc(Db, DocId) of
         {ok, #{<<"history">> := H} = PreviousDoc} ->
             H2 = update_history(H, SessionId, HistorySize, Checkpoint),
-            PreviousDoc#{<<"history">> => H2};
+            Transport:put_local_doc(Db, DocId,
+                                    PreviousDoc#{<<"history">> => H2});
+        {ok, _NoHistory} ->
+            Transport:put_local_doc(Db, DocId,
+                                    #{<<"history">> => [Checkpoint]});
         {error, not_found} ->
-            #{<<"history">> => [Checkpoint]}
-    end,
-    Transport:put_local_doc(Db, DocId, Doc).
+            Transport:put_local_doc(Db, DocId,
+                                    #{<<"history">> => [Checkpoint]});
+        {error, _} = Err ->
+            Err
+    end.
 
 %% @doc Update checkpoint history
 update_history(History, SessionId, HistorySize, Checkpoint) ->

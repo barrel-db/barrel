@@ -226,10 +226,17 @@ location in `sys.config`:
 %% sys.config
 [
     {barrel_embed, [
-        {venv_dir, "/path/to/.venv"}  %% Optional: custom venv location
+        {venv_dir, "/path/to/.venv"},  %% Optional: custom venv location
+        {managed_venv, false}          %% Optional: skip the bootstrap
     ]}
 ].
 ```
+
+Set `managed_venv` to `false` when the deployment supplies its own
+interpreter with the model libraries installed (each provider's `python`
+option): the venv is neither created nor checked at start, so an image
+without `python3-venv` boots silently. Installing `python3-venv` just to
+silence the warning would create an empty venv nothing uses.
 
 ## Python Setup
 

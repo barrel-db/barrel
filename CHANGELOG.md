@@ -4,6 +4,24 @@ All notable changes to the Barrel umbrella are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and each app
 is versioned independently under [Semantic Versioning](https://semver.org/).
 
+## [2026-08-26] Signed sync requests v2, checkpoint errors, venv opt-out
+
+Found while porting barrel_memory onto barrel. Two identical signed requests
+inside one millisecond were byte-identical, so the replay cache refused the
+second; replication repeats identical requests back to back and failed about
+half its runs over signed auth. Signature v2 adds a per-request nonce and
+signs the query string, which was outside the signed scope. Servers accept
+v1 and v2; roll servers first, then clients, then set `require_nonce`. A
+failed checkpoint write now ends the run with an error instead of raising.
+`barrel_embed` gains an opt-out for the managed venv bootstrap, and mTLS is
+documented as the CA-level transport gate it is.
+
+| App | Version | Change |
+|-----|---------|--------|
+| barrel_docdb | 1.4.0 | signature v2 (nonce, signed query), checkpoint errors returned |
+| barrel_server | 1.6.0 | verifies v1 and v2, `require_nonce`, mTLS wording |
+| barrel_embed | 2.4.0 | `managed_venv => false` skips the venv bootstrap |
+
 ## [2026-08-26] barrel_spaces caller-owned pin and message ids
 
 Feedback from the barrel_memory migration onto 1.1.0: sessions, data,
