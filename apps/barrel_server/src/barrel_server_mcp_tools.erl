@@ -332,9 +332,14 @@ query_subscribe(#{<<"db">> := Name, <<"query">> := Bql} = Args, Ctx) ->
             P when is_map(P) -> P;
             _ -> #{}
         end,
-        SessionId = maps:get(session_id, Ctx, undefined),
-        case barrel_server_mcp_live:subscribe(Name, Bql, Params,
-                                              SessionId) of
+        %% MCP 2026-07-28 connections carry no session: the live query
+        %% then belongs to the authenticated principal, as barrel_mcp
+        %% does for tasks.
+        Owner = case maps:get(session_id, Ctx, undefined) of
+            undefined -> {principal, barrel_server_mcp_auth:actor(Ctx)};
+            Sid -> {session, Sid}
+        end,
+        case barrel_server_mcp_live:subscribe(Name, Bql, Params, Owner) of
             {ok, SubId, Uri} ->
                 reply(#{ok => true, sub => SubId, uri => Uri});
             {error, missing_subscribe} ->

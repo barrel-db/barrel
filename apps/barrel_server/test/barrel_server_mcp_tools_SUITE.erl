@@ -398,7 +398,7 @@ make_space(Config, Tag) ->
 base_url() ->
     Children = supervisor:which_children(barrel_server_sup),
     {_, Pid, _, _} = lists:keyfind(barrel_server_http, 1, Children),
-    #{h1 := Port} = livery:which_listeners(Pid),
+    Port = barrel_server_test:h1_port(Pid),
     "http://127.0.0.1:" ++ integer_to_list(Port).
 
 restart_http() ->
@@ -415,8 +415,10 @@ connect(Extra) ->
 
 wait_ready(_C, 0) ->
     {error, not_ready};
+%% MCP 2026-07-28 removed ping; list_tools exists in every era and
+%% answers not_ready until the session is up.
 wait_ready(C, N) ->
-    case barrel_mcp_client:ping(C) of
+    case barrel_mcp_client:list_tools(C) of
         {ok, _} -> ok;
         {error, not_ready} ->
             timer:sleep(50),

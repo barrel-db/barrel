@@ -93,9 +93,9 @@ t_registered_tools(_Config) ->
 t_session_roundtrip(_Config) ->
     C = connect(#{}),
     %% several requests ride one Mcp-Session-Id
-    {ok, _} = barrel_mcp_client:ping(C),
     {ok, _} = barrel_mcp_client:list_tools(C),
-    {ok, _} = barrel_mcp_client:ping(C),
+    {ok, _} = barrel_mcp_client:list_tools(C),
+    {ok, _} = barrel_mcp_client:list_tools(C),
     barrel_mcp_client:close(C),
     ok.
 
@@ -113,7 +113,7 @@ t_rest_unaffected(_Config) ->
     {ok, 200, _, Body} = hackney:request(
         get, B ++ "/db/mcp_mount_db/doc/d1", [], <<>>, [with_body]),
     ?assertMatch(#{<<"v">> := 1}, json:decode(Body)),
-    {ok, _} = barrel_mcp_client:ping(C),
+    {ok, _} = barrel_mcp_client:list_tools(C),
     barrel_mcp_client:close(C),
     ok.
 
@@ -164,7 +164,7 @@ t_locked_server_token(_Config) ->
     C = connect(#{auth => {bearer, ?ROOT}}),
     {ok, Tools} = barrel_mcp_client:list_tools(C),
     ?assert(length(Tools) > 0),
-    {ok, _} = barrel_mcp_client:ping(C),
+    {ok, _} = barrel_mcp_client:list_tools(C),
     barrel_mcp_client:close(C),
     ok.
 
@@ -177,7 +177,7 @@ t_locked_capability_token(Config) ->
     {ok, Token, _} = barrel_caps:grant(SpaceId,
                                        #{rights => [read, write]}),
     C = connect(#{auth => {bearer, Token}}),
-    {ok, _} = barrel_mcp_client:ping(C),
+    {ok, _} = barrel_mcp_client:list_tools(C),
     {ok, Tools} = barrel_mcp_client:list_tools(C),
     ?assert(length(Tools) > 0),
     barrel_mcp_client:close(C),
@@ -194,7 +194,7 @@ t_locked_capability_token(Config) ->
 base_url() ->
     Children = supervisor:which_children(barrel_server_sup),
     {_, Pid, _, _} = lists:keyfind(barrel_server_http, 1, Children),
-    #{h1 := Port} = livery:which_listeners(Pid),
+    Port = barrel_server_test:h1_port(Pid),
     "http://127.0.0.1:" ++ integer_to_list(Port).
 
 restart_http() ->
@@ -211,8 +211,10 @@ connect(Extra) ->
 
 wait_ready(_C, 0) ->
     {error, not_ready};
+%% MCP 2026-07-28 removed ping; list_tools exists in every era and
+%% answers not_ready until the session is up.
 wait_ready(C, N) ->
-    case barrel_mcp_client:ping(C) of
+    case barrel_mcp_client:list_tools(C) of
         {ok, _} -> ok;
         {error, not_ready} ->
             timer:sleep(50),

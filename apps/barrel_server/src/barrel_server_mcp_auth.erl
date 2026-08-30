@@ -25,7 +25,7 @@
 -export([init/1, authenticate/2, challenge/2, auth_headers/1]).
 
 %% Tool-side helpers
--export([allow/3, prov/2]).
+-export([allow/3, prov/2, actor/1]).
 
 %%====================================================================
 %% barrel_mcp_auth callbacks
@@ -133,6 +133,9 @@ anonymous() ->
 subject(<<>>) -> <<"anonymous">>;
 subject(Subject) -> Subject.
 
+%% @doc The authenticated subject of a tool call (`anonymous' on an
+%% open server).
+-spec actor(map()) -> binary().
 actor(Ctx) ->
     case maps:get(auth_info, Ctx, undefined) of
         undefined -> <<"anonymous">>;

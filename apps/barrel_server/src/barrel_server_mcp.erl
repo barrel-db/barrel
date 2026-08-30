@@ -65,6 +65,28 @@ handler_opts() ->
 config() ->
     application:get_env(barrel_server, mcp, #{}).
 
+%% The HMAC key sealing multi round-trip request state (barrel_mcp
+%% `request_state_key'): every node of a fleet must carry the same
+%% value, or a retry landing elsewhere fails. Absent, barrel_mcp uses
+%% an ephemeral key and says so at start.
+apply_request_state_key(#{request_state_key := {file, Path}}) ->
+    case file:read_file(Path) of
+        {ok, Key} when byte_size(Key) > 0 ->
+            application:set_env(barrel_mcp, request_state_key,
+                                string:trim(Key, trailing, "\n"));
+        {ok, _Empty} ->
+            logger:error("barrel_server: mcp request_state_key file ~s "
+                         "is empty", [Path]);
+        {error, Reason} ->
+            logger:error("barrel_server: cannot read mcp "
+                         "request_state_key file ~s: ~p", [Path, Reason])
+    end;
+apply_request_state_key(#{request_state_key := Key})
+  when is_binary(Key), byte_size(Key) > 0 ->
+    application:set_env(barrel_mcp, request_state_key, Key);
+apply_request_state_key(_Cfg) ->
+    ok.
+
 %%====================================================================
 %% gen_server (the tool registrar)
 %%====================================================================
@@ -76,6 +98,7 @@ init([]) ->
     process_flag(trap_exit, true),
     case enabled() of
         true ->
+            ok = apply_request_state_key(config()),
             ok = barrel_server_mcp_tools:register_all(),
             ok = barrel_server_mcp_agent:register_all(),
             ok = barrel_server_mcp_resources:register_all();
