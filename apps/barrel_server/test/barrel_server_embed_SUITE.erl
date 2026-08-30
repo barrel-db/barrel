@@ -59,7 +59,7 @@ init_per_suite(Config) ->
     %% start_service links to this (ephemeral) init process; unlink so the
     %% service survives until end_per_suite stops it explicitly.
     true = unlink(Pid),
-    #{h1 := Port} = livery:which_listeners(Pid),
+    Port = barrel_server_test:h1_port(Pid),
     Base = "http://127.0.0.1:" ++ integer_to_list(Port),
     {201, _} = req(put, Base ++ "/barrel/db/" ++ ?DB, <<>>),
     [{svc, Pid}, {base, Base} | Config].

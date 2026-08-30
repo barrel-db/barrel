@@ -202,7 +202,7 @@ try_bearer(Req, #{hashes := Hashes}) ->
 %% verified client cert. This authenticates the CA, not the peer: livery
 %% surfaces `tls => #{}' with no certificate details, so per-peer
 %% identity and rights come from bearer or signed auth layered on top.
-%% H1-TLS surfaces the marker; H2/H3 do not on livery 0.6, so H1-only.
+%% H1-TLS and H2 surface the marker (livery 0.8+); H3 does not yet.
 mtls_ok(Req) ->
     livery_req:tls(Req) =/= undefined.
 

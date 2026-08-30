@@ -14,6 +14,7 @@
     t_live_e2e/1,
     t_unsubscribe/1,
     t_session_gc/1,
+    t_session_gc_legacy/1,
     t_per_session_limit/1,
     t_live_only_mode/1
 ]).
@@ -23,7 +24,7 @@
 
 all() ->
     [t_templates_list_read, t_live_e2e, t_unsubscribe, t_session_gc,
-     t_per_session_limit, t_live_only_mode].
+     t_session_gc_legacy, t_per_session_limit, t_live_only_mode].
 
 init_per_suite(Config) ->
     application:load(barrel_server),
@@ -120,17 +121,42 @@ t_unsubscribe(_Config) ->
     barrel_mcp_client:close(C),
     ok.
 
+%% A modern (2026-07-28) connection has no session, so a live query
+%% belongs to the principal and is swept once idle past orphan_ttl_ms.
 t_session_gc(_Config) ->
-    C = connect(),
-    {false, _} = call(C, <<"db_create">>, #{<<"db">> => <<"gc_db">>}),
+    Saved = application:get_env(barrel_server, mcp),
+    application:set_env(barrel_server, mcp,
+                        #{live => #{orphan_ttl_ms => 1}}),
+    try
+        C = connect(),
+        {false, _} = call(C, <<"db_create">>, #{<<"db">> => <<"gc_db">>}),
+        {false, #{<<"sub">> := Sub}} =
+            call(C, <<"query_subscribe">>,
+                 #{<<"db">> => <<"gc_db">>,
+                   <<"query">> =>
+                       <<"SELECT * FROM db WHERE kind = 'g' SUBSCRIBE">>}),
+        {ok, _} = barrel_server_mcp_live:snapshot(Sub),
+        timer:sleep(10),
+        ok = wait_swept(Sub, 50),
+        ?assertEqual({error, not_found},
+                     barrel_server_mcp_live:snapshot(Sub)),
+        barrel_mcp_client:close(C)
+    after
+        restore_env(Saved)
+    end,
+    ok.
+
+%% A session-bearing (legacy revision) connection: closing the client
+%% DELETEs its MCP session and the sweep drops the orphaned live query.
+t_session_gc_legacy(_Config) ->
+    C = connect(#{protocol_version => <<"2025-11-25">>}),
+    {false, _} = call(C, <<"db_create">>, #{<<"db">> => <<"gc_db2">>}),
     {false, #{<<"sub">> := Sub}} =
         call(C, <<"query_subscribe">>,
-             #{<<"db">> => <<"gc_db">>,
+             #{<<"db">> => <<"gc_db2">>,
                <<"query">> =>
                    <<"SELECT * FROM db WHERE kind = 'g' SUBSCRIBE">>}),
     {ok, _} = barrel_server_mcp_live:snapshot(Sub),
-    %% closing the client DELETEs its MCP session; the bridge sweep
-    %% then drops the orphaned live query
     barrel_mcp_client:close(C),
     ok = wait_swept(Sub, 50),
     ?assertEqual({error, not_found}, barrel_server_mcp_live:snapshot(Sub)),
@@ -186,7 +212,7 @@ t_live_only_mode(_Config) ->
 base_url() ->
     Children = supervisor:which_children(barrel_server_sup),
     {_, Pid, _, _} = lists:keyfind(barrel_server_http, 1, Children),
-    #{h1 := Port} = livery:which_listeners(Pid),
+    Port = barrel_server_test:h1_port(Pid),
     "http://127.0.0.1:" ++ integer_to_list(Port).
 
 restart_registrar() ->
@@ -196,17 +222,25 @@ restart_registrar() ->
     ok.
 
 connect() ->
+    connect(#{}).
+
+connect(Extra) ->
     Base = base_url(),
-    {ok, C} = barrel_mcp_client:start(#{
+    {ok, C} = barrel_mcp_client:start(Extra#{
         transport => {http, list_to_binary(Base ++ "/mcp")}
     }),
     ok = wait_client_ready(C, 100),
     C.
 
+restore_env(undefined) -> application:unset_env(barrel_server, mcp);
+restore_env({ok, V}) -> application:set_env(barrel_server, mcp, V).
+
 wait_client_ready(_C, 0) ->
     {error, not_ready};
+%% MCP 2026-07-28 removed ping; list_tools exists in every era and
+%% answers not_ready until the session is up.
 wait_client_ready(C, N) ->
-    case barrel_mcp_client:ping(C) of
+    case barrel_mcp_client:list_tools(C) of
         {ok, _} -> ok;
         {error, not_ready} ->
             timer:sleep(50),

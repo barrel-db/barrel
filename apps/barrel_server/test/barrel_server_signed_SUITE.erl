@@ -263,5 +263,5 @@ method_bin(delete) -> <<"DELETE">>.
 discover_port() ->
     Children = supervisor:which_children(barrel_server_sup),
     {_, Pid, _, _} = lists:keyfind(barrel_server_http, 1, Children),
-    #{h1 := Port} = livery:which_listeners(Pid),
+    Port = barrel_server_test:h1_port(Pid),
     Port.

@@ -146,7 +146,7 @@ lower(Headers) ->
 base_url() ->
     Children = supervisor:which_children(barrel_server_sup),
     {_, Pid, _, _} = lists:keyfind(barrel_server_http, 1, Children),
-    #{h1 := Port} = livery:which_listeners(Pid),
+    Port = barrel_server_test:h1_port(Pid),
     "http://127.0.0.1:" ++ integer_to_list(Port).
 
 restart_http() ->

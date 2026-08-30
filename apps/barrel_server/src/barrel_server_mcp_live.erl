@@ -37,7 +37,10 @@
     id :: binary(),
     uri :: binary(),
     db :: binary(),
-    session :: binary() | undefined,
+    %% {session, Sid} on a session-bearing connection, else
+    %% {principal, Subject} (MCP 2026-07-28 connections have no session)
+    owner :: {session, binary()} | {principal, binary()},
+    last_seen :: integer(),   %% monotonic ms, refreshed by snapshot reads
     barrel_sub :: #{ref := reference(), pid := pid()},
     mref :: reference(),
     rows = #{} :: #{binary() | non_neg_integer() => map()},
@@ -58,18 +61,20 @@
 start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
-%% @doc Create a live query owned by the bridge. Returns the sub id
-%% and its resource URI.
--spec subscribe(binary(), binary(), map(), binary() | undefined) ->
+%% @doc Create a live query owned by the bridge on behalf of `Owner'
+%% (`{session, Sid}' or `{principal, Subject}'). Returns the sub id and
+%% its resource URI.
+-spec subscribe(binary(), binary(), map(),
+                {session, binary()} | {principal, binary()}) ->
     {ok, binary(), binary()} | {error, term()}.
-subscribe(DbName, Bql, Params, SessionId) ->
+subscribe(DbName, Bql, Params, Owner) ->
     %% Open the database in the caller's process, not the bridge loop: a
     %% cold or large open must not block every other subscribe/snapshot/
     %% unsubscribe call queued on the singleton bridge.
     case barrel_server_dbs:ensure(DbName) of
         {ok, Db} ->
             gen_server:call(?MODULE,
-                            {subscribe, DbName, Db, Bql, Params, SessionId},
+                            {subscribe, DbName, Db, Bql, Params, Owner},
                             30000);
         {error, _} = Err ->
             Err
@@ -85,7 +90,8 @@ unsubscribe(SubId) ->
 snapshot(SubId) ->
     gen_server:call(?MODULE, {snapshot, SubId}).
 
-%% @doc Test hook: run the session sweep now.
+%% @doc Test hook: run the owner sweep now (dead sessions, idle
+%% principal-owned queries).
 -spec sweep() -> {ok, non_neg_integer()}.
 sweep() ->
     gen_server:call(?MODULE, sweep).
@@ -101,11 +107,11 @@ init([]) ->
     {ok, #{subs => #{}, by_ref => #{}}}.
 
 %% @private
-handle_call({subscribe, DbName, Db, Bql, Params, SessionId}, _From,
+handle_call({subscribe, DbName, Db, Bql, Params, Owner}, _From,
             #{subs := Subs} = State) ->
-    case check_caps(SessionId, Subs) of
+    case check_caps(Owner, Subs) of
         ok ->
-            do_subscribe(DbName, Db, Bql, Params, SessionId, State);
+            do_subscribe(DbName, Db, Bql, Params, Owner, State);
         {error, _} = Err ->
             {reply, Err, State}
     end;
@@ -120,7 +126,9 @@ handle_call({snapshot, SubId}, _From, #{subs := Subs} = State) ->
     case maps:find(SubId, Subs) of
         {ok, Sub} ->
             {Snap, Sub1} = snapshot_of(Sub),
-            {reply, {ok, Snap}, put_sub(Sub1, State)};
+            %% a read keeps a principal-owned query alive
+            {reply, {ok, Snap},
+             put_sub(Sub1#sub{last_seen = now_ms()}, State)};
         error ->
             {reply, {error, not_found}, State}
     end;
@@ -193,7 +201,7 @@ terminate(_Reason, #{subs := Subs}) ->
 %% Subscribe / drop
 %%====================================================================
 
-do_subscribe(DbName, Db, Bql, Params, SessionId, State) ->
+do_subscribe(DbName, Db, Bql, Params, Owner, State) ->
     %% The database is already open (ensured by the caller). subscribe_query
     %% owns the bridge as the row owner, so it must run here.
     SubOpts = #{params => Params, owner => self()},
@@ -206,7 +214,8 @@ do_subscribe(DbName, Db, Bql, Params, SessionId, State) ->
                 id = SubId,
                 uri = Uri,
                 db = DbName,
-                session = SessionId,
+                owner = Owner,
+                last_seen = now_ms(),
                 barrel_sub = BSub,
                 mref = erlang:monitor(process, Pid)
             },
@@ -233,17 +242,18 @@ drop_sub(#sub{id = SubId, db = Db, barrel_sub = #{ref := Ref} = BSub,
     end,
     State#{subs => Subs1, by_ref => maps:remove(Ref, ByRef)}.
 
-check_caps(SessionId, Subs) ->
+%% max_per_session bounds each owner (a session, or a principal on a
+%% session-less connection); max_global bounds the node.
+check_caps(Owner, Subs) ->
     Cfg = live_config(),
     MaxGlobal = maps:get(max_global, Cfg, 1024),
     MaxPerSession = maps:get(max_per_session, Cfg, 32),
     Global = map_size(Subs),
-    Mine = length([S || S = #sub{session = Sid} <- maps:values(Subs),
-                        Sid =:= SessionId, Sid =/= undefined]),
+    Mine = length([S || S = #sub{owner = O} <- maps:values(Subs),
+                        O =:= Owner]),
     if
         Global >= MaxGlobal -> {error, too_many_live_queries};
-        SessionId =/= undefined, Mine >= MaxPerSession ->
-            {error, too_many_live_queries};
+        Mine >= MaxPerSession -> {error, too_many_live_queries};
         true -> ok
     end.
 
@@ -311,11 +321,22 @@ schedule_notify(#sub{id = SubId} = Sub) ->
     erlang:send_after(Debounce, self(), {notify, SubId}),
     Sub#sub{pending = true}.
 
+%% A session-owned query dies with its session; a principal-owned one
+%% (no session to watch) after `orphan_ttl_ms' without a read.
 sweep_sessions(#{subs := Subs} = State) ->
-    Dead = [Sub || Sub = #sub{session = Sid} <- maps:values(Subs),
-                   Sid =/= undefined, not session_alive(Sid)],
+    Ttl = maps:get(orphan_ttl_ms, live_config(), 600000),
+    Now = now_ms(),
+    Dead = [Sub || Sub <- maps:values(Subs), dead(Sub, Ttl, Now)],
     State1 = lists:foldl(fun drop_sub/2, State, Dead),
     {length(Dead), State1}.
+
+dead(#sub{owner = {session, Sid}}, _Ttl, _Now) ->
+    not session_alive(Sid);
+dead(#sub{owner = {principal, _}, last_seen = Seen}, Ttl, Now) ->
+    Now - Seen > Ttl.
+
+now_ms() ->
+    erlang:monotonic_time(millisecond).
 
 session_alive(SessionId) ->
     case barrel_mcp_session:get(SessionId) of

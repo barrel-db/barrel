@@ -94,7 +94,7 @@ t_certless_refused(Config) ->
 listeners() ->
     Children = supervisor:which_children(barrel_server_sup),
     {_, Pid, _, _} = lists:keyfind(barrel_server_http, 1, Children),
-    livery:which_listeners(Pid).
+    barrel_server_test:listener_ports(Pid).
 
 tls_base(Config) ->
     #{h1 := Port} = ?config(listeners, Config),

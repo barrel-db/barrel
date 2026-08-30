@@ -3,6 +3,15 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.7.0] - 2026-08-30
+
+### Changed
+- livery 0.6.1 to 0.9.1 and barrel_mcp 2.3.0 to 3.0.1: the standalone server now serves MCP protocol 2026-07-28. Nothing in the server's own API changes; consumers that embed the suites note that `livery:which_listeners/1` reports a list of ports per protocol since livery 0.8.0 (the suites go through `barrel_server_test:h1_port/1`), and that MCP 2026-07-28 removed `ping`: the 3.0 client refuses it on a modern session, so the suites probe readiness with `list_tools/1` instead.
+
+### Added
+- Live queries on a 2026-07-28 MCP connection (which carries no session) belong to the authenticated principal: `max_per_session` bounds each owner, and a principal-owned query is swept after `orphan_ttl_ms` (default 600000) without a read. Session-owned queries still go with their session.
+- `{barrel_server, mcp, #{request_state_key => Key | {file, Path}}}` seeds barrel_mcp's HMAC key for multi round-trip request state at start. Every node of a fleet must carry the same key or a retry landing on another node fails; without it barrel_mcp uses an ephemeral key and warns at start.
+
 ## [1.6.0] - 2026-08-26
 
 ### Added
