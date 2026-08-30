@@ -6,7 +6,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [1.7.0] - 2026-08-30
 
 ### Changed
-- livery 0.6.1 to 0.9.1 and barrel_mcp 2.3.0 to 3.0.1: the standalone server now serves MCP protocol 2026-07-28. Nothing in the server's own API changes; consumers that embed the suites note that `livery:which_listeners/1` reports a list of ports per protocol since livery 0.8.0 (the suites go through `barrel_server_test:h1_port/1`), and that MCP 2026-07-28 removed `ping`: the 3.0 client refuses it on a modern session, so the suites probe readiness with `list_tools/1` instead.
+- livery 0.6.1 to 0.9.2 and barrel_mcp 2.3.0 to 3.0.1: the standalone server now serves MCP protocol 2026-07-28, and h1 0.9.1 (via livery 0.9.2) fixes chunked uploads that were answered `400 Chunk size is not valid hex` when a socket read split a chunk-size line between its CR and LF, which large attachment pushes hit under load. Nothing in the server's own API changes; consumers that embed the suites note that `livery:which_listeners/1` reports a list of ports per protocol since livery 0.8.0 (the suites go through `barrel_server_test:h1_port/1`), and that MCP 2026-07-28 removed `ping`: the 3.0 client refuses it on a modern session, so the suites probe readiness with `list_tools/1` instead.
 
 ### Added
 - Live queries on a 2026-07-28 MCP connection (which carries no session) belong to the authenticated principal: `max_per_session` bounds each owner, and a principal-owned query is swept after `orphan_ttl_ms` (default 600000) without a read. Session-owned queries still go with their session.
