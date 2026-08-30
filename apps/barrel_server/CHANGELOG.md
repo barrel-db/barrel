@@ -3,6 +3,14 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.6.0] - 2026-08-26
+
+### Added
+- Signed-request verification accepts signature v2 (per-request nonce, path plus raw query string signed) next to v1. New auth option `require_nonce => true` rejects v1 once the fleet has rolled; v1 acceptances log at debug level so you can tell when that is. Upgrade servers before clients: a v2 client against a 1.5.x server is refused.
+
+### Changed
+- mTLS is documented for what it is: a transport gate that authenticates the CA a client certificate chains to, not the peer. Identity and per-database rights come from bearer or signed auth layered on top.
+
 ## [1.5.0] - 2026-08-15
 
 ### Fixed

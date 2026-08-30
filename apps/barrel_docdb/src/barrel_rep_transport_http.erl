@@ -280,7 +280,7 @@ get_attachment_stream(Endpoint, DocId, Name) ->
             case hackney:send_request(
                      ConnPid,
                      {get, url_path(Url),
-                      base_headers(Endpoint, <<"GET">>, url_path(Url),
+                      base_headers(Endpoint, <<"GET">>, url_target(Url),
                                    barrel_sync_sig:content_sha256(<<>>)),
                       <<>>}) of
                 {ok, 200, RespHeaders, ConnPid2} ->
@@ -312,6 +312,12 @@ url_path(Url) ->
     #{path := Path} = uri_string:parse(Url),
     Path.
 
+%% The signed target: path plus the raw query (`<<>>' when none), what
+%% the server signs on its side too.
+url_target(Url) ->
+    Parsed = uri_string:parse(Url),
+    {maps:get(path, Parsed), maps:get(query, Parsed, <<>>)}.
+
 att_read_fun(ClientRef) ->
     fun() ->
         case hackney:stream_body(ClientRef) of
@@ -332,7 +338,7 @@ put_attachment(Endpoint, DocId, Name, Meta, ReadFun) ->
                {?DIGEST_HEADER, Digest},
                {?ORIGIN_HEADER,
                 base64:encode(barrel_hlc:encode(Origin))}
-               | base_headers(Endpoint, <<"PUT">>, url_path(AttUrl), Digest)],
+               | base_headers(Endpoint, <<"PUT">>, url_target(AttUrl), Digest)],
     case hackney:request(put, AttUrl, Headers,
                          stream, stream_opts(Endpoint)) of
         {ok, ClientRef} ->
@@ -437,7 +443,7 @@ req(#{url := BaseUrl} = Endpoint, Method, PathSuffix, BodyTerm,
     ContentHash = barrel_sync_sig:content_sha256(Body),
     Headers = [{<<"content-type">>, <<"application/json">>}
                | ExtraHeaders]
-              ++ base_headers(Endpoint, method_bin(Method), url_path(Url),
+              ++ base_headers(Endpoint, method_bin(Method), url_target(Url),
                               ContentHash),
     HttpOpts = [with_body | stream_opts(Endpoint)],
     Deadline = maps:get(request_timeout, Endpoint, ?REQUEST_TIMEOUT),
@@ -471,12 +477,12 @@ bounded_request(Method, Url, Headers, Body, HttpOpts, Deadline) ->
     end.
 
 %% HLC + auth + endpoint headers. `Method' is the uppercase verb, `Path'
-%% the request path (matching what the server signs), `ContentHash' the
-%% hex SHA-256 of the body (or the attachment digest).
-base_headers(Endpoint, Method, Path, ContentHash) ->
+%% the request target `{Path, Query}' (matching what the server signs),
+%% `ContentHash' the hex SHA-256 of the body (or the attachment digest).
+base_headers(Endpoint, Method, Target, ContentHash) ->
     [{?HLC_HEADER,
       base64:encode(barrel_hlc:encode(barrel_hlc:get_hlc()))}]
-    ++ auth_headers(Endpoint, Method, Path, ContentHash)
+    ++ auth_headers(Endpoint, Method, Target, ContentHash)
     ++ maps:get(headers, Endpoint, []).
 
 stream_opts(Endpoint) ->
@@ -490,11 +496,13 @@ stream_opts(Endpoint) ->
 
 %% Signed requests take precedence over bearer when configured; otherwise
 %% fall back to the (unchanged) bearer resolution.
-auth_headers(Endpoint, Method, Path, ContentHash) ->
+auth_headers(Endpoint, Method, {Path, Query}, ContentHash) ->
     case signing_config(Endpoint) of
         #{key_id := KeyId, priv_key := PrivKey} ->
             TsMs = erlang:system_time(millisecond),
-            Auth = barrel_sync_sig:sign(KeyId, PrivKey, Method, Path,
+            %% v2: per-request nonce, query signed (servers must be on
+            %% barrel_server 1.6+, see the synchronization guide)
+            Auth = barrel_sync_sig:sign(KeyId, PrivKey, Method, Path, Query,
                                         ContentHash, TsMs),
             [{<<"authorization">>, Auth},
              {<<"x-barrel-content-sha256">>, ContentHash}];

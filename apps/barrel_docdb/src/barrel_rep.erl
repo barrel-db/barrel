@@ -227,11 +227,21 @@ replicate_one_shot(Config, Opts) ->
     CheckpointSize = maps:get(checkpoint_size, Opts, 10),
     Filter = maps:get(filter, Opts, #{}),
 
-    case do_replicate(Source, Target, SourceTransport, TargetTransport,
-                      StartSeq, BatchSize, CheckpointSize, Checkpoint, Filter) of
+    %% The final checkpoint write is part of the run: a failure ends it
+    %% with an error (docs are committed; the next run resumes earlier).
+    Run = case do_replicate(Source, Target, SourceTransport, TargetTransport,
+                            StartSeq, BatchSize, CheckpointSize, Checkpoint,
+                            Filter) of
+        {ok, Stats0, FinalCheckpoint0} ->
+            case barrel_rep_checkpoint:write_checkpoint(FinalCheckpoint0) of
+                ok -> {ok, Stats0, FinalCheckpoint0};
+                {error, _} = CpError -> CpError
+            end;
+        NotOk ->
+            NotOk
+    end,
+    case Run of
         {ok, Stats, FinalCheckpoint} ->
-            %% Write final checkpoint
-            ok = barrel_rep_checkpoint:write_checkpoint(FinalCheckpoint),
 
             %% Record replication metrics
             DocsWritten = maps:get(docs_written, Stats, 0),
@@ -346,18 +356,23 @@ do_replicate_batch_done(Source, Target, SourceTransport, TargetTransport,
     Checkpoint2 = barrel_rep_checkpoint:set_last_seq(LastSeq, Checkpoint),
     NewDocsProcessed = DocsProcessed + length(Changes),
 
-    %% Maybe write checkpoint
-    Checkpoint3 = case NewDocsProcessed >= CheckpointSize of
+    %% Maybe write checkpoint; a failed write ends the run
+    MaybeWritten = case NewDocsProcessed >= CheckpointSize of
         true ->
             barrel_rep_checkpoint:maybe_write_checkpoint(Checkpoint2);
         false ->
-            Checkpoint2
+            {ok, Checkpoint2}
     end,
-
-    %% Continue with next batch
-    do_replicate(Source, Target, SourceTransport, TargetTransport, LastSeq,
-                 BatchSize, CheckpointSize, Checkpoint3, Filter, MergedStats,
-                 NewDocsProcessed rem CheckpointSize).
+    case MaybeWritten of
+        {error, _} = CpError ->
+            CpError;
+        {ok, Checkpoint3} ->
+            %% Continue with next batch
+            do_replicate(Source, Target, SourceTransport, TargetTransport,
+                         LastSeq, BatchSize, CheckpointSize, Checkpoint3,
+                         Filter, MergedStats,
+                         NewDocsProcessed rem CheckpointSize)
+    end.
 
 %% @doc Deterministic replication ID. Each endpoint contributes its
 %% rep_id_term/1 when its transport exports one (network transports:

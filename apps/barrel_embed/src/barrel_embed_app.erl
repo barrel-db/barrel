@@ -13,10 +13,13 @@
 %%====================================================================
 
 start(_StartType, _StartArgs) ->
-    %% Ensure managed venv exists
-    case barrel_embed_venv:ensure_venv() of
+    %% Managed venv bootstrap (opt out with managed_venv => false)
+    case barrel_embed_venv:bootstrap() of
         {ok, VenvPath} ->
             error_logger:info_msg("barrel_embed: using venv at ~s~n", [VenvPath]);
+        skipped ->
+            error_logger:info_msg(
+                "barrel_embed: managed venv disabled by config~n");
         {error, Reason} ->
             error_logger:warning_msg(
                 "barrel_embed: failed to create managed venv: ~p~n"

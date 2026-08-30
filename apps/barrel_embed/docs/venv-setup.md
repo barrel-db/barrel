@@ -61,6 +61,18 @@ Set a custom venv path via application config:
 ]}.
 ```
 
+## Bringing your own interpreter
+
+If the image already has an interpreter with the provider libraries
+installed, skip the managed venv entirely and point each provider at it:
+
+```erlang
+{barrel_embed, [{managed_venv, false}]}.
+%% then per provider: #{python => "/usr/bin/python3", ...}
+```
+
+Nothing is created or checked at application start.
+
 ## Provider Dependencies
 
 | Provider | Packages | Size |

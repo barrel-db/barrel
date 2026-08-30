@@ -3,6 +3,11 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.4.0] - 2026-08-26
+
+### Added
+- `managed_venv` app env (default true). Set it to `false` to skip the managed-venv bootstrap at application start: nothing is created or checked, `managed_venv_path` stays unset, and providers use their own `python`. For deployments that ship an interpreter with the libraries installed (and images without `python3-venv`, which logged a warning on every boot).
+
 ## [2.3.2] - 2026-08-23
 
 ### Fixed

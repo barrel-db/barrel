@@ -46,7 +46,8 @@ groups() ->
             replicate_with_updates,
             replicate_deleted_doc,
             replicate_checkpoint_persistence,
-            no_progress_seq_guard
+            no_progress_seq_guard,
+            checkpoint_unauthorized_returns_error
         ]},
         {filtered_replication, [sequence], [
             replicate_with_query_filter,
@@ -1172,4 +1173,23 @@ task_attachments_disabled_survives_restart(_Config) ->
                                              <<"f">>)),
     ok = barrel_rep_tasks:stop_task(TaskId),
     ok = barrel_rep_tasks:delete_task(TaskId),
+    ok.
+
+%% A checkpoint read refused by the peer (401 -> unauthorized) used to
+%% raise case_clause from add_checkpoint/6; it is an error now, naming
+%% the side that failed.
+checkpoint_unauthorized_returns_error(_Config) ->
+    Cp = barrel_rep_checkpoint:new(#{
+        id => <<"unauth-cp">>,
+        source => <<"test_source">>,
+        target => <<"remote">>,
+        source_transport => barrel_rep_transport_local,
+        target_transport => barrel_rep_unauth_transport}),
+    ?assertEqual({error, {checkpoint_failed, target, unauthorized}},
+                 barrel_rep_checkpoint:write_checkpoint(Cp)),
+    %% a run against that peer ends with an error, never a crash
+    ?assertMatch({error, _},
+                 barrel_rep:replicate(<<"test_source">>, <<"remote">>,
+                                      #{target_transport =>
+                                            barrel_rep_unauth_transport})),
     ok.
