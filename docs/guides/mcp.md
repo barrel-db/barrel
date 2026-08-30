@@ -25,10 +25,25 @@ The endpoint is on by default in the server build. Configure it with the
         allow_missing_origin => true,
         resources => full,             %% full | live_only
         live => #{max_per_session => 32, max_global => 1024,
-                  sweep_interval_ms => 60000, debounce_ms => 100}
+                  sweep_interval_ms => 60000, debounce_ms => 100,
+                  orphan_ttl_ms => 600000},
+        request_state_key => {file, "/etc/barrel/mcp-state.key"}
     }}
 ]}
 ```
+
+Live queries belong to the MCP session that created them, or, on a
+2026-07-28 connection (no sessions), to the authenticated principal:
+`max_per_session` bounds each owner, and a principal-owned query is dropped
+after `orphan_ttl_ms` without a read (a session-owned one when its session
+goes).
+
+`request_state_key` (a binary of 32 or more random bytes, or `{file, Path}`
+to read it from a file at start) seals the state of multi round-trip
+requests. Every node of a fleet must carry the same key: a retry that lands
+on another node, or on the same node after a restart, is refused otherwise.
+Leave it unset on a single node and barrel_mcp uses an ephemeral key, saying
+so at start.
 
 ## Auth
 

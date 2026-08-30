@@ -4,6 +4,20 @@ All notable changes to the Barrel umbrella are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and each app
 is versioned independently under [Semantic Versioning](https://semver.org/).
 
+## [2026-08-30] barrel_server on livery 0.9.1 and barrel_mcp 3.0.1
+
+The server pinned livery 0.6.1 and barrel_mcp 2.3.0 while consumers ran
+ahead of both; moving it forward removes the skew and lets the standalone
+server serve MCP protocol 2026-07-28. The one break was in the suites
+(`livery:which_listeners/1` returns port lists since 0.8.0), and livery
+0.9.2 brings the h1 fix for chunked uploads split between CR and LF. barrel_mcp 3.0
+seals multi round-trip request state with an HMAC key that must be shared
+across a fleet; the server exposes it as configuration.
+
+| App | Version | Change |
+|-----|---------|--------|
+| barrel_server | 1.7.0 | livery 0.9.2 (h1 0.9.1 chunked-upload fix), barrel_mcp 3.0.1, `request_state_key` config |
+
 ## [2026-08-26] Signed sync requests v2, checkpoint errors, venv opt-out
 
 Found while porting barrel_memory onto barrel. Two identical signed requests
