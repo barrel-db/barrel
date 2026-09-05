@@ -55,6 +55,17 @@
 -define(SERVER, ?MODULE).
 -define(TASKS_DB, <<"_replication_tasks">>).
 
+%% Task records go through put_local_doc/3 only -- see the identical
+%% rationale on barrel_docdb.erl's SYSTEM_DB_OPTS, which this mirrors:
+%% this database never stores an attachment or a real (revtree-backed)
+%% document, so the stock 64MB write_buffer_size and the unconditional
+%% second RocksDB instance barrel_db_server opens for attachments are
+%% both sized for a workload this database structurally cannot have.
+-define(TASKS_DB_OPTS, #{
+    att_opts => #{backend => none},
+    store_opts => #{write_buffer_size => 4 * 1024 * 1024}
+}).
+
 %% Task check interval (5 seconds)
 -define(CHECK_INTERVAL, 5000).
 
@@ -796,7 +807,7 @@ ensure_tasks_db() ->
         {ok, _} ->
             ok;
         {error, not_found} ->
-            case barrel_docdb:create_db(?TASKS_DB) of
+            case barrel_docdb:create_db(?TASKS_DB, ?TASKS_DB_OPTS) of
                 {ok, _} -> ok;
                 {error, _} = E -> E
             end;

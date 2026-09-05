@@ -4,7 +4,9 @@
 %%% Selects an attachment backend (a {@link barrel_att_backend}) per database
 %%% and routes all attachment calls to it. The backend is chosen from
 %%% `att_opts.backend' at {@link open/2} (default `blob', the RocksDB BlobDB
-%%% backend) via {@link backend_module/1}, resolved to a module and tagged
+%%% backend; `none' for a database that structurally never stores
+%%% attachments -- see {@link barrel_att_store_none}) via
+%%% {@link backend_module/1}, resolved to a module and tagged
 %%% into the returned `att_ref'. Streaming handles embed their `att_ref', so
 %%% streaming calls dispatch to the same backend.
 %%%
@@ -59,6 +61,7 @@
 -spec backend_module(atom()) -> module().
 backend_module(blob) -> barrel_att_store_blob;
 backend_module(s3) -> barrel_att_s3_store;
+backend_module(none) -> barrel_att_store_none;
 backend_module(Module) when is_atom(Module) -> Module.
 
 %% @doc Whether a backend's implementation is present in the build.
@@ -68,6 +71,8 @@ backend_module(Module) when is_atom(Module) -> Module.
 %% for the optional FAISS backend.
 -spec is_available(atom()) -> boolean().
 is_available(blob) ->
+    true;
+is_available(none) ->
     true;
 is_available(s3) ->
     backend_loaded(barrel_att_s3_store);
