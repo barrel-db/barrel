@@ -59,6 +59,24 @@
 %% index, etc.). Not replicated.
 -define(SYSTEM_DB, <<"_barrel_system">>).
 
+%% System documents go through put_local_doc/3 only -- this database
+%% never stores an attachment or a real (revtree-backed) document, so
+%% both the RocksDB write buffer it asks for and the attachment store
+%% barrel_db_server otherwise opens unconditionally are pure waste sized
+%% for a workload this database never has. Measured on a real deployment
+%% (hecate-agora, 2026-09-05): the stock defaults (64MB write_buffer_size,
+%% a full second RocksDB instance for attachments) cost this one database
+%% ~148MB on disk -- almost entirely RocksDB's own WAL/MANIFEST
+%% preallocation, not a single byte of it proportional to the handful of
+%% small docs actually stored. `none' skips the attachment store
+%% entirely (see barrel_att_store_none); 4MB is still generous headroom
+%% for node-id/config-sized documents while cutting the docs store's own
+%% WAL preallocation from ~70MB to ~4.4MB.
+-define(SYSTEM_DB_OPTS, #{
+    att_opts => #{backend => none},
+    store_opts => #{write_buffer_size => 4 * 1024 * 1024}
+}).
+
 %% Database lifecycle
 -export([
     create_db/1,
@@ -242,8 +260,18 @@ create_db(Name) ->
 %% == Options ==
 %% <ul>
 %%   <li>`data_dir' - Directory to store database files (default: `/tmp/barrel_data')</li>
-%%   <li>`store_opts' - RocksDB options for document store</li>
-%%   <li>`att_opts' - RocksDB options for attachment store</li>
+%%   <li>`store_opts' - RocksDB options for document store, e.g.
+%%       `#{write_buffer_size => 4194304}' for a database that will only
+%%       ever hold a handful of small documents -- the 64MB RocksDB
+%%       default preallocates a WAL sized for a write-heavy workload
+%%       (~1.1x write_buffer_size) regardless of how little is actually
+%%       written</li>
+%%   <li>`att_opts' - RocksDB options for attachment store, or
+%%       `#{backend => none}' to skip opening an attachment store
+%%       entirely for a database that will never store one (see
+%%       {@link barrel_att_store_none}) -- avoids paying a second,
+%%       identically-sized fixed RocksDB floor for a feature that's
+%%       never used</li>
 %%   <li>`encryption' - `disabled | default | #{provider => Mod}': encrypt
 %%       both stores at rest (RocksDB EncryptedEnv, AES-256-CTR) with a
 %%       per-database key resolved by `barrel_keyprovider'. Runtime config
@@ -1998,7 +2026,7 @@ ensure_system_db() ->
         {ok, _} ->
             ok;
         {error, not_found} ->
-            {ok, _} = create_db(?SYSTEM_DB),
+            {ok, _} = create_db(?SYSTEM_DB, ?SYSTEM_DB_OPTS),
             ok
     end.
 
