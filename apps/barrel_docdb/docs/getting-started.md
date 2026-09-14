@@ -208,6 +208,29 @@ AttNames = barrel_docdb:list_attachments(<<"myapp">>, <<"user-alice">>).
 
 For large files, stream with `open_attachment_stream/3` and `read_attachment_chunk/1`.
 
+### Databases without attachments
+
+Every database opens a second RocksDB instance for attachments, and RocksDB preallocates about 74MB of WAL and MANIFEST files for it even when empty. If a database never stores attachments (config, task state, small local docs), skip that store:
+
+```erlang
+{ok, _} = barrel_docdb:create_db(<<"config">>, #{
+    att_opts => #{backend => none},
+    store_opts => #{write_buffer_size => 4 * 1024 * 1024}
+}).
+```
+
+Attachment writes and deletes then return `{error, attachments_disabled}` (HTTP `501`), and reads return `not_found`. The backend is chosen at each open, so pass the same options every time you open the database.
+
+To reclaim the space of a database that already has an `attachments/` directory, add `purge_existing => true`. It deletes that directory on open, so use it only for databases that hold no attachments:
+
+```erlang
+{ok, _} = barrel_docdb:create_db(<<"config">>, #{
+    att_opts => #{backend => none, purge_existing => true}
+}).
+```
+
+A `none` database cannot be branched with `branch_db/3`. barrel uses this backend for `_barrel_system` and `_replication_tasks`.
+
 ## Configuration
 
 ### Environment Variables

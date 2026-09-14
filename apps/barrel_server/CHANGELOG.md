@@ -3,6 +3,11 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.7.1] - 2026-09-14
+
+### Fixed
+- An attachment write, delete, or sync push to a database using the `none` attachment backend (barrel_docdb 1.5.0 internal databases) answers `501 attachments_disabled` instead of `500`.
+
 ## [1.7.0] - 2026-08-30
 
 ### Changed

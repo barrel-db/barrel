@@ -116,6 +116,8 @@ This matters for replication because the behaviour splits its callbacks in two:
 
 A backend that implements only the required set (put/get/delete/streaming, no feed at all) still degrades gracefully rather than erroring, detected per call via `barrel_att_store:supports_sync/1` (`erlang:function_exported/3`): attachment sync reports `att_sync => skipped` as a replication *source*, for one-shot replication, timeline merges, and tasks alike. Attachments still work locally (put/get/delete) in that case; they just don't replicate. This check only covers the source -- such a backend as a replication *target* is not detected, since `put`/`delete` are required callbacks and land regardless, with no feed on the target to check `origin_hlc` against, so the last-write-wins guard a feed-backed target enforces silently does not apply for it.
 
+`none` (`att_opts => #{backend => none}`) stores nothing and opens no RocksDB instance. It has no feed, so as a replication source attachment sync reports `att_sync => skipped`. As a target, every attachment write or delete returns `{error, attachments_disabled}`; document replication is unaffected. barrel uses it for its internal `_barrel_system` and `_replication_tasks` databases. Do not point attachment replication at a `none` database.
+
 ## Filtered Replication
 
 Replicate only documents matching specific criteria using the `filter` option. A filtered stream keeps its own checkpoint, separate from the full replication.

@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] - 2026-09-14
+
+### Added
+- `att_opts => #{backend => none}`: an attachment backend that stores nothing and opens no RocksDB instance. Attachment writes and deletes return `{error, attachments_disabled}`; reads behave like a document with no attachments. `purge_existing => true` removes an `attachments/` directory left by a previous backend on open.
+
+### Changed
+- `_barrel_system` and `_replication_tasks` open with the `none` backend and a 4MB write buffer, dropping about 140MB of preallocated RocksDB files per database. Existing nodes reclaim their old `attachments/` directories on the next start.
+
 ## [1.4.0] - 2026-08-26
 
 ### Added

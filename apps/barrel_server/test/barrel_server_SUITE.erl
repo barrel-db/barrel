@@ -33,7 +33,8 @@
     t_create_db_att_opts_redacts_secrets/1,
     t_create_db_att_opts_blob_explicit/1,
     t_attachment_conditional_headers_unenforced_on_blob/1,
-    t_attachment_bad_if_none_match/1
+    t_attachment_bad_if_none_match/1,
+    t_attachment_disabled_internal_db/1
 ]).
 
 -include_lib("common_test/include/ct.hrl").
@@ -51,7 +52,8 @@ all() ->
      t_create_db_att_opts_validation, t_create_db_att_opts_missing_endpoint,
      t_create_db_att_opts_redacts_secrets, t_create_db_att_opts_blob_explicit,
      t_attachment_conditional_headers_unenforced_on_blob,
-     t_attachment_bad_if_none_match].
+     t_attachment_bad_if_none_match,
+     t_attachment_disabled_internal_db].
 
 init_per_suite(Config) ->
     %% Load first, then override env (application:load resets to .app defaults).
@@ -126,6 +128,16 @@ t_attachment(Config) ->
     {200, Body} = req_raw(get, url("/doc/att-doc/att/f.bin", B)),
     ?assertEqual(<<"raw-bytes">>, Body),
     {200, _} = req(delete, url("/doc/att-doc/att/f.bin", B), <<>>),
+    ok.
+
+%% Internal dbs use the `none' attachment backend: a clean 501, not a 500.
+t_attachment_disabled_internal_db(Config) ->
+    B = base(Config),
+    ok = barrel_docdb:put_system_doc(<<"srv_test">>, #{<<"v">> => 1}),
+    Db = B ++ "/db/_barrel_system",
+    {201, _} = req_json(put, Db ++ "/doc/att-doc", #{}),
+    ?assertMatch({501, #{<<"error">> := <<"attachments_disabled">>}},
+                 req(put, Db ++ "/doc/att-doc/att/f.bin", <<"raw-bytes">>)),
     ok.
 
 t_vector_search(Config) ->

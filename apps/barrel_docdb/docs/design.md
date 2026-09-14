@@ -242,6 +242,14 @@ barrel_docdb:create_db(<<"mydb">>, #{
         min_blob_size => 8192  %% 8KB threshold
     }
 }).
+
+%% A database that never stores attachments: no attachment RocksDB
+%% instance, and a small write buffer (the WAL is preallocated at
+%% about 1.1x write_buffer_size).
+barrel_docdb:create_db(<<"config">>, #{
+    store_opts => #{write_buffer_size => 4 * 1024 * 1024},
+    att_opts => #{backend => none}
+}).
 ```
 
 ### 4. HLC (Hybrid Logical Clock)

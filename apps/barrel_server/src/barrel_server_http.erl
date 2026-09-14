@@ -1157,6 +1157,9 @@ error_resp({conflict, CurrentInfo}) ->
 %% attempted here), so nothing extra to do on the HTTP side either.
 error_resp(conditional_writes_unsupported) ->
     json_resp(501, #{error => <<"conditional_writes_unsupported">>});
+%% The database uses the `none' attachment backend (internal dbs).
+error_resp(attachments_disabled) ->
+    json_resp(501, #{error => <<"attachments_disabled">>});
 error_resp({bad_if_none_match, _}) ->
     json_resp(400, #{error => <<"bad_if_none_match">>});
 %% A freshly forked S3-backed branch: the local feed already knows this

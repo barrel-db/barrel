@@ -617,6 +617,8 @@ json_resp(_Req, Status, Term) ->
 error_resp(Req, {error, Reason}) -> error_resp(Req, Reason);
 error_resp(Req, not_found) ->
     json_resp(Req, 404, #{error => <<"not_found">>});
+error_resp(Req, attachments_disabled) ->
+    json_resp(Req, 501, #{error => <<"attachments_disabled">>});
 error_resp(Req, Reason) ->
     json_resp(Req, 500, #{error => err_bin(Reason)}).
 
