@@ -3,6 +3,11 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.2.1] - 2026-09-14
+
+### Changed
+- Requires `barrel ~> 1.3`. The old `barrel ~> 1.0` floor still resolved barrel 1.0 with barrel_vectordb 2.1 and its `gen_batch_server` dependency.
+
 ## [1.2.0] - 2026-08-26
 
 ### Added
