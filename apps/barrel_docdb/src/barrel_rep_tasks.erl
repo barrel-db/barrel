@@ -62,7 +62,7 @@
 %% second RocksDB instance barrel_db_server opens for attachments are
 %% both sized for a workload this database structurally cannot have.
 -define(TASKS_DB_OPTS, #{
-    att_opts => #{backend => none},
+    att_opts => #{backend => none, purge_existing => true},
     store_opts => #{write_buffer_size => 4 * 1024 * 1024}
 }).
 
