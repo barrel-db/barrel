@@ -121,7 +121,18 @@ ok = barrel_ngram:close(<<"code">>).
 ```
 
 `close/1` returns `ok | {error, term()}`. It is idempotent: closing a corpus that is
-already closed, or was never opened, is `ok`.
+already closed, or was never opened, is `ok`. It returns once every shard has stopped.
+
+## Delete a corpus
+
+Closing keeps the corpus on disk, bound to its database. To retire it for good, or to
+reuse the name after its database was destroyed and recreated:
+
+```erlang
+ok = barrel_ngram:delete_corpus(<<"code">>).
+```
+
+See [operations](operations.md#retiring-a-corpus) for `data_dir` handling.
 
 ## Notes
 
@@ -130,6 +141,6 @@ already closed, or was never opened, is `ok`.
   fields (see [selectors](selectors.md) and [design](design.md) for what gets indexed).
 - Results are always exact: the trigram index only narrows candidates, and a confirm pass
   re-checks each candidate against the current document.
-- A corpus indexed by a version of `barrel_ngram` older than 0.9.0 has no `corpus.meta` on
-  disk; `open/2` rejects it with `{error, {legacy_corpus_requires_reindex, Corpus}}` since
-  its `db`/`shards` binding was never recoverable. Reindex it into a fresh `data_dir`.
+- A corpus written by an older on-disk format (for example
+  `{error, {legacy_corpus_requires_reindex, Corpus}}`) is rebuilt in place by opening it with
+  `on_legacy => reindex`. See [operations](operations.md#upgrading-the-on-disk-format).

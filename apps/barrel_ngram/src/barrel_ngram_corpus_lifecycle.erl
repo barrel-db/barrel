@@ -68,11 +68,85 @@ handle_cast(_Msg, State) ->
 
 run_op(Corpus, {open, Opts}) ->
     case normalize(Corpus, Opts) of
-        {ok, Config} -> run_open(Corpus, Config);
+        {ok, Config} -> open_or_reindex(Corpus, Config, maps:get(on_legacy, Opts, fail));
         {error, _} = Err -> Err
     end;
 run_op(Corpus, close) ->
-    run_close(Corpus).
+    run_close(Corpus);
+run_op(Corpus, {delete, Opts}) ->
+    run_delete(Corpus, Opts).
+
+%% @private `on_legacy => reindex': a corpus written by an older on-disk
+%% format is derived data, so wipe it and open fresh. Only when nothing
+%% of this corpus is live in the VM; config mismatches stay strict.
+open_or_reindex(Corpus, Config, fail) ->
+    run_open(Corpus, Config);
+open_or_reindex(Corpus, Config, reindex) ->
+    case run_open(Corpus, Config) of
+        {error, Reason} = Err ->
+            case is_legacy_error(Reason) andalso runtime_meta(Corpus) =:= undefined of
+                true ->
+                    logger:warning("barrel_ngram rebuilding legacy corpus ~p: ~p",
+                                   [Corpus, Reason]),
+                    case del_dir(corpus_base_dir(Config)) of
+                        ok -> run_open(Corpus, Config);
+                        {error, _} = WipeErr -> WipeErr
+                    end;
+                false ->
+                    Err
+            end;
+        ok ->
+            ok
+    end.
+
+is_legacy_error({legacy_corpus_requires_reindex, _}) -> true;
+is_legacy_error({corpus_meta_corrupt, {unsupported_corpus_meta_version, _, _}}) -> true;
+is_legacy_error({open_failed, {unsupported_manifest_version, _, _}, ok}) -> true;
+is_legacy_error({open_failed, {unsupported_segment_version, _, _, _}, ok}) -> true;
+is_legacy_error(_) -> false.
+
+%%====================================================================
+%% run_op/2 for {delete, Opts}
+%%====================================================================
+
+%% @private Close if open, then remove `data_dir/<corpus>'. A live
+%% corpus is deleted from its own data_dir; a different one is rejected.
+run_delete(Corpus, Opts) ->
+    case delete_data_dir(Corpus, Opts) of
+        {ok, DataDir} ->
+            case run_close(Corpus) of
+                ok -> del_dir(corpus_base_dir(#{corpus => Corpus, data_dir => DataDir}));
+                {error, _} = Err -> Err
+            end;
+        {error, _} = Err ->
+            Err
+    end.
+
+delete_data_dir(Corpus, Opts) ->
+    case runtime_meta(Corpus) of
+        {ok, #{data_dir := LiveDir}} ->
+            case maps:find(data_dir, Opts) of
+                error ->
+                    {ok, LiveDir};
+                {ok, Dir} ->
+                    case to_bin(Dir) =:= to_bin(LiveDir) of
+                        true -> {ok, LiveDir};
+                        false -> {error, {config_mismatch, data_dir, LiveDir, Dir}}
+                    end
+            end;
+        undefined ->
+            {ok, data_dir(Opts)}
+    end.
+
+del_dir(Dir) ->
+    case file:del_dir_r(Dir) of
+        ok -> ok;
+        {error, enoent} -> ok;
+        {error, Reason} -> {error, {corpus_dir_not_removed, Reason}}
+    end.
+
+to_bin(D) when is_binary(D) -> D;
+to_bin(D) -> unicode:characters_to_binary(D).
 
 %% @private Step 1 (normalize) -- extends barrel_ngram's old normalize/2
 %% with `shards' (previously handled separately as a bare `N') and

@@ -23,5 +23,6 @@ Start here.
 ## Architecture
 
 - [Vision](architecture/vision.md): what barrel is becoming (the database for agents) and the settled decisions.
+- [Contexts (proposal)](architecture/contexts.md): portable datasets as agent-attachable contexts, the proposed scale-out model.
 - [Overview](architecture/overview.md): how the umbrella is split and why.
 - [Responsibilities](migration/responsibilities.md): per-app responsibilities.
