@@ -39,7 +39,15 @@
          concurrent_open_same_corpus_serialized/1,
          validate_open_opts_path_traversal_and_shape/1,
          search_on_never_opened_corpus_fails_closed/1,
-         atom_and_binary_corpus_names_are_one_identity/1]).
+         atom_and_binary_corpus_names_are_one_identity/1,
+         open_close_cycles_fresh_corpus_fresh_db/1,
+         delete_corpus_allows_reuse_after_db_recreate/1,
+         delete_corpus_while_open/1,
+         delete_corpus_idempotent/1,
+         delete_corpus_data_dir_mismatch_while_open/1,
+         on_legacy_reindex_rebuilds_legacy_corpus/1,
+         on_legacy_reindex_rebuilds_old_manifest/1,
+         on_legacy_reindex_keeps_config_mismatch/1]).
 
 all() ->
     [reopen_different_shards_rejected_while_live,
@@ -62,7 +70,15 @@ all() ->
      concurrent_open_same_corpus_serialized,
      validate_open_opts_path_traversal_and_shape,
      search_on_never_opened_corpus_fails_closed,
-     atom_and_binary_corpus_names_are_one_identity].
+     atom_and_binary_corpus_names_are_one_identity,
+     open_close_cycles_fresh_corpus_fresh_db,
+     delete_corpus_allows_reuse_after_db_recreate,
+     delete_corpus_while_open,
+     delete_corpus_idempotent,
+     delete_corpus_data_dir_mismatch_while_open,
+     on_legacy_reindex_rebuilds_legacy_corpus,
+     on_legacy_reindex_rebuilds_old_manifest,
+     on_legacy_reindex_keeps_config_mismatch].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(barrel_docdb),
@@ -544,6 +560,115 @@ atom_and_binary_corpus_names_are_one_identity(Config) ->
     ?assertNot(is_process_alive(ShardPid)),
     ?assertEqual(undefined, barrel_ngram_registry:whereis_name({shard, CorpusBin})),
     ?assertEqual(false, barrel_ngram:is_open(CorpusBin)).
+
+%% Regression: open -> close -> open a different fresh corpus on a
+%% different fresh db, several cycles in one VM, never leaks a binding.
+open_close_cycles_fresh_corpus_fresh_db(Config) ->
+    Base = ?config(db, Config), DataDir = ?config(data_dir, Config),
+    lists:foreach(
+      fun(I) ->
+          Suffix = integer_to_binary(I),
+          Db = <<Base/binary, "_db", Suffix/binary>>,
+          Corpus = <<Base/binary, "_c", Suffix/binary>>,
+          _ = barrel_docdb:delete_db(Db),
+          {ok, _} = barrel_docdb:create_db(Db),
+          ?assertEqual(ok, barrel_ngram:open(Corpus, #{db => Db, data_dir => DataDir,
+                                                      postings => roaring,
+                                                      fields => [<<"key">>]})),
+          {ok, _} = barrel_docdb:put_doc(Db, #{<<"id">> => <<"k">>, <<"key">> => <<"10.4.2.11">>}),
+          ?assertMatch({ok, _}, barrel_ngram:index(Corpus)),
+          ?assertMatch({ok, [_ | _]}, barrel_ngram:search(Corpus, <<"4.2.11">>)),
+          ?assertEqual(ok, barrel_ngram:close(Corpus)),
+          ?assertEqual(undefined, barrel_ngram_registry:whereis_name({shard, Corpus})),
+          ok = barrel_docdb:delete_db(Db)
+      end, lists:seq(1, 4)).
+
+%% A destroyed and recreated db mints a new instance id: the old binding
+%% is rejected, delete_corpus/2 clears it, and the name opens again.
+delete_corpus_allows_reuse_after_db_recreate(Config) ->
+    Db = ?config(db, Config), Corpus = ?config(corpus, Config), DataDir = ?config(data_dir, Config),
+    Opts = #{db => Db, data_dir => DataDir},
+    ok = barrel_ngram:open(Corpus, Opts),
+    ok = barrel_ngram:close(Corpus),
+    ok = barrel_docdb:delete_db(Db),
+    {ok, _} = barrel_docdb:create_db(Db),
+    ?assertMatch({error, {config_mismatch, db_instance_id, _, _}}, barrel_ngram:open(Corpus, Opts)),
+    ?assertEqual(ok, barrel_ngram:delete_corpus(Corpus, #{data_dir => DataDir})),
+    ?assertEqual({error, enoent}, file:list_dir(filename:join(DataDir, Corpus))),
+    ?assertEqual(ok, barrel_ngram:open(Corpus, Opts)),
+    ?assertEqual(true, barrel_ngram:is_open(Corpus)).
+
+%% Deleting an open corpus stops its shards and uses its own data_dir.
+delete_corpus_while_open(Config) ->
+    Db = ?config(db, Config), Corpus = ?config(corpus, Config), DataDir = ?config(data_dir, Config),
+    ok = barrel_ngram:open(Corpus, #{db => Db, data_dir => DataDir, shards => 2}),
+    Pids = [barrel_ngram_registry:whereis_name({shard, {Corpus, I}}) || I <- [0, 1]],
+    ?assert(lists:all(fun is_pid/1, Pids)),
+    ?assertEqual(ok, barrel_ngram:delete_corpus(Corpus)),
+    ?assertNot(lists:any(fun is_process_alive/1, Pids)),
+    ?assertEqual(false, barrel_ngram:is_open(Corpus)),
+    ?assertEqual(undefined, barrel_ngram_shards:get_meta(Corpus)),
+    ?assertEqual(undefined, barrel_ngram_shards:get_pending_meta(Corpus)),
+    ?assertEqual({error, enoent}, file:list_dir(filename:join(DataDir, Corpus))).
+
+delete_corpus_idempotent(Config) ->
+    Corpus = ?config(corpus, Config), DataDir = ?config(data_dir, Config),
+    ?assertEqual(ok, barrel_ngram:delete_corpus(Corpus, #{data_dir => DataDir})),
+    ?assertEqual(ok, barrel_ngram:delete_corpus(Corpus, #{data_dir => DataDir})),
+    ?assertMatch({error, {invalid_option, corpus, _}},
+                 barrel_ngram:delete_corpus(<<"../escape">>, #{data_dir => DataDir})).
+
+delete_corpus_data_dir_mismatch_while_open(Config) ->
+    Db = ?config(db, Config), Corpus = ?config(corpus, Config), DataDir = ?config(data_dir, Config),
+    ok = barrel_ngram:open(Corpus, #{db => Db, data_dir => DataDir}),
+    Other = filename:join(DataDir, "other"),
+    ?assertMatch({error, {config_mismatch, data_dir, _, _}},
+                 barrel_ngram:delete_corpus(Corpus, #{data_dir => Other})),
+    ?assertEqual(true, barrel_ngram:is_open(Corpus)).
+
+%% Artifacts without corpus.meta: on_legacy => reindex rebuilds from the feed.
+on_legacy_reindex_rebuilds_legacy_corpus(Config) ->
+    Db = ?config(db, Config), Corpus = ?config(corpus, Config), DataDir = ?config(data_dir, Config),
+    ok = barrel_ngram:open(Corpus, #{db => Db, data_dir => DataDir}),
+    {ok, _} = barrel_docdb:put_doc(Db, #{<<"id">> => <<"a">>, <<"body">> => <<"connect_timeout">>}),
+    {ok, _} = barrel_ngram:refresh(Corpus),
+    ok = barrel_ngram:close(Corpus),
+    ok = file:delete(filename:join([DataDir, Corpus, "corpus.meta"])),
+    ?assertEqual({error, {legacy_corpus_requires_reindex, Corpus}},
+                 barrel_ngram:open(Corpus, #{db => Db, data_dir => DataDir})),
+    ?assertEqual(ok, barrel_ngram:open(Corpus, #{db => Db, data_dir => DataDir,
+                                                on_legacy => reindex})),
+    {ok, _} = barrel_ngram:refresh(Corpus),
+    ?assertMatch({ok, [_ | _]}, barrel_ngram:search(Corpus, <<"connect_timeout">>)).
+
+%% A manifest from an older format version is rebuilt the same way.
+on_legacy_reindex_rebuilds_old_manifest(Config) ->
+    Db = ?config(db, Config), Corpus = ?config(corpus, Config), DataDir = ?config(data_dir, Config),
+    Opts = #{db => Db, data_dir => DataDir},
+    ok = barrel_ngram:open(Corpus, Opts),
+    {ok, _} = barrel_docdb:put_doc(Db, #{<<"id">> => <<"a">>, <<"body">> => <<"connect_timeout">>}),
+    {ok, _} = barrel_ngram:refresh(Corpus),
+    ok = barrel_ngram:close(Corpus),
+    ManifestPath = filename:join([DataDir, Corpus, "manifest"]),
+    {ok, Bin} = file:read_file(ManifestPath),
+    ok = file:write_file(ManifestPath, term_to_binary((binary_to_term(Bin))#{version => 1})),
+    ?assertMatch({error, {open_failed, {unsupported_manifest_version, 1, _}, ok}},
+                 barrel_ngram:open(Corpus, Opts)),
+    ?assertEqual(ok, barrel_ngram:open(Corpus, Opts#{on_legacy => reindex})),
+    {ok, _} = barrel_ngram:refresh(Corpus),
+    ?assertMatch({ok, [_ | _]}, barrel_ngram:search(Corpus, <<"connect_timeout">>)).
+
+%% A genuine config conflict is never treated as legacy.
+on_legacy_reindex_keeps_config_mismatch(Config) ->
+    Db = ?config(db, Config), Corpus = ?config(corpus, Config), DataDir = ?config(data_dir, Config),
+    ok = barrel_ngram:open(Corpus, #{db => Db, data_dir => DataDir}),
+    ok = barrel_ngram:close(Corpus),
+    ?assertMatch({error, {config_mismatch, fields, all, [<<"title">>]}},
+                 barrel_ngram:open(Corpus, #{db => Db, data_dir => DataDir,
+                                             fields => [<<"title">>], on_legacy => reindex})),
+    ?assertMatch({ok, _}, file:read_file(filename:join([DataDir, Corpus, "corpus.meta"]))),
+    ?assertMatch({error, {invalid_option, on_legacy, bogus}},
+                 barrel_ngram:open(Corpus, #{db => Db, data_dir => DataDir, on_legacy => bogus})).
 
 %%====================================================================
 %% Helpers

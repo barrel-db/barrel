@@ -30,7 +30,8 @@
 %%%-------------------------------------------------------------------
 -module(barrel_ngram).
 
--export([open/2, close/1, is_open/1, index/1, refresh/1, compact/1,
+-export([open/2, close/1, delete_corpus/1, delete_corpus/2,
+         is_open/1, index/1, refresh/1, compact/1,
          search/2, search/3, regex/2, regex/3]).
 -export([safe_shard_call/2]).
 
@@ -80,7 +81,16 @@
 %%       verifying candidates without a full `barrel_docdb' fetch
 %%       (optional; falls back to `barrel_docdb:get_docs/2' when
 %%       absent).</li>
+%%   <li>`on_legacy' - `fail' (default) or `reindex': rebuild a corpus
+%%       written by an older on-disk format in place instead of returning
+%%       `legacy_corpus_requires_reindex', `unsupported_manifest_version',
+%%       `unsupported_segment_version' or `unsupported_corpus_meta_version'.
+%%       Not persisted; a config mismatch is never rebuilt.</li>
 %% </ul>
+%%
+%% Manual rebuild or retirement: {@link delete_corpus/2} (closes the
+%% corpus and removes `data_dir/<corpus>'), then `open/2' again. No app or
+%% VM restart is needed.
 -spec open(corpus(), map()) -> ok | {error, term()}.
 open(Corpus, Opts) ->
     case validate_open_opts(Corpus, Opts) of
@@ -95,6 +105,28 @@ close(Corpus) ->
     case validate_corpus(Corpus) of
         ok -> lifecycle_call(normalize_corpus(Corpus), close, ?LIFECYCLE_RETRIES);
         {error, _} = Err -> Err
+    end.
+
+%% @equiv delete_corpus(Corpus, #{})
+-spec delete_corpus(corpus()) -> ok | {error, term()}.
+delete_corpus(Corpus) ->
+    delete_corpus(Corpus, #{}).
+
+%% @doc Retire a corpus: close it if open, then remove `data_dir/<corpus>'
+%% (its `corpus.meta' binding, manifests and segments). Idempotent, and
+%% safe on a corpus never opened in this VM. `data_dir' defaults to the
+%% open corpus's own, else the app env; a live corpus with a different
+%% `data_dir' is rejected with `{error, {config_mismatch, data_dir, Live, Given}}'.
+-spec delete_corpus(corpus(), map()) -> ok | {error, term()}.
+delete_corpus(Corpus, Opts) when is_map(Opts) ->
+    case validate_corpus(Corpus) of
+        ok ->
+            case validate_data_dir(Opts) of
+                ok -> lifecycle_call(normalize_corpus(Corpus), {delete, Opts}, ?LIFECYCLE_RETRIES);
+                {error, _} = Err -> Err
+            end;
+        {error, _} = Err ->
+            Err
     end.
 
 %% @doc Whether a corpus is currently open: a cheap, NON-AUTHORITATIVE
@@ -297,9 +329,17 @@ validate_open_opts_fields(Opts) ->
         fun() -> validate_fields(Opts) end,
         fun() -> validate_threshold(freeze_threshold, Opts, fun is_pos_integer/1) end,
         fun() -> validate_threshold(compact_threshold, Opts, fun is_pos_integer_or_infinity/1) end,
-        fun() -> validate_source(Opts) end
+        fun() -> validate_source(Opts) end,
+        fun() -> validate_on_legacy(Opts) end
     ],
     run_checks(Checks).
+
+validate_on_legacy(Opts) ->
+    case maps:get(on_legacy, Opts, fail) of
+        fail -> ok;
+        reindex -> ok;
+        V -> {error, {invalid_option, on_legacy, V}}
+    end.
 
 run_checks([]) -> ok;
 run_checks([Check | Rest]) ->

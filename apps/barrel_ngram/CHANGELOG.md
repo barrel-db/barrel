@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] - 2026-09-14
+
+### Added
+
+- `delete_corpus/1,2` retires a corpus: closes it if open, then removes
+  `data_dir/<corpus>` (its `corpus.meta` binding, manifests, and
+  segments). Idempotent, safe on a corpus never opened in this VM, and
+  lets a name be reused after its database was destroyed and recreated.
+- `open/2` option `on_legacy => reindex` rebuilds a corpus written by
+  an older on-disk format (`legacy_corpus_requires_reindex`,
+  `unsupported_manifest_version`, `unsupported_segment_version`,
+  `unsupported_corpus_meta_version`) in place instead of failing.
+  Default `fail` keeps the previous behavior.
+
 ## [0.9.0] - 2026-08-15
 
 ### Changed
