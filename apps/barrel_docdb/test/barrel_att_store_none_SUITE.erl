@@ -26,7 +26,9 @@
          local_docs_still_work/1,
          put_attachment_returns_clean_error/1,
          get_attachment_reports_not_found_not_error/1,
-         default_backend_still_creates_attachments_directory/1]).
+         default_backend_still_creates_attachments_directory/1,
+         sync_calls_return_clean_error/1,
+         purge_existing_removes_stale_attachments_directory/1]).
 
 all() ->
     [no_attachments_directory_created,
@@ -34,7 +36,9 @@ all() ->
      local_docs_still_work,
      put_attachment_returns_clean_error,
      get_attachment_reports_not_found_not_error,
-     default_backend_still_creates_attachments_directory].
+     default_backend_still_creates_attachments_directory,
+     sync_calls_return_clean_error,
+     purge_existing_removes_stale_attachments_directory].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(barrel_docdb),
@@ -121,4 +125,31 @@ default_backend_still_creates_attachments_directory(Config) ->
     DbPath = ?config(db_path, Config),
     {ok, _} = barrel_docdb:create_db(Name, #{data_dir => Dir}),
     ?assert(filelib:is_dir(filename:join(DbPath, "attachments"))),
+    ok.
+
+%% Replicated delete and feed rebuild skip supports_sync: error, not undef.
+sync_calls_return_clean_error(Config) ->
+    Name = ?config(name, Config),
+    Dir = ?config(dir, Config),
+    {ok, _} = barrel_docdb:create_db(Name, (none_opts())#{data_dir => Dir}),
+    ?assertEqual({error, attachments_disabled},
+                 barrel_docdb:delete_attachment(Name, <<"doc1">>, <<"a.txt">>, #{})),
+    ?assertEqual({error, attachments_disabled},
+                 barrel_docdb:rebuild_attachment_feed(Name)),
+    ok.
+
+%% An upgraded node reopens an existing db with none: the old store is removed.
+purge_existing_removes_stale_attachments_directory(Config) ->
+    Name = ?config(name, Config),
+    Dir = ?config(dir, Config),
+    DbPath = ?config(db_path, Config),
+    {ok, _} = barrel_docdb:create_db(Name, #{data_dir => Dir}),
+    ok = barrel_docdb:put_local_doc(Name, <<"k">>, #{<<"v">> => 1}),
+    ?assert(filelib:is_dir(filename:join(DbPath, "attachments"))),
+    ok = barrel_docdb:close_db(Name),
+    Opts = #{data_dir => Dir,
+             att_opts => #{backend => none, purge_existing => true}},
+    {ok, _} = barrel_docdb:create_db(Name, Opts),
+    ?assertNot(filelib:is_dir(filename:join(DbPath, "attachments"))),
+    ?assertEqual({ok, #{<<"v">> => 1}}, barrel_docdb:get_local_doc(Name, <<"k">>)),
     ok.

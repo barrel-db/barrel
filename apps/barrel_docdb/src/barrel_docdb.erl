@@ -72,8 +72,9 @@
 %% entirely (see barrel_att_store_none); 4MB is still generous headroom
 %% for node-id/config-sized documents while cutting the docs store's own
 %% WAL preallocation from ~70MB to ~4.4MB.
+%% purge_existing reclaims the attachments/ dir an upgraded node still has.
 -define(SYSTEM_DB_OPTS, #{
-    att_opts => #{backend => none},
+    att_opts => #{backend => none, purge_existing => true},
     store_opts => #{write_buffer_size => 4 * 1024 * 1024}
 }).
 

@@ -30,23 +30,40 @@
 %%% via timeline branching, which is fine for `_barrel_system' and
 %%% `_replication_tasks' (neither is ever branched) but is a real
 %%% limitation for anyone else opting into this backend.
+%%%
+%%% `purge_existing => true' removes an `attachments/' directory left by
+%%% a previous backend on open. Only for databases known to never hold
+%%% attachments: it deletes whatever is there.
 %%% @end
 %%%-------------------------------------------------------------------
 -module(barrel_att_store_none).
 -behaviour(barrel_att_backend).
 
 -export([open/2, close/1]).
--export([put/5, put/6, get/4, delete/4]).
+-export([put/5, put/6, get/4, delete/4, delete/5]).
 -export([delete_all/3]).
 -export([fold/5]).
 -export([get_info/4]).
 -export([put_stream/5, put_stream/6]).
 -export([write_chunk/2, finish_stream/1, abort_stream/1]).
 -export([get_stream/4, read_chunk/1, close_stream/1]).
+-export([rebuild_feed/2]).
 
-%% @doc No RocksDB instance, no directory -- Path is intentionally unused.
--spec open(string(), map()) -> {ok, map()}.
-open(_Path, _Options) -> {ok, #{}}.
+%% @doc No RocksDB instance, no directory. With `purge_existing => true',
+%% a stale store left at `Path' by a previous backend is removed.
+-spec open(string(), map()) -> {ok, map()} | {error, term()}.
+open(Path, Options) ->
+    case maps:get(purge_existing, Options, false) of
+        true -> purge(Path);
+        false -> {ok, #{}}
+    end.
+
+purge(Path) ->
+    case file:del_dir_r(Path) of
+        ok -> {ok, #{}};
+        {error, enoent} -> {ok, #{}};
+        {error, Reason} -> {error, {purge_failed, Path, Reason}}
+    end.
 
 -spec close(map()) -> ok.
 close(_AttRef) -> ok.
@@ -64,6 +81,11 @@ get(_AttRef, _DbName, _DocId, _AttName) -> not_found.
 
 -spec delete(map(), binary(), binary(), binary()) -> {error, attachments_disabled}.
 delete(_AttRef, _DbName, _DocId, _AttName) -> {error, attachments_disabled}.
+
+%% @doc Replicated delete: exported so callers that skip the
+%% supports_sync check get an error, not `undef'.
+-spec delete(map(), binary(), binary(), binary(), map()) -> {error, attachments_disabled}.
+delete(_AttRef, _DbName, _DocId, _AttName, _Opts) -> {error, attachments_disabled}.
 
 %% @doc Deleting all (zero) attachments a document has is trivially
 %% successful, same as a real backend would report for a document that
@@ -102,3 +124,7 @@ read_chunk(_Stream) -> eof.
 
 -spec close_stream(map()) -> ok.
 close_stream(_Stream) -> ok.
+
+%% @doc Exported for the same reason as delete/5.
+-spec rebuild_feed(map(), binary()) -> {error, attachments_disabled}.
+rebuild_feed(_AttRef, _DbName) -> {error, attachments_disabled}.
