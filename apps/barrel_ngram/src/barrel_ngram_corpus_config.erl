@@ -56,7 +56,7 @@ save(Config, Map) ->
 %% `not_found' means genuinely no file (a fresh or pre-fix corpus);
 %% `{error, Reason}' means a file exists but could not be read/decoded
 %% (truncated, corrupt, permission denied) -- callers must never treat
-%% the two the same way (see `barrel_ngram_corpus_lifecycle:run_op/2').
+%% the two the same way (see {@link barrel_ngram_corpus_lifecycle}).
 -spec load(map()) -> {ok, config()} | not_found | {error, term()}.
 load(Config) ->
     Path = path(Config),

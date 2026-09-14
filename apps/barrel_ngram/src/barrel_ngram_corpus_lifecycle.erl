@@ -22,7 +22,7 @@
 %%% keeps `init/1' fast regardless.
 %%%
 %%% The result is sent DIRECTLY to the caller (by a reference generated
-%%% before this process even starts, see `barrel_ngram:lifecycle_call/3')
+%%% before this process even starts, see lifecycle_call in barrel_ngram)
 %%% rather than relying on this process's own exit reason: a monitor
 %%% installed after `start_child/2' returns can race a fast
 %%% `handle_continue/2' that already finished.
