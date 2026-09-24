@@ -27,7 +27,9 @@
          collection_delegation/1,
          query_fold_stops/1,
          error_paths/1,
-         plain_store_without_embedder/1]).
+         plain_store_without_embedder/1,
+         observed_version/1,
+         observed_version_after_write/1]).
 
 all() ->
     [vector_rank_and_columns,
@@ -42,6 +44,8 @@ all() ->
      orphan_hits_dropped,
      unnest_over_hits,
      collection_delegation,
+     observed_version,
+     observed_version_after_write,
      query_fold_stops,
      error_paths,
      plain_store_without_embedder].
@@ -335,3 +339,40 @@ plain_store_without_embedder(Config) ->
     ok = barrel:close(Plain),
     barrel_docdb:delete_db(maps:get(docdb, Plain)),
     ok.
+
+%% B1: every successful query reports the instance id and last seq read
+%% after the run; with no write in between they match the db's own.
+observed_version(Config) ->
+    #{docdb := DbBin} = Db = ?config(db, Config),
+    {ok, InstanceId} = barrel_docdb:db_instance_id(DbBin),
+    {ok, #{last_seq := LastSeq}} = barrel_docdb:db_observed_version(DbBin),
+    Stmts = ["SELECT * FROM db",
+             "SELECT title FROM db WHERE lang = 'en' ORDER BY title LIMIT 2",
+             "SELECT * FROM vector_top_k('erlang', k => 2) AS v",
+             "SELECT * FROM bm25_top_k('rust', k => 2) AS b",
+             "SELECT * FROM hybrid_top_k('erlang', k => 2) AS h"],
+    lists:foreach(
+        fun(Stmt) ->
+            {ok, _Rows, Meta} = barrel:query(Db, Stmt),
+            ?assertMatch({_, #{instance_id := InstanceId,
+                               last_seq := LastSeq}}, {Stmt, Meta})
+        end, Stmts),
+    {ok, _, FoldMeta} = barrel:query_fold(Db, "SELECT * FROM db", #{},
+                                          fun(_R, A) -> {ok, A} end, ok),
+    ?assertMatch(#{instance_id := InstanceId, last_seq := LastSeq},
+                 FoldMeta).
+
+%% The observation is read after the rows: a write that lands in between
+%% makes last_seq later than the state the rows came from, never earlier.
+observed_version_after_write(Config) ->
+    #{docdb := DbBin} = Db = ?config(db, Config),
+    {ok, #{last_seq := Before}} = barrel_docdb:db_observed_version(DbBin),
+    Fun = fun(_Row, done) -> {ok, done};
+             (_Row, pending) ->
+                  {ok, _} = barrel:put_doc(Db, #{<<"id">> => <<"late">>,
+                                                 <<"title">> => <<"x">>}),
+                  {ok, done}
+          end,
+    {ok, done, #{last_seq := After}} =
+        barrel:query_fold(Db, "SELECT * FROM db", #{}, Fun, pending),
+    ?assert(After > Before).

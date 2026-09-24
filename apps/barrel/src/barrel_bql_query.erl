@@ -15,7 +15,8 @@
     run/3,
     fold/5,
     explain/2,
-    subscribe_plan/3
+    subscribe_plan/3,
+    row_bound/1
 ]).
 
 -define(MAX_FETCH_K, 1000).
@@ -30,8 +31,9 @@ run(_Db, #{subscribe := true}, _Opts) ->
     {error, {unsupported, subscribe}};
 run(#{docdb := DbBin}, #{source := {collection, _}} = Plan, Opts) ->
     barrel_bql_exec:run(DbBin, Plan, Opts);
-run(Db, #{source := {table_fn, Fn, Args}} = Plan, Opts) ->
-    run_table_fn(Db, Fn, Args, Plan, Opts).
+run(#{docdb := DbBin} = Db, #{source := {table_fn, Fn, Args}} = Plan,
+    Opts) ->
+    barrel_bql_exec:observe(DbBin, run_table_fn(Db, Fn, Args, Plan, Opts)).
 
 -spec fold(barrel:db(), barrel_bql_lower:plan(), map(),
            fun((map(), term()) -> {ok, term()} | {stop, term()}),
@@ -87,6 +89,19 @@ explain(Db, Plan) ->
                        residual_conditions =>
                            length(DocWhere) + length(Residual)}}
     end.
+
+%% @doc Most rows a plan can return: its LIMIT, or k (capped by LIMIT)
+%% for a table function; `undefined' when unbounded.
+-spec row_bound(barrel_bql_lower:plan()) -> non_neg_integer() | undefined.
+row_bound(#{unnest := #{}, post := #{limit := Limit}}) ->
+    %% UNNEST fans a hit out to several rows: only LIMIT bounds them
+    Limit;
+row_bound(#{source := {table_fn, _Fn, #{k := K}}, post := #{limit := undefined}}) ->
+    K;
+row_bound(#{source := {table_fn, _Fn, #{k := K}}, post := #{limit := Limit}}) ->
+    min(K, Limit);
+row_bound(#{post := #{limit := Limit}}) ->
+    Limit.
 
 %%====================================================================
 %% Table functions

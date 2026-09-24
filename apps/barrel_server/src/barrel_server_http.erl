@@ -9,6 +9,10 @@
 %%%-------------------------------------------------------------------
 -module(barrel_server_http).
 
+%% Query route bounds: row cap (max_rows) and deadline ceiling.
+-define(MAX_QUERY_ROWS, 1000).
+-define(MAX_QUERY_DEADLINE_MS, 300000).
+
 %% Service start (supervised child)
 -export([start_link/0]).
 
@@ -576,11 +580,13 @@ find(Req) ->
 %%====================================================================
 %% BQL query endpoint
 %%
-%% POST body: raw BQL text, or {"query","params","continuation"} as
-%% JSON. GET takes ?q= (for browser EventSource). Plain statements
-%% stream ndjson: one {"row":...} line per row, one final {"meta":...}
-%% line; failures after the 200 is committed appear as an in-band
-%% {"error":...} line. SUBSCRIBE statements need the SSE accept and
+%% POST body: raw BQL text, or {"query","params","continuation",
+%% "max_rows","deadline_ms"} as JSON. GET takes ?q= (for browser
+%% EventSource) plus optional ?max_rows= and ?deadline_ms=. Plain
+%% statements stream ndjson: one {"row":...} line per row, one final
+%% {"meta":...} line carrying the observed version and the bound;
+%% failures after the 200 is committed, a passed deadline included,
+%% appear as an in-band {"error":...} line and no meta. SUBSCRIBE statements need the SSE accept and
 %% stream row / ready / change / error events with a 30s ping.
 %% stream_deferred picks the status after compile, so bad BQL is a
 %% clean 400 before the first byte.
@@ -618,9 +624,11 @@ prepare_query(Req) ->
                 {ok, Bql, QOpts} ->
                     Params = maps:get(params, QOpts, #{}),
                     case barrel_bql:compile(Bql, #{params => Params}) of
-                        {ok, #{subscribe := Subscribe}} ->
+                        {ok, #{subscribe := Subscribe} = Plan} ->
                             {ok, Db, Bql,
-                             QOpts#{subscribe => Subscribe}};
+                             QOpts#{subscribe => Subscribe,
+                                    row_bound =>
+                                        barrel_bql_query:row_bound(Plan)}};
                         {error, BqlError} ->
                             {error, 400, bql_error_body(BqlError)}
                     end;
@@ -640,7 +648,12 @@ query_input(Req) ->
             case param(<<"q">>, Req) of
                 undefined -> {error, missing_query};
                 <<>> -> {error, missing_query};
-                Bql -> {ok, Bql, #{}}
+                Bql ->
+                    bounds_input(
+                        #{<<"max_rows">> => int_param(<<"max_rows">>, Req),
+                          <<"deadline_ms">> =>
+                              int_param(<<"deadline_ms">>, Req)},
+                        Bql, #{})
             end;
         _ ->
             ContentType = livery_req:header(<<"content-type">>, Req, <<>>),
@@ -668,11 +681,48 @@ json_query_input(Bin) ->
                 _ ->
                     QOpts0
             end,
-            {ok, Bql, QOpts};
+            bounds_input(Body, Bql, QOpts);
         _ ->
             {error, missing_query}
     catch
         _:_ -> {error, bad_json}
+    end.
+
+%% Optional row cap (clamped to ?MAX_QUERY_ROWS) and deadline.
+bounds_input(Body, Bql, QOpts0) ->
+    case bound_opt(max_rows, maps:get(<<"max_rows">>, Body, undefined),
+                   QOpts0) of
+        {ok, QOpts1} ->
+            case bound_opt(deadline_ms,
+                           maps:get(<<"deadline_ms">>, Body, undefined),
+                           QOpts1) of
+                {ok, QOpts} -> {ok, Bql, QOpts};
+                {error, _} = Err -> Err
+            end;
+        {error, _} = Err ->
+            Err
+    end.
+
+bound_opt(_Key, undefined, QOpts) ->
+    {ok, QOpts};
+bound_opt(_Key, null, QOpts) ->
+    {ok, QOpts};
+bound_opt(max_rows, N, QOpts) when is_integer(N), N > 0 ->
+    {ok, QOpts#{max_rows => min(N, ?MAX_QUERY_ROWS)}};
+bound_opt(deadline_ms, N, QOpts) when is_integer(N), N > 0 ->
+    {ok, QOpts#{deadline_ms => min(N, ?MAX_QUERY_DEADLINE_MS)}};
+bound_opt(max_rows, _Bad, _QOpts) ->
+    {error, invalid_max_rows};
+bound_opt(deadline_ms, _Bad, _QOpts) ->
+    {error, invalid_deadline_ms}.
+
+int_param(Key, Req) ->
+    case param(Key, Req) of
+        undefined -> undefined;
+        Bin ->
+            try binary_to_integer(Bin)
+            catch error:badarg -> Bin
+            end
     end.
 
 bql_error_body(BqlError) ->
@@ -686,38 +736,85 @@ bql_error_body(BqlError) ->
     end,
     json:encode(WithLoc).
 
+%% The fold stops at max_rows (one extra row proves more exist) or at the
+%% deadline, checked per row and once more before the meta line.
 run_query(Db, Bql, QOpts, Emit) ->
-    FoldOpts = maps:without([subscribe], QOpts),
+    FoldOpts = maps:without([subscribe, max_rows, deadline_ms, row_bound],
+                            QOpts),
+    MaxRows = maps:get(max_rows, QOpts, infinity),
+    Deadline = deadline_at(maps:get(deadline_ms, QOpts, undefined)),
     Result = barrel:query_fold(Db, Bql, FoldOpts#{chunk_size => 100},
-        fun(Row, ok) ->
-            case Emit(#{row => Row}) of
-                ok -> {ok, ok};
-                {error, _} -> {stop, ok}
+        fun(Row, N) ->
+            case {past(Deadline), N >= MaxRows} of
+                {true, _} -> {stop, {deadline, N}};
+                {false, true} -> {stop, {max_rows, N}};
+                {false, false} ->
+                    case Emit(#{row => Row}) of
+                        ok -> {ok, N + 1};
+                        {error, _} -> {stop, {gone, N}}
+                    end
             end
         end,
-        ok),
+        0),
     case Result of
-        {ok, _, Meta} ->
-            _ = Emit(#{meta => query_meta(Meta)}),
+        {ok, {deadline, _}, _Meta} ->
+            _ = Emit(#{error => <<"deadline">>}),
             ok;
+        {ok, {gone, _}, _Meta} ->
+            ok;
+        {ok, Stop, Meta} ->
+            case past(Deadline) of
+                true ->
+                    _ = Emit(#{error => <<"deadline">>}),
+                    ok;
+                false ->
+                    Bound = maps:get(row_bound, QOpts, undefined),
+                    _ = Emit(#{meta => query_meta(Meta, Stop, Bound)}),
+                    ok
+            end;
         {error, Reason} ->
             _ = Emit(#{error => err_bin(Reason)}),
             ok
     end.
 
-query_meta(Meta) ->
-    Base = #{has_more => maps:get(has_more, Meta, false)},
+deadline_at(undefined) -> infinity;
+deadline_at(Ms) -> erlang:monotonic_time(millisecond) + Ms.
+
+past(infinity) -> false;
+past(At) -> erlang:monotonic_time(millisecond) >= At.
+
+%% `bound': limit_reached when the cap cut the stream, more rows exist, or
+%% the statement's own LIMIT/k was filled; exhausted otherwise.
+query_meta(Meta, {max_rows, N}, _Bound) ->
+    observed(Meta, #{has_more => true, count => N,
+                     bound => <<"limit_reached">>});
+query_meta(Meta, N, Bound) ->
+    HasMore = maps:get(has_more, Meta, false),
+    Base = #{has_more => HasMore,
+             bound => bound(HasMore, N, Bound)},
     Base1 = case maps:get(count, Meta, undefined) of
         undefined -> Base;
         Count -> Base#{count => Count}
     end,
-    case maps:get(continuation, Meta, undefined) of
+    Base2 = case maps:get(continuation, Meta, undefined) of
         undefined ->
             Base1;
         Token ->
             Base1#{continuation =>
                        base64:encode(Token, #{mode => urlsafe})}
-    end.
+    end,
+    observed(Meta, Base2).
+
+bound(true, _N, _Bound) -> <<"limit_reached">>;
+bound(false, N, Bound) when is_integer(Bound), N >= Bound ->
+    <<"limit_reached">>;
+bound(false, _N, _Bound) -> <<"exhausted">>.
+
+observed(#{instance_id := Id, last_seq := Seq}, Out) when is_binary(Seq) ->
+    Out#{instance_id => Id,
+         last_seq => base64:encode(Seq, #{mode => urlsafe})};
+observed(_Meta, Out) ->
+    Out.
 
 run_subscribe(Db, Bql, QOpts, Emit) ->
     SubOpts = maps:with([params], QOpts),

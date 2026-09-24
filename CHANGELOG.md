@@ -4,6 +4,18 @@ All notable changes to the Barrel umbrella are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and each app
 is versioned independently under [Semantic Versioning](https://semver.org/).
 
+## [2026-09-25] Bounded queries that report what answered
+
+A node that fans a query out to other nodes needs to bound what each one
+sends and to know which state of which database answered. The query route
+takes a row cap and a deadline and reports whether rows were cut, and every
+BQL result carries the observed version.
+
+| App | Version | Change |
+|-----|---------|--------|
+| barrel | 1.4.0 | observed version in query meta, `row_bound/1` |
+| barrel_server | 1.8.0 | `max_rows`, `deadline_ms`, `bound` and observed version on the query route |
+
 ## [2026-09-25] Read-only stores and imported copies
 
 First step of contexts (portable, queryable datasets): a copy of a database

@@ -3,6 +3,15 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.8.0] - 2026-09-25
+
+### Added
+- `POST /db/:db/query` (and `GET ?q=`) accepts `max_rows` (capped at 1000) and `deadline_ms` (capped at 300000). The stream stops at the row cap, or answers an in-band `{"error":"deadline"}` line and no meta once the deadline passed.
+- The final meta line carries `bound` (`limit_reached` or `exhausted`) and the observed version (`instance_id`, `last_seq`, base64url), so a caller knows whether rows were cut and which state of the database answered.
+
+### Changed
+- Requires `barrel ~> 1.4`.
+
 ## [1.7.3] - 2026-09-24
 
 ### Fixed

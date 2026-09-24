@@ -3,6 +3,15 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.4.0] - 2026-09-25
+
+### Added
+- `query/2,3` and `query_fold/5` results carry the observed version in their meta (`instance_id`, `last_seq`), for collection queries and table functions (`vector_top_k`, `bm25_top_k`, `hybrid_top_k`) alike.
+- `barrel_bql_query:row_bound/1`: the most rows a compiled plan can return (its `LIMIT`, or `k` capped by `LIMIT`).
+
+### Changed
+- Requires `barrel_docdb ~> 1.7` (observed version).
+
 ## [1.3.1] - 2026-08-23
 
 ### Changed
