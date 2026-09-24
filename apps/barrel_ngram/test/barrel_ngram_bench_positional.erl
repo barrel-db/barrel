@@ -151,7 +151,7 @@ bench_segment_density(DocCount, Density) ->
     Spec = #{doc_count => DocCount, watermark => <<0:96>>,
              postings => Postings, positional_postings => PositionalPostings,
              entries => Entries},
-    {T, ok} = timer:tc(fun() -> barrel_ngram_segment:write(Path, Spec) end),
+    {T, {ok, _}} = timer:tc(fun() -> barrel_ngram_segment:write(Path, Spec) end),
     Bytes = filelib:file_size(Path),
     io:format("~-20.2f ~-12.2f ~-14B~n", [Density, T / 1000, Bytes]),
     _ = file:delete(Path),

@@ -42,6 +42,8 @@ gram(A, B, C) -> (A bsl 16) bor (B bsl 8) bor C.
 
 entry(Key, N, Del) -> #{key => Key, hlc => hlc(N), deleted => Del}.
 
+v({ok, V}) -> V.
+
 round_trip(Dir) ->
     fun() ->
         Path = filename:join(Dir, "seg.ngseg"),
@@ -55,7 +57,7 @@ round_trip(Dir) ->
                         entry(<<"doc-one">>, 20, false),
                         entry(<<"doc-two">>, 30, false)]
         },
-        ok = ?M:write(Path, Spec),
+        {ok, _} = ?M:write(Path, Spec),
         {ok, H} = ?M:open(Path),
         try
             ?assertEqual(3, ?M:doc_count(H)),
@@ -63,12 +65,12 @@ round_trip(Dir) ->
             ?assertEqual({ok, [0, 2]}, ?M:lookup_postings(H, G1)),
             ?assertEqual({ok, [1, 2]}, ?M:lookup_postings(H, G2)),
             ?assertEqual([{0, <<"doc-zero">>}, {2, <<"doc-two">>}],
-                         ?M:keys(H, [0, 2])),
+                         v(?M:keys(H, [0, 2]))),
             %% per-ordinal hlc + deleted round-trips
             ?assertEqual([{0, <<"doc-zero">>, hlc(10), false},
                           {1, <<"doc-one">>, hlc(20), false},
                           {2, <<"doc-two">>, hlc(30), false}],
-                         ?M:entries(H))
+                         v(?M:entries(H)))
         after
             ?M:close(H)
         end
@@ -85,12 +87,12 @@ tombstone_entry(Dir) ->
             entries => [entry(<<"live">>, 5, false),
                         entry(<<"dead">>, 7, true)]  %% tombstone, no grams
         },
-        ok = ?M:write(Path, Spec),
+        {ok, _} = ?M:write(Path, Spec),
         {ok, H} = ?M:open(Path),
         try
             ?assertEqual([{0, <<"live">>, hlc(5), false},
                           {1, <<"dead">>, hlc(7), true}],
-                         ?M:entries(H)),
+                         v(?M:entries(H))),
             %% the tombstone ordinal appears in no posting list
             ?assertEqual({ok, [0]}, ?M:lookup_postings(H, G))
         after
@@ -112,10 +114,10 @@ all_postings_directory(Dir) ->
                         entry(<<"k1">>, 2, false),
                         entry(<<"k2">>, 3, false)]
         },
-        ok = ?M:write(Path, Spec),
+        {ok, _} = ?M:write(Path, Spec),
         {ok, H} = ?M:open(Path),
         try
-            All = lists:sort(?M:all_postings(H)),
+            All = lists:sort(v(?M:all_postings(H))),
             ?assertEqual(lists:sort([{G1, [0, 1]}, {G2, [1]}, {G3, [2]}]), All)
         after
             ?M:close(H)
@@ -125,15 +127,15 @@ all_postings_directory(Dir) ->
 empty_segment(Dir) ->
     fun() ->
         Path = filename:join(Dir, "empty.ngseg"),
-        ok = ?M:write(Path, #{doc_count => 0, watermark => wm(),
+        {ok, _} = ?M:write(Path, #{doc_count => 0, watermark => wm(),
                               postings => [], entries => []}),
         {ok, H} = ?M:open(Path),
         try
             ?assertEqual(0, ?M:doc_count(H)),
             ?assertEqual(empty, ?M:lookup_postings(H, gram($a, $b, $c))),
-            ?assertEqual([], ?M:keys(H, [0, 1])),
-            ?assertEqual([], ?M:entries(H)),
-            ?assertEqual([], ?M:all_postings(H))
+            ?assertEqual([], v(?M:keys(H, [0, 1]))),
+            ?assertEqual([], v(?M:entries(H))),
+            ?assertEqual([], v(?M:all_postings(H)))
         after
             ?M:close(H)
         end
@@ -143,7 +145,7 @@ absent_gram(Dir) ->
     fun() ->
         Path = filename:join(Dir, "absent.ngseg"),
         G = gram($a, $b, $c),
-        ok = ?M:write(Path, #{doc_count => 1, watermark => wm(),
+        {ok, _} = ?M:write(Path, #{doc_count => 1, watermark => wm(),
                               postings => [{G, [0]}],
                               entries => [entry(<<"k">>, 1, false)]}),
         {ok, H} = ?M:open(Path),
@@ -159,7 +161,7 @@ high_gram_beyond_table(Dir) ->
     fun() ->
         Path = filename:join(Dir, "high.ngseg"),
         Low = gram(0, 0, 5),
-        ok = ?M:write(Path, #{doc_count => 1, watermark => wm(),
+        {ok, _} = ?M:write(Path, #{doc_count => 1, watermark => wm(),
                               postings => [{Low, [0]}],
                               entries => [entry(<<"k">>, 1, false)]}),
         {ok, H} = ?M:open(Path),
@@ -188,7 +190,7 @@ positional_composite_round_trip(Dir) ->
             entries => [entry(<<"doc-zero">>, 10, false),
                         entry(<<"doc-one">>, 20, false)]
         },
-        ok = ?M:write(Path, Spec),
+        {ok, _} = ?M:write(Path, Spec),
         {ok, H} = ?M:open(Path),
         try
             %% phase-1 lookups are unaffected by phase-2 data riding along
@@ -220,7 +222,7 @@ positional_doc_count_table(Dir) ->
                         entry(<<"k1">>, 2, false),
                         entry(<<"k2">>, 3, false)]
         },
-        ok = ?M:write(Path, Spec),
+        {ok, _} = ?M:write(Path, Spec),
         {ok, H} = ?M:open(Path),
         try
             ?assertEqual({ok, 3}, ?M:positional_doc_count(H, G1)),
@@ -250,7 +252,7 @@ roaring_with_positional_uncorrupted(Dir) ->
                         || N <- lists:seq(0, 74)],
             codec => roaring
         },
-        ok = ?M:write(Path, Spec),
+        {ok, _} = ?M:write(Path, Spec),
         {ok, H} = ?M:open(Path),
         try
             {ok, B1} = ?M:lookup_block(H, G1),
@@ -272,7 +274,7 @@ roaring_with_positional_uncorrupted(Dir) ->
 unsupported_version_error(Dir) ->
     fun() ->
         Path = filename:join(Dir, "oldver.ngseg"),
-        ok = ?M:write(Path, #{doc_count => 0, watermark => wm(),
+        {ok, _} = ?M:write(Path, #{doc_count => 0, watermark => wm(),
                               postings => [], entries => []}),
         {ok, Bin} = file:read_file(Path),
         <<Magic:8/binary, _OldVersion:32/little, Rest/binary>> = Bin,
@@ -298,10 +300,10 @@ all_positional_postings_directory(Dir) ->
                         entry(<<"k1">>, 2, false),
                         entry(<<"k2">>, 3, false)]
         },
-        ok = ?M:write(Path, Spec),
+        {ok, _} = ?M:write(Path, Spec),
         {ok, H} = ?M:open(Path),
         try
-            All = lists:sort(?M:all_positional_postings(H)),
+            All = lists:sort(v(?M:all_positional_postings(H))),
             ?assertEqual(lists:sort([{G1, [{0, [3]}, {1, [7]}]}, {G3, [{2, [0, 5]}]}]), All)
         after
             ?M:close(H)

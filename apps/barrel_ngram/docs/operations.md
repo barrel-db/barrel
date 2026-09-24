@@ -79,12 +79,34 @@ The corpus directory is wiped and reindexed from the start of the changes feed. 
 mismatch is never treated as legacy. To do it by hand instead: `delete_corpus/1,2`, then
 `open/2`. Both run in the live VM; neither the app nor the VM needs a restart.
 
+Version 0.11.0 moves the manifest to version 3 (segment checksums), so every corpus written
+by 0.10.x or earlier fails open with `{unsupported_manifest_version, 2, 3}` and is rebuilt
+once this way.
+
 ## Recovery
 
 The manifest rename is the only commit point. On restart the corpus loads the manifest and
 resubscribes from its watermark, replaying only the feed tail. A crash mid-freeze or
 mid-merge leaves an orphan segment that is cleaned up on the next open; the committed
 segments are intact.
+
+Every segment, manifest and `corpus.meta` is fsynced before its rename, and the directory
+after. The manifest records each segment's sha256 and size, and `open/2` checks them:
+
+```erlang
+%% default: hash every segment at open
+ok = barrel_ngram:open(<<"code">>, #{db => <<"mydb">>}).
+%% large corpus: check only the header layout against the file size
+ok = barrel_ngram:open(<<"code">>, #{db => <<"mydb">>, verify_segments => layout}).
+```
+
+`checksum` reads every segment once: about 0.24 s for 550 MB of segments on a laptop SSD
+with a warm page cache, against 2 ms for `layout`. Use `layout` when open time matters more
+than catching silent corruption.
+
+A damaged segment fails open with `{corrupt_segment, Path, Detail}`. The index is derived
+data: `delete_corpus/1,2` then `open/2` rebuilds it. A read error during a query fails the
+query with `{segment_read_failed, Path, Reason}`; it is never read as "no match".
 
 ## The delete caveat
 

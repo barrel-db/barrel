@@ -34,7 +34,7 @@
 -type offset() :: barrel_ngram_postings_positional:offset().
 -type ordinal() :: barrel_ngram_postings:ordinal().
 
--type segment_plan() :: dense | {positional, [{ordinal(), [offset()]}]}.
+-type segment_plan() :: dense | {positional, [{ordinal(), [offset()]}]} | {error, term()}.
 -export_type([segment_plan/0]).
 
 %% The anchor literal, its Prefix/SuffixMax (see
@@ -60,7 +60,8 @@ literal_plan(Literal, PositionalOpts) ->
 
 %% @doc This segment's best narrowing for a literal's reliable grams:
 %% `dense' if none have phase-2 data here, a single-gram candidate list
-%% for one, distance-checked pair for two or more.
+%% for one, distance-checked pair for two or more. A read error is
+%% returned, never read as "no candidates".
 -spec segment_plan(barrel_ngram_segment:handle(),
                    brute_force | {reliable, [{gram(), offset()}]}) ->
     segment_plan().
@@ -71,9 +72,9 @@ segment_plan(Handle, {reliable, GramOffs}) ->
         [] ->
             dense;
         [{G, D}] ->
-            {positional, single_gram(Handle, G, D)};
+            single_gram(Handle, G, D);
         [{G1, D1}, {G2, D2} | _] ->
-            {positional, pair(Handle, G1, D1, G2, D2)}
+            pair(Handle, G1, D1, G2, D2)
     end.
 
 %% @private Reliable grams with phase-2 data in this segment, ascending by
@@ -90,17 +91,25 @@ rank_by_doc_count(Handle, GramOffs) ->
 
 single_gram(Handle, G, D) ->
     case barrel_ngram_segment:lookup_positional_block(Handle, G) of
-        {ok, Block} -> barrel_ngram_postings_positional:single_gram_candidates(Block, D);
-        not_found -> []
+        {ok, Block} ->
+            {positional, barrel_ngram_postings_positional:single_gram_candidates(Block, D)};
+        not_found ->
+            {positional, []};
+        {error, _} = Err ->
+            Err
     end.
 
 pair(Handle, G1, D1, G2, D2) ->
     case {barrel_ngram_segment:lookup_positional_block(Handle, G1),
           barrel_ngram_segment:lookup_positional_block(Handle, G2)} of
         {{ok, B1}, {ok, B2}} ->
-            barrel_ngram_postings_positional:distance_check(B1, D1, B2, D2);
+            {positional, barrel_ngram_postings_positional:distance_check(B1, D1, B2, D2)};
+        {{error, _} = Err, _} ->
+            Err;
+        {_, {error, _} = Err} ->
+            Err;
         _ ->
-            []
+            {positional, []}
     end.
 
 %%====================================================================

@@ -173,7 +173,8 @@ normalize(Corpus, Opts) ->
                                                          "data/barrel_ngram")),
                 postings => maps:get(postings, Opts, varint)
             },
-            {ok, maps:merge(Base, maps:with([freeze_threshold, compact_threshold, source], Opts))};
+            {ok, maps:merge(Base, maps:with([freeze_threshold, compact_threshold, source,
+                                             verify_segments], Opts))};
         {error, Reason} ->
             {error, {db_not_available, Reason}}
     end.

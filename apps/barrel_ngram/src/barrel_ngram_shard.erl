@@ -158,14 +158,15 @@ init({Ref, Config}) ->
     end.
 
 %% @private Load the manifest, eagerly validate every segment it lists
-%% (fail closed on any pre-v4 segment rather than surfacing it lazily on
-%% first query), and reconcile the corpus's persisted config against this
-%% open's request. Runs before `cleanup_orphans/2' so a rejected open
-%% never deletes anything.
+%% (fail closed on any pre-v4 or corrupt segment rather than surfacing it
+%% lazily on first query), and reconcile the corpus's persisted config
+%% against this open's request. Runs before `cleanup_orphans/2' so a
+%% rejected open never deletes anything.
 open_manifest(Dir, Config) ->
     case barrel_ngram_manifest:load(Dir) of
         {ok, Manifest0} ->
-            case validate_segments(Dir, Manifest0) of
+            Verify = maps:get(verify_segments, Config, checksum),
+            case validate_segments(Dir, Manifest0, Verify) of
                 ok ->
                     Requested = #{
                         phase2_selector_opts => maps:get(phase2_selector_opts, Config, #{}),
@@ -185,22 +186,29 @@ open_manifest(Dir, Config) ->
             Err
     end.
 
-validate_segments(Dir, Manifest) ->
-    validate_segment_files(Dir, barrel_ngram_manifest:list_segments(Manifest)).
+validate_segments(Dir, Manifest, Verify) ->
+    validate_segment_files(Dir, barrel_ngram_manifest:list_segments(Manifest), Verify).
 
-validate_segment_files(_Dir, []) ->
+validate_segment_files(_Dir, [], _Verify) ->
     ok;
-validate_segment_files(Dir, [#{file := File} | Rest]) ->
+validate_segment_files(Dir, [#{file := File} = Seg | Rest], Verify) ->
     Path = filename:join(Dir, File),
-    case barrel_ngram_segment:open(Path) of
+    case barrel_ngram_segment:open(Path, verify_opts(Verify, Seg)) of
         {ok, H} ->
             barrel_ngram_segment:close(H),
-            validate_segment_files(Dir, Rest);
+            validate_segment_files(Dir, Rest, Verify);
         {error, {unsupported_segment_version, Got, Expected}} ->
             {error, {unsupported_segment_version, Path, Got, Expected}};
+        {error, {corrupt_segment, Detail}} ->
+            {error, {corrupt_segment, Path, Detail}};
         {error, _} = Err ->
             Err
     end.
+
+%% `checksum' hashes every segment at open; `layout' checks only the
+%% header layout against the file size.
+verify_opts(checksum, #{sha256 := Sha}) -> #{sha256 => Sha};
+verify_opts(layout, _Seg) -> #{}.
 
 handle_call(refresh, _From, State) ->
     Target = barrel_docdb:get_hlc(),
@@ -225,8 +233,8 @@ handle_call(compact, _From, #state{merge_worker = undefined} = State0) ->
             InputFiles = [maps:get(file, S) || S <- Segs],
             InputPaths = [filename:join(State1#state.dir, F) || F <- InputFiles],
             case barrel_ngram_merge:merge(InputPaths, true) of
-                {ok, TempPath, DocCount, _Wm} ->
-                    State2 = apply_merge_result(TempPath, DocCount, InputFiles, State1),
+                {ok, #{doc_count := DocCount} = Merged} ->
+                    State2 = apply_merge_result(Merged, InputFiles, State1),
                     N = length(barrel_ngram_manifest:list_segments(State2#state.manifest)),
                     {reply, {ok, #{segments => N, doc_count => DocCount}}, State2};
                 {error, Reason} ->
@@ -269,8 +277,8 @@ handle_info({merge_done, Result, InputFiles},
             #state{merge_worker = {_Pid, MRef}} = State) ->
     erlang:demonitor(MRef, [flush]),
     State1 = case Result of
-        {ok, TempPath, DocCount, _Wm} ->
-            apply_merge_result(TempPath, DocCount, InputFiles, State);
+        {ok, Merged} ->
+            apply_merge_result(Merged, InputFiles, State);
         {error, Reason} ->
             logger:warning("barrel_ngram compaction failed for ~p: ~p",
                            [State#state.corpus, Reason]),
@@ -493,9 +501,10 @@ do_freeze(#state{buffer = Buffer, manifest = M, dir = Dir,
              entries => Entries,
              codec => maps:get(postings, Config, varint)},
     case barrel_ngram_segment:write(Path, Spec) of
-        ok ->
+        {ok, #{sha256 := Sha, bytes := Bytes}} ->
             M1 = barrel_ngram_manifest:add_segment(
-                   M, #{gen => Gen, file => File, doc_count => length(Keys)}),
+                   M, #{gen => Gen, file => File, doc_count => length(Keys),
+                        sha256 => Sha, bytes => Bytes}),
             M2 = barrel_ngram_manifest:set_watermark(M1, WmBin),
             case barrel_ngram_manifest:save(Dir, M2) of
                 ok ->
@@ -594,16 +603,18 @@ maybe_compact(State) ->
 %% inputs from the manifest, commit, then delete the input files. The
 %% manifest save is the atomic commit; a crash before it leaves the merged
 %% file as an orphan and keeps the inputs.
-apply_merge_result(TempPath, DocCount, InputFiles,
+apply_merge_result(#{path := TempPath, doc_count := DocCount, sha256 := Sha,
+                     bytes := Bytes}, InputFiles,
                    #state{dir = Dir, manifest = M} = State) ->
     Gen = barrel_ngram_manifest:next_gen(M),
     FinalFile = segment_file(Gen),
     FinalPath = filename:join(Dir, FinalFile),
-    case file:rename(TempPath, FinalPath) of
+    case barrel_ngram_fs:commit(TempPath, FinalPath) of
         ok ->
             M1 = barrel_ngram_manifest:remove_segments(M, InputFiles),
             M2 = barrel_ngram_manifest:add_segment(
-                   M1, #{gen => Gen, file => FinalFile, doc_count => DocCount}),
+                   M1, #{gen => Gen, file => FinalFile, doc_count => DocCount,
+                         sha256 => Sha, bytes => Bytes}),
             case barrel_ngram_manifest:save(Dir, M2) of
                 ok ->
                     [file:delete(filename:join(Dir, F))

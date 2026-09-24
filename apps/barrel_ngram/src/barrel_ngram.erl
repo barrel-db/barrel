@@ -81,6 +81,10 @@
 %%       verifying candidates without a full `barrel_docdb' fetch
 %%       (optional; falls back to `barrel_docdb:get_docs/2' when
 %%       absent).</li>
+%%   <li>`verify_segments' - `checksum' (default: hash every segment
+%%       against its manifest sha256 at open) or `layout' (check only the
+%%       header layout and file size). A mismatch fails open with
+%%       `{corrupt_segment, Path, Detail}'.</li>
 %%   <li>`on_legacy' - `fail' (default) or `reindex': rebuild a corpus
 %%       written by an older on-disk format in place instead of returning
 %%       `legacy_corpus_requires_reindex', `unsupported_manifest_version',
@@ -330,9 +334,17 @@ validate_open_opts_fields(Opts) ->
         fun() -> validate_threshold(freeze_threshold, Opts, fun is_pos_integer/1) end,
         fun() -> validate_threshold(compact_threshold, Opts, fun is_pos_integer_or_infinity/1) end,
         fun() -> validate_source(Opts) end,
-        fun() -> validate_on_legacy(Opts) end
+        fun() -> validate_on_legacy(Opts) end,
+        fun() -> validate_verify_segments(Opts) end
     ],
     run_checks(Checks).
+
+validate_verify_segments(Opts) ->
+    case maps:get(verify_segments, Opts, checksum) of
+        checksum -> ok;
+        layout -> ok;
+        V -> {error, {invalid_option, verify_segments, V}}
+    end.
 
 validate_on_legacy(Opts) ->
     case maps:get(on_legacy, Opts, fail) of

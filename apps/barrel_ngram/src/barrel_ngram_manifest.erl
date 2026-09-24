@@ -10,8 +10,11 @@
 %%% would silently desync the query planner from what was actually
 %%% indexed, so {@link reconcile_config/2} rejects the mismatch instead.
 %%%
-%%% It is written atomically (temp file + `file:rename'), so the rename
-%%% is the commit point: a crash between writing a new segment and
+%%% Each segment entry carries the sha256 and size recorded when the
+%%% segment was written, checked when the corpus opens.
+%%%
+%%% It is written atomically (temp file, fsync, `file:rename', directory
+%%% fsync), so the rename is the commit point: a crash between writing a new segment and
 %%% committing the manifest leaves an orphan segment that the reader
 %%% never sees and that {@link cleanup_orphans/2} removes at startup. The
 %%% tail since the committed watermark is replayed from the feed.
@@ -26,10 +29,11 @@
 -export([config/1, reconcile_config/2]).
 
 -define(FILENAME, "manifest").
--define(VERSION, 2).
+-define(VERSION, 3).
 
 -type segment() :: #{gen := non_neg_integer(), file := binary(),
-                     doc_count := non_neg_integer()}.
+                     doc_count := non_neg_integer(), sha256 := binary(),
+                     bytes := non_neg_integer()}.
 -type config() :: #{phase2_selector_opts := map(), fields := all | [binary()]}.
 -type manifest() :: #{version := pos_integer(),
                       watermark := binary() | first,
@@ -70,17 +74,13 @@ load(Dir) ->
             Err
     end.
 
-%% @doc Write the manifest atomically (temp + rename).
+%% @doc Write the manifest durably (temp, fsync, rename, dir fsync).
 -spec save(file:name_all(), manifest()) -> ok | {error, term()}.
 save(Dir, M) ->
     case filelib:ensure_dir(filename:join(Dir, "dummy")) of
         ok ->
-            Path = filename:join(Dir, ?FILENAME),
-            Tmp = iolist_to_binary([to_binary(Path), <<".tmp">>]),
-            case file:write_file(Tmp, term_to_binary(M)) of
-                ok -> file:rename(Tmp, Path);
-                {error, _} = Err -> Err
-            end;
+            barrel_ngram_fs:write_file(filename:join(Dir, ?FILENAME),
+                                       term_to_binary(M#{version => ?VERSION}));
         {error, _} = Err ->
             Err
     end.
@@ -184,5 +184,3 @@ cleanup_orphans(Dir, M) ->
 is_segment_file(F) ->
     filename:extension(F) =:= ".ngseg".
 
-to_binary(P) when is_binary(P) -> P;
-to_binary(P) when is_list(P) -> list_to_binary(P).

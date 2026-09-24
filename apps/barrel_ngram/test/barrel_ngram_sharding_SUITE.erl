@@ -137,7 +137,8 @@ shard_keys(Corpus, I) ->
 seg_live_keys(Path) ->
     {ok, H} = barrel_ngram_segment:open(Path),
     try
-        [K || {_O, K, _Hlc, Deleted} <- barrel_ngram_segment:entries(H), not Deleted]
+        {ok, Entries} = barrel_ngram_segment:entries(H),
+        [K || {_O, K, _Hlc, Deleted} <- Entries, not Deleted]
     after
         barrel_ngram_segment:close(H)
     end.

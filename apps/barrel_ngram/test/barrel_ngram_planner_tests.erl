@@ -54,7 +54,7 @@ setup() ->
         entries => [entry(<<"k0">>, 1), entry(<<"k1">>, 2), entry(<<"k2">>, 3),
                     entry(<<"k3">>, 4), entry(<<"k4">>, 5)]
     },
-    ok = ?SEG:write(Path, Spec),
+    {ok, _} = ?SEG:write(Path, Spec),
     {Dir, Path}.
 
 cleanup({Dir, _Path}) ->

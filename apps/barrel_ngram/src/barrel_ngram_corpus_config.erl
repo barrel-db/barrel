@@ -14,8 +14,8 @@
 %%% `active') is internal bookkeeping for crash recovery, not a
 %%% requested option -- see {@link barrel_ngram_corpus_lifecycle}.
 %%%
-%%% Written/read atomically (temp file + rename), matching the existing
-%%% per-shard manifest's own convention.
+%%% Written durably (temp file, fsync, rename, directory fsync), matching
+%%% the per-shard manifest.
 %%% @end
 %%%-------------------------------------------------------------------
 -module(barrel_ngram_corpus_config).
@@ -37,19 +37,13 @@
 }.
 -export_type([config/0]).
 
-%% @doc Write the corpus.meta atomically (temp + rename).
+%% @doc Write the corpus.meta durably (temp, fsync, rename, dir fsync).
 -spec save(map(), config()) -> ok | {error, term()}.
 save(Config, Map) ->
     Path = path(Config),
     case filelib:ensure_dir(Path) of
-        ok ->
-            Tmp = tmp_path(Path),
-            case file:write_file(Tmp, term_to_binary(Map#{version => ?VERSION})) of
-                ok -> file:rename(Tmp, Path);
-                {error, _} = Err -> Err
-            end;
-        {error, _} = Err ->
-            Err
+        ok -> barrel_ngram_fs:write_file(Path, term_to_binary(Map#{version => ?VERSION}));
+        {error, _} = Err -> Err
     end.
 
 %% @doc Load the corpus.meta. Three-way, not collapsed to a boolean:

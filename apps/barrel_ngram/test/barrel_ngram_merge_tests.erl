@@ -36,13 +36,14 @@ cleanup(Dir) ->
 hlc(N) -> <<N:96>>.
 gram(A, B, C) -> (A bsl 16) bor (B bsl 8) bor C.
 entry(K, N, Del) -> #{key => K, hlc => hlc(N), deleted => Del}.
+v({ok, V}) -> V.
 
 write_seg(Dir, Name, Postings, Entries) ->
     write_seg(Dir, Name, Postings, [], Entries).
 
 write_seg(Dir, Name, Postings, PositionalPostings, Entries) ->
     Path = filename:join(Dir, Name),
-    ok = ?SEG:write(Path, #{doc_count => length(Entries), watermark => <<0:96>>,
+    {ok, _} = ?SEG:write(Path, #{doc_count => length(Entries), watermark => <<0:96>>,
                             postings => Postings,
                             positional_postings => PositionalPostings,
                             entries => Entries}),
@@ -52,10 +53,10 @@ write_seg(Dir, Name, Postings, PositionalPostings, Entries) ->
 inspect(Path) ->
     {ok, H} = ?SEG:open(Path),
     try
-        Entries = [{K, Hlc, Del} || {_O, K, Hlc, Del} <- ?SEG:entries(H)],
+        Entries = [{K, Hlc, Del} || {_O, K, Hlc, Del} <- v(?SEG:entries(H))],
         {?SEG:doc_count(H),
          lists:sort(Entries),
-         lists:sort(?SEG:all_postings(H))}
+         lists:sort(v(?SEG:all_postings(H)))}
     after
         ?SEG:close(H)
     end.
@@ -63,7 +64,7 @@ inspect(Path) ->
 inspect_positional(Path) ->
     {ok, H} = ?SEG:open(Path),
     try
-        lists:sort(?SEG:all_positional_postings(H))
+        lists:sort(v(?SEG:all_positional_postings(H)))
     after
         ?SEG:close(H)
     end.
@@ -77,7 +78,7 @@ collapse_supersede(Dir) ->
                        [entry(<<"a">>, 10, false), entry(<<"b">>, 11, false)]),
         S1 = write_seg(Dir, "s1.ngseg", [{Gxyz, [0]}],
                        [entry(<<"a">>, 20, false)]),
-        {ok, Out, DocCount, _Wm} = ?M:merge([S0, S1], false),
+        {ok, #{path := Out, doc_count := DocCount}} = ?M:merge([S0, S1], false),
         {DC, Entries, Postings} = inspect(Out),
         ?assertEqual(2, DocCount),
         ?assertEqual(2, DC),
@@ -93,7 +94,7 @@ tombstone_retained(Dir) ->
         Gabc = gram($a, $b, $c),
         S0 = write_seg(Dir, "s0.ngseg", [{Gabc, [0]}], [entry(<<"a">>, 10, false)]),
         S1 = write_seg(Dir, "s1.ngseg", [], [entry(<<"a">>, 20, true)]),
-        {ok, Out, DocCount, _Wm} = ?M:merge([S0, S1], false),
+        {ok, #{path := Out, doc_count := DocCount}} = ?M:merge([S0, S1], false),
         {_DC, Entries, Postings} = inspect(Out),
         ?assertEqual(1, DocCount),
         ?assertEqual([{<<"a">>, hlc(20), true}], Entries),
@@ -105,7 +106,7 @@ tombstone_dropped(Dir) ->
         Gabc = gram($a, $b, $c),
         S0 = write_seg(Dir, "s0.ngseg", [{Gabc, [0]}], [entry(<<"a">>, 10, false)]),
         S1 = write_seg(Dir, "s1.ngseg", [], [entry(<<"a">>, 20, true)]),
-        {ok, Out, DocCount, _Wm} = ?M:merge([S0, S1], true),
+        {ok, #{path := Out, doc_count := DocCount}} = ?M:merge([S0, S1], true),
         {_DC, Entries, Postings} = inspect(Out),
         ?assertEqual(0, DocCount),
         ?assertEqual([], Entries),
@@ -118,7 +119,7 @@ tombstone_superseded_by_live(Dir) ->
         %% delete then re-create with a higher HLC: the live version wins
         S0 = write_seg(Dir, "s0.ngseg", [], [entry(<<"a">>, 10, true)]),
         S1 = write_seg(Dir, "s1.ngseg", [{Gabc, [0]}], [entry(<<"a">>, 20, false)]),
-        {ok, Out, DocCount, _Wm} = ?M:merge([S0, S1], true),
+        {ok, #{path := Out, doc_count := DocCount}} = ?M:merge([S0, S1], true),
         {_DC, Entries, Postings} = inspect(Out),
         ?assertEqual(1, DocCount),
         ?assertEqual([{<<"a">>, hlc(20), false}], Entries),
@@ -137,7 +138,7 @@ positional_survives_supersede(Dir) ->
                        [entry(<<"a">>, 10, false)]),
         S1 = write_seg(Dir, "s1.ngseg", [{Gxyz, [0]}], [{Gxyz, [{0, [9]}]}],
                        [entry(<<"a">>, 20, false)]),
-        {ok, Out, _DocCount, _Wm} = ?M:merge([S0, S1], false),
+        {ok, #{path := Out}} = ?M:merge([S0, S1], false),
         NewOrd = ord_of(Out, <<"a">>),
         ?assertEqual([{Gxyz, [{NewOrd, [9]}]}], inspect_positional(Out))
     end.
@@ -155,7 +156,7 @@ positional_ordinal_remap(Dir) ->
         S0 = write_seg(Dir, "s0.ngseg", [{Ga, [0]}, {Gb, [1]}],
                        [{Ga, [{0, [2]}]}, {Gb, [{1, [4]}]}],
                        [entry(<<"zebra">>, 10, false), entry(<<"apple">>, 11, false)]),
-        {ok, Out, DocCount, _Wm} = ?M:merge([S0], false),
+        {ok, #{path := Out, doc_count := DocCount}} = ?M:merge([S0], false),
         ?assertEqual(2, DocCount),
         AppleOrd = ord_of(Out, <<"apple">>),
         ZebraOrd = ord_of(Out, <<"zebra">>),
@@ -173,7 +174,7 @@ positional_dropped_with_tombstone(Dir) ->
         S0 = write_seg(Dir, "s0.ngseg", [{Gabc, [0]}], [{Gabc, [{0, [3]}]}],
                        [entry(<<"a">>, 10, false)]),
         S1 = write_seg(Dir, "s1.ngseg", [], [], [entry(<<"a">>, 20, true)]),
-        {ok, Out, DocCount, _Wm} = ?M:merge([S0, S1], false),
+        {ok, #{path := Out, doc_count := DocCount}} = ?M:merge([S0, S1], false),
         ?assertEqual(1, DocCount),
         ?assertEqual([], inspect_positional(Out))
     end.
@@ -182,7 +183,7 @@ positional_dropped_with_tombstone(Dir) ->
 ord_of(Path, Key) ->
     {ok, H} = ?SEG:open(Path),
     try
-        [Ord] = [O || {O, K, _Hlc, _Del} <- ?SEG:entries(H), K =:= Key],
+        [Ord] = [O || {O, K, _Hlc, _Del} <- v(?SEG:entries(H)), K =:= Key],
         Ord
     after
         ?SEG:close(H)

@@ -23,10 +23,15 @@
 
 -export([merge/2]).
 
+-type result() :: #{path := binary(), doc_count := non_neg_integer(),
+                    watermark := binary(), sha256 := binary(),
+                    bytes := non_neg_integer()}.
+-export_type([result/0]).
+
 %% @doc Merge `InputPaths' into one temp segment. Returns its path, the
-%% document count, and the max input watermark.
--spec merge([file:name_all()], boolean()) ->
-    {ok, binary(), non_neg_integer(), binary()} | {error, term()}.
+%% document count, the max input watermark, and its sha256 and size. An
+%% input read error fails the merge.
+-spec merge([file:name_all()], boolean()) -> {ok, result()} | {error, term()}.
 merge([], _DropTombstones) ->
     {error, no_inputs};
 merge(InputPaths, DropTombstones) ->
@@ -34,6 +39,8 @@ merge(InputPaths, DropTombstones) ->
         {ok, Handles} ->
             try
                 do_merge(Handles, InputPaths, DropTombstones)
+            catch
+                throw:{segment_read_error, Reason} -> {error, {merge_read_failed, Reason}}
             after
                 [barrel_ngram_segment:close(H) || H <- Handles]
             end;
@@ -70,8 +77,11 @@ do_merge(Handles, InputPaths, DropTombstones) ->
              postings => Postings, positional_postings => PositionalPostings,
              entries => Entries, codec => Codec},
     case barrel_ngram_segment:write(Temp, Spec) of
-        ok -> {ok, iolist_to_binary(Temp), DocCount, Wm};
-        {error, _} = Err -> Err
+        {ok, Info} ->
+            {ok, Info#{path => iolist_to_binary(Temp), doc_count => DocCount,
+                       watermark => Wm}};
+        {error, _} = Err ->
+            Err
     end.
 
 %% @private Fold inputs into Key -> {MaxHlc, Deleted, Grams, Positional},
@@ -82,8 +92,9 @@ do_merge(Handles, InputPaths, DropTombstones) ->
 collect(Handles) ->
     lists:foldl(
         fun(H, Acc) ->
-            OrdGrams = invert(barrel_ngram_segment:all_postings(H)),
-            OrdPositional = invert_positional(barrel_ngram_segment:all_positional_postings(H)),
+            OrdGrams = invert(read(barrel_ngram_segment:all_postings(H))),
+            OrdPositional = invert_positional(
+                              read(barrel_ngram_segment:all_positional_postings(H))),
             lists:foldl(
                 fun({Ord, Key, Hlc, Deleted}, A) ->
                     case maps:find(Key, A) of
@@ -94,8 +105,11 @@ collect(Handles) ->
                             Positional = maps:get(Ord, OrdPositional, []),
                             A#{Key => {Hlc, Deleted, Grams, Positional}}
                     end
-                end, Acc, barrel_ngram_segment:entries(H))
+                end, Acc, read(barrel_ngram_segment:entries(H)))
         end, #{}, Handles).
+
+read({ok, V}) -> V;
+read({error, Reason}) -> throw({segment_read_error, Reason}).
 
 %% @private gram -> [ordinal] into ordinal -> [gram].
 invert(GramOrds) ->
