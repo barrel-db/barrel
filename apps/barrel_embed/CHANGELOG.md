@@ -3,6 +3,12 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.5.0] - 2026-09-25
+
+### Added
+- Optional provider callback `model_info/1` and `barrel_embed_provider:model_info/2`: the model behind the vectors (`model`, plus `revision` when the config pins one), computed from the config without a network call. Every bundled provider implements it; Ollama resolves an untagged name to `:latest` and Azure falls back to the deployment name. Providers without the callback report the config's `model` and `revision` keys.
+- `info/1` lists each provider's model identity next to its module and name.
+
 ## [2.4.0] - 2026-08-26
 
 ### Added

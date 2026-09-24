@@ -3,6 +3,14 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.9.0] - 2026-09-25
+
+### Added
+- A `vector_top_k` answer on the query route ends with `embedding: {fingerprint, distance, dimensions}` in its meta line, so a node merging answers from several databases can check that their scores compare.
+
+### Changed
+- Requires `barrel ~> 1.5`.
+
 ## [1.8.0] - 2026-09-25
 
 ### Added

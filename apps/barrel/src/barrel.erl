@@ -418,15 +418,33 @@ delete(#{name := Name, docdb := DbBin, vstore := Store} = Db) ->
 info(#{docdb := DbBin} = Db) ->
     case barrel_docdb:db_info(DbBin) of
         {ok, Info} ->
-            case Db of
+            Info1 = case Db of
                 #{embedding := Policy, dimensions := Dim} ->
-                    {ok, Info#{embedding => Policy, dimensions => Dim}};
+                    Info#{embedding => Policy, dimensions => Dim};
                 _ ->
-                    {ok, Info}
-            end;
+                    Info
+            end,
+            {ok, with_embedder(Db, Info1)};
         {error, _} = Err ->
             Err
     end.
+
+%% @private The embedder identity under `embedder' in info/1.
+with_embedder(Db, Info) ->
+    {ok, Emb} = embedder_info(Db),
+    Info#{embedder => maps:with([provider, model, revision, dimensions,
+                                 distance, preprocessing, fingerprint], Emb)}.
+
+%% @private Dimension and distance metric of the vector index.
+vector_space(Store) ->
+    {ok, Stats} = barrel_vectordb:stats(Store),
+    {maps:get(dimension, Stats, undefined), distance_of(Stats)}.
+
+distance_of(#{index := #{config := #{distance_fn := D}}}) -> D;
+distance_of(#{index := #{distance_fn := D}}) -> D;
+distance_of(#{config := #{backend := diskann} = Config}) ->
+    maps:get(distance_fn, maps:get(diskann, Config, #{}), cosine);
+distance_of(_Stats) -> undefined.
 
 %%====================================================================
 %% Documents (barrel_docdb)
@@ -922,12 +940,21 @@ embed_batch(#{vstore := Store}, Texts) ->
     barrel_vectordb:embed_batch(Store, Texts).
 
 %% @doc Describe the database's embedder: `configured', `providers' and
-%% `dimension' (see `barrel_embed:info/1').
+%% `dimension' (see `barrel_embed:info/1'), plus its identity: provider,
+%% model, revision, dimensions, distance, preprocessing and fingerprint
+%% (see {@link barrel_embed_fingerprint}).
 -spec embedder_info(db()) -> {ok, map()}.
-embedder_info(#{embedding := _, embed := Embed}) ->
-    {ok, barrel_embed:info(Embed)};
+embedder_info(#{embedding := Policy, embed := Embed, vstore := Store,
+                dimensions := Dim}) ->
+    Info = barrel_embed:info(Embed),
+    {_, Distance} = vector_space(Store),
+    {ok, maps:merge(Info, barrel_embed_fingerprint:identity(Info, Dim,
+                                                            Distance, Policy))};
 embedder_info(#{vstore := Store}) ->
-    barrel_vectordb:embedder_info(Store).
+    {ok, Info} = barrel_vectordb:embedder_info(Store),
+    {Dim, Distance} = vector_space(Store),
+    {ok, maps:merge(Info, barrel_embed_fingerprint:identity(Info, Dim,
+                                                            Distance, none))}.
 
 %% @doc Vector store statistics.
 -spec vector_stats(db()) -> term().

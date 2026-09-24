@@ -3,6 +3,15 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.5.0] - 2026-09-25
+
+### Added
+- `embedder_info/1` returns the embedder's identity: `provider`, `model`, `revision`, `dimensions`, `distance`, `preprocessing` (the policy's fields and join) and a `fingerprint` (`sha256:` of their canonical JSON, see `barrel_embed_fingerprint`). Two databases with the same fingerprint produce comparable vector scores. No fingerprint without a configured embedder.
+- `info/1` carries the same identity under `embedder`.
+
+### Changed
+- Requires `barrel_embed ~> 2.5` and starts `crypto`.
+
 ## [1.4.0] - 2026-09-25
 
 ### Added

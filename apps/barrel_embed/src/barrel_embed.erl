@@ -180,9 +180,11 @@ dimension(#{dimension := Dimension}) ->
 info(undefined) ->
     #{configured => false};
 info(#{providers := Providers, dimension := Dimension}) ->
+    %% model (and revision when pinned) identify the vector space
     ProviderInfo = [
-        #{module => Module, name => Module:name()}
-        || {Module, _Config} <- Providers
+        maps:merge(#{module => Module, name => Module:name()},
+                   barrel_embed_provider:model_info(Module, Config))
+        || {Module, Config} <- Providers
     ],
     #{
         configured => true,

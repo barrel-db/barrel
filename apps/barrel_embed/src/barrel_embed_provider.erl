@@ -56,13 +56,23 @@
 %% Used to skip unavailable providers in fallback chains.
 -callback available(Config :: map()) -> boolean().
 
--optional_callbacks([init/1, available/1]).
+%% Identify the model behind the vectors: `model', plus `revision'
+%% when the configuration pins one. Pure: no network.
+-callback model_info(Config :: map()) -> model_info().
+
+-optional_callbacks([init/1, available/1, model_info/1]).
+
+-type model_info() :: #{model := binary() | undefined,
+                        revision => binary()}.
+-export_type([model_info/0]).
 
 %% Utility exports
 -export([
     call_embed/3,
     call_embed_batch/3,
-    check_available/2
+    check_available/2,
+    model_info/2,
+    model_info_from/3
 ]).
 
 %%====================================================================
@@ -94,6 +104,32 @@ call_embed_batch(Module, Texts, Config) ->
         Class:Reason:Stack ->
             {error, {provider_error, Module, {Class, Reason, Stack}}}
     end.
+
+%% @doc The provider's model identity; providers without `model_info/1'
+%% fall back to the config's `model' and `revision' keys.
+-spec model_info(module(), map()) -> model_info().
+model_info(Module, Config) ->
+    _ = code:ensure_loaded(Module),
+    case erlang:function_exported(Module, model_info, 1) of
+        true -> Module:model_info(Config);
+        false -> model_info_from(Config, model, undefined)
+    end.
+
+%% @doc Read the model id from `Key' (default `Default') and the
+%% optional `revision' from a provider config.
+-spec model_info_from(map(), atom(), binary() | string() | undefined) ->
+    model_info().
+model_info_from(Config, Key, Default) ->
+    Info = #{model => to_bin(maps:get(Key, Config, Default))},
+    case maps:get(revision, Config, undefined) of
+        undefined -> Info;
+        Rev -> Info#{revision => to_bin(Rev)}
+    end.
+
+to_bin(undefined) -> undefined;
+to_bin(B) when is_binary(B) -> B;
+to_bin(L) when is_list(L) -> unicode:characters_to_binary(L);
+to_bin(A) when is_atom(A) -> atom_to_binary(A).
 
 %% @doc Check if a provider is available.
 %% Returns true if the provider doesn't implement available/1.

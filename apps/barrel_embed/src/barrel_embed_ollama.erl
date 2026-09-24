@@ -39,6 +39,7 @@
     embed_batch/2,
     dimension/1,
     name/0,
+    model_info/1,
     init/1,
     available/1
 ]).
@@ -55,6 +56,21 @@
 %% @doc Provider name.
 -spec name() -> atom().
 name() -> ollama.
+
+%% @doc Model identity (see barrel_embed_provider:model_info/2).
+-spec model_info(map()) -> barrel_embed_provider:model_info().
+model_info(Config) ->
+    #{model := Model} = Info =
+        barrel_embed_provider:model_info_from(Config, model, ?DEFAULT_MODEL),
+    Info#{model := with_tag(Model)}.
+
+%% Ollama resolves an untagged name to `:latest'.
+with_tag(Model) ->
+    Last = lists:last(binary:split(Model, <<"/">>, [global])),
+    case binary:split(Last, <<":">>) of
+        [_] -> <<Model/binary, ":latest">>;
+        [_, _] -> Model
+    end.
 
 %% @doc Get dimension for this provider.
 -spec dimension(map()) -> pos_integer().

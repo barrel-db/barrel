@@ -158,7 +158,9 @@ t_vectors(Config) ->
     ?assertEqual({error, embedder_not_configured}, barrel:embed(Db, <<"hello">>)),
     ?assertEqual({error, embedder_not_configured},
                  barrel:embed_batch(Db, [<<"hello">>])),
-    ?assertEqual({ok, #{configured => false}}, barrel:embedder_info(Db)),
+    {ok, EmbInfo} = barrel:embedder_info(Db),
+    ?assertMatch(#{configured := false, distance := cosine}, EmbInfo),
+    ?assertNot(maps:is_key(fingerprint, EmbInfo)),
     ok = barrel:vector_delete(Db, <<"a">>),
     ?assertEqual(not_found, barrel:vector_get(Db, <<"a">>)),
     ok.

@@ -35,6 +35,7 @@
          sync_batch_put/1,
          explicit_vector_skips_embedder/1,
          embed_accessors/1,
+         embedder_fingerprint/1,
          explicit_vector_dimension_check/1,
          search_end_to_end/1,
          vector_add_guards/1,
@@ -74,6 +75,7 @@ all() ->
      explicit_vector_dimension_check,
      search_end_to_end,
      embed_accessors,
+     embedder_fingerprint,
      vector_add_guards,
      byo_embedding_async,
      byo_embedding_sync_and_precedence,
@@ -654,6 +656,37 @@ embed_accessors(Config) ->
     {ok, Info} = barrel:embedder_info(Db),
     ?assertMatch(#{configured := _}, Info),
     ok = barrel:close(Db).
+
+%% Same policy, same fingerprint; another model changes it. The ollama
+%% provider is only configured here, never called.
+embedder_fingerprint(Config) ->
+    Policy = fun(Model) ->
+        #{fields => [<<"title">>, <<"body">>],
+          embedder => {ollama, #{model => Model}}}
+    end,
+    {ok, A} = open_record(fp_a_db, Config, Policy(<<"nomic-embed-text">>)),
+    {ok, B} = open_record(fp_b_db, Config,
+                          Policy(<<"nomic-embed-text:latest">>)),
+    {ok, C} = open_record(fp_c_db, Config, Policy(<<"all-minilm">>)),
+    {ok, IA} = barrel:embedder_info(A),
+    {ok, IB} = barrel:embedder_info(B),
+    {ok, IC} = barrel:embedder_info(C),
+    ?assertMatch(#{provider := ollama, model := <<"nomic-embed-text:latest">>,
+                   dimensions := 3, distance := cosine,
+                   preprocessing := #{fields := [[<<"title">>], [<<"body">>]],
+                                      join := <<"\n">>},
+                   fingerprint := <<"sha256:", _/binary>>}, IA),
+    ?assertEqual(maps:get(fingerprint, IA), maps:get(fingerprint, IB)),
+    ?assertNotEqual(maps:get(fingerprint, IA), maps:get(fingerprint, IC)),
+    %% info/1 carries the same identity
+    {ok, Info} = barrel:info(A),
+    ?assertEqual(maps:get(fingerprint, IA),
+                 maps:get(fingerprint, maps:get(embedder, Info))),
+    %% no embedder configured: no fingerprint
+    {ok, D} = open_record(fp_d_db, Config, #{fields => [<<"title">>]}),
+    {ok, ID} = barrel:embedder_info(D),
+    ?assertNot(maps:is_key(fingerprint, ID)),
+    [ok = barrel:close(Db) || Db <- [A, B, C, D]].
 
 vector_add_guards(Config) ->
     {ok, Db} = open_record(guards_db, Config, #{fields => [<<"title">>]}),
