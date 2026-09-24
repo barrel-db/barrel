@@ -25,6 +25,7 @@ To expose metrics over HTTP for a Prometheus scrape, run the `barrel_server` app
 |--------|------|--------|-------------|
 | `barrel_doc_operations` | Counter | db, operation | Total document operations |
 | `barrel_doc_operation_duration_seconds` | Histogram | db, operation | Operation latency |
+| `barrel_write_group_size` | Histogram | db | Write requests committed in one batch |
 
 **Operations:** `put`, `get`, `delete`
 

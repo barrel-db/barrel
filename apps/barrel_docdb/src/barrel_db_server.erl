@@ -91,7 +91,30 @@
     %% writer loop. #{Kind => {Pid, Waiters, Periodic}}: Waiters are the
     %% gen_server Froms to reply to; Periodic marks a worker that a timer
     %% contributed to, so its completion re-arms the periodic timer.
-    sweep_workers = #{} :: #{atom() => {pid(), [term()], boolean()}}
+    sweep_workers = #{} :: #{atom() => {pid(), [term()], boolean()}},
+    max_group = 256 :: pos_integer(),  %% max write requests per batch
+    write_groups = #{groups => 0, requests => 0, max_size => 0} :: map()
+}).
+
+%% A write request in a group commit. `seg' holds the items built in the
+%% current group, `done' the results of items committed by earlier
+%% groups, both newest first. `more' marks a request that continues in
+%% the next group.
+-record(wreq, {
+    from :: gen_server:from(),
+    kind :: put_doc | put_docs | delete_doc | outbox_ack,
+    opts = #{} :: map(),
+    pending = [] :: [term()],
+    seg = [] :: [{term(), list(), term()}],
+    done = [] :: [term()],
+    more = false :: boolean()
+}).
+
+%% A group of write requests committed in one batch (reqs newest first).
+-record(grp, {
+    reqs = [] :: [#wreq{}],
+    ids = #{} :: #{binary() => true},
+    count = 0 :: non_neg_integer()
 }).
 
 %% Default compaction settings
@@ -430,7 +453,8 @@ init(Name, Config, CompiledChannels, DbPath, Keyspace, Parent, ForkHlc, Env) ->
                         retention_interval = RetentionInterval,
                         ttl_sweep_interval = TtlInterval,
                         ttl_sweep_batch = TtlBatch,
-                        ttl_timer = TtlTimer
+                        ttl_timer = TtlTimer,
+                        max_group = maps:get(max_group, Config, 256)
                     }};
                 {error, AttReason} ->
                     %% Close document store if attachment store fails
@@ -448,7 +472,8 @@ handle_call(info, _From, #state{name = Name, keyspace = Keyspace,
                                 parent = Parent, fork_hlc = ForkHlc,
                                 config = Config, db_path = DbPath,
                                 store_ref = StoreRef, att_ref = AttRef,
-                                retention_period = RetentionPeriod} = State) ->
+                                retention_period = RetentionPeriod,
+                                write_groups = WriteGroups} = State) ->
     AttFloor = case barrel_att_store:supports_sync(AttRef) of
         true -> barrel_att_store:att_floor(AttRef, Name);
         false -> undefined
@@ -461,7 +486,8 @@ handle_call(info, _From, #state{name = Name, keyspace = Keyspace,
         pid => self(),
         retention_period => RetentionPeriod,
         history_floor => barrel_history:history_floor(StoreRef, Name),
-        att_floor => AttFloor
+        att_floor => AttFloor,
+        write_groups => WriteGroups
     },
     Info = case Parent of
         undefined -> Info0;
@@ -489,22 +515,18 @@ handle_call(get_store_ref, _From, #state{store_ref = StoreRef} = State) ->
 handle_call(get_att_ref, _From, #state{att_ref = AttRef} = State) ->
     {reply, {ok, AttRef}, State};
 
-%% Document operations
-handle_call({put_doc, Doc, Opts}, _From,
-            #state{name = DbName, store_ref = StoreRef} = State) ->
-    Result = case validate_prov_opt(Opts) of
-        {ok, Opts1} -> do_put_doc(StoreRef, DbName, Doc, Opts1);
-        {error, _} = PErr -> PErr
-    end,
-    {reply, Result, State};
+%% Document writes: committed with the writes waiting behind them
+handle_call({put_doc, _, _} = Req, From, State) ->
+    {noreply, group_commit(Req, From, State)};
 
-handle_call({put_docs, Docs, Opts}, _From,
-            #state{name = DbName, store_ref = StoreRef} = State) ->
-    Result = case validate_prov_opt(Opts) of
-        {ok, Opts1} -> do_put_docs(StoreRef, DbName, Docs, Opts1);
-        {error, _} = PErr -> PErr
-    end,
-    {reply, Result, State};
+handle_call({put_docs, _, _} = Req, From, State) ->
+    {noreply, group_commit(Req, From, State)};
+
+handle_call({delete_doc, _, _} = Req, From, State) ->
+    {noreply, group_commit(Req, From, State)};
+
+handle_call({outbox_ack, _, _} = Req, From, State) ->
+    {noreply, group_commit(Req, From, State)};
 
 handle_call({get_doc, DocId, Opts}, _From,
             #state{name = DbName, store_ref = StoreRef} = State) ->
@@ -514,14 +536,6 @@ handle_call({get_doc, DocId, Opts}, _From,
 handle_call({get_docs, DocIds, Opts}, _From,
             #state{name = DbName, store_ref = StoreRef} = State) ->
     Result = do_get_docs(StoreRef, DbName, DocIds, Opts),
-    {reply, Result, State};
-
-handle_call({delete_doc, DocId, Opts}, _From,
-            #state{name = DbName, store_ref = StoreRef} = State) ->
-    Result = case validate_prov_opt(Opts) of
-        {ok, Opts1} -> do_delete_doc(StoreRef, DbName, DocId, Opts1);
-        {error, _} = PErr -> PErr
-    end,
     {reply, Result, State};
 
 handle_call({fold_docs, Fun, Acc}, From, State) ->
@@ -559,17 +573,6 @@ handle_call(ttl_sweep, From,
                    ttl_sweep_batch = Batch} = State) ->
     Fun = fun() -> do_ttl_sweep(StoreRef, DbName, Batch) end,
     {noreply, start_sweep(ttl, Fun, From, false, State)};
-
-%% Tagged outbox operations
-handle_call({outbox_ack, Tag, Hlcs}, _From,
-            #state{name = DbName, store_ref = StoreRef} = State) ->
-    Ks = barrel_keyspace:resolve(DbName),
-    Result = case [{delete, barrel_store_keys:outbox_key(Ks, Tag, Hlc)}
-                   || Hlc <- Hlcs] of
-        [] -> ok;
-        Ops -> barrel_store_rocksdb:write_batch(StoreRef, Ops, #{})
-    end,
-    {reply, Result, State};
 
 %% Conflict operations
 handle_call({get_conflicts, DocId}, _From,
@@ -1114,36 +1117,215 @@ inc_sweep(Key, Stats) ->
 %% Wide column names for the document entity are shared with the caller-side
 %% reader; they live in barrel_docdb.hrl (?COL_VERSION, ?COL_VV, ...).
 
-%% @doc Put a document (create or update)
-%% Accepts: Erlang map, indexed CBOR binary, or plain CBOR binary
-%% Options:
-%%   - sync: boolean() - if true, sync to disk before returning (default: false)
-do_put_doc(StoreRef, DbName, Doc, Opts) ->
-    %% Normalize input: map, indexed binary, or plain CBOR -> map for processing
-    DocMap = barrel_doc:to_map(Doc),
-    DocRecord = barrel_doc:make_doc_record(DocMap),
-    Old = read_current(StoreRef, DbName, maps:get(id, DocRecord)),
-    case cas_check(Old, maps:get(expected_version, DocRecord)) of
-        ok ->
-            {AllOps, {DocId, NewToken, NextHlc, Deleted, DocBody}} =
-                build_write_ops(StoreRef, DbName, DocRecord, Old, Opts),
-            Sync = maps:get(sync, Opts, false),
-            ok = barrel_store_rocksdb:write_batch(StoreRef, AllOps, #{sync => Sync}),
-            notify_subscribers(DbName, DocId, NewToken, NextHlc, Deleted, DocBody),
-            %% return_hlc => true adds the write's change HLC (internal atom
-            %% key), used by callers that ack outbox entries.
-            Result = #{
-                <<"id">> => DocId,
-                <<"ok">> => true,
-                <<"rev">> => NewToken
-            },
-            case maps:get(return_hlc, Opts, false) of
-                true -> {ok, Result#{hlc => NextHlc}};
-                false -> {ok, Result}
-            end;
-        {error, conflict} ->
-            {error, conflict}
+%%====================================================================
+%% Group commit
+%%====================================================================
+
+%% @private Commit a write request together with the write requests
+%% already waiting in the mailbox: one batch, one sync. Each request is
+%% built in arrival order and answered after the batch is written.
+group_commit(Req, From, State) ->
+    case new_wreq(Req, From) of
+        {ok, W} ->
+            run_group(W, State);
+        {error, _} = Err ->
+            gen_server:reply(From, Err),
+            State
     end.
+
+new_wreq({put_doc, Doc, Opts}, From) ->
+    wreq(put_doc, From, Opts, [{doc, Doc}]);
+new_wreq({put_docs, Docs, Opts}, From) ->
+    wreq(put_docs, From, Opts, [{doc, D} || D <- Docs]);
+new_wreq({delete_doc, DocId, Opts}, From) ->
+    wreq(delete_doc, From, Opts, [{delete, DocId}]);
+new_wreq({outbox_ack, Tag, Hlcs}, From) ->
+    {ok, #wreq{from = From, kind = outbox_ack, pending = [{ack, Tag, Hlcs}]}}.
+
+wreq(Kind, From, Opts, Items) ->
+    case validate_prov_opt(Opts) of
+        {ok, Opts1} ->
+            {ok, #wreq{from = From, kind = Kind, opts = Opts1, pending = Items}};
+        {error, _} = Err ->
+            Err
+    end.
+
+%% A request that touches a doc id already written in the group closes
+%% it and opens the next one, so its read sees the earlier write.
+run_group(W, State) ->
+    {Grp, Carry} = case add_req(W, #grp{}, State) of
+        {G, none} -> drain(G, State);
+        Closed -> Closed
+    end,
+    {State1, MoreSeg} = commit_group(Grp, State),
+    case Carry of
+        none -> State1;
+        #wreq{done = Done} -> run_group(Carry#wreq{done = MoreSeg ++ Done}, State1)
+    end.
+
+%% Take the writes waiting in the mailbox without blocking. Anything
+%% else keeps its place.
+drain(#grp{count = N} = G, #state{max_group = Max}) when N >= Max ->
+    {G, none};
+drain(G, State) ->
+    receive
+        {'$gen_call', From, {put_doc, _, _} = Req} -> drain(Req, From, G, State);
+        {'$gen_call', From, {put_docs, _, _} = Req} -> drain(Req, From, G, State);
+        {'$gen_call', From, {delete_doc, _, _} = Req} -> drain(Req, From, G, State);
+        {'$gen_call', From, {outbox_ack, _, _} = Req} -> drain(Req, From, G, State)
+    after 0 ->
+        {G, none}
+    end.
+
+drain(Req, From, G, State) ->
+    case new_wreq(Req, From) of
+        {ok, W} ->
+            case add_req(W, G, State) of
+                {G1, none} -> drain(G1, State);
+                Closed -> Closed
+            end;
+        {error, _} = Err ->
+            gen_server:reply(From, Err),
+            drain(G, State)
+    end.
+
+%% Build the request's items into the group. Returns {Group, none}, or
+%% {Group, Carry} when an item's id is already written in the group.
+add_req(#wreq{pending = []} = W, #grp{reqs = Reqs, count = N} = G, _State) ->
+    {G#grp{reqs = [W | Reqs], count = N + 1}, none};
+add_req(#wreq{pending = [Item | Rest], seg = Seg, opts = Opts} = W,
+        #grp{ids = Ids} = G,
+        #state{name = DbName, store_ref = StoreRef} = State) ->
+    case prepare_item(Item) of
+        {error, _} = Err ->
+            add_req(W#wreq{pending = Rest, seg = [{Err, [], none} | Seg]}, G, State);
+        {Id, _} when is_map_key(Id, Ids) ->
+            close_group(W, G);
+        {Id, Prepared} ->
+            Built = build_item(Prepared, StoreRef, DbName, Opts),
+            add_req(W#wreq{pending = Rest, seg = [Built | Seg]},
+                    G#grp{ids = mark_id(Id, Built, Ids)}, State)
+    end.
+
+close_group(#wreq{seg = []} = W, G) ->
+    {G, W};
+close_group(#wreq{} = W, #grp{reqs = Reqs, count = N} = G) ->
+    {G#grp{reqs = [W#wreq{more = true} | Reqs], count = N + 1},
+     W#wreq{seg = []}}.
+
+mark_id(none, _Built, Ids) -> Ids;
+mark_id(Id, {{ok, _}, _, _}, Ids) -> Ids#{Id => true};
+mark_id(_Id, _Built, Ids) -> Ids.
+
+prepare_item({doc, Doc}) ->
+    try barrel_doc:make_doc_record(barrel_doc:to_map(Doc)) of
+        #{id := DocId} = DocRecord -> {DocId, {doc, DocRecord}}
+    catch
+        _:Reason -> {error, Reason}
+    end;
+prepare_item({delete, DocId} = Item) ->
+    {DocId, Item};
+prepare_item({ack, _Tag, _Hlcs} = Item) ->
+    {none, Item}.
+
+%% Build one item: {Result, Ops, NotifyInfo}. A failed item adds no ops.
+build_item({doc, DocRecord}, StoreRef, DbName, Opts) ->
+    try
+        Old = read_current(StoreRef, DbName, maps:get(id, DocRecord)),
+        case cas_check(Old, maps:get(expected_version, DocRecord)) of
+            ok ->
+                {Ops, Notify} = build_write_ops(StoreRef, DbName, DocRecord,
+                                                Old, Opts),
+                {write_result(Notify, Opts), Ops, Notify};
+            {error, conflict} = Conflict ->
+                {Conflict, [], none}
+        end
+    catch
+        _:Reason -> {{error, Reason}, [], none}
+    end;
+build_item({delete, DocId}, StoreRef, DbName, Opts) ->
+    try build_delete_ops(StoreRef, DbName, DocId, Opts) of
+        {ok, Ops, Notify} -> {write_result(Notify, Opts), Ops, Notify};
+        {error, _} = Err -> {Err, [], none}
+    catch
+        throw:{error, _} = Err -> {Err, [], none};
+        _:Reason -> {{error, Reason}, [], none}
+    end;
+build_item({ack, Tag, Hlcs}, _StoreRef, DbName, _Opts) ->
+    Ks = barrel_keyspace:resolve(DbName),
+    {ok, [{delete, barrel_store_keys:outbox_key(Ks, Tag, Hlc)} || Hlc <- Hlcs],
+     none}.
+
+%% return_hlc => true adds the write's change HLC (internal atom key),
+%% used by callers that ack outbox entries.
+write_result({DocId, NewToken, NextHlc, _Deleted, _DocBody}, Opts) ->
+    Result = #{<<"id">> => DocId, <<"ok">> => true, <<"rev">> => NewToken},
+    case maps:get(return_hlc, Opts, false) of
+        true -> {ok, Result#{hlc => NextHlc}};
+        false -> {ok, Result}
+    end.
+
+%% Write the group in one batch, synced when any request asked for it,
+%% then notify and answer each request in arrival order. Returns the
+%% results of a request that continues in the next group.
+commit_group(#grp{reqs = []}, State) ->
+    {State, []};
+commit_group(#grp{reqs = Reqs0, count = N},
+             #state{name = DbName, store_ref = StoreRef} = State) ->
+    Reqs = lists:reverse(Reqs0),
+    Ops = lists:append([ItemOps || #wreq{seg = Seg} <- Reqs,
+                                   {_, ItemOps, _} <- lists:reverse(Seg)]),
+    Sync = lists:any(fun(#wreq{opts = O}) -> maps:get(sync, O, false) =:= true end,
+                     Reqs),
+    Written = write_group(StoreRef, Ops, Sync),
+    MoreSeg = lists:foldl(fun(W, Acc) -> finish_req(W, Written, DbName, Acc) end,
+                          [], Reqs),
+    ok = barrel_metrics:observe_write_group(DbName, N),
+    {count_group(N, State), MoreSeg}.
+
+write_group(_StoreRef, [], _Sync) ->
+    ok;
+write_group(StoreRef, Ops, Sync) ->
+    try barrel_store_rocksdb:write_batch(StoreRef, Ops, #{sync => Sync}) of
+        ok -> ok;
+        {error, _} = Err -> Err
+    catch
+        Class:Reason -> {error, {Class, Reason}}
+    end.
+
+finish_req(#wreq{seg = Seg, more = More, done = Done} = W, Written, DbName,
+           Acc) ->
+    Final = [finish_item(Item, Written, DbName) || Item <- lists:reverse(Seg)],
+    case More of
+        true ->
+            lists:reverse(Final);
+        false ->
+            reply_req(W, lists:reverse(Done) ++ Final),
+            Acc
+    end.
+
+finish_item({Result, [], _Notify}, _Written, _DbName) ->
+    Result;
+finish_item({Result, _Ops, Notify}, ok, DbName) ->
+    notify_write(DbName, Notify),
+    Result;
+finish_item({_Result, _Ops, _Notify}, {error, _} = Err, _DbName) ->
+    Err.
+
+reply_req(#wreq{from = From, kind = put_docs}, Results) ->
+    gen_server:reply(From, Results);
+reply_req(#wreq{from = From}, [Result]) ->
+    gen_server:reply(From, Result).
+
+notify_write(_DbName, none) ->
+    ok;
+notify_write(DbName, {DocId, NewToken, NextHlc, Deleted, DocBody}) ->
+    notify_subscribers(DbName, DocId, NewToken, NextHlc, Deleted, DocBody).
+
+count_group(N, #state{write_groups = #{groups := G, requests := R,
+                                       max_size := M}} = State) ->
+    State#state{write_groups = #{groups => G + 1, requests => R + N,
+                                 max_size => max(M, N)}}.
 
 %% @doc Embedding entity columns for a write. Present only when the doc
 %% carried an _embedding; absent otherwise, which clears any previous
@@ -1438,71 +1620,6 @@ build_write_ops(StoreRef, DbName, DocRecord, Old, Opts) ->
         ++ ExpiryOps ++ [BodyOp],
     {AllOps, {DocId, NewToken, NextHlc, Deleted, DocBody}}.
 
-%% @doc Put multiple documents in a single batch (batch write)
-%% Options:
-%%   - sync: boolean() - if true, sync to disk before returning (default: false)
-do_put_docs(StoreRef, DbName, Docs, Opts) ->
-    Sync = maps:get(sync, Opts, false),
-    %% Process each document to build operations and metadata
-    {AllOps, Notifications} = lists:foldl(
-        fun(Doc, {OpsAcc, NotifyAcc}) ->
-            case prepare_doc_ops(StoreRef, DbName, Doc, Opts) of
-                {ok, Ops, NotifyInfo} ->
-                    {OpsAcc ++ Ops, [NotifyInfo | NotifyAcc]};
-                {error, _Reason} = Err ->
-                    %% Skip failed docs, include error in notifications
-                    {OpsAcc, [{error, Err} | NotifyAcc]}
-            end
-        end,
-        {[], []},
-        Docs
-    ),
-
-    %% Write all operations in a single batch (includes body CF writes)
-    case AllOps of
-        [] -> ok;
-        _ ->
-            WriteOpts = #{sync => Sync},
-            ok = barrel_store_rocksdb:write_batch(StoreRef, AllOps, WriteOpts)
-    end,
-
-    %% Notify subscribers and build results (reverse to maintain order)
-    ReturnHlc = maps:get(return_hlc, Opts, false),
-    Results = lists:map(
-        fun({error, Err}) ->
-            Err;
-           ({DocId, NewToken, NextHlc, Deleted, DocBody}) ->
-            notify_subscribers(DbName, DocId, NewToken, NextHlc, Deleted, DocBody),
-            Result = #{<<"id">> => DocId, <<"ok">> => true, <<"rev">> => NewToken},
-            case ReturnHlc of
-                true -> {ok, Result#{hlc => NextHlc}};
-                false -> {ok, Result}
-            end
-        end,
-        lists:reverse(Notifications)
-    ),
-    Results.
-
-%% @doc Prepare document operations without writing.
-%% Batch-level Opts carry the outbox tags applied to every doc in the batch.
-%% Returns {ok, Ops, NotifyInfo} or {error, Reason}
-prepare_doc_ops(StoreRef, DbName, Doc, Opts) ->
-    try
-        DocMap = barrel_doc:to_map(Doc),
-        DocRecord = barrel_doc:make_doc_record(DocMap),
-        Old = read_current(StoreRef, DbName, maps:get(id, DocRecord)),
-        case cas_check(Old, maps:get(expected_version, DocRecord)) of
-            ok -> ok;
-            {error, conflict} -> throw(conflict)
-        end,
-        {AllOps, NotifyInfo} =
-            build_write_ops(StoreRef, DbName, DocRecord, Old, Opts),
-        {ok, AllOps, NotifyInfo}
-    catch
-        _:Reason ->
-            {error, Reason}
-    end.
-
 %% @doc Store a computed embedding in the doc entity (CAS on revision).
 %% Read-modify-write of the entity columns is safe here: this runs in
 %% the database writer, which serializes all entity writes.
@@ -1549,6 +1666,19 @@ do_get_docs(StoreRef, DbName, DocIds, Opts) ->
 %%   - rev: binary() - expected version token (optional, for conflict detection)
 %%   - sync: boolean() - if true, sync to disk before returning (default: false)
 do_delete_doc(StoreRef, DbName, DocId, Opts) ->
+    case build_delete_ops(StoreRef, DbName, DocId, Opts) of
+        {ok, AllOps, Notify} ->
+            WriteOpts = #{sync => maps:get(sync, Opts, false)},
+            ok = barrel_store_rocksdb:write_batch(StoreRef, AllOps, WriteOpts),
+            notify_write(DbName, Notify),
+            write_result(Notify, Opts);
+        {error, _} = Err ->
+            Err
+    end.
+
+%% @doc Build the ops of a versioned tombstone write. Throws
+%% {error, {conflict, CurrentToken}} when the rev option does not match.
+build_delete_ops(StoreRef, DbName, DocId, Opts) ->
     Ks = barrel_keyspace:resolve(DbName),
     case read_current(StoreRef, DbName, DocId) of
         undefined ->
@@ -1636,22 +1766,10 @@ do_delete_doc(StoreRef, DbName, DocId, Opts) ->
             ChannelOps = channel_ops(DbName, NextHlc, NewDocInfo, undefined,
                                      OldHlc, OldDocBody, OldDeleted),
 
-            %% Write batch atomically
             AllOps = DocOps ++ HlcDeleteOps ++ PathIndexOps ++ ChangeOps ++ PathHlcOps
                 ++ ArchiveOps ++ ChainOps ++ OutboxOps ++ HistoryOps
                 ++ ChannelOps ++ ExpiryOps,
-            WriteOpts = #{sync => maps:get(sync, Opts, false)},
-            ok = barrel_store_rocksdb:write_batch(StoreRef, AllOps, WriteOpts),
-
-            %% Notify path subscribers
-            notify_subscribers(DbName, DocId, NewToken, NextHlc, true, #{}),
-
-            DeleteResult = #{<<"id">> => DocId, <<"ok">> => true,
-                             <<"rev">> => NewToken},
-            case maps:get(return_hlc, Opts, false) of
-                true -> {ok, DeleteResult#{hlc => NextHlc}};
-                false -> {ok, DeleteResult}
-            end
+            {ok, AllOps, {DocId, NewToken, NextHlc, true, #{}}}
     end.
 
 %%====================================================================

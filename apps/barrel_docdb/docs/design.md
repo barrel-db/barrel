@@ -82,6 +82,46 @@ Databases are registered in `persistent_term` for fast lookup:
 persistent_term:put({barrel_db, DbName}, Pid)
 ```
 
+#### Write serialization and group commit
+
+Reads run in the caller, against the store. Writes (`put_doc`, `put_docs`,
+`delete_doc`, `outbox_ack`) go through the database server, one at a time,
+so the conflict check of a write always sees the writes before it.
+
+Serializing writes does not mean syncing each one. When the server takes a
+write, it also takes the writes already waiting in its mailbox, without
+blocking, and commits them together:
+
+1. **Collect.** Up to `max_group` requests (default 256). Other messages
+   keep their place in the mailbox.
+2. **Build, in arrival order.** Each request gets its own read, conflict
+   check and ops, with its own options (`outbox`, `return_hlc`, `sync`,
+   provenance). HLCs are issued in arrival order, so the changes feed and
+   the last HLC stay monotonic. A request that fails its check or
+   validation adds no ops and gets its own error.
+3. **Close on a repeated id.** A request touching a doc id already written
+   in the group ends the group and opens the next one, so its read sees the
+   earlier write. The same rule applies inside `put_docs`.
+4. **Write once.** One `write_batch`, synced when any request asked for
+   `sync`.
+5. **Answer.** In arrival order, each request notifies its subscribers and
+   gets the same answer it would get alone.
+
+What a caller is promised:
+
+- The call returns after the batch holding its write is written, and
+  synced if it asked for `sync`.
+- Create-if-absent (no `_rev`) and CAS (with `_rev`) behave as if the
+  writes ran one after the other: of 32 concurrent creators of one id,
+  exactly one gets `ok`.
+- A write that did not ask for `sync` may be synced by a neighbour. That
+  only makes it durable sooner.
+- If the batch write fails, every request of the group gets
+  `{error, Reason}` and the server keeps running.
+
+A single writer with nothing waiting is a group of one. Group sizes are in
+`db_info/1` (`write_groups`) and in the `barrel_write_group_size` metric.
+
 ### 2. Document Model
 
 Documents are versioned with Hybrid Logical Clocks, not revision trees. Each write is a **version** `{HLC, Author}` whose API token is `<hex(hlc)>@<author>` (the value in `<<"_rev">>`). Each document carries a **version vector** tracking the highest HLC seen from each author. Concurrent writes are resolved by last-write-wins with the losing versions retained.
@@ -661,6 +701,7 @@ barrel_docdb_sup (one_for_one)
 ## Performance Considerations
 
 ### Write Path
+- Concurrent writes to one database share one batch and one sync (group commit)
 - Batch operations reduce disk I/O
 - Sequence numbers enable efficient change tracking
 - Revision computation is CPU-bound (SHA-256)

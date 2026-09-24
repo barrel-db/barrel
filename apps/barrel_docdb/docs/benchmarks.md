@@ -27,6 +27,27 @@ Basic document operations show strong single-document performance:
 - Writes include RocksDB sync and indexing overhead
 - Bulk inserts can achieve higher throughput with batching
 
+## Concurrent Synced Writers
+
+Each writer runs `put_doc(Db, Doc, #{outbox => [Tag], return_hlc => true, sync => true})`
+on distinct ids, against one database. Measured on a 14-CPU Mac (Apple
+Silicon, APFS), 1,280 writes per row.
+
+| Writers | 1.5.0 (writes/s) | 1.6.0 (writes/s) |
+|---------|------------------|------------------|
+| 1 | 176 | 185 |
+| 4 | 211 | 703 |
+| 16 | 217 | 2,302 |
+| 64 | 181 | 6,588 |
+
+In 1.5.0 each write paid its own fsync, so throughput stayed flat whatever
+the number of writers. From 1.6.0 the writes waiting at the database commit
+in one batch and one sync. The single writer is unchanged: it still pays one
+sync per write.
+
+`barrel_group_commit_SUITE:concurrent_synced_throughput` runs the 1 and 64
+writer cases and prints the ratio and the group sizes.
+
 ## Query Performance
 
 Query performance varies based on query pattern and result set size.
@@ -280,8 +301,9 @@ Use `explain/2` to see how queries execute:
 ### Write Optimization
 
 1. **Batch writes** for bulk inserts
-2. **Disable sync** for non-critical writes: `#{sync => false}`
-3. **Use specific paths** in change subscriptions vs wildcards
+2. **Write concurrently** to one database: concurrent writes share a batch and a sync
+3. **Disable sync** for non-critical writes: `#{sync => false}`
+4. **Use specific paths** in change subscriptions vs wildcards
 
 ### Configuration Tuning
 

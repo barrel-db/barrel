@@ -28,6 +28,7 @@
     inc_doc_ops/2,
     inc_doc_ops/3,
     observe_doc_latency/3,
+    observe_write_group/2,
 
     %% Query operations
     inc_query_ops/1,
@@ -69,6 +70,11 @@
     {histogram, barrel_doc_operation_duration_seconds,
      <<"Document operation duration in seconds">>,
      [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0]},
+
+    %% Write requests committed per batch (group commit)
+    {histogram, barrel_write_group_size,
+     <<"Write requests committed in one batch">>,
+     [1, 2, 4, 8, 16, 32, 64, 128, 256]},
 
     %% Query counters
     {counter, barrel_query_operations,
@@ -160,6 +166,15 @@ observe_doc_latency(Db, Op, DurationMs) ->
     case instrument_meter:get_instrument(barrel_doc_operation_duration_seconds) of
         undefined -> ok;
         Instrument -> instrument_meter:record(Instrument, DurationMs / 1000, Attrs)
+    end,
+    ok.
+
+%% @doc Record the number of write requests committed in one batch
+-spec observe_write_group(binary(), pos_integer()) -> ok.
+observe_write_group(Db, Size) ->
+    case instrument_meter:get_instrument(barrel_write_group_size) of
+        undefined -> ok;
+        Instrument -> instrument_meter:record(Instrument, Size, #{db => Db})
     end,
     ok.
 

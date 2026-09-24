@@ -4,6 +4,19 @@ All notable changes to the Barrel umbrella are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and each app
 is versioned independently under [Semantic Versioning](https://semver.org/).
 
+## [2026-09-24] barrel_docdb group commit
+
+hornbeam appends each step of a durable execution as a synced `put_doc`,
+and all executions of an agent share one database. Throughput stayed flat
+at about 200 writes per second whatever the number of writers, with the CPU
+idle: the database server wrote and synced each request on its own. It now
+commits the writes waiting at the database in one batch and one sync, while
+each request keeps its own conflict check and answer.
+
+| App | Version | Change |
+|-----|---------|--------|
+| barrel_docdb | 1.6.0 | group commit (`max_group`), `put_docs` repeated-id fix, write errors returned |
+
 ## [2026-08-30] barrel_server on livery 0.9.1 and barrel_mcp 3.0.1
 
 The server pinned livery 0.6.1 and barrel_mcp 2.3.0 while consumers ran
