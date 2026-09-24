@@ -81,6 +81,10 @@ configured_registry() ->
 %%     (60000; sessions rely on it)</li>
 %% <li>`docdb', `vectordb' - extra store config</li>
 %% </ul>
+%% The vector store is per node: by default it lives at
+%% `<data_dir>/<id>_vec', resolved from the local `data_dir' on every
+%% open. A custom `vectordb => #{db_path => ...}' is kept as given and
+%% must exist on every node that opens the space.
 -spec create_space(map()) -> {ok, space()} | {error, term()}.
 create_space(Opts) when is_map(Opts) ->
     Registry = registry_db(),
@@ -90,7 +94,7 @@ create_space(Opts) when is_map(Opts) ->
     VecOpts = vec_opts(Id, maps:get(vectordb, Opts, #{})),
     case open_db(Id, Opts, TtlSweep, VecOpts) of
         {ok, Db} ->
-            Doc = #{
+            Doc0 = #{
                 <<"id">> => <<"space:", Id/binary>>,
                 <<"type">> => <<"space">>,
                 <<"space">> => Id,
@@ -101,11 +105,10 @@ create_space(Opts) when is_map(Opts) ->
                 <<"created_at">> => now_ms(),
                 <<"session_ttl">> => SessionTtl,
                 <<"ttl_sweep_interval">> => TtlSweep,
-                <<"vec_path">> => iolist_to_binary(
-                    maps:get(db_path, VecOpts)),
                 <<"encrypted">> =>
                     maps:get(encryption, Opts, disabled) =/= disabled
             },
+            Doc = maps:merge(Doc0, recorded_vec_path(Id, VecOpts)),
             {ok, _} = barrel_docdb:put_doc(Registry, Doc),
             {ok, #{id => Id, db => Db}};
         {error, _} = Err ->
@@ -124,8 +127,8 @@ open_space(Id, RuntimeOpts) when is_binary(Id), is_map(RuntimeOpts) ->
     case space_info(Id) of
         {ok, #{<<"status">> := <<"active">>} = Info} ->
             TtlSweep = maps:get(<<"ttl_sweep_interval">>, Info, 60000),
-            VecOpts = vec_opts_from(Info, maps:get(vectordb, RuntimeOpts,
-                                                   #{})),
+            VecOpts = vec_opts_from(Id, Info, maps:get(vectordb, RuntimeOpts,
+                                                       #{})),
             case open_db(Id, RuntimeOpts, TtlSweep, VecOpts) of
                 {ok, Db} -> {ok, #{id => Id, db => Db}};
                 {error, _} = Err -> Err
@@ -223,23 +226,54 @@ open_db(Id, Opts, TtlSweep, VecOpts) ->
     end,
     barrel_dbs:ensure(Id, OpenOpts).
 
+vec_opts(_Id, #{db_path := _} = VecOpts) ->
+    VecOpts;
 vec_opts(Id, VecOpts) ->
-    case maps:is_key(db_path, VecOpts) of
-        true ->
-            VecOpts;
-        false ->
-            DataDir = application:get_env(barrel_docdb, data_dir,
-                                          "/tmp/barrel_data"),
-            Path = filename:join(DataDir, binary_to_list(Id) ++ "_vec"),
-            VecOpts#{db_path => Path}
+    VecOpts#{db_path => default_vec_path(Id)}.
+
+%% The vector store is not replicated: record the default layout
+%% relative to data_dir so each node resolves it locally.
+recorded_vec_path(Id, #{db_path := Path}) ->
+    Abs = filename:absname(iolist_to_binary(Path)),
+    case Abs =:= filename:absname(iolist_to_binary(default_vec_path(Id))) of
+        true -> #{<<"vec_path">> => list_to_binary(vec_dir_name(Id))};
+        false -> #{<<"vec_path">> => Abs, <<"vec_custom">> => true}
     end.
 
-vec_opts_from(Info, VecOpts) ->
-    case maps:is_key(db_path, VecOpts) of
-        true -> VecOpts;
-        false -> VecOpts#{db_path => binary_to_list(
-                              maps:get(<<"vec_path">>, Info))}
+vec_opts_from(_Id, _Info, #{db_path := _} = VecOpts) ->
+    VecOpts;
+vec_opts_from(Id, Info, VecOpts) ->
+    VecOpts#{db_path => resolve_vec_path(Id, Info)}.
+
+resolve_vec_path(_Id, #{<<"vec_custom">> := true, <<"vec_path">> := Path}) ->
+    binary_to_list(Path);
+resolve_vec_path(Id, #{<<"vec_path">> := Path}) ->
+    resolve_vec_path(Id, binary_to_list(Path), filename:pathtype(Path));
+resolve_vec_path(Id, _Info) ->
+    default_vec_path(Id).
+
+resolve_vec_path(_Id, Path, relative) ->
+    filename:join(data_dir(), Path);
+resolve_vec_path(Id, Path, _Absolute) ->
+    %% 1.2.1 doc: an absolute default path may come from another node.
+    case {under_data_dir(Path), filename:basename(Path) =:= vec_dir_name(Id)} of
+        {false, true} -> default_vec_path(Id);
+        _ -> Path
     end.
+
+under_data_dir(Path) ->
+    lists:prefix(filename:split(filename:absname(data_dir())),
+                 filename:split(filename:absname(Path))).
+
+default_vec_path(Id) ->
+    filename:join(data_dir(), vec_dir_name(Id)).
+
+vec_dir_name(Id) ->
+    binary_to_list(Id) ++ "_vec".
+
+data_dir() ->
+    unicode:characters_to_list(
+      application:get_env(barrel_docdb, data_dir, "/tmp/barrel_data")).
 
 %% Revocation is owned by barrel_caps (next step); tolerate its absence
 %% so this module stays independently testable.
