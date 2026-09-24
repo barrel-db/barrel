@@ -13,7 +13,12 @@
     t_dropped_space_refuses_open/1,
     t_list_spaces/1,
     t_encrypted_space/1,
-    t_space_is_a_barrel_db/1
+    t_space_is_a_barrel_db/1,
+    t_vec_path_relative/1,
+    t_vec_path_replica/1,
+    t_vec_path_legacy_foreign/1,
+    t_vec_path_legacy_local/1,
+    t_vec_path_custom/1
 ]).
 
 -include_lib("common_test/include/ct.hrl").
@@ -21,7 +26,9 @@
 
 all() ->
     [t_lifecycle, t_registry_doc, t_dropped_space_refuses_open,
-     t_list_spaces, t_encrypted_space, t_space_is_a_barrel_db].
+     t_list_spaces, t_encrypted_space, t_space_is_a_barrel_db,
+     t_vec_path_relative, t_vec_path_replica, t_vec_path_legacy_foreign,
+     t_vec_path_legacy_local, t_vec_path_custom].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(barrel_spaces),
@@ -134,4 +141,113 @@ t_space_is_a_barrel_db(Config) ->
     {ok, Changes, _} = barrel:changes(Db, first),
     ?assert(length(Changes) >= 1),
     ok = barrel_spaces:drop_space(Id),
+    ok.
+
+%%====================================================================
+%% Vector store path, resolved on the opening node
+%%====================================================================
+
+t_vec_path_relative(Config) ->
+    A = use_data_dir(Config, "rel_a"),
+    {ok, #{id := Id}} = barrel_spaces:create_space(#{vectordb => vec()}),
+    VecDir = filename:join(A, binary_to_list(Id) ++ "_vec"),
+    {ok, Info} = barrel_spaces:space_info(Id),
+    ?assertEqual(<<Id/binary, "_vec">>, maps:get(<<"vec_path">>, Info)),
+    ?assertNot(maps:is_key(<<"vec_custom">>, Info)),
+    ?assertEqual(VecDir, store_path(Id)),
+    ok = barrel_spaces:close_space(Id),
+    {ok, _} = barrel_spaces:open_space(Id),
+    ?assertEqual(VecDir, store_path(Id)),
+    ok = barrel_spaces:drop_space(Id),
+    restore_data_dir(Config).
+
+t_vec_path_replica(Config) ->
+    A = use_data_dir(Config, "rep_a"),
+    {ok, #{id := Id, db := Db}} = barrel_spaces:create_space(
+                                    #{vectordb => vec()}),
+    ok = barrel:vector_add(Db, <<"a">>, <<"hello">>, #{},
+                           [1.0, 0.0, 0.0]),
+    ok = barrel_spaces:close_space(Id),
+    %% the registry doc reaches a node with another data_dir
+    B = use_data_dir(Config, "rep_b"),
+    {ok, _} = barrel_spaces:open_space(Id),
+    BVec = filename:join(B, binary_to_list(Id) ++ "_vec"),
+    ?assertEqual(BVec, store_path(Id)),
+    ?assert(filelib:is_dir(BVec)),
+    ok = barrel_spaces:drop_space(Id),
+    ?assertNot(filelib:is_dir(BVec)),
+    ?assert(filelib:is_dir(filename:join(A, binary_to_list(Id) ++ "_vec"))),
+    restore_data_dir(Config).
+
+t_vec_path_legacy_foreign(Config) ->
+    _ = use_data_dir(Config, "leg_a"),
+    {ok, #{id := Id}} = barrel_spaces:create_space(#{vectordb => vec()}),
+    ok = barrel_spaces:close_space(Id),
+    Foreign = "/nonexistent/other_node/" ++ binary_to_list(Id) ++ "_vec",
+    ok = legacy_vec_path(Id, Foreign),
+    B = use_data_dir(Config, "leg_b"),
+    {ok, _} = barrel_spaces:open_space(Id),
+    ?assertEqual(filename:join(B, binary_to_list(Id) ++ "_vec"),
+                 store_path(Id)),
+    ok = barrel_spaces:drop_space(Id),
+    restore_data_dir(Config).
+
+t_vec_path_legacy_local(Config) ->
+    A = use_data_dir(Config, "legl_a"),
+    {ok, #{id := Id}} = barrel_spaces:create_space(#{vectordb => vec()}),
+    ok = barrel_spaces:close_space(Id),
+    %% a 1.2.1 doc: absolute path under the local data_dir, kept as is
+    Local = filename:join([A, "moved", binary_to_list(Id) ++ "_vec"]),
+    ok = legacy_vec_path(Id, Local),
+    {ok, _} = barrel_spaces:open_space(Id),
+    ?assertEqual(Local, store_path(Id)),
+    ok = barrel_spaces:drop_space(Id),
+    restore_data_dir(Config).
+
+t_vec_path_custom(Config) ->
+    _ = use_data_dir(Config, "cus_a"),
+    Custom = filename:join(?config(priv_dir, Config), "custom_vec"),
+    {ok, #{id := Id}} = barrel_spaces:create_space(
+                          #{vectordb => vec(Custom)}),
+    {ok, Info} = barrel_spaces:space_info(Id),
+    ?assertEqual(list_to_binary(Custom), maps:get(<<"vec_path">>, Info)),
+    ?assertEqual(true, maps:get(<<"vec_custom">>, Info)),
+    ok = barrel_spaces:close_space(Id),
+    _ = use_data_dir(Config, "cus_b"),
+    {ok, _} = barrel_spaces:open_space(Id),
+    ?assertEqual(Custom, store_path(Id)),
+    ok = barrel_spaces:close_space(Id),
+    %% an explicit runtime db_path wins, as before
+    Runtime = filename:join(?config(priv_dir, Config), "runtime_vec"),
+    {ok, _} = barrel_spaces:open_space(
+                Id, #{vectordb => vec(Runtime)}),
+    ?assertEqual(Runtime, store_path(Id)),
+    ok = barrel_spaces:drop_space(Id),
+    restore_data_dir(Config).
+
+vec() ->
+    #{dimension => 3, bm25_backend => memory}.
+
+vec(Path) ->
+    (vec())#{db_path => Path}.
+
+use_data_dir(Config, Name) ->
+    Dir = filename:join(?config(priv_dir, Config), Name),
+    ok = filelib:ensure_dir(filename:join(Dir, "x")),
+    application:set_env(barrel_docdb, data_dir, Dir),
+    Dir.
+
+restore_data_dir(Config) ->
+    application:set_env(barrel_docdb, data_dir, ?config(priv_dir, Config)).
+
+store_path(Id) ->
+    {ok, Path} = barrel_vectordb_server:get_db_path(Id),
+    Path.
+
+%% Rewrite the registry doc the way 1.2.1 wrote it.
+legacy_vec_path(Id, Path) ->
+    Registry = barrel_spaces:registry_db(),
+    {ok, Info} = barrel_spaces:space_info(Id),
+    {ok, _} = barrel_docdb:put_doc(
+                Registry, Info#{<<"vec_path">> => list_to_binary(Path)}),
     ok.

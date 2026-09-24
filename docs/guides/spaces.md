@@ -201,6 +201,13 @@ capability tokens work as bearers there (and only there). See
   another; the flip side is that revocation propagates at replication
   speed. Keep the registry's replication tight if revocation latency
   matters to you.
+- A space's vector store is per node. It lives at
+  `<data_dir>/<space id>_vec`, resolved from the local `barrel_docdb`
+  `data_dir` on every open, so a replicated space doc opens on any node.
+  Replicating the registry carries metadata and grants, not memory: the
+  vectors stay on the node that wrote them. A custom
+  `vectordb => #{db_path => ...}` given at create is kept as is and must
+  exist on every node that opens the space.
 - `barrel_caps:grant/2` does not require the space to exist. Granting on a
   purely logical scope (a tenant id, a handoff id) is supported: revocable,
   hash-at-rest, rights-laddered tokens with no space database behind them.

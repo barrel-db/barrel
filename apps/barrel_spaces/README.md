@@ -36,6 +36,12 @@ ephemeral spaces stay cheap. Per-space `encryption` specs give each
 space its own key (agent isolation); like all barrel runtime config,
 the spec must be passed again on every open.
 
+A space's vector store is per node, at `<data_dir>/<space id>_vec`
+resolved from the local `barrel_docdb` `data_dir` on every open.
+Replicating the registry carries metadata and grants, not memory. A
+custom `vectordb => #{db_path => ...}` must exist on every node that
+opens the space.
+
 ## Capability tokens
 
 A capability is an opaque random token verified against a grant document in the

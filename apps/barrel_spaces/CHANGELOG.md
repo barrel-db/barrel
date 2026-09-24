@@ -3,6 +3,12 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.2.2] - 2026-09-24
+
+### Fixed
+- A space's vector store path is resolved on the node that opens it, from the local `data_dir`. `create_space/1` records the default layout relative to `data_dir` (`vec_path` = `<id>_vec`), so a registry doc replicated to another node no longer opens, or creates, the store under the first node's directory.
+- Docs written by 1.2.1 hold an absolute `vec_path`: kept when it lies under the local `data_dir`, otherwise a default-layout path opens at `<local data_dir>/<id>_vec`. A custom `db_path` is recorded absolute with `vec_custom` and kept on every node. An explicit `db_path` on open wins, as before.
+
 ## [1.2.1] - 2026-09-14
 
 ### Changed
