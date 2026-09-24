@@ -4,6 +4,15 @@ All notable changes to the Barrel umbrella are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and each app
 is versioned independently under [Semantic Versioning](https://semver.org/).
 
+## [2026-09-25] Contexts demo, guide and benchmarks
+
+A user guide for contexts, a three-node demo that exercises it end to end
+over MCP (36 checks, no embedder, no network service), the experiment
+reports behind the design, the fanout (S1) and cross-context ranking (S2)
+harnesses, and the read-only open bench (`bench/rocksdb_readonly`: RocksDB
+read-write against OpenForReadOnly on imported generations). No application
+changes.
+
 ## [2026-09-25] Contexts over REST and MCP
 
 Contexts and working sets become reachable from HTTP clients and MCP
