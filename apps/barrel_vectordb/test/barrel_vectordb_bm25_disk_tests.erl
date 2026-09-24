@@ -412,10 +412,12 @@ open_close_test_() ->
              {ok, Index2} = barrel_vectordb_bm25_disk:add(Index, <<"doc1">>, <<"hello world">>),
              ok = barrel_vectordb_bm25_disk:close(Index2),
 
-             %% Reopen
+             %% Reopen: the uncompacted document is still there
              {ok, Index3} = barrel_vectordb_bm25_disk:open(Path),
-             %% Note: hot layer data is not persisted, so doc count might be 0
-             %% until we implement full persistence
+             ?assertEqual(1, maps:get(total_docs,
+                                      barrel_vectordb_bm25_disk:stats(Index3))),
+             ?assertMatch([{<<"doc1">>, _}],
+                          barrel_vectordb_bm25_disk:search(Index3, <<"hello">>, 10)),
              ok = barrel_vectordb_bm25_disk:close(Index3)
          end}]
      end}.

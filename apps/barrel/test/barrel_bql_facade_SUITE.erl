@@ -16,6 +16,7 @@
 -export([vector_rank_and_columns/1,
          bm25_rows/1,
          bm25_rows_survive_reopen/1,
+         bm25_rows_rebuilt_from_legacy_store/1,
          hybrid_rows/1,
          residual_where_overfetch/1,
          underfill_contract/1,
@@ -32,6 +33,7 @@ all() ->
     [vector_rank_and_columns,
      bm25_rows,
      bm25_rows_survive_reopen,
+     bm25_rows_rebuilt_from_legacy_store,
      hybrid_rows,
      residual_where_overfetch,
      underfill_contract,
@@ -154,6 +156,27 @@ bm25_rows_survive_reopen(Config) ->
     {ok, Before, _} = barrel:query(Db, Q),
     ?assertEqual(5, length(Before)),
     ok = barrel:close(Db),
+    {ok, Db2} = barrel:open(Name, Opts),
+    {ok, After, _} = barrel:query(Db2, Q),
+    ?assertEqual(Before, After).
+
+%% A disk BM25 index written before barrel_vectordb 2.4.1 has no forward
+%% index: reopen rebuilds it from the documents through the policy.
+bm25_rows_rebuilt_from_legacy_store(Config) ->
+    Db = ?config(db, Config),
+    {Name, #{vectordb := #{db_path := VecPath}} = Opts} = ?config(open, Config),
+    Q = "SELECT m._score, title FROM bm25_top_k('erlang rust', k => 10) AS m",
+    {ok, Before, _} = barrel:query(Db, Q),
+    ?assertEqual(5, length(Before)),
+    ok = barrel:close(Db),
+    Cfs = ["default", "terms_fwd", "terms_rev", "docs_fwd", "docs_rev",
+           "doc_terms", "term_df", "pending"],
+    {ok, Ids, [CfD, _, _, _, _ | New]} =
+        rocksdb:open(VecPath ++ "/bm25/bm25.ids", [], [{C, []} || C <- Cfs]),
+    [ok = rocksdb:drop_column_family(Ids, Cf) || Cf <- New],
+    [ok = rocksdb:delete(Ids, CfD, K, [])
+     || K <- [<<"format">>, <<"stats">>, <<"segment">>]],
+    ok = rocksdb:close(Ids),
     {ok, Db2} = barrel:open(Name, Opts),
     {ok, After, _} = barrel:query(Db2, Q),
     ?assertEqual(Before, After).

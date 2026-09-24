@@ -28,6 +28,9 @@
 %% Upper bound on queued writes merged into one RocksDB batch.
 -define(DEFAULT_MAX_BATCH, 256).
 
+%% Documents fetched per docstore read while rebuilding BM25 at open.
+-define(BM25_REBUILD_CHUNK, 256).
+
 %% API
 -export([
     start_link/2,
@@ -367,7 +370,7 @@ init_stores(Name, Config, DbPath, Dimension, Docstore, IndexModule,
                                     Db, maps:get(hnsw, CfHandles)),
                                 index_origin = Origin
                             },
-                            {ok, State};
+                            {ok, maybe_rebuild_bm25(State)};
                         {error, BM25Error} ->
                             {stop, {bm25_init_failed, BM25Error}}
                     end;
@@ -1586,10 +1589,66 @@ init_bm25(DbPath, disk, Config, Crypto) ->
     %% Try to open existing index or create new
     case filelib:is_dir(BasePath) of
         true ->
-            barrel_vectordb_bm25_disk:open(BasePath, #{crypto => Crypto});
+            barrel_vectordb_bm25_disk:open(BasePath, FinalConfig);
         false ->
             barrel_vectordb_bm25_disk:new(FinalConfig)
     end.
+
+%% The memory index starts empty, and a disk index written before the
+%% durable format opens empty: both are rebuilt from the stored text.
+maybe_rebuild_bm25(#state{bm25_backend = memory} = State) ->
+    rebuild_bm25(State);
+maybe_rebuild_bm25(#state{bm25_backend = disk, bm25_index = Index} = State) ->
+    case barrel_vectordb_bm25_disk:rebuild_required(Index) of
+        true ->
+            {ok, Index1} = barrel_vectordb_bm25_disk:reset(Index),
+            #state{bm25_index = Index2} = State1 =
+                rebuild_bm25(State#state{bm25_index = Index1}),
+            {ok, Index3} = barrel_vectordb_bm25_disk:mark_rebuilt(Index2),
+            State1#state{bm25_index = Index3};
+        false ->
+            State
+    end;
+maybe_rebuild_bm25(State) ->
+    State.
+
+%% Walk the vectors CF (the authoritative id list) and index each
+%% document's text from the text CF or the docstore. Index-only writes
+%% on the default docstore keep no text, so they cannot be rebuilt.
+rebuild_bm25(#state{db = Db, cf_vectors = CfV} = State) ->
+    {ok, Iter} = rocksdb:iterator(Db, CfV, []),
+    try
+        {State1, Missing} = rebuild_bm25_loop(
+                              Iter, rocksdb:iterator_move(Iter, first), [], 0, State, 0),
+        _ = case Missing of
+            0 -> ok;
+            _ -> logger:warning("barrel_vectordb ~p: ~b documents have no stored "
+                                "text and are missing from the BM25 index",
+                                [State#state.name, Missing])
+        end,
+        State1
+    after
+        rocksdb:iterator_close(Iter)
+    end.
+
+rebuild_bm25_loop(Iter, {ok, Key, _}, Keys, ?BM25_REBUILD_CHUNK, State, Missing) ->
+    {State1, Missing1} = rebuild_bm25_chunk(lists:reverse(Keys), State, Missing),
+    rebuild_bm25_loop(Iter, rocksdb:iterator_move(Iter, next), [Key], 1, State1, Missing1);
+rebuild_bm25_loop(Iter, {ok, Key, _}, Keys, N, State, Missing) ->
+    rebuild_bm25_loop(Iter, rocksdb:iterator_move(Iter, next), [Key | Keys], N + 1,
+                      State, Missing);
+rebuild_bm25_loop(_Iter, {error, _}, Keys, _N, State, Missing) ->
+    rebuild_bm25_chunk(lists:reverse(Keys), State, Missing).
+
+rebuild_bm25_chunk([], State, Missing) ->
+    {State, Missing};
+rebuild_bm25_chunk(Keys, #state{db = Db, cf_metadata = CfM, cf_text = CfT,
+                                docstore = Docstore, bm25_index = Index} = State,
+                   Missing) ->
+    {_Metas, Texts} = docstore_multi_fetch(Docstore, Db, CfM, CfT, Keys),
+    Found = [{Key, Text} || {Key, {ok, Text}} <- lists:zip(Keys, Texts)],
+    {ok, Index1} = bm25_add_all(Index, [P || {_, Text} = P <- Found, Text =/= <<>>]),
+    {State#state{bm25_index = Index1}, Missing + length(Keys) - length(Found)}.
 
 %% Add document to BM25 index
 %% Extract the {Id, Text} pairs a write contributes to the BM25 index. Writes

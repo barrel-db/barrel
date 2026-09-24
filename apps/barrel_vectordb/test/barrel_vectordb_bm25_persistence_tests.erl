@@ -24,7 +24,9 @@ persistence_test_() ->
           {"disk: stats identical after reopen", fun disk_stats/1},
           {"disk: kill then reopen loses no acked write", fun disk_kill/1},
           {"disk: encrypted reopen", fun disk_encrypted/1},
-          {"memory: rebuilt from stored text at open", fun memory_reopen/1}
+          {"memory: rebuilt from stored text at open", fun memory_reopen/1},
+          {"disk: interrupted compaction redone at open", fun disk_torn_segment/1},
+          {"disk: store predating the durable format is rebuilt", fun disk_legacy/1}
       ]]}.
 
 direct_test_() ->
@@ -166,6 +168,44 @@ memory_reopen(Dir) ->
     {ok, _} = barrel_vectordb:start_link(Cfg),
     ?assertEqual(Before, snapshot()).
 
+%% A compaction killed between the file writes and the marker update.
+disk_torn_segment(Dir) ->
+    Cfg = cfg(Dir, disk),
+    {ok, _} = barrel_vectordb:start_link(Cfg),
+    add_docs(1, 10),
+    ok = barrel_vectordb_server:bm25_compact(?STORE),
+    add_docs(11, 14),
+    Before = snapshot(),
+    ok = barrel_vectordb:stop(?STORE),
+    BmDir = Dir ++ "/vs/bm25",
+    with_ids_db(BmDir, fun(Db, [CfD | _]) ->
+        ok = rocksdb:delete(Db, CfD, <<"segment">>, [])
+    end),
+    ok = file:write_file(BmDir ++ "/bm25.blockmax", <<"torn">>),
+    {ok, _} = barrel_vectordb:start_link(Cfg),
+    ?assertEqual(Before, snapshot()),
+    ?assertEqual(0, maps:get(hot_docs, info())).
+
+%% Pre-2.4.1 stores have no forward index: rebuilt from the stored text.
+disk_legacy(Dir) ->
+    Cfg = cfg(Dir, disk),
+    {ok, _} = barrel_vectordb:start_link(Cfg),
+    add_docs(1, 12),
+    ok = barrel_vectordb_server:bm25_compact(?STORE),
+    add_docs(13, 15),
+    ok = barrel_vectordb:delete(?STORE, <<"2">>),
+    Before = snapshot(),
+    ok = barrel_vectordb:stop(?STORE),
+    make_legacy(Dir ++ "/vs/bm25"),
+    {ok, _} = barrel_vectordb:start_link(Cfg),
+    ?assertEqual(false, maps:get(rebuild_required, info())),
+    ?assertEqual(lists:sort(ids(1, 15) -- [<<"2">>]),
+                 lists:sort(hit_ids(<<"erlang">>))),
+    ?assertEqual(Before, snapshot()),
+    ok = barrel_vectordb:stop(?STORE),
+    {ok, _} = barrel_vectordb:start_link(Cfg),
+    ?assertEqual(Before, snapshot()).
+
 %%====================================================================
 %% Direct index API
 %%====================================================================
@@ -194,6 +234,26 @@ direct_compacted(Dir) ->
 %%====================================================================
 %% Helpers
 %%====================================================================
+
+-define(CFS, ["default", "terms_fwd", "terms_rev", "docs_fwd", "docs_rev",
+               "doc_terms", "term_df", "pending"]).
+
+with_ids_db(BmDir, Fun) ->
+    {ok, Db, Cfs} = rocksdb:open(BmDir ++ "/bm25.ids", [],
+                                 [{Name, []} || Name <- ?CFS]),
+    try Fun(Db, Cfs)
+    after
+        rocksdb:close(Db)
+    end.
+
+%% Strip what 2.4.1 added to the ids RocksDB.
+make_legacy(BmDir) ->
+    with_ids_db(BmDir, fun(Db, [CfD, _, _, _, _ | New]) ->
+        [ok = rocksdb:drop_column_family(Db, Cf) || Cf <- New],
+        [ok = rocksdb:delete(Db, CfD, K, [])
+         || K <- [<<"format">>, <<"stats">>, <<"segment">>]],
+        ok
+    end).
 
 cfg(Dir, Backend) ->
     #{name => ?STORE, db_path => Dir ++ "/vs", dimension => 3,

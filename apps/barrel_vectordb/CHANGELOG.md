@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.4.1] - 2026-09-24
+
+### Fixed
+- The disk BM25 backend (the record-mode default) lost documents on close/reopen: the uncompacted hot layer was never written, each compaction replaced the previous segment instead of merging with it, and removals of compacted documents were ignored. Every add and remove is now written to the `bm25.ids` RocksDB (forward index, document frequencies, stats) before the call returns, so hits and scores are identical after a close, a kill, or an interrupted compaction. Compaction rewrites the segment from that forward index.
+- The memory BM25 backend started empty after a restart. It is now rebuilt at open from the stored text (text column family or docstore).
+- On first open with 2.4.1, a disk BM25 index written by an earlier version is detected and rebuilt from the stored text before the store serves requests; documents added with `add_index_only` on the default docstore keep no text and are logged as missing. Files stay compatible; the ids RocksDB gains three column families, so 2.4.0 cannot reopen a store after 2.4.1 has.
+
 ## [2.4.0] - 2026-08-25
 
 ### Added
