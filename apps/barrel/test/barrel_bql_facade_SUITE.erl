@@ -15,6 +15,7 @@
 
 -export([vector_rank_and_columns/1,
          bm25_rows/1,
+         bm25_rows_survive_reopen/1,
          hybrid_rows/1,
          residual_where_overfetch/1,
          underfill_contract/1,
@@ -30,6 +31,7 @@
 all() ->
     [vector_rank_and_columns,
      bm25_rows,
+     bm25_rows_survive_reopen,
      hybrid_rows,
      residual_where_overfetch,
      underfill_contract,
@@ -56,14 +58,15 @@ init_per_testcase(TC, Config) ->
     mock_embed(),
     Dir = ?config(dir, Config),
     Name = list_to_atom("bqlf_" ++ atom_to_list(TC)),
-    {ok, Db} = barrel:open(Name, #{
+    Opts = #{
         embedding => #{fields => [<<"title">>], mode => sync,
                        metadata_fields => [<<"kind">>]},
         docdb => #{data_dir => Dir},
         vectordb => #{dimension => 3,
-                      db_path => Dir ++ "/" ++ atom_to_list(TC)}}),
+                      db_path => Dir ++ "/" ++ atom_to_list(TC)}},
+    {ok, Db} = barrel:open(Name, Opts),
     seed(Db),
-    [{db, Db} | Config].
+    [{db, Db}, {open, {Name, Opts}} | Config].
 
 end_per_testcase(_TC, Config) ->
     try meck:unload(barrel_embed) catch _:_ -> ok end,
@@ -140,6 +143,20 @@ bm25_rows(Config) ->
             ?assert(maps:is_key(<<"title">>, Row))
         end,
         Rows).
+
+%% Record mode defaults to disk BM25: rows survive barrel:close + reopen.
+bm25_rows_survive_reopen(Config) ->
+    Db = ?config(db, Config),
+    {Name, Opts} = ?config(open, Config),
+    ?assertMatch({ok, #{backend := disk}},
+                 barrel_vectordb_server:bm25_info(maps:get(vstore, Db))),
+    Q = "SELECT m._score, title FROM bm25_top_k('erlang rust', k => 10) AS m",
+    {ok, Before, _} = barrel:query(Db, Q),
+    ?assertEqual(5, length(Before)),
+    ok = barrel:close(Db),
+    {ok, Db2} = barrel:open(Name, Opts),
+    {ok, After, _} = barrel:query(Db2, Q),
+    ?assertEqual(Before, After).
 
 hybrid_rows(Config) ->
     Db = ?config(db, Config),
