@@ -3,6 +3,22 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.10.0] - 2026-09-25
+
+### Added
+- Contexts over REST (`contexts` route group): `POST|GET /contexts` (register, list, `?q=` discover), `GET|DELETE /contexts/:id`, `POST /contexts/_query`, `GET /contexts/_capabilities`, `GET|PUT /contexts/_offline`. Names are accepted wherever ids are.
+- Working sets over REST: `POST|GET /worksets`, `GET|DELETE /worksets/:ws`, `POST /worksets/:ws/members`, `DELETE /worksets/:ws/members/:ctx`, `POST /worksets/:ws/_materialize`, `POST /worksets/:ws/_import`.
+- MCP tools in `barrel_server_mcp_contexts`: `context_capabilities`, `context_list`, `context_discover`, `context_inspect`, `context_query`, `context_attach`, `context_detach`, `context_materialize`, `context_import`, `context_working_sets`, `context_working_set_delete`, `context_offline`, with their own argument checks. A query no context answered is an MCP error result.
+- Errors from contexts routes and tools share one shape: `error`, `message`, `hint`, `details`, with an HTTP status per code.
+- `barrel_server_auth:member_authorizer/1`, `is_global/1`, `barrel_server_mcp_auth:global/1`, `barrel_server_dbs:ensure_opts/0`, `barrel_server_http:read_json/1`.
+
+### Changed
+- Capability tokens may read context cards and run context queries (each local member is checked as its own `POST /db/:db/query`); registering cards, working sets, imports and offline mode need a global principal.
+- Requires `barrel ~> 1.10`.
+
+### Fixed
+- MCP resource reads no longer depend on template registration order: a trailing `{db}` template also matched doc and live URIs and answered them as database info.
+
 ## [1.9.0] - 2026-09-25
 
 ### Added

@@ -4,6 +4,16 @@ All notable changes to the Barrel umbrella are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and each app
 is versioned independently under [Semantic Versioning](https://semver.org/).
 
+## [2026-09-25] Contexts over REST and MCP
+
+Contexts and working sets become reachable from HTTP clients and MCP
+agents, with the same error shape on both and capability tokens limited to
+reading cards and querying databases they already hold rights on.
+
+| App | Version | Change |
+|-----|---------|--------|
+| barrel_server | 1.10.0 | `/contexts`, `/worksets`, MCP context tools, MCP resource routing fix |
+
 ## [2026-09-25] Federated context queries
 
 The point of contexts: one BQL statement answered across local databases,

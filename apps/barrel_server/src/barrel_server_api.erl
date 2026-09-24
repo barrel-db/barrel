@@ -17,6 +17,7 @@
 %%%   <li>`timeline' - branch, merge, lineage.</li>
 %%%   <li>`search'   - vector/bm25/hybrid search.</li>
 %%%   <li>`spaces'   - the agent layer (`/spaces', `/handoffs').</li>
+%%%   <li>`contexts' - context cards and federated queries.</li>
 %%%   <li>`mcp'      - the MCP endpoint (empty when disabled).</li>
 %%% </ul>
 %%%
@@ -39,7 +40,8 @@
 
 -export([routes/0, routes/1, router/0, router/1, groups/0]).
 
--type group() :: meta | db | sync | timeline | search | spaces | mcp.
+-type group() :: meta | db | sync | timeline | search | spaces | contexts
+               | mcp.
 -type route() :: {binary(), binary(), term()}.
 -export_type([group/0, route/0]).
 
@@ -47,7 +49,8 @@
 -define(DEFAULT_GROUPS, [db, sync, timeline, search]).
 %% Every group, in a stable order. `meta' first so `/' and `/health'
 %% keep working in the standalone service.
--define(ALL_GROUPS, [meta, db, timeline, sync, search, spaces, mcp]).
+-define(ALL_GROUPS, [meta, db, timeline, sync, search, spaces, contexts,
+                     mcp]).
 
 %%====================================================================
 %% API
@@ -166,5 +169,7 @@ group_routes(search) ->
     ];
 group_routes(spaces) ->
     barrel_server_spaces:routes();
+group_routes(contexts) ->
+    barrel_server_contexts:routes();
 group_routes(mcp) ->
     barrel_server_mcp:routes().

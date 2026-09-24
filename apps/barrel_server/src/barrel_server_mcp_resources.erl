@@ -72,7 +72,21 @@ live_spec() ->
 %% Handlers
 %%====================================================================
 
-db_resource(#{<<"db">> := Name}) ->
+%% barrel_mcp takes the first template that matches, in registry order,
+%% and a trailing {db} also matches doc and live URIs: route those here.
+db_resource(#{<<"db">> := Path}) ->
+    case binary:split(Path, <<"/">>) of
+        [Name] ->
+            db_info(Name);
+        [Name, <<"doc/", Id/binary>>] when Id =/= <<>> ->
+            doc_resource(#{<<"db">> => Name, <<"id">> => Id});
+        [Name, <<"live/", Sub/binary>>] when Sub =/= <<>> ->
+            live_resource(#{<<"db">> => Name, <<"sub">> => Sub});
+        _ ->
+            #{error => <<"invalid_name">>}
+    end.
+
+db_info(Name) ->
     case barrel_server_dbs:ensure(Name) of
         {ok, Db} ->
             case barrel:info(Db) of

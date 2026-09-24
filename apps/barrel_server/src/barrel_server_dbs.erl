@@ -8,7 +8,8 @@
 %%%-------------------------------------------------------------------
 -module(barrel_server_dbs).
 
--export([ensure/1, ensure/2, close/1, branch/3, destroy/1, list/0]).
+-export([ensure/1, ensure/2, close/1, branch/3, destroy/1, list/0,
+         ensure_opts/0]).
 
 -define(MAX_NAME_LEN, 128).
 
@@ -44,6 +45,12 @@ merge_opts(Opts) ->
     BaseDocdb = maps:get(docdb, Base, #{}),
     CallerDocdb = maps:get(docdb, Opts, #{}),
     (maps:merge(Base, Opts))#{docdb => maps:merge(BaseDocdb, CallerDocdb)}.
+
+%% @doc The open options `ensure/1' uses, for callers that open through
+%% barrel_dbs themselves (federated query members).
+-spec ensure_opts() -> map().
+ensure_opts() ->
+    merge_opts(#{}).
 
 %% @doc Close and forget the database `Name'. Idempotent.
 -spec close(binary()) -> ok.

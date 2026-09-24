@@ -52,6 +52,7 @@
     json_resp/2,
     error_resp/1,
     with_json/2,
+    read_json/1,
     param/2,
     jsonable/1,
     encode_db_info/1,
