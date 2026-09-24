@@ -72,14 +72,15 @@
 %% @doc Open an attachment store with BlobDB enabled
 -spec open(string(), map()) -> {ok, att_ref()} | {error, term()}.
 open(Path, Options) ->
-    ok = filelib:ensure_dir(Path ++ "/"),
+    ReadOnly = maps:get(read_only, Options, false),
+    ok = ensure_store_dir(ReadOnly, Path),
     DbOpts0 = build_blob_options(Options),
     Env = maps:get(env, Options, undefined),
     DbOpts = case Env of
         undefined -> DbOpts0;
         _ -> [{env, Env} | DbOpts0]
     end,
-    case rocksdb:open(Path, DbOpts) of
+    case open_store(ReadOnly, Path, DbOpts) of
         {ok, Ref} ->
             ChunkThreshold = maps:get(chunk_threshold, Options, ?DEFAULT_CHUNK_THRESHOLD),
             ChunkSize = maps:get(chunk_size, Options, ?DEFAULT_CHUNK_SIZE),
@@ -93,9 +94,17 @@ open(Path, Options) ->
                 undefined -> {ok, AttRef};
                 _ -> {ok, AttRef#{env => Env}}
             end;
+        {error, {read_only_store_missing, _} = Reason} ->
+            {error, Reason};
         {error, Reason} ->
             {error, {att_store_open_failed, Reason}}
     end.
+
+ensure_store_dir(true, _Path) -> ok;
+ensure_store_dir(_, Path) -> filelib:ensure_dir(Path ++ "/").
+
+open_store(true, Path, DbOpts) -> barrel_rocksdb_ro:open(Path, DbOpts);
+open_store(_, Path, DbOpts) -> rocksdb:open(Path, DbOpts).
 
 %% @doc Close the attachment store
 -spec close(att_ref()) -> ok.

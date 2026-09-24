@@ -4,6 +4,20 @@ All notable changes to the Barrel umbrella are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and each app
 is versioned independently under [Semantic Versioning](https://semver.org/).
 
+## [2026-09-25] Read-only stores and imported copies
+
+First step of contexts (portable, queryable datasets): a copy of a database
+must open without any write reaching its files, and a copy restored under
+another name must keep reading its keys. Both stores gain a read-only open
+that writes nothing to disk (RocksDB `OpenForReadOnly`, flat files opened
+without write access), docdb learns an import sidecar, and BQL results say
+which database state answered.
+
+| App | Version | Change |
+|-----|---------|--------|
+| barrel_docdb | 1.7.0 | `read_only` open (group commit included, no file written), import sidecar, `db_exists/2`, observed version in BQL meta, `read_only_store_missing` / `read_only_upgrade_needed` errors |
+| barrel_vectordb | 2.5.0 | `read_only` store option (no file written, DiskANN included), `read_only_store_missing` / `read_only_upgrade_needed` errors |
+
 ## [2026-09-24] barrel_ngram segment integrity and leases
 
 A query running during a compaction failed with `enoent`: the compaction

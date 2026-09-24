@@ -191,6 +191,8 @@
     docstore => {module(), map()},
     %% Queued writes merged into one RocksDB batch (default 256)
     batch => #{max_batch_size => pos_integer(), _ => _},
+    %% true: writes return {error, read_only}; close persists nothing
+    read_only => boolean(),
     _ => _
 }.
 %% Store configuration options.

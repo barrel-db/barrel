@@ -332,16 +332,10 @@ init_stores(Name, Config, DbPath, Dimension, Docstore, IndexModule,
         none -> undefined;
         #{env := E} -> E
     end,
-    case init_rocksdb(DbPath, Env) of
+    case init_rocksdb(DbPath, Env, read_only(Config)) of
         {ok, Db, CfHandles} ->
-            %% DiskANN owns flat files + an ids RocksDB: it gets the
-            %% crypto context (key + env) alongside its config
-            IndexConfig1 = case {IndexModule, Crypto} of
-                {barrel_vectordb_diskann, #{}} ->
-                    IndexConfig#{crypto => Crypto};
-                _ ->
-                    IndexConfig
-            end,
+            IndexConfig1 = diskann_config(IndexModule, IndexConfig, Crypto,
+                                          read_only(Config)),
             %% Load or create vector index
             case load_or_create_index(Db, CfHandles, Dimension, IndexConfig1, IndexModule) of
                 {ok, Index, Origin} ->
@@ -370,7 +364,7 @@ init_stores(Name, Config, DbPath, Dimension, Docstore, IndexModule,
                                     Db, maps:get(hnsw, CfHandles)),
                                 index_origin = Origin
                             },
-                            {ok, maybe_rebuild_bm25(State)};
+                            open_bm25(State);
                         {error, BM25Error} ->
                             {stop, {bm25_init_failed, BM25Error}}
                     end;
@@ -385,7 +379,19 @@ init_stores(Name, Config, DbPath, Dimension, Docstore, IndexModule,
 %% passes it as crypto => #{key => <<_:256>>}. The disk BM25 backend
 %% and DiskANN encrypt their flat files with the same key.
 init_crypto(Config, DbPath) ->
-    barrel_vectordb_crypto:init(maps:get(crypto, Config, none), DbPath).
+    barrel_vectordb_crypto:init(maps:get(crypto, Config, none), DbPath,
+                                read_only(Config)).
+
+read_only(Config) -> maps:get(read_only, Config, false) =:= true.
+
+%% DiskANN owns flat files + an ids RocksDB: it gets the crypto context
+%% (key + env) and the read-only flag alongside its config.
+diskann_config(barrel_vectordb_diskann, IndexConfig, none, ReadOnly) ->
+    IndexConfig#{read_only => ReadOnly};
+diskann_config(barrel_vectordb_diskann, IndexConfig, Crypto, ReadOnly) ->
+    IndexConfig#{crypto => Crypto, read_only => ReadOnly};
+diskann_config(_IndexModule, IndexConfig, _Crypto, _ReadOnly) ->
+    IndexConfig.
 
 max_batch(Config) ->
     maps:get(max_batch_size, maps:get(batch, Config, #{}), ?DEFAULT_MAX_BATCH).
@@ -399,7 +405,26 @@ write_op({index_only, _, _, _}) -> true;
 write_op({index_only_batch, _}) -> true;
 write_op(_) -> false.
 
+%% Requests a read-only store refuses (read_only => true in the config).
+ro_refused(Req) -> write_op(Req) orelse mutating_read(Req).
+
+mutating_read({delete, _}) -> true;
+mutating_read({update, _, _, _}) -> true;
+mutating_read({upsert, _, _, _}) -> true;
+mutating_read(bm25_compact) -> true;
+mutating_read(persist_index) -> true;
+mutating_read(_) -> false.
+
+handle_call(Req, From, #state{config = #{read_only := true}} = State) ->
+    case {ro_refused(Req), Req} of
+        {true, _} -> {reply, {error, read_only}, State};
+        {false, checkpoint} -> {reply, ok, State};
+        {false, _} -> handle_call_rw(Req, From, State)
+    end;
 handle_call(Req, From, State) ->
+    handle_call_rw(Req, From, State).
+
+handle_call_rw(Req, From, State) ->
     case write_op(Req) of
         true ->
             handle_write(Req, From, State);
@@ -991,11 +1016,17 @@ prepare_batch_embeddings(Docs, State) ->
 
 terminate(_Reason, #state{db = Db, index = Index, index_module = Mod, cf_hnsw = CfHnsw,
                           bm25_index = BM25, bm25_backend = BM25Backend,
-                          docstore = Docstore} = State) ->
+                          docstore = Docstore, config = Config} = State) ->
     %% Persist index metadata and graph before closing (best effort;
-    %% a kill mid-persist just means a rebuild on the next open)
-    _ = persist_index_meta(Db, CfHnsw, Index, Mod),
-    _ = persist_index_graph(State),
+    %% a kill mid-persist just means a rebuild on the next open). A
+    %% read-only store leaves its files untouched.
+    _ = case maps:get(read_only, Config, false) of
+        true ->
+            ok;
+        _ ->
+            _ = persist_index_meta(Db, CfHnsw, Index, Mod),
+            persist_index_graph(State)
+    end,
     %% Close index if backend supports it (e.g., FAISS releases NIF resources)
     _ = maybe_close_index(Mod, Index),
     %% The disk BM25 backend holds file + nested RocksDB handles
@@ -1020,11 +1051,9 @@ maybe_close_index(Mod, Index) ->
 %% Internal Functions - Database
 %%====================================================================
 
-%% Initialize RocksDB with column families
-init_rocksdb(DbPath, Env) ->
-    %% Ensure directory exists
-    ok = filelib:ensure_dir(DbPath ++ "/"),
-
+%% Initialize RocksDB with column families; read only, nothing is created.
+init_rocksdb(DbPath, Env, ReadOnly) ->
+    ok = ensure_store_dir(ReadOnly, DbPath),
     Options0 = [{create_if_missing, true}, {create_missing_column_families, true}],
     Options = case Env of
         undefined -> Options0;
@@ -1039,7 +1068,7 @@ init_rocksdb(DbPath, Env) ->
         {?CF_HNSW, []}
     ],
 
-    case rocksdb:open(DbPath, Options, CfDefs) of
+    case open_rocksdb(ReadOnly, DbPath, Options, CfDefs) of
         {ok, Db, [_Default, CfVectors, CfMetadata, CfText, CfHnsw]} ->
             {ok, Db, #{
                 vectors => CfVectors,
@@ -1050,6 +1079,14 @@ init_rocksdb(DbPath, Env) ->
         {error, Reason} ->
             {error, Reason}
     end.
+
+ensure_store_dir(true, _DbPath) -> ok;
+ensure_store_dir(false, DbPath) -> filelib:ensure_dir(DbPath ++ "/").
+
+open_rocksdb(true, DbPath, Options, CfDefs) ->
+    barrel_vectordb_ro:open(DbPath, Options, CfDefs);
+open_rocksdb(false, DbPath, Options, CfDefs) ->
+    rocksdb:open(DbPath, Options, CfDefs).
 
 %% Load existing index or create a new one; the third element says
 %% how the index came to be (new | loaded | rebuilt).
@@ -1083,7 +1120,21 @@ load_or_create_index(Db, CfHandles, Dimension, IndexConfig, IndexModule) ->
             end
     end.
 
-%% DiskANN-specific loading: try open existing, else create new
+%% DiskANN-specific loading: try open existing, else create new; read
+%% only, open what is there or fail.
+load_or_create_diskann(#{read_only := true, base_path := BasePath} = Config,
+                       _Dimension) ->
+    Crypto = maps:get(crypto, Config, none),
+    case filelib:is_regular(filename:join(BasePath, "diskann.meta")) of
+        true ->
+            case barrel_vectordb_diskann:open(BasePath, #{crypto => Crypto,
+                                                          read_only => true}) of
+                {ok, Index} -> {ok, Index, loaded};
+                {error, _} = Err -> Err
+            end;
+        false ->
+            {error, {read_only_store_missing, BasePath}}
+    end;
 load_or_create_diskann(Config, Dimension) ->
     BasePath = maps:get(base_path, Config),
     Crypto = maps:get(crypto, Config, none),
@@ -1585,14 +1636,32 @@ init_bm25(_DbPath, memory, Config, _Crypto) ->
 init_bm25(DbPath, disk, Config, Crypto) ->
     BM25Config = maps:get(bm25_disk, Config, #{}),
     BasePath = maps:get(base_path, BM25Config, filename:join(DbPath, "bm25")),
-    FinalConfig = BM25Config#{base_path => BasePath, crypto => Crypto},
+    ReadOnly = read_only(Config),
+    FinalConfig = BM25Config#{base_path => BasePath, crypto => Crypto,
+                              read_only => ReadOnly},
     %% Try to open existing index or create new
-    case filelib:is_dir(BasePath) of
-        true ->
+    case {filelib:is_dir(BasePath), ReadOnly} of
+        {true, _} ->
             barrel_vectordb_bm25_disk:open(BasePath, FinalConfig);
-        false ->
+        {false, true} ->
+            {error, {read_only_store_missing, BasePath}};
+        {false, false} ->
             barrel_vectordb_bm25_disk:new(FinalConfig)
     end.
+
+%% A read-only disk index that needs a rebuild cannot be served.
+open_bm25(#state{bm25_backend = disk, bm25_index = Index,
+                 config = #{read_only := true}} = State) ->
+    case barrel_vectordb_bm25_disk:rebuild_required(Index) of
+        true ->
+            _ = barrel_vectordb_bm25_disk:close(Index),
+            _ = rocksdb:close(State#state.db),
+            {stop, {read_only_upgrade_needed, bm25_rebuild}};
+        false ->
+            {ok, State}
+    end;
+open_bm25(State) ->
+    {ok, maybe_rebuild_bm25(State)}.
 
 %% The memory index starts empty, and a disk index written before the
 %% durable format opens empty: both are rebuilt from the stored text.

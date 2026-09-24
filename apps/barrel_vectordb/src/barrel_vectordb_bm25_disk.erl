@@ -136,6 +136,9 @@
     %% Set on a store that predates the durable format
     rebuild_required = false :: boolean(),
 
+    %% Opened read only: nothing on disk is created or rewritten
+    read_only = false :: boolean(),
+
     compaction_in_progress = false :: boolean()
 }).
 
@@ -189,8 +192,10 @@ open(Path) ->
 open(Path, Opts) ->
     BasePathBin = to_binary(Path),
     Crypto = maps:get(crypto, Opts, none),
+    ReadOnly = maps:get(read_only, Opts, false),
     case barrel_vectordb_bm25_disk_file:open(BasePathBin,
-                                             #{crypto => file_crypto(Crypto)}) of
+                                             #{crypto => file_crypto(Crypto),
+                                               read_only => ReadOnly}) of
         {ok, FileHandle} ->
             Header = barrel_vectordb_bm25_disk_file:read_header(FileHandle),
             Config = #bm25_disk_config{
@@ -200,7 +205,7 @@ open(Path, Opts) ->
                 lowercase = maps:get(lowercase, Opts, true),
                 block_size = maps:get(block_size, Header, ?DEFAULT_BLOCK_SIZE)
             },
-            case open_id_db(BasePathBin, Crypto) of
+            case open_id_db(BasePathBin, Crypto, ReadOnly) of
                 {ok, Handles} ->
                     Index1 = init_index(Handles, BasePathBin, Config,
                                         FileHandle, Opts),
@@ -501,7 +506,7 @@ create_index(BasePathBin, Config, Options) ->
     },
     case barrel_vectordb_bm25_disk_file:create(BasePathBin, FileConfig) of
         {ok, FileHandle} ->
-            case open_id_db(BasePathBin, Crypto) of
+            case open_id_db(BasePathBin, Crypto, false) of
                 {ok, Handles} ->
                     Index1 = init_index(Handles, BasePathBin, Config,
                                         FileHandle, Options),
@@ -536,6 +541,7 @@ init_index(#{db := Db, cfs := [CfD, CfTermsFwd, CfTermsRev, CfDocsFwd,
         cf_pending = CfPending,
         id_db_standalone = true,
         id_db_env = IdEnv,
+        read_only = maps:get(read_only, Opts, false),
         file_handle = FileHandle,
         doc_stats_table = ets:new(bm25_doc_stats, [set, public]),
         next_term_int_id = get_next_id(Db, CfTermsRev),
@@ -548,11 +554,14 @@ init_index(#{db := Db, cfs := [CfD, CfTermsFwd, CfTermsRev, CfDocsFwd,
 %% Durable format: stats, pending docs into the hot layer, segment if
 %% complete (else rebuilt now). No format marker: a store written before
 %% the forward index existed, its segment cannot be trusted.
-load_index(#bm25_disk_index{id_db = Db, cf_default = CfD} = Index) ->
-    case rocksdb:get(Db, CfD, ?KEY_FORMAT, []) of
-        {ok, ?FORMAT} ->
+load_index(#bm25_disk_index{id_db = Db, cf_default = CfD,
+                             read_only = ReadOnly} = Index) ->
+    case {rocksdb:get(Db, CfD, ?KEY_FORMAT, []), ReadOnly} of
+        {{ok, ?FORMAT}, _} ->
             load_durable(Index);
-        not_found ->
+        {not_found, true} ->
+            {error, {read_only_upgrade_needed, bm25_format}};
+        {not_found, false} ->
             ok = rocksdb:put(Db, CfD, ?KEY_REBUILD, <<>>, [{sync, true}]),
             ok = rocksdb:put(Db, CfD, ?KEY_FORMAT, ?FORMAT, [{sync, true}]),
             {ok, Index1} = reset(Index),
@@ -580,6 +589,8 @@ load_durable(#bm25_disk_index{id_db = Db, cf_default = CfD} = Index) ->
                    disk_doc_count = maps:get(doc_count, Header, 0),
                    disk_term_count = maps:get(term_count, Header, 0),
                    disk_total_tokens = maps:get(total_tokens, Header, 0)})};
+        not_found when Index1#bm25_disk_index.read_only ->
+            {error, {read_only_upgrade_needed, bm25_segment}};
         not_found ->
             %% Interrupted compaction: every live doc must be rewritten
             compact(load_pending(Index1))
@@ -611,8 +622,9 @@ id_db_env(#{key := Key}) ->
     {ok, Env} = rocksdb:new_env({encrypted, Key}),
     Env.
 
-%% Column families missing on an older store are created at open.
-open_id_db(BasePathBin, Crypto) ->
+%% Column families missing on an older store are created at a writable
+%% open; a read-only open reports them.
+open_id_db(BasePathBin, Crypto, ReadOnly) ->
     DbPath = filename:join(BasePathBin, "bm25.ids"),
     CfNames = ["default", ?CF_TERMS_FWD, ?CF_TERMS_REV, ?CF_DOCS_FWD,
                ?CF_DOCS_REV, ?CF_DOC_TERMS, ?CF_TERM_DF, ?CF_PENDING],
@@ -623,12 +635,18 @@ open_id_db(BasePathBin, Crypto) ->
         undefined -> DbOpts0;
         _ -> [{env, IdEnv} | DbOpts0]
     end,
-    case rocksdb:open(binary_to_list(DbPath), DbOpts, CfDescriptors) of
+    case open_id_rocksdb(ReadOnly, binary_to_list(DbPath), DbOpts,
+                         CfDescriptors) of
         {ok, Db, Cfs} ->
             {ok, #{db => Db, cfs => Cfs, env => IdEnv}};
         {error, _} = Error ->
             Error
     end.
+
+open_id_rocksdb(true, Path, DbOpts, CFs) ->
+    barrel_vectordb_ro:open(Path, DbOpts, CFs);
+open_id_rocksdb(false, Path, DbOpts, CFs) ->
+    rocksdb:open(Path, DbOpts, CFs).
 
 get_next_id(Db, CfRev) ->
     %% Scan reverse CF to find highest ID

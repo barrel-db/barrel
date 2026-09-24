@@ -14,7 +14,8 @@
 
 -export([
     run/3,
-    fold/5
+    fold/5,
+    observe/2
 ]).
 
 %% Frame surface reused by the barrel module for table functions.
@@ -34,11 +35,14 @@
 %% keep find/3's chunk semantics: one chunk per call, meta carries the
 %% continuation. Materializing plans paginate internally and return
 %% everything.
--spec run(binary(), barrel_bql_lower:plan(), map()) ->
+-spec run(binary() | pid(), barrel_bql_lower:plan(), map()) ->
     {ok, [map()], map()} | {error, term()}.
-run(_DbName, #{post := #{empty := true}}, _Opts) ->
+run(Db, Plan, Opts) ->
+    observe(Db, do_run(Db, Plan, Opts)).
+
+do_run(_DbName, #{post := #{empty := true}}, _Opts) ->
     {ok, [], #{has_more => false, count => 0}};
-run(DbName, #{streamable := true} = Plan, Opts) ->
+do_run(DbName, #{streamable := true} = Plan, Opts) ->
     #{spec := Spec, post := #{project := Project}} = Plan,
     case barrel_docdb:find(DbName, Spec, find_opts(Opts)) of
         {ok, Rows, Meta} ->
@@ -46,7 +50,7 @@ run(DbName, #{streamable := true} = Plan, Opts) ->
         {error, _} = Error ->
             Error
     end;
-run(DbName, Plan, Opts) ->
+do_run(DbName, Plan, Opts) ->
     case maps:is_key(continuation, Opts) of
         true ->
             {error, {unsupported, continuation}};
@@ -66,26 +70,41 @@ run(DbName, Plan, Opts) ->
 %% @doc Fold rows without materializing the full result (streamable
 %% plans paginate internally; materializing plans fold the built list).
 %% Fun(Row, Acc) -> {ok, Acc} | {stop, Acc}.
--spec fold(binary(), barrel_bql_lower:plan(), map(),
+-spec fold(binary() | pid(), barrel_bql_lower:plan(), map(),
            fun((map(), term()) -> {ok, term()} | {stop, term()}),
            term()) ->
     {ok, term(), map()} | {error, term()}.
-fold(_DbName, #{post := #{empty := true}}, _Opts, _Fun, Acc) ->
+fold(Db, Plan, Opts, Fun, Acc) ->
+    observe(Db, do_fold(Db, Plan, Opts, Fun, Acc)).
+
+do_fold(_DbName, #{post := #{empty := true}}, _Opts, _Fun, Acc) ->
     {ok, Acc, #{has_more => false, count => 0}};
-fold(DbName, #{streamable := true} = Plan, Opts, Fun, Acc0) ->
+do_fold(DbName, #{streamable := true} = Plan, Opts, Fun, Acc0) ->
     #{spec := Spec, post := #{project := Project}} = Plan,
     ChunkSize = maps:get(chunk_size, Opts, 100),
     fold_chunks(DbName, Spec, Project,
                 maps:get(continuation, Opts, undefined),
                 ChunkSize, Fun, Acc0);
-fold(DbName, Plan, Opts, Fun, Acc0) ->
-    case run(DbName, Plan, Opts) of
+do_fold(DbName, Plan, Opts, Fun, Acc0) ->
+    case do_run(DbName, Plan, Opts) of
         {ok, Rows, Meta} ->
             {_, Acc} = fold_rows(Rows, Fun, Acc0),
             {ok, Acc, Meta};
         {error, _} = Error ->
             Error
     end.
+
+%% @doc Add the observed version (`instance_id', `last_seq', read after
+%% the run) to a successful result's meta.
+-spec observe(binary() | pid(), {ok, term(), map()} | {error, term()}) ->
+    {ok, term(), map()} | {error, term()}.
+observe(Db, {ok, Result, Meta}) ->
+    case barrel_docdb:db_observed_version(Db) of
+        {ok, Observed} -> {ok, Result, maps:merge(Meta, Observed)};
+        {error, _} -> {ok, Result, Meta}
+    end;
+observe(_Db, {error, _} = Error) ->
+    Error.
 
 %%====================================================================
 %% Frame surface (shared with barrel)

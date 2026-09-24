@@ -33,6 +33,14 @@ meta_round_trip_test() ->
     %% never leaves a temp file behind
     ?assertEqual({ok, ["TIMELINE"]}, file:list_dir(Dir)).
 
+meta_import_round_trip_test() ->
+    Dir = tmp_dir("meta_import"),
+    Hlc = barrel_hlc:encode(barrel_hlc:from_wall_time(1234567)),
+    Meta = #{keyspace => <<"src1">>, parent => <<"src1">>,
+             fork_hlc => Hlc, kind => import},
+    ok = barrel_keyspace:write_meta(Dir, Meta),
+    ?assertEqual({ok, Meta}, barrel_keyspace:read_meta(Dir)).
+
 meta_absent_test() ->
     Dir = tmp_dir("meta_absent"),
     ?assertEqual(not_found, barrel_keyspace:read_meta(Dir)).

@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.5.0] - 2026-09-25
+
+### Added
+- `read_only => true` store option. Adds, updates, upserts, deletes, `persist_index` and `bm25_compact` answer `{error, read_only}`; `checkpoint` is a no-op and close persists neither the index metadata nor the graph. Searches work, BM25 included: a memory index is rebuilt at open (2.4.1) and a disk index is read as is.
+- A read-only store opens its RocksDB stores (vector store, `bm25.ids`, DiskANN `diskann_ids`) with `OpenForReadOnly` and its BM25 and DiskANN flat files without write access: nothing in the store directory is created, rewritten or removed, and several nodes can open it at once. A missing store fails with `{read_only_store_missing, Path}`; a store that needs an upgrade (a column family added by a later version, a disk BM25 index from before the durable format or with an interrupted compaction, a DiskANN V1 index) fails with `{read_only_upgrade_needed, _}` until one writable open upgrades it.
+
 ## [2.4.1] - 2026-09-24
 
 ### Fixed
