@@ -279,6 +279,9 @@ create_db(Name) ->
 %%       like `channels': pass it again on every reopen. A database cannot
 %%       change between plaintext and encrypted after creation
 %%       (default: `disabled')</li>
+%%   <li>`max_group' - Maximum number of write requests committed in one
+%%       batch. Writes waiting at the database are committed together,
+%%       with one sync when any of them asked for it (default: `256')</li>
 %% </ul>
 %%
 %% == Example ==
@@ -721,9 +724,15 @@ put_doc(Db, Doc) ->
 %%
 %% == Options ==
 %% <ul>
+%% <li>`sync' - If `true', the write is synced to disk before the call
+%% returns (default: false)</li>
 %% <li>`replicate => sync' - Wait for document to reach replicas before returning</li>
 %% <li>`wait_for => [Target]' - List of targets to wait for (requires replicate => sync)</li>
 %% </ul>
+%%
+%% Concurrent writes to one database share a batch and a sync. The call
+%% returns once the batch holding its write is written, and synced when
+%% `sync' is set.
 %%
 %% == Example ==
 %% ```
@@ -835,6 +844,10 @@ put_docs(Db, Docs) ->
 %% <ul>
 %%   <li>`sync' - If `true', sync to disk before returning (default: false)</li>
 %% </ul>
+%%
+%% A document whose id already appears earlier in `Docs' is written after
+%% that earlier one, like a separate call: without its `_rev' it answers
+%% `{error, conflict}'.
 %%
 %% @param Db Database name or pid
 %% @param Docs List of document maps to store

@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] - 2026-09-24
+
+### Changed
+- Concurrent writes to one database share one batch and one sync. When the database takes a write (`put_doc`, `put_docs`, `delete_doc`, `outbox_ack`), it also takes the writes already waiting behind it, up to `max_group` (a database option, default 256), and commits them in one `write_batch`, synced when any of them asked for `sync`. Each request keeps its own options, conflict check and answer, and is answered after the batch holding its write is written. 64 synced writers go from about 180 to about 6,600 writes per second on one database.
+- A failed batch write answers `{error, Reason}` to each request of the group, and the database keeps running. It used to crash.
+- `db_info/1` reports `write_groups => #{groups, requests, max_size}`, and the `barrel_write_group_size` histogram records the requests committed per batch.
+
+### Fixed
+- `put_docs` with the same id twice: both documents answered ok, and the first one's change row, outbox entry and index rows were left orphaned. The repeated id is now written after the first one, like a separate call, so without its `_rev` it answers `{error, conflict}`.
+
 ## [1.5.0] - 2026-09-14
 
 ### Added
