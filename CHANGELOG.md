@@ -4,6 +4,19 @@ All notable changes to the Barrel umbrella are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and each app
 is versioned independently under [Semantic Versioning](https://semver.org/).
 
+## [2026-09-25] Federated context queries
+
+The point of contexts: one BQL statement answered across local databases,
+imported generations, slices and other nodes, with each source saying what
+it answered from. The executor decides every member before running, keeps
+local members open under a lease and remote ones under a deadline, merges
+rows by the statement's own order, and merges vector hits by score only
+when their embedding fingerprints match.
+
+| App | Version | Change |
+|-----|---------|--------|
+| barrel | 1.10.0 | `barrel_ctx` facade, federated executor, merges, error catalog, self-explaining answers |
+
 ## [2026-09-25] Working sets and slices
 
 An agent works with a few contexts at a time and must keep answering when

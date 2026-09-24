@@ -3,6 +3,14 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.10.0] - 2026-09-25
+
+### Added
+- `barrel_ctx`: the contexts facade. `capabilities/0` (query shapes with examples, merges, limits, budgets, offline state), `discover/2`, `inspect/1`, `list/1`, `register/1`, `update/2`, `unregister/1`, `resolve/1` (names wherever ids are accepted, close matches on a typo), `query/1`, working sets (`create_ws/1`, `get_ws/1`, `list_ws/0`, `delete_ws/1`, `attach/3`, `detach/2`, `materialize/2`, `import/3`) and `offline/0`, `set_offline/1`.
+- `barrel_ctx_query`: federated BQL over local, imported, sliced and remote contexts. Each member is decided before any work (offline members that need the network are skipped, missing local copies fail); local members run under a lease, remote ones under the request deadline and a parallelism bound. Every source reports its status, version and membership; answers are `succeeded`, `partial` or `failed`.
+- Merges (`barrel_ctx_merge`, `barrel_ctx_shape`): `ordered` rows are merged by the statement's `ORDER BY` and cut at its `LIMIT`; retrieval is `grouped` by context by default; `score` merges `vector_top_k` hits only when every member reports the same embedding fingerprint and cosine distance, otherwise it falls back to `grouped` and says why; `interleave` answers with `relevance: false`; `rrf` and `rerank` are refused.
+- `barrel_ctx_error`: one error catalog, `{error, {Code, Details}}` with a message, a hint and an HTTP status per code. `barrel_ctx_explain`: a `summary` on every answer, names on sources, groups, members and rows, a message and hint on every source that did not answer.
+
 ## [1.9.0] - 2026-09-25
 
 ### Added
