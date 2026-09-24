@@ -18,7 +18,12 @@
     t_reopen_preserves_data/1,
     t_crash_restart/1,
     t_record_close_stops_indexer/1,
-    t_concurrent_ensure_coalesces/1
+    t_concurrent_ensure_coalesces/1,
+    t_lease_counts/1,
+    t_lease_released_on_exit/1,
+    t_must_exist/1,
+    t_hold/1,
+    t_lookup/1
 ]).
 
 -include_lib("common_test/include/ct.hrl").
@@ -27,7 +32,9 @@
 all() ->
     [t_idle_close, t_touch_resets, t_pin_blocks, t_lru_eviction,
      t_all_pinned_errors, t_reopen_preserves_data, t_crash_restart,
-     t_record_close_stops_indexer, t_concurrent_ensure_coalesces].
+     t_record_close_stops_indexer, t_concurrent_ensure_coalesces,
+     t_lease_counts, t_lease_released_on_exit, t_must_exist, t_hold,
+     t_lookup].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(barrel),
@@ -93,6 +100,91 @@ t_touch_resets(Config) ->
     timer:sleep(120),
     ok = barrel_dbs:sweep(),
     ?assertEqual([], barrel_dbs:list()),
+    ok.
+
+%% Leases are counted: the db stays held until the last one is released.
+t_lease_counts(Config) ->
+    Name = uname(<<"lease">>),
+    application:set_env(barrel, dbs_idle_timeout, 30),
+    {ok, Db, L1} = barrel_dbs:lease(Name, open_opts(Name, Config)),
+    {ok, Db, L2} = barrel_dbs:lease(Name, #{}),
+    ?assertEqual(#{Name => 2}, barrel_dbs:leases()),
+    ok = barrel_dbs:release(L1),
+    ok = barrel_dbs:release(L1),
+    timer:sleep(60),
+    ok = barrel_dbs:sweep(),
+    ?assertEqual([Name], barrel_dbs:list()),
+    ok = barrel_dbs:release(L2),
+    ?assertEqual(#{}, barrel_dbs:leases()),
+    timer:sleep(60),
+    ok = barrel_dbs:sweep(),
+    ?assertEqual([], barrel_dbs:list()),
+    ok.
+
+%% A holder that exits without releasing drops its lease.
+t_lease_released_on_exit(Config) ->
+    Name = uname(<<"lease_exit">>),
+    Self = self(),
+    Pid = spawn(fun() ->
+                    {ok, _, _} = barrel_dbs:lease(Name, open_opts(Name, Config)),
+                    Self ! leased,
+                    receive stop -> ok end
+                end),
+    receive leased -> ok end,
+    ?assertEqual(#{Name => 1}, barrel_dbs:leases()),
+    exit(Pid, kill),
+    timer:sleep(20),
+    ?assertEqual(#{}, barrel_dbs:leases()),
+    ok.
+
+%% must_exist never creates a database.
+t_must_exist(Config) ->
+    Name = uname(<<"must">>),
+    Opts = open_opts(Name, Config),
+    ?assertEqual({error, not_found},
+                 barrel_dbs:ensure(Name, Opts#{must_exist => true})),
+    ?assertNot(barrel_docdb:db_exists(Name, #{})),
+    {ok, _} = barrel_dbs:ensure(Name, Opts),
+    ok = barrel_dbs:close(Name),
+    {ok, _} = barrel_dbs:ensure(Name, Opts#{must_exist => true}),
+    ok.
+
+%% A hold closes the database and refuses ensures until unhold; pinned or
+%% leased databases cannot be held.
+t_hold(Config) ->
+    Name = uname(<<"hold">>),
+    Opts = open_opts(Name, Config),
+    {ok, _} = barrel_dbs:ensure(Name, Opts#{owner => me}),
+    ?assertEqual({error, {owned_by, me}}, barrel_dbs:hold(Name, #{})),
+    {ok, #{was_open := true, opts := Opts}} =
+        barrel_dbs:hold(Name, #{owner => me}),
+    ?assertEqual([], barrel_dbs:list()),
+    ?assertEqual({error, {held, me}}, barrel_dbs:ensure(Name, Opts)),
+    ?assertEqual({error, {held, me}}, barrel_dbs:hold(Name, #{owner => me})),
+    ok = barrel_dbs:unhold(Name),
+    ok = barrel_dbs:unhold(Name),
+    {ok, _} = barrel_dbs:ensure(Name, Opts),
+    ok = barrel_dbs:pin(Name),
+    ?assertEqual({error, pinned}, barrel_dbs:hold(Name, #{})),
+    ok = barrel_dbs:unpin(Name),
+    {ok, _, Lease} = barrel_dbs:lease(Name, #{}),
+    ?assertEqual({error, {leased, 1}}, barrel_dbs:hold(Name, #{})),
+    ok = barrel_dbs:release(Lease),
+    %% a name that is not open is held without closing anything
+    Other = uname(<<"hold_absent">>),
+    {ok, #{was_open := false}} = barrel_dbs:hold(Other, #{}),
+    ok = barrel_dbs:unhold(Other),
+    ok.
+
+%% lookup reports the open options (without owner or must_exist).
+t_lookup(Config) ->
+    Name = uname(<<"lookup">>),
+    Opts = open_opts(Name, Config),
+    ?assertEqual({error, not_open}, barrel_dbs:lookup(Name)),
+    {ok, _} = barrel_dbs:ensure(Name, Opts#{owner => t, must_exist => false}),
+    ?assertEqual({ok, #{pinned => false, owner => t,
+                        opts => Opts}},
+                 barrel_dbs:lookup(Name)),
     ok.
 
 t_pin_blocks(Config) ->

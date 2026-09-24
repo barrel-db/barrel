@@ -123,10 +123,14 @@
 %% indexer.
 -define(EMBED_TAG, <<"embed">>).
 
+%% Local doc holding the persisted embedding policy.
+-define(POLICY_DOC, <<"_barrel/embedding">>).
+
 -type db() :: #{
     name := binary(),
     docdb := binary(),
     vstore := binary(),
+    read_only => true,
     embedding => barrel_embedding_policy:policy(),
     embed => term(),
     dimensions => pos_integer(),
@@ -176,13 +180,47 @@ open(Name) ->
 %% keyspace, so a branch resolves its parent's key) and hands it to the
 %% vector store. Runtime config: pass it again on every open. Branches
 %% inherit the spec from the parent handle.
+%%
+%% `read_only => true' opens both stores read only: every write returns
+%% `{error, read_only}', record mode persists no policy and starts no
+%% indexer. `embedding => stored' opens record mode with the policy the
+%% database persisted (used for imported copies).
 -spec open(db_name(), map()) -> {ok, db()} | {error, term()}.
-open(Name, Opts) when (is_atom(Name) orelse is_binary(Name)),
-                      is_map(Opts) ->
+open(Name, Opts0) when (is_atom(Name) orelse is_binary(Name)),
+                       is_map(Opts0) ->
     DbBin = to_name(Name),
+    Opts = read_only_opts(Opts0),
     case maps:get(embedding, Opts, undefined) of
         undefined -> open_plain(DbBin, Opts);
+        stored -> open_stored(DbBin, Opts);
         PolicyMap -> open_record(DbBin, Opts, PolicyMap)
+    end.
+
+%% `read_only => true' reaches both stores: docdb and vectordb refuse
+%% writes, record mode persists no policy and runs no indexer.
+read_only_opts(#{read_only := true} = Opts) ->
+    Opts#{docdb => (maps:get(docdb, Opts, #{}))#{read_only => true},
+          vectordb => (maps:get(vectordb, Opts, #{}))#{read_only => true}};
+read_only_opts(Opts) ->
+    maps:remove(read_only, Opts).
+
+%% `embedding => stored' opens record mode with the policy persisted in
+%% the database (an imported copy carries its source's policy).
+open_stored(DbBin, Opts) ->
+    EncSpec = maps:get(encryption, Opts, disabled),
+    DocOpts = put_encryption(maps:get(docdb, Opts, #{}), EncSpec),
+    case ensure_docdb(DbBin, DocOpts) of
+        {ok, _} ->
+            case barrel_docdb:get_local_doc(DbBin, ?POLICY_DOC) of
+                {ok, #{<<"policy">> := Bin}} ->
+                    Policy = binary_to_term(Bin, [safe]),
+                    open_record(DbBin, Opts, Policy);
+                {error, not_found} ->
+                    _ = barrel_docdb:close_db(DbBin),
+                    {error, no_stored_policy}
+            end;
+        {error, _} = Err ->
+            Err
     end.
 
 %% @private Today's composed open, plus encryption threading.
@@ -197,10 +235,12 @@ open_plain(DbBin, Opts) ->
                     case start_vstore(VecConfig#{name => DbBin},
                                       maps:get(store_supervised, Opts, false)) of
                         {ok, _StorePid} ->
-                            {ok, with_encryption(#{name => DbBin,
-                                                   docdb => DbBin,
-                                                   vstore => DbBin},
-                                                 EncSpec)};
+                            {ok, with_read_only(
+                                   Opts,
+                                   with_encryption(#{name => DbBin,
+                                                     docdb => DbBin,
+                                                     vstore => DbBin},
+                                                   EncSpec))};
                         {error, _} = VErr ->
                             _ = barrel_docdb:close_db(DbBin),
                             VErr
@@ -238,14 +278,12 @@ do_open_record(DbBin, Opts, Policy) ->
         {ok, Dim} ->
             case ensure_docdb(DbBin, DocOpts) of
                 {ok, _DbPid} ->
-                    ok = persist_policy(DbBin, Policy),
+                    ok = maybe_persist_policy(Opts, DbBin, Policy),
                     case vec_crypto_config(DbBin, EncSpec, VecConfig0) of
                         {ok, VecConfig1} ->
                             do_open_record_stores(DbBin, Policy, Dim,
                                                   VecConfig0, VecConfig1,
-                                                  EncSpec,
-                                                  maps:get(store_supervised,
-                                                           Opts, false));
+                                                  EncSpec, Opts);
                         {error, _} = CErr ->
                             _ = barrel_docdb:close_db(DbBin),
                             CErr
@@ -258,7 +296,8 @@ do_open_record(DbBin, Opts, Policy) ->
     end.
 
 do_open_record_stores(DbBin, Policy, Dim, VecConfig0, VecConfig1,
-                      EncSpec, Supervised) ->
+                      EncSpec, Opts) ->
+    Supervised = maps:get(store_supervised, Opts, false),
     case init_embed(Policy, Dim) of
         {ok, EmbedState} ->
             VecConfig = VecConfig1#{
@@ -273,15 +312,18 @@ do_open_record_stores(DbBin, Policy, Dim, VecConfig0, VecConfig1,
             },
             case start_vstore(VecConfig, Supervised) of
                 {ok, _StorePid} ->
-                    case start_indexer(DbBin, Policy,
-                                       EmbedState, Dim) of
+                    case record_side(Opts, DbBin, Policy, EmbedState,
+                                     Dim) of
                         ok ->
-                            {ok, with_encryption(#{name => DbBin, docdb => DbBin,
-                                                   vstore => DbBin,
-                                                   embedding => Policy,
-                                                   embed => EmbedState,
-                                                   dimensions => Dim},
-                                                 EncSpec)};
+                            {ok, with_read_only(
+                                   Opts,
+                                   with_encryption(#{name => DbBin,
+                                                     docdb => DbBin,
+                                                     vstore => DbBin,
+                                                     embedding => Policy,
+                                                     embed => EmbedState,
+                                                     dimensions => Dim},
+                                                   EncSpec))};
                         {error, _} = IErr ->
                             _ = barrel_vectordb:stop(DbBin),
                             _ = barrel_docdb:close_db(DbBin),
@@ -1026,9 +1068,6 @@ vec_crypto_config(DbBin, Spec, VecConfig) ->
 %% Internal: record mode
 %%====================================================================
 
-%% Local doc holding the persisted embedding policy.
--define(POLICY_DOC, <<"_barrel/embedding">>).
-
 %% @private Tag record-mode writes for the embedding indexer; plain
 %% databases pass options through untouched. User-supplied outbox tags
 %% are preserved.
@@ -1350,6 +1389,21 @@ init_embed(Policy, Dim) ->
         Embedder -> #{embedder => Embedder}
     end,
     barrel_embed:init(Cfg0#{dimensions => Dim}).
+
+%% A read-only database keeps the policy it was opened with in memory.
+maybe_persist_policy(#{read_only := true}, _DbBin, _Policy) -> ok;
+maybe_persist_policy(_Opts, DbBin, Policy) -> persist_policy(DbBin, Policy).
+
+%% Read-only record mode runs no indexer: nothing is written. BM25 needs
+%% no refill: the vector store rebuilds a memory index from the documents
+%% at open and a disk index is durable.
+record_side(#{read_only := true}, _DbBin, _Policy, _Embed, _Dim) ->
+    ok;
+record_side(_Opts, DbBin, Policy, Embed, Dim) ->
+    start_indexer(DbBin, Policy, Embed, Dim).
+
+with_read_only(#{read_only := true}, Db) -> Db#{read_only => true};
+with_read_only(_Opts, Db) -> Db.
 
 %% @private Persist the policy as a local doc. On reopen with a changed
 %% policy, warn and overwrite: existing documents are NOT reindexed.
