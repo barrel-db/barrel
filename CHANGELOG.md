@@ -4,6 +4,18 @@ All notable changes to the Barrel umbrella are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and each app
 is versioned independently under [Semantic Versioning](https://semver.org/).
 
+## [2026-09-24] BM25 survives store reopen
+
+A vector store with the disk BM25 backend, the default for record-mode
+databases, came back empty or partial after close/reopen, and the memory
+backend always did. BM25 state is now durable per write and rebuilt from the
+stored text where it was missing, including indexes written by earlier
+versions on first open.
+
+| App | Version | Change |
+|-----|---------|--------|
+| barrel_vectordb | 2.4.1 | durable disk BM25 (forward index in `bm25.ids`), memory BM25 rebuilt at open, legacy indexes rebuilt on first open |
+
 ## [2026-09-24] barrel_docdb group commit
 
 hornbeam appends each step of a durable execution as a synced `put_doc`,
