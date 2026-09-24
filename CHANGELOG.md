@@ -4,6 +4,18 @@ All notable changes to the Barrel umbrella are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and each app
 is versioned independently under [Semantic Versioning](https://semver.org/).
 
+## [2026-09-25] Context catalog and remote client
+
+Contexts need names and a way to reach the ones that live on other nodes. A
+local catalog stores context cards (what a context is, where its copies
+live) and finds them by words; a remote client queries another node's query
+route under a deadline and a byte cap, and reports every failure in one
+shape.
+
+| App | Version | Change |
+|-----|---------|--------|
+| barrel | 1.8.0 | `barrel_ctx_catalog`, `barrel_ctx_remote`, hackney declared |
+
 ## [2026-09-25] Export and read-only import of a database
 
 A context can be copied to another node and queried there without the
