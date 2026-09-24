@@ -90,6 +90,10 @@ The corpus tracks the database, so segments come and go:
 - **Compaction.** When the segment count crosses a threshold (or on `compact/1`), a worker
   merges segments, collapsing each key to its newest version by HLC and physically
   evicting superseded and deleted entries.
+- **Leases.** A query leases the segment files of its snapshot. A compaction swaps the
+  manifest right away but deletes a merged input only once no lease pins it, so a query
+  running during a compaction never loses a file. A lease ends when the query finishes or
+  its process dies.
 - **Recovery.** On start the corpus reads the manifest and resubscribes from its
   watermark, so only the feed tail is replayed.
 

@@ -19,7 +19,7 @@
          corrupt_segment_fails_open/1,
          truncated_segment_fails_open/1,
          truncated_segment_fails_query/1,
-         legacy_manifest_requires_reindex/1]).
+         legacy_manifest_requires_reindex/1, lease_pins_until_release/1]).
 
 all() ->
     [query_during_compaction,
@@ -30,7 +30,7 @@ all() ->
      corrupt_segment_fails_open,
      truncated_segment_fails_open,
      truncated_segment_fails_query,
-     legacy_manifest_requires_reindex].
+     legacy_manifest_requires_reindex, lease_pins_until_release].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(barrel_docdb),
@@ -74,8 +74,45 @@ query_during_compaction(Config) ->
     C = ?config(corpus, Config),
     compact_on_first_open(C),
     ?assertEqual({ok, [<<"1">>, <<"2">>, <<"3">>]}, ids(barrel_ngram:search(C, <<"needle">>))),
-    %% the compaction really ran and the inputs are gone afterwards
+    %% the compaction ran and the inputs go once the lease is released (a
+    %% call after the release cast is ordered behind it)
+    {ok, _} = barrel_ngram_shard:get_manifest(C),
     ?assertEqual(1, length(segment_files(Config))).
+
+%% A lease pins its files until released; a lease whose owner dies is
+%% released too.
+lease_pins_until_release(Config) ->
+    C = ?config(corpus, Config),
+    Self = self(),
+    Owner = spawn(fun() ->
+        {ok, Lease, Segs, _} = barrel_ngram:safe_shard_call(C, lease_snapshot),
+        Self ! {leased, Lease, Segs},
+        receive release -> barrel_ngram_shard:release(C, Lease) end,
+        receive stop -> ok end
+    end),
+    {Lease, Segs} = receive {leased, L, S} -> {L, S} after 5000 -> ct:fail(no_lease) end,
+    {ok, _} = barrel_ngram:compact(C),
+    %% inputs survive the compaction while leased
+    ?assert(lists:all(fun({_, P}) -> filelib:is_regular(P) end, Segs)),
+    Owner ! release,
+    ok = wait_until(fun() -> not lists:any(fun({_, P}) -> filelib:is_regular(P) end, Segs) end, 100),
+    %% releasing twice is harmless
+    ok = barrel_ngram_shard:release(C, Lease),
+    %% a dead owner releases its lease
+    Owner2 = spawn(fun() ->
+        {ok, _L2, Segs2, _} = barrel_ngram:safe_shard_call(C, lease_snapshot),
+        Self ! {leased2, Segs2},
+        receive stop -> ok end
+    end),
+    Segs2 = receive {leased2, S2} -> S2 after 5000 -> ct:fail(no_lease) end,
+    {ok, _} = barrel_docdb:put_doc(?config(db, Config), #{<<"id">> => <<"4">>,
+                                                          <<"body">> => <<"needle 4">>}),
+    {ok, _} = barrel_ngram:refresh(C),
+    {ok, _} = barrel_ngram:compact(C),
+    ?assert(lists:all(fun({_, P}) -> filelib:is_regular(P) end, Segs2)),
+    exit(Owner2, kill),
+    ok = wait_until(fun() -> not lists:any(fun({_, P}) -> filelib:is_regular(P) end, Segs2) end, 100),
+    Owner ! stop.
 
 regex_during_compaction(Config) ->
     C = ?config(corpus, Config),
@@ -171,6 +208,14 @@ check_manifest_checksums(Config, N) ->
             ?assertEqual({ok, Sha, Bytes},
                          barrel_ngram_fs:sha256_file(filename:join(corpus_dir(Config), F)))
         end, Segs).
+
+wait_until(_Fun, 0) ->
+    timeout;
+wait_until(Fun, N) ->
+    case Fun() of
+        true -> ok;
+        false -> timer:sleep(20), wait_until(Fun, N - 1)
+    end.
 
 truncate(Path, By) ->
     {ok, Bin} = file:read_file(Path),

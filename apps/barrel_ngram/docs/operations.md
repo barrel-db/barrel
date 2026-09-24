@@ -108,6 +108,10 @@ A damaged segment fails open with `{corrupt_segment, Path, Detail}`. The index i
 data: `delete_corpus/1,2` then `open/2` rebuilds it. A read error during a query fails the
 query with `{segment_read_failed, Path, Reason}`; it is never read as "no match".
 
+A query leases the segment files of its snapshot. A compaction commits its manifest at once
+but deletes a merged input only when no query holds it, so queries and compactions can run
+side by side.
+
 ## The delete caveat
 
 Deletes are observed from the feed, where a deletion is a tombstone that the database keeps

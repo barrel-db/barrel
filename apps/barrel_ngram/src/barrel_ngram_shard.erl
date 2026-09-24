@@ -21,6 +21,11 @@
 %%% dropping superseded and deleted ordinals, and the shard swaps the
 %%% manifest to the merged segment. `compact/1' does this synchronously.
 %%%
+%%% Queries lease their snapshot's segment files (`lease_snapshot',
+%%% released by {@link release/2} or when the query process dies). A
+%%% compaction swaps the manifest at once but deletes a leased input only
+%%% once its last lease is gone.
+%%%
 %%% Recovery is the watermark: on start the shard loads the manifest and
 %%% resubscribes from its watermark, so only the feed tail is replayed
 %%% (idempotently). Correctness of updates/deletes never depends on
@@ -33,7 +38,7 @@
 
 -export([start_link/2]).
 -export([refresh/1, compact/1, get_manifest/1, buffer_keys/1, snapshot/1,
-         get_config/1]).
+         get_config/1, release/2]).
 
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
@@ -67,7 +72,11 @@
     freeze_threshold :: pos_integer(),
     compact_threshold :: pos_integer() | infinity,
     merge_worker :: undefined | {pid(), reference()},
-    stream_pid :: pid() | undefined
+    stream_pid :: pid() | undefined,
+    %% lease (query monitor ref) -> segment files it pins
+    leases = #{} :: #{reference() => [binary()]},
+    %% superseded files kept until their last lease is released
+    doomed = [] :: [binary()]
 }).
 
 %%====================================================================
@@ -112,6 +121,12 @@ buffer_keys(Corpus) ->
     {ok, [{non_neg_integer(), binary()}], #{binary() => {binary(), live | deleted}}}.
 snapshot(Corpus) ->
     gen_server:call(via(Corpus), snapshot, infinity).
+
+%% @doc Release a lease taken with the `lease_snapshot' call. Idempotent;
+%% a lease also ends when its owner dies.
+-spec release(term(), reference()) -> ok.
+release(Corpus, Lease) ->
+    gen_server:cast(via(Corpus), {release, Lease}).
 
 %% @doc The corpus config held by the shard.
 -spec get_config(term()) -> {ok, map()}.
@@ -252,16 +267,22 @@ handle_call(get_manifest, _From, #state{dir = Dir, manifest = M} = State) ->
 handle_call(buffer_keys, _From, #state{buffer = Buffer} = State) ->
     {reply, maps:keys(Buffer), State};
 
-handle_call(snapshot, _From, #state{dir = Dir, manifest = M, buffer = Buffer} = State) ->
-    Segs = [{maps:get(gen, S), filename:join(Dir, maps:get(file, S))}
-            || S <- barrel_ngram_manifest:list_segments(M)],
-    BufferSnapshot = maps:map(fun(_K, {Hlc, Content}) -> {Hlc, content_kind(Content)} end,
-                              Buffer),
+handle_call(snapshot, _From, State) ->
+    {Segs, BufferSnapshot} = snapshot_of(State),
     {reply, {ok, Segs, BufferSnapshot}, State};
+
+handle_call(lease_snapshot, {Pid, _Tag}, #state{manifest = M, leases = Leases} = State) ->
+    {Segs, BufferSnapshot} = snapshot_of(State),
+    Files = [maps:get(file, S) || S <- barrel_ngram_manifest:list_segments(M)],
+    Lease = erlang:monitor(process, Pid),
+    {reply, {ok, Lease, Segs, BufferSnapshot}, State#state{leases = Leases#{Lease => Files}}};
 
 handle_call(get_config, _From, #state{config = Config} = State) ->
     {reply, {ok, Config}, State}.
 
+handle_cast({release, Lease}, State) ->
+    erlang:demonitor(Lease, [flush]),
+    {noreply, end_lease(Lease, State)};
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
@@ -291,6 +312,10 @@ handle_info({'DOWN', MRef, process, _Pid, Reason},
     logger:warning("barrel_ngram compaction worker died for ~p: ~p",
                    [State#state.corpus, Reason]),
     {noreply, State#state{merge_worker = undefined}};
+
+handle_info({'DOWN', Lease, process, _Pid, _Reason}, #state{leases = Leases} = State)
+        when is_map_key(Lease, Leases) ->
+    {noreply, end_lease(Lease, State)};
 
 handle_info({'EXIT', Pid, _Reason}, #state{stream_pid = Pid} = State) ->
     case subscribe(State#state{stream_pid = undefined}) of
@@ -617,9 +642,8 @@ apply_merge_result(#{path := TempPath, doc_count := DocCount, sha256 := Sha,
                          sha256 => Sha, bytes => Bytes}),
             case barrel_ngram_manifest:save(Dir, M2) of
                 ok ->
-                    [file:delete(filename:join(Dir, F))
-                     || F <- InputFiles, F =/= FinalFile],
-                    State#state{manifest = M2};
+                    Doomed = State#state.doomed ++ (InputFiles -- [FinalFile]),
+                    delete_unleased(State#state{manifest = M2, doomed = Doomed});
                 {error, SReason} ->
                     logger:error("barrel_ngram manifest save failed for ~p: ~p",
                                  [State#state.corpus, SReason]),
@@ -632,6 +656,28 @@ apply_merge_result(#{path := TempPath, doc_count := DocCount, sha256 := Sha,
             _ = file:delete(TempPath),
             State
     end.
+
+%% @private Segment paths of the manifest and the buffer's key kinds.
+snapshot_of(#state{dir = Dir, manifest = M, buffer = Buffer}) ->
+    Segs = [{maps:get(gen, S), filename:join(Dir, maps:get(file, S))}
+            || S <- barrel_ngram_manifest:list_segments(M)],
+    {Segs, maps:map(fun(_K, {Hlc, Content}) -> {Hlc, content_kind(Content)} end, Buffer)}.
+
+%%====================================================================
+%% Leases
+%%====================================================================
+
+end_lease(Lease, #state{leases = Leases} = State) ->
+    delete_unleased(State#state{leases = maps:remove(Lease, Leases)}).
+
+%% @private Delete superseded files no lease pins any more.
+delete_unleased(#state{doomed = []} = State) ->
+    State;
+delete_unleased(#state{dir = Dir, leases = Leases, doomed = Doomed} = State) ->
+    Pinned = lists:append(maps:values(Leases)),
+    {Keep, Drop} = lists:partition(fun(F) -> lists:member(F, Pinned) end, Doomed),
+    [_ = file:delete(filename:join(Dir, F)) || F <- Drop],
+    State#state{doomed = Keep}.
 
 %%====================================================================
 %% Helpers

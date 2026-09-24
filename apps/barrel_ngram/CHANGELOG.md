@@ -26,6 +26,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A query running during a compaction no longer fails with `enoent`:
+  queries lease their snapshot's segment files, and a compaction deletes
+  an input only once no lease pins it (a lease ends when the query
+  returns or its process dies).
 - A read error on postings, keys, a phase-2 block or the offset table
   fails the query with `{segment_read_failed, Path, Reason}` instead of
   reading as "no match". A truncated segment is refused at open instead

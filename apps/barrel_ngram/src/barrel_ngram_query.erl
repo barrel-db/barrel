@@ -15,7 +15,8 @@
 %%% from both segment lanes before verification.
 %%%
 %%% The query runs in the calling process against its own immutable read
-%%% handles, never inside the shard loop.
+%%% handles, never inside the shard loop. It holds a lease on its
+%%% snapshot's segment files, so a compaction cannot delete them under it.
 %%% @end
 %%%-------------------------------------------------------------------
 -module(barrel_ngram_query).
@@ -65,11 +66,18 @@ search_case_sensitive(Corpus, Literal) ->
             merge_hits([search_shard(Ref, Config, Literal) || Ref <- Refs])
     end.
 
-%% @private Run `Fun(Segments, BufferSnapshot)' on a shard snapshot.
+%% @private Run `Fun(Segments, BufferSnapshot)' on a shard snapshot taken
+%% under a lease, released when `Fun' returns.
 with_snapshot(Ref, Fun) ->
-    case barrel_ngram:safe_shard_call(Ref, snapshot) of
-        {ok, Segments, BufferSnapshot} -> Fun(Segments, BufferSnapshot);
-        {error, _} = Err -> Err
+    case barrel_ngram:safe_shard_call(Ref, lease_snapshot) of
+        {ok, Lease, Segments, BufferSnapshot} ->
+            try
+                Fun(Segments, BufferSnapshot)
+            after
+                barrel_ngram_shard:release(Ref, Lease)
+            end;
+        {error, _} = Err ->
+            Err
     end.
 
 %% @private Substring candidates from one shard, confirmed (the
