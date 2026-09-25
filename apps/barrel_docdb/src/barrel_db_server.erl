@@ -134,7 +134,7 @@
     kind :: put_doc | put_docs | delete_doc | outbox_ack,
     opts = #{} :: map(),
     pending = [] :: [term()],
-    seg = [] :: [{term(), list(), term()}],
+    seg = [] :: [{term(), list() | boolean(), term()}],  %% ops, or whether it had ops
     done = [] :: [term()],
     more = false :: boolean(),
     sync = false :: boolean()   %% the request or one of its docs asked for sync
@@ -1725,8 +1725,6 @@ reply_req(#wreq{from = From, kind = put_docs}, Results) ->
 reply_req(#wreq{from = From}, [Result]) ->
     gen_server:reply(From, Result).
 
-notify_write(_DbName, none) ->
-    ok;
 notify_write(DbName, Note) ->
     notify_group(DbName, [Note]).
 
