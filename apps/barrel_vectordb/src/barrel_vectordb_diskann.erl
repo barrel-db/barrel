@@ -91,6 +91,9 @@
     id_db_env :: term() | undefined,
     next_int_id = 0 :: non_neg_integer(),
 
+    %% Opened read only: close writes no header, PQ state or sync
+    read_only = false :: boolean(),
+
     %% Quantization settings
     quantization_method = none :: pq | turboquant | subspace_turboquant | none,
 
@@ -1779,19 +1782,22 @@ open(BasePath) ->
     open(BasePath, #{}).
 
 %% @doc Open with options: `crypto => none | #{key := <<_:256>>,
-%% env => rocksdb env}'. The key encrypts the flat files; the env (or
-%% one minted from the key) covers the diskann_ids RocksDB.
+%% env => rocksdb env}', `read_only => boolean()'. The key encrypts the
+%% flat files; the env (or one minted from the key) covers the
+%% diskann_ids RocksDB. Read only, a V1 index is not migrated.
 -spec open(binary() | string(), map()) ->
     {ok, diskann_index()} | {error, term()}.
 open(BasePath, Opts) ->
     BasePathBin = to_binary_or_undefined(BasePath),
     Crypto = maps:get(crypto, Opts, none),
     IdDbPath = filename:join(BasePathBin, "diskann_ids"),
-    case filelib:is_dir(IdDbPath) of
-        true ->
+    case {filelib:is_dir(IdDbPath), maps:get(read_only, Opts, false)} of
+        {true, ReadOnly} ->
             %% V2 format with RocksDB ID mapping - fast O(1) open
-            open_v2(BasePathBin, Crypto);
-        false ->
+            open_v2(BasePathBin, Crypto, ReadOnly);
+        {false, true} ->
+            {error, {read_only_upgrade_needed, diskann_v1}};
+        {false, false} ->
             %% V1 format - try to migrate or use legacy open. With
             %% crypto requested the meta decode fails closed
             %% (cannot_encrypt_legacy_index) before anything opens.
@@ -1799,26 +1805,27 @@ open(BasePath, Opts) ->
     end.
 
 %% Open V2 format index (O(1) startup)
-open_v2(BasePath, Crypto) ->
+open_v2(BasePath, Crypto, ReadOnly) ->
     %% 1. Open binary files (O(1))
-    case barrel_vectordb_diskann_file:open(BasePath, #{crypto => file_crypto(Crypto)}) of
+    case barrel_vectordb_diskann_file:open(BasePath,
+                                           #{crypto => file_crypto(Crypto),
+                                             read_only => ReadOnly}) of
         {ok, FileHandle} ->
             %% 2. Read header from binary file
-            case barrel_vectordb_diskann_file:read_header_from_file(FileHandle) of
-                {ok, Header} ->
-                    open_v2_with_header(BasePath, FileHandle, Header, Crypto);
-                {error, _} ->
-                    %% Fallback to meta file header
-                    Header = barrel_vectordb_diskann_file:read_header(FileHandle),
-                    open_v2_with_header(BasePath, FileHandle, Header, Crypto)
-            end;
+            Header = case barrel_vectordb_diskann_file:read_header_from_file(
+                            FileHandle) of
+                {ok, H} -> H;
+                %% Fallback to meta file header
+                {error, _} -> barrel_vectordb_diskann_file:read_header(FileHandle)
+            end,
+            open_v2_with_header(BasePath, FileHandle, Header, Crypto, ReadOnly);
         {error, _} = Error ->
             Error
     end.
 
-open_v2_with_header(BasePath, FileHandle, Header, Crypto) ->
+open_v2_with_header(BasePath, FileHandle, Header, Crypto, ReadOnly) ->
     %% 3. Open RocksDB for ID mapping (O(1))
-    case open_id_db(BasePath, Crypto) of
+    case open_id_db(BasePath, Crypto, ReadOnly) of
         {ok, IdDb, CfFwd, CfRev, Standalone, IdEnv} ->
             Dimension = maps:get(dimension, Header, 128),
             R = maps:get(r, Header, 64),
@@ -1860,6 +1867,7 @@ open_v2_with_header(BasePath, FileHandle, Header, Crypto) ->
                 id_db_standalone = Standalone,
                 id_db_env = IdEnv,
                 next_int_id = NextIntId,
+                read_only = ReadOnly,
                 cache_table = CacheTable,
                 graph_cache_table = GraphCacheTable,
                 pq_state = PQState,
@@ -2108,6 +2116,16 @@ save_pq_state(BasePath, PQState, PQCodesInt, Crypto) ->
 -spec close(diskann_index()) -> ok.
 close(#diskann_index{file_handle = undefined, cache_table = undefined,
                      graph_cache_table = undefined, id_db = undefined}) ->
+    ok;
+close(#diskann_index{storage_mode = disk, read_only = true,
+                     file_handle = FileHandle, id_db = IdDb,
+                     id_db_standalone = Standalone, cache_table = CacheTable,
+                     graph_cache_table = GraphCacheTable}) ->
+    %% Read only: release handles, write nothing
+    ok = barrel_vectordb_diskann_file:close(FileHandle),
+    close_id_db(IdDb, Standalone),
+    true = ets:delete(CacheTable),
+    true = ets:delete(GraphCacheTable),
     ok;
 close(#diskann_index{storage_mode = disk} = Index) ->
     #diskann_index{
@@ -3194,42 +3212,52 @@ add_neighbor(#diskann_index{nodes = Nodes} = Index, NodeId, NewNeighborId) ->
 -spec open_id_db(binary(), none | map()) ->
     {ok, rocksdb:db_handle(), rocksdb:cf_handle(), rocksdb:cf_handle(),
      boolean(), term()} | {error, term()}.
-open_id_db(BasePath, none) ->
+open_id_db(BasePath, Crypto) ->
+    open_id_db(BasePath, Crypto, false).
+
+%% Read only: always the index's own diskann_ids, opened read only.
+open_id_db(BasePath, Crypto, true) ->
+    Env = id_db_env(Crypto),
+    case open_standalone_id_db(BasePath, Env, true) of
+        {ok, Db, CfFwd, CfRev} -> {ok, Db, CfFwd, CfRev, true, Env};
+        {error, _} = Err -> Err
+    end;
+open_id_db(BasePath, none, false) ->
     %% Try to get handles from the shared barrel_vectordb_store first
     case catch barrel_vectordb_store:get_diskann_db() of
         {ok, {Db, CfFwd, CfRev}} ->
             {ok, Db, CfFwd, CfRev, false, undefined};  %% Not standalone - managed by store
         _ ->
             %% Store not running, open standalone database for testing/standalone use
-            case open_standalone_id_db(BasePath, undefined) of
+            case open_standalone_id_db(BasePath, undefined, false) of
                 {ok, Db, CfFwd, CfRev} ->
                     {ok, Db, CfFwd, CfRev, true, undefined};  %% Standalone - we manage it
                 {error, _} = Err ->
                     Err
             end
     end;
-open_id_db(BasePath, #{key := Key} = Crypto) ->
+open_id_db(BasePath, #{key := _} = Crypto, false) ->
     %% An encrypted index never shares the global store's plaintext db:
     %% always standalone under the caller's env (or one minted here)
-    Env = case Crypto of
-        #{env := E} ->
-            E;
-        _ ->
-            {ok, E} = rocksdb:new_env({encrypted, Key}),
-            E
-    end,
-    case open_standalone_id_db(BasePath, Env) of
+    Env = id_db_env(Crypto),
+    case open_standalone_id_db(BasePath, Env, false) of
         {ok, Db, CfFwd, CfRev} ->
             {ok, Db, CfFwd, CfRev, true, Env};
         {error, _} = Err ->
             Err
     end.
 
+id_db_env(none) -> undefined;
+id_db_env(#{env := Env}) -> Env;
+id_db_env(#{key := Key}) ->
+    {ok, Env} = rocksdb:new_env({encrypted, Key}),
+    Env.
+
 %% Open standalone RocksDB for ID mapping (for tests or standalone mode)
 %% Also tracks open databases in process dictionary for cleanup
-open_standalone_id_db(BasePath, Env) ->
+open_standalone_id_db(BasePath, Env, ReadOnly) ->
     DbPath = filename:join(BasePath, "diskann_ids"),
-    ok = filelib:ensure_dir(filename:join(DbPath, "dummy")),
+    ok = ensure_id_db_dir(ReadOnly, DbPath),
     CfNames = ["default", "ids_fwd", "ids_rev"],
     DbOpts0 = [{create_if_missing, true}, {create_missing_column_families, true}],
     DbOpts = case Env of
@@ -3237,8 +3265,8 @@ open_standalone_id_db(BasePath, Env) ->
         _ -> [{env, Env} | DbOpts0]
     end,
     CfOpts = [],
-    case rocksdb:open(binary_to_list(DbPath), DbOpts,
-                      [{Name, CfOpts} || Name <- CfNames]) of
+    case open_id_rocksdb(ReadOnly, binary_to_list(DbPath), DbOpts,
+                         [{Name, CfOpts} || Name <- CfNames]) of
         {ok, Db, [_Default, CfFwd, CfRev]} ->
             %% Track open database for cleanup
             register_standalone_db(Db),
@@ -3246,6 +3274,12 @@ open_standalone_id_db(BasePath, Env) ->
         {error, _} = Err ->
             Err
     end.
+
+ensure_id_db_dir(true, _DbPath) -> ok;
+ensure_id_db_dir(false, DbPath) -> filelib:ensure_dir(filename:join(DbPath, "dummy")).
+
+open_id_rocksdb(true, Path, DbOpts, CFs) -> barrel_vectordb_ro:open(Path, DbOpts, CFs);
+open_id_rocksdb(false, Path, DbOpts, CFs) -> rocksdb:open(Path, DbOpts, CFs).
 
 %% Track open standalone databases in process dictionary
 register_standalone_db(Db) ->

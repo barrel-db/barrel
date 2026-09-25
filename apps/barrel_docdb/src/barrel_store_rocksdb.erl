@@ -87,11 +87,12 @@
 %% barrel_store callbacks
 %%====================================================================
 
-%% @doc Open a RocksDB database with column families
-%% Uses create_missing_column_families to auto-create any missing CFs on existing DBs.
+%% @doc Open a RocksDB database with column families. Writable opens
+%% create missing CFs; `read_only => true' uses OpenForReadOnly.
 -spec open(string(), map()) -> {ok, db_ref()} | {error, term()}.
 open(Path, Options) ->
-    ok = filelib:ensure_dir(Path ++ "/"),
+    ReadOnly = maps:get(read_only, Options, false),
+    ok = ensure_store_dir(ReadOnly, Path),
     DbOpts0 = build_db_options(Options),
     Env = maps:get(env, Options, undefined),
     DbOpts = case Env of
@@ -109,7 +110,7 @@ open(Path, Options) ->
         {?LOCAL_CF_NAME, []}  %% Simple KV storage for local docs (no merge operator)
     ],
 
-    case rocksdb:open(Path, DbOpts, CFDescriptors) of
+    case open_store(ReadOnly, Path, DbOpts, CFDescriptors) of
         {ok, Ref, [DefaultCF, BitmapCF, PostingCF, BodyCF, LocalCF]} ->
             DbRef = #{ref => Ref, path => Path,
                       default_cf => DefaultCF, bitmap_cf => BitmapCF,
@@ -119,9 +120,19 @@ open(Path, Options) ->
                 undefined -> {ok, DbRef};
                 _ -> {ok, DbRef#{env => Env}}
             end;
+        {error, {read_only_store_missing, _} = Reason} ->
+            {error, Reason};
+        {error, {read_only_upgrade_needed, _} = Reason} ->
+            {error, Reason};
         {error, Reason} ->
             {error, {db_open_failed, Reason}}
     end.
+
+ensure_store_dir(true, _Path) -> ok;
+ensure_store_dir(_, Path) -> filelib:ensure_dir(Path ++ "/").
+
+open_store(true, Path, DbOpts, CFs) -> barrel_rocksdb_ro:open(Path, DbOpts, CFs);
+open_store(_, Path, DbOpts, CFs) -> rocksdb:open(Path, DbOpts, CFs).
 
 %% @doc Close the database
 -spec close(db_ref()) -> ok.

@@ -93,6 +93,9 @@
     %% contributed to, so its completion re-arms the periodic timer.
     sweep_workers = #{} :: #{atom() => {pid(), [term()], boolean()}},
     max_group = 256 :: pos_integer(),  %% max write requests per batch
+    %% read_only => true in the config: writes are refused and no
+    %% compaction, retention or TTL timer runs
+    read_only = false :: boolean(),
     write_groups = #{groups => 0, requests => 0, max_size => 0} :: map()
 }).
 
@@ -332,6 +335,10 @@ init(Name, Config, CompiledChannels) ->
     %% readable BEFORE the compaction filter starts (the filter matches
     %% key-embedded names) and before RocksDB opens.
     case barrel_keyspace:read_meta(DbPath) of
+        {ok, #{keyspace := SidecarKs, kind := import}} ->
+            %% an imported copy: source keyspace, no timeline parent
+            init(Name, Config, CompiledChannels, DbPath,
+                 SidecarKs, undefined, undefined);
         {ok, #{keyspace := SidecarKs, parent := SidecarParent,
                fork_hlc := SidecarForkHlc}} ->
             init(Name, Config, CompiledChannels, DbPath,
@@ -372,7 +379,9 @@ init(Name, Config, CompiledChannels, DbPath, Keyspace, Parent, ForkHlc, Env) ->
     DocStorePath = filename:join(DbPath, "docs"),
     StoreOpts0 = maps:get(store_opts, Config, #{}),
     %% Pass the filter handler to the store options
-    StoreOpts = add_env_opt(StoreOpts0#{compaction_filter_handler => FilterPid},
+    ReadOnly = maps:get(read_only, Config, false) =:= true,
+    StoreOpts = add_env_opt(StoreOpts0#{compaction_filter_handler => FilterPid,
+                                        read_only => ReadOnly},
                             Env),
     case barrel_store_rocksdb:open(DocStorePath, StoreOpts) of
         {ok, StoreRef} ->
@@ -383,7 +392,9 @@ init(Name, Config, CompiledChannels, DbPath, Keyspace, Parent, ForkHlc, Env) ->
             %% first open -- derive one without every backend needing its
             %% own convention for it.
             AttStorePath = filename:join(DbPath, "attachments"),
-            AttOpts = add_env_opt((maps:get(att_opts, Config, #{}))#{db_name => Keyspace},
+            AttOpts = add_env_opt((maps:get(att_opts, Config, #{}))#{
+                                      db_name => Keyspace,
+                                      read_only => ReadOnly},
                                   Env),
             case barrel_att_store:open(AttStorePath, AttOpts) of
                 {ok, AttRef} ->
@@ -399,7 +410,8 @@ init(Name, Config, CompiledChannels, DbPath, Keyspace, Parent, ForkHlc, Env) ->
                     persistent_term:put({barrel_db, Name}, self()),
                     persistent_term:put({barrel_store, Name}, StoreRef),
                     persistent_term:put({barrel_source, Name},
-                                        ensure_source_id(StoreRef, Name)),
+                                        source_id(ReadOnly, StoreRef, Name,
+                                                  DbPath)),
                     ok = barrel_channel:install(Name, CompiledChannels),
 
                     %% Compaction settings from config (or defaults)
@@ -409,7 +421,8 @@ init(Name, Config, CompiledChannels, DbPath, Keyspace, Parent, ForkHlc, Env) ->
                                                    ?DEFAULT_COMPACTION_SIZE_THRESHOLD),
 
                     %% Start periodic compaction check timer
-                    TimerRef = erlang:send_after(CompactionInterval, self(), compaction_check),
+                    TimerRef = arm_unless(ReadOnly, CompactionInterval,
+                                          compaction_check),
 
                     %% Retention settings; the sweeper only runs for a
                     %% finite window
@@ -419,8 +432,8 @@ init(Name, Config, CompiledChannels, DbPath, Keyspace, Parent, ForkHlc, Env) ->
                                                  ?DEFAULT_RETENTION_INTERVAL),
                     RetentionTimer = case RetentionPeriod of
                         0 -> undefined;
-                        _ -> erlang:send_after(RetentionInterval, self(),
-                                               retention_sweep)
+                        _ -> arm_unless(ReadOnly, RetentionInterval,
+                                        retention_sweep)
                     end,
 
                     %% Doc TTL sweeper (opt-in): turns lazily expired
@@ -429,8 +442,7 @@ init(Name, Config, CompiledChannels, DbPath, Keyspace, Parent, ForkHlc, Env) ->
                     TtlBatch = maps:get(ttl_sweep_batch, Config, 512),
                     TtlTimer = case TtlInterval of
                         0 -> undefined;
-                        _ -> erlang:send_after(TtlInterval, self(),
-                                               ttl_sweep)
+                        _ -> arm_unless(ReadOnly, TtlInterval, ttl_sweep)
                     end,
 
                     logger:info("Database ~s started at ~s", [Name, DbPath]),
@@ -454,7 +466,8 @@ init(Name, Config, CompiledChannels, DbPath, Keyspace, Parent, ForkHlc, Env) ->
                         ttl_sweep_interval = TtlInterval,
                         ttl_sweep_batch = TtlBatch,
                         ttl_timer = TtlTimer,
-                        max_group = maps:get(max_group, Config, 256)
+                        max_group = maps:get(max_group, Config, 256),
+                        read_only = ReadOnly
                     }};
                 {error, AttReason} ->
                     %% Close document store if attachment store fails
@@ -467,13 +480,36 @@ init(Name, Config, CompiledChannels, DbPath, Keyspace, Parent, ForkHlc, Env) ->
             {stop, {store_open_failed, Reason}}
     end.
 
-%% @doc Handle synchronous calls
-handle_call(info, _From, #state{name = Name, keyspace = Keyspace,
-                                parent = Parent, fork_hlc = ForkHlc,
-                                config = Config, db_path = DbPath,
-                                store_ref = StoreRef, att_ref = AttRef,
-                                retention_period = RetentionPeriod,
-                                write_groups = WriteGroups} = State) ->
+%% @doc Handle synchronous calls. A read-only database refuses every
+%% write before it reaches the store or a write group (group_commit/3
+%% only drains the mailbox of a writable database).
+handle_call(Req, From, #state{read_only = true} = State) ->
+    case write_request(Req) of
+        true -> {reply, {error, read_only}, State};
+        false -> handle_call_rw(Req, From, State)
+    end;
+handle_call(Req, From, State) ->
+    handle_call_rw(Req, From, State).
+
+write_request({put_doc, _, _}) -> true;
+write_request({put_docs, _, _}) -> true;
+write_request({delete_doc, _, _}) -> true;
+write_request({outbox_ack, _, _}) -> true;
+write_request({set_doc_embedding, _, _, _}) -> true;
+write_request(sweep_retention) -> true;
+write_request(ttl_sweep) -> true;
+write_request({resolve_conflict, _, _, _}) -> true;
+write_request({put_version, _, _, _, _}) -> true;
+write_request({put_local_doc, _, _}) -> true;
+write_request({delete_local_doc, _}) -> true;
+write_request(_) -> false.
+
+handle_call_rw(info, _From, #state{name = Name, keyspace = Keyspace,
+                                   parent = Parent, fork_hlc = ForkHlc,
+                                   config = Config, db_path = DbPath,
+                                   store_ref = StoreRef, att_ref = AttRef,
+                                   retention_period = RetentionPeriod,
+                                   write_groups = WriteGroups} = State) ->
     AttFloor = case barrel_att_store:supports_sync(AttRef) of
         true -> barrel_att_store:att_floor(AttRef, Name);
         false -> undefined
@@ -481,6 +517,7 @@ handle_call(info, _From, #state{name = Name, keyspace = Keyspace,
     Info0 = #{
         name => Name,
         keyspace => Keyspace,
+        read_only => maps:get(read_only, Config, false),
         config => Config,
         db_path => DbPath,
         pid => self(),
@@ -495,8 +532,8 @@ handle_call(info, _From, #state{name = Name, keyspace = Keyspace,
     end,
     {reply, {ok, Info}, State};
 
-handle_call({checkpoint_to, DocsPath, AttPath}, _From,
-            #state{store_ref = StoreRef, att_ref = AttRef} = State) ->
+handle_call_rw({checkpoint_to, DocsPath, AttPath}, _From,
+               #state{store_ref = StoreRef, att_ref = AttRef} = State) ->
     ForkHlc = barrel_hlc:new_hlc(),
     Result = case barrel_store_rocksdb:checkpoint(StoreRef, DocsPath) of
         ok ->
@@ -509,86 +546,86 @@ handle_call({checkpoint_to, DocsPath, AttPath}, _From,
     end,
     {reply, Result, State};
 
-handle_call(get_store_ref, _From, #state{store_ref = StoreRef} = State) ->
+handle_call_rw(get_store_ref, _From, #state{store_ref = StoreRef} = State) ->
     {reply, {ok, StoreRef}, State};
 
-handle_call(get_att_ref, _From, #state{att_ref = AttRef} = State) ->
+handle_call_rw(get_att_ref, _From, #state{att_ref = AttRef} = State) ->
     {reply, {ok, AttRef}, State};
 
 %% Document writes: committed with the writes waiting behind them
-handle_call({put_doc, _, _} = Req, From, State) ->
+handle_call_rw({put_doc, _, _} = Req, From, State) ->
     {noreply, group_commit(Req, From, State)};
 
-handle_call({put_docs, _, _} = Req, From, State) ->
+handle_call_rw({put_docs, _, _} = Req, From, State) ->
     {noreply, group_commit(Req, From, State)};
 
-handle_call({delete_doc, _, _} = Req, From, State) ->
+handle_call_rw({delete_doc, _, _} = Req, From, State) ->
     {noreply, group_commit(Req, From, State)};
 
-handle_call({outbox_ack, _, _} = Req, From, State) ->
+handle_call_rw({outbox_ack, _, _} = Req, From, State) ->
     {noreply, group_commit(Req, From, State)};
 
-handle_call({get_doc, DocId, Opts}, _From,
-            #state{name = DbName, store_ref = StoreRef} = State) ->
+handle_call_rw({get_doc, DocId, Opts}, _From,
+               #state{name = DbName, store_ref = StoreRef} = State) ->
     Result = do_get_doc(StoreRef, DbName, DocId, Opts),
     {reply, Result, State};
 
-handle_call({get_docs, DocIds, Opts}, _From,
-            #state{name = DbName, store_ref = StoreRef} = State) ->
+handle_call_rw({get_docs, DocIds, Opts}, _From,
+               #state{name = DbName, store_ref = StoreRef} = State) ->
     Result = do_get_docs(StoreRef, DbName, DocIds, Opts),
     {reply, Result, State};
 
-handle_call({fold_docs, Fun, Acc}, From, State) ->
-    handle_call({fold_docs, Fun, Acc, #{}}, From, State);
+handle_call_rw({fold_docs, Fun, Acc}, From, State) ->
+    handle_call_rw({fold_docs, Fun, Acc, #{}}, From, State);
 
-handle_call({fold_docs, Fun, Acc, Opts}, _From,
-            #state{name = DbName, store_ref = StoreRef} = State) ->
+handle_call_rw({fold_docs, Fun, Acc, Opts}, _From,
+               #state{name = DbName, store_ref = StoreRef} = State) ->
     %% Fallback path (store ref not yet published): reuse the caller-side
     %% fold so prefix bounding and snapshot reads match the fast path.
     Result = barrel_docdb_reader:fold_docs(StoreRef, DbName, Fun, Acc, Opts),
     {reply, Result, State};
 
 %% Embedding column write-back
-handle_call({set_doc_embedding, DocId, ExpectedRev, Vector}, _From,
-            #state{name = DbName, store_ref = StoreRef} = State) ->
+handle_call_rw({set_doc_embedding, DocId, ExpectedRev, Vector}, _From,
+               #state{name = DbName, store_ref = StoreRef} = State) ->
     Result = do_set_doc_embedding(StoreRef, DbName, DocId, ExpectedRev, Vector),
     {reply, Result, State};
 
 %% Retention sweep (manual trigger; also runs on the timer). Runs in the
 %% shared worker so it does not block the writer loop; the reply is deferred
 %% until the sweep finishes.
-handle_call(sweep_retention, _From,
-            #state{retention_period = 0} = State) ->
+handle_call_rw(sweep_retention, _From,
+               #state{retention_period = 0} = State) ->
     {reply, {ok, #{retention => infinite}}, State};
-handle_call(sweep_retention, From,
-            #state{name = DbName, store_ref = StoreRef, att_ref = AttRef,
-                   retention_period = RetentionPeriod} = State) ->
+handle_call_rw(sweep_retention, From,
+               #state{name = DbName, store_ref = StoreRef, att_ref = AttRef,
+                      retention_period = RetentionPeriod} = State) ->
     Fun = fun() -> do_retention_sweep(StoreRef, AttRef, DbName,
                                       RetentionPeriod) end,
     {noreply, start_sweep(retention, Fun, From, false, State)};
 
 %% Doc TTL sweep (manual trigger; also runs on the timer).
-handle_call(ttl_sweep, From,
-            #state{name = DbName, store_ref = StoreRef,
-                   ttl_sweep_batch = Batch} = State) ->
+handle_call_rw(ttl_sweep, From,
+               #state{name = DbName, store_ref = StoreRef,
+                      ttl_sweep_batch = Batch} = State) ->
     Fun = fun() -> do_ttl_sweep(StoreRef, DbName, Batch) end,
     {noreply, start_sweep(ttl, Fun, From, false, State)};
 
 %% Conflict operations
-handle_call({get_conflicts, DocId}, _From,
-            #state{name = DbName, store_ref = StoreRef} = State) ->
+handle_call_rw({get_conflicts, DocId}, _From,
+               #state{name = DbName, store_ref = StoreRef} = State) ->
     Result = do_get_conflicts(StoreRef, DbName, DocId),
     {reply, Result, State};
 
-handle_call({resolve_conflict, DocId, BaseRev, Resolution}, _From,
-            #state{name = DbName, store_ref = StoreRef} = State) ->
+handle_call_rw({resolve_conflict, DocId, BaseRev, Resolution}, _From,
+               #state{name = DbName, store_ref = StoreRef} = State) ->
     Result = do_resolve_conflict(StoreRef, DbName, DocId, BaseRev, Resolution),
     {reply, Result, State};
 
 %% Replication operations
-handle_call({put_version, Doc, VersionToken, VVBin, Deleted}, _From,
-            #state{name = DbName, store_ref = StoreRef,
-                   config = Config} = State) ->
+handle_call_rw({put_version, Doc, VersionToken, VVBin, Deleted}, _From,
+               #state{name = DbName, store_ref = StoreRef,
+                      config = Config} = State) ->
     Result = try
         do_put_version(StoreRef, DbName, Config, Doc,
                        barrel_version:from_token(VersionToken),
@@ -599,8 +636,8 @@ handle_call({put_version, Doc, VersionToken, VVBin, Deleted}, _From,
     end,
     {reply, Result, State};
 
-handle_call({diff_versions, TokenMap}, _From,
-            #state{name = DbName, store_ref = StoreRef} = State) ->
+handle_call_rw({diff_versions, TokenMap}, _From,
+               #state{name = DbName, store_ref = StoreRef} = State) ->
     Result = try
         do_diff_versions(StoreRef, DbName, TokenMap)
     catch
@@ -610,27 +647,27 @@ handle_call({diff_versions, TokenMap}, _From,
     {reply, Result, State};
 
 %% Local document operations
-handle_call({put_local_doc, DocId, Doc}, _From,
-            #state{name = DbName, store_ref = StoreRef} = State) ->
+handle_call_rw({put_local_doc, DocId, Doc}, _From,
+               #state{name = DbName, store_ref = StoreRef} = State) ->
     Result = do_put_local_doc(StoreRef, DbName, DocId, Doc),
     {reply, Result, State};
 
-handle_call({get_local_doc, DocId}, _From,
-            #state{name = DbName, store_ref = StoreRef} = State) ->
+handle_call_rw({get_local_doc, DocId}, _From,
+               #state{name = DbName, store_ref = StoreRef} = State) ->
     Result = do_get_local_doc(StoreRef, DbName, DocId),
     {reply, Result, State};
 
-handle_call({delete_local_doc, DocId}, _From,
-            #state{name = DbName, store_ref = StoreRef} = State) ->
+handle_call_rw({delete_local_doc, DocId}, _From,
+               #state{name = DbName, store_ref = StoreRef} = State) ->
     Result = do_delete_local_doc(StoreRef, DbName, DocId),
     {reply, Result, State};
 
-handle_call({fold_local_docs, Prefix, Fun, Acc}, _From,
-            #state{name = DbName, store_ref = StoreRef} = State) ->
+handle_call_rw({fold_local_docs, Prefix, Fun, Acc}, _From,
+               #state{name = DbName, store_ref = StoreRef} = State) ->
     Result = do_fold_local_docs(StoreRef, DbName, Prefix, Fun, Acc),
     {reply, Result, State};
 
-handle_call(_Request, _From, State) ->
+handle_call_rw(_Request, _From, State) ->
     {reply, {error, unknown_request}, State}.
 
 %% @doc Handle asynchronous casts
@@ -747,12 +784,13 @@ init_encryption(Config, Keyspace, DbPath) ->
                 false -> {ok, undefined}
             end;
         {ok, Key} ->
-            check_crypto_marker(DbPath, Key);
+            check_crypto_marker(DbPath, Key,
+                                maps:get(read_only, Config, false));
         {error, Reason} ->
             {error, {encryption_key_error, Reason}}
     end.
 
-check_crypto_marker(DbPath, Key) ->
+check_crypto_marker(DbPath, Key, ReadOnly) ->
     MarkerPath = crypto_marker_path(DbPath),
     case file:read_file(MarkerPath) of
         {ok, Token} ->
@@ -761,10 +799,12 @@ check_crypto_marker(DbPath, Key) ->
                 false -> {error, wrong_encryption_key}
             end;
         {error, enoent} ->
-            case filelib:is_dir(filename:join(DbPath, "docs")) of
-                true ->
+            case {filelib:is_dir(filename:join(DbPath, "docs")), ReadOnly} of
+                {true, _} ->
                     {error, cannot_encrypt_existing_db};
-                false ->
+                {false, true} ->
+                    {error, {read_only_store_missing, DbPath}};
+                {false, _} ->
                     case write_crypto_marker(MarkerPath, Key) of
                         ok ->
                             new_encrypted_env(Key);
@@ -1377,6 +1417,10 @@ expiry_index_ops(Ks, DocId, Old, New) ->
     [{delete, barrel_store_keys:doc_expiry(Ks, Old, DocId)},
      {put, barrel_store_keys:doc_expiry(Ks, New, DocId), <<>>}].
 
+%% A read-only database runs no periodic maintenance.
+arm_unless(true, _Interval, _Msg) -> undefined;
+arm_unless(false, Interval, Msg) -> erlang:send_after(Interval, self(), Msg).
+
 %% @doc Read a document's current version state (undefined when absent).
 read_current(StoreRef, DbName, DocId) ->
     Ks = barrel_keyspace:resolve(DbName),
@@ -1419,6 +1463,22 @@ source_id(DbName) ->
     persistent_term:get({barrel_source, DbName}).
 
 %% @private Load or create the source id (persisted in db meta).
+%% A read-only store cannot mint: the stored id, else the one the import
+%% sidecar carries, else an in-memory one (it never authors a version).
+source_id(false, StoreRef, LogicalName, _DbPath) ->
+    ensure_source_id(StoreRef, LogicalName);
+source_id(true, StoreRef, LogicalName, DbPath) ->
+    Key = barrel_store_keys:db_meta(LogicalName, <<"source_id">>),
+    case {barrel_store_rocksdb:get(StoreRef, Key),
+          barrel_keyspace:read_meta(DbPath)} of
+        {{ok, SourceId}, _} -> SourceId;
+        {not_found, {ok, #{source_id := SourceId}}} -> SourceId;
+        {not_found, _} -> new_source_id()
+    end.
+
+new_source_id() ->
+    binary:encode_hex(crypto:strong_rand_bytes(8), lowercase).
+
 ensure_source_id(StoreRef, LogicalName) ->
     %% Deliberately keyed by the LOGICAL name, never the keyspace: a
     %% branch checkpoint carries only the parent-keyed source_id, so
@@ -1428,7 +1488,7 @@ ensure_source_id(StoreRef, LogicalName) ->
         {ok, SourceId} ->
             SourceId;
         not_found ->
-            SourceId = binary:encode_hex(crypto:strong_rand_bytes(8), lowercase),
+            SourceId = new_source_id(),
             ok = barrel_store_rocksdb:put(StoreRef, Key, SourceId),
             SourceId
     end.

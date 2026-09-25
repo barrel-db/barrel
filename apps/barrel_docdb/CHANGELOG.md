@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.0] - 2026-09-25
+
+### Added
+- `read_only => true` open option (runtime config, pass it on every open). Document, local document, attachment and replication writes answer `{error, read_only}`, a group commit never forms, and no compaction, retention or TTL timer runs. `db_info/1` reports `read_only`. Used to serve an imported or exported copy without changing its files.
+- A read-only open uses RocksDB `OpenForReadOnly` for the document store and the blob attachment store: open, reads and close create, rewrite or remove no file in the database directory (no WAL flush, info LOG, MANIFEST or OPTIONS file), and several nodes can open the same directory at once. A missing store fails with `{read_only_store_missing, Path}` (nothing is created, the CRYPTO marker included); a store written by an older version that lacks a column family fails with `{read_only_upgrade_needed, #{store, missing_cfs}}` until one writable open adds it.
+- A TIMELINE sidecar with `kind => import` marks a copy restored under a new name: keys keep the source keyspace, the copy has no timeline parent. Its source id is the one stored in the copy, else the sidecar's `source_id`, else a fresh in-memory one. Branch sidecars read back as before.
+- `db_exists/2`: whether a database is open or has files under a data dir, without creating it.
+- `db_observed_version/1` (instance id and last change HLC). BQL results from `barrel_bql_exec:run/3` and `fold/5` carry both in their meta, read after the rows, so a reader can tell which state of which database answered.
+
 ## [1.6.0] - 2026-09-24
 
 ### Changed

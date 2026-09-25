@@ -83,6 +83,7 @@
     create_db/1,
     create_db/2,
     open_db/1,
+    db_exists/2,
     close_db/1,
     delete_db/1,
     delete_db/2,
@@ -217,7 +218,7 @@
     new_hlc/0
 ]).
 
--export([db_instance_id/1]).
+-export([db_instance_id/1, db_observed_version/1]).
 
 %% Path Subscriptions (real-time document change notifications)
 -export([
@@ -282,6 +283,10 @@ create_db(Name) ->
 %%   <li>`max_group' - Maximum number of write requests committed in one
 %%       batch. Writes waiting at the database are committed together,
 %%       with one sync when any of them asked for it (default: `256')</li>
+%%   <li>`read_only' - `true' refuses every write (documents, local docs,
+%%       attachments, replication) with `{error, read_only}' and runs no
+%%       compaction, retention or TTL sweep. Runtime config: pass it on
+%%       every open (default: `false')</li>
 %% </ul>
 %%
 %% == Example ==
@@ -357,6 +362,18 @@ validate_db_name_chars(_) ->
 -spec open_db(binary()) -> {ok, pid()} | {error, term()}.
 open_db(Name) when is_binary(Name) ->
     get_db(Name).
+
+%% @doc Whether `Name' is open or has files on disk, under the
+%% `data_dir' option, else its remembered or the default data dir.
+-spec db_exists(binary(), map()) -> boolean().
+db_exists(Name, Opts) when is_binary(Name), is_map(Opts) ->
+    case get_db(Name) of
+        {ok, _Pid} ->
+            true;
+        {error, _} ->
+            Dir = closed_db_data_dir(Name, Opts),
+            filelib:is_dir(filename:join([Dir, binary_to_list(Name), "docs"]))
+    end.
 
 %% @doc Fork a database into a new branch (timeline). `Parent' is the
 %% database name or the pid returned by create_db/2. See
@@ -1160,7 +1177,7 @@ put_attachment(Db, DocId, AttName, Data) ->
                      map()) ->
     {ok, map()} | {ok, ignored} | {error, term()}.
 put_attachment(Db, DocId, AttName, Data, Opts) ->
-    with_att(Db, fun(AttRef, DbName) ->
+    with_att_write(Db, fun(AttRef, DbName) ->
         barrel_att:put_attachment(AttRef, DbName, DocId, AttName, Data, Opts)
     end).
 
@@ -1198,10 +1215,7 @@ get_attachment(Db, DocId, AttName) ->
 %% @returns `ok' or `{error, not_found}'
 -spec delete_attachment(binary() | pid(), binary(), binary()) -> ok | {error, term()}.
 delete_attachment(Db, DocId, AttName) ->
-    with_db(Db, fun(Pid) ->
-        {ok, AttRef} = barrel_db_server:get_att_ref(Pid),
-        {ok, Info} = barrel_db_server:info(Pid),
-        DbName = maps:get(name, Info),
+    with_att_write(Db, fun(AttRef, DbName) ->
         barrel_att:delete_attachment(AttRef, DbName, DocId, AttName)
     end).
 
@@ -1210,7 +1224,7 @@ delete_attachment(Db, DocId, AttName) ->
 -spec delete_attachment(binary() | pid(), binary(), binary(), map()) ->
     ok | {error, term()}.
 delete_attachment(Db, DocId, AttName, Opts) ->
-    with_att(Db, fun(AttRef, DbName) ->
+    with_att_write(Db, fun(AttRef, DbName) ->
         barrel_att_store:delete(AttRef, DbName, DocId, AttName, Opts)
     end).
 
@@ -1316,7 +1330,7 @@ diff_attachments(Db, Entries) ->
 -spec rebuild_attachment_feed(binary() | pid()) ->
     {ok, map()} | {error, term()}.
 rebuild_attachment_feed(Db) ->
-    with_att(Db, fun(AttRef, DbName) ->
+    with_att_write(Db, fun(AttRef, DbName) ->
         barrel_att_store:rebuild_feed(AttRef, DbName)
     end).
 
@@ -1400,7 +1414,7 @@ open_attachment_writer(Db, DocId, AttName, ContentType) ->
                              binary(), map()) ->
     {ok, map()} | {error, term()}.
 open_attachment_writer(Db, DocId, AttName, ContentType, Opts) ->
-    with_att(Db, fun(AttRef, DbName) ->
+    with_att_write(Db, fun(AttRef, DbName) ->
         barrel_att_store:put_stream(AttRef, DbName, DocId, AttName,
                                     ContentType, Opts)
     end).
@@ -2174,6 +2188,40 @@ db_instance_id(Db) ->
             Err
     end.
 
+%% @doc Observed version of an open database: its instance id and the
+%% encoded HLC of its last write, read now (a freshness hint, not a snapshot).
+-spec db_observed_version(binary() | pid()) ->
+    {ok, #{instance_id := binary(), last_seq := binary()}} | {error, term()}.
+db_observed_version(Db) ->
+    case resolve_db_name(Db) of
+        {ok, DbName} ->
+            case db_instance_id(DbName) of
+                {ok, InstanceId} ->
+                    case db_last_seq(DbName) of
+                        {ok, LastSeq} ->
+                            {ok, #{instance_id => InstanceId,
+                                   last_seq => LastSeq}};
+                        {error, _} = Err ->
+                            Err
+                    end;
+                {error, _} = Err ->
+                    Err
+            end;
+        {error, _} = Err ->
+            Err
+    end.
+
+db_last_seq(DbName) ->
+    case reader_store(DbName) of
+        {ok, StoreRef} ->
+            {ok, barrel_changes:get_last_seq(StoreRef, DbName)};
+        undefined ->
+            with_db(DbName, fun(Pid) ->
+                {ok, StoreRef} = barrel_db_server:get_store_ref(Pid),
+                {ok, barrel_changes:get_last_seq(StoreRef, DbName)}
+            end)
+    end.
+
 %% @doc Synchronize with a remote HLC timestamp.
 %%
 %% Call this when receiving data from another node to maintain causality.
@@ -2444,6 +2492,19 @@ with_att(Db, Fun) ->
         {ok, Info} = barrel_db_server:info(Pid),
         DbName = maps:get(name, Info),
         Fun(AttRef, DbName)
+    end).
+
+%% @private Like with_att/2 for attachment writes: a read-only database
+%% refuses them (attachments bypass the writer process).
+with_att_write(Db, Fun) ->
+    with_db(Db, fun(Pid) ->
+        {ok, AttRef} = barrel_db_server:get_att_ref(Pid),
+        case barrel_db_server:info(Pid) of
+            {ok, #{read_only := true}} ->
+                {error, read_only};
+            {ok, #{name := DbName}} ->
+                Fun(AttRef, DbName)
+        end
     end).
 
 %% @private Resolve the store ref for caller-side reads when Db is a name.

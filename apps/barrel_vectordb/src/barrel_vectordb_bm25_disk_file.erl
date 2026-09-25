@@ -95,7 +95,9 @@
     %% (key-check token + nonces) carrying the GCM-sealed header.
     crypto :: undefined | #{key := binary(),
                             postings_nonce := binary(),
-                            key_check := binary()}
+                            key_check := binary()},
+    %% read only: opened without write access, close writes no header
+    read_only = false :: boolean()
 }).
 
 -type bm25_file() :: #bm25_file{}.
@@ -168,7 +170,8 @@ open(Path, Opts) ->
     PostingsPath = filename:join(PathBin, "bm25.postings"),
     BlockmaxPath = filename:join(PathBin, "bm25.blockmax"),
 
-    case open_files(MetaPath, PostingsPath, BlockmaxPath, [read, write, binary, raw]) of
+    ReadOnly = maps:get(read_only, Opts, false),
+    case open_files(MetaPath, PostingsPath, BlockmaxPath, file_modes(ReadOnly)) of
         {ok, MetaFd, PostingsFd, BlockmaxFd} ->
             case read_meta(MetaFd, maps:get(crypto, Opts, none)) of
                 {ok, Header, Crypto} ->
@@ -181,7 +184,8 @@ open(Path, Opts) ->
                         blockmax_fd = BlockmaxFd,
                         blockmax_mmap = BlockmaxMmap,
                         header = Header,
-                        crypto = Crypto
+                        crypto = Crypto,
+                        read_only = ReadOnly
                     }};
                 {error, _} = Error ->
                     _ = file:close(MetaFd),
@@ -193,13 +197,19 @@ open(Path, Opts) ->
             Error
     end.
 
+file_modes(true) -> [read, binary, raw];
+file_modes(false) -> [read, write, binary, raw].
+
+close_header(true, _File, _Header) -> ok;
+close_header(false, File, Header) -> write_header_internal(File, Header).
+
 %% @doc Close file handles
 -spec close(bm25_file()) -> ok.
 close(#bm25_file{meta_fd = MetaFd, postings_fd = PostingsFd,
                   blockmax_fd = BlockmaxFd, blockmax_mmap = BlockmaxMmap,
-                  header = Header} = File) ->
-    %% Write final header
-    _ = write_header_internal(File, Header),
+                  header = Header, read_only = ReadOnly} = File) ->
+    %% Write final header (a read-only file is left as it is)
+    _ = close_header(ReadOnly, File, Header),
     _ = close_mmap_if_open(BlockmaxMmap),
     _ = close_if_open(MetaFd),
     _ = close_if_open(PostingsFd),

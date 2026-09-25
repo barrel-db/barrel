@@ -30,7 +30,12 @@
 -type meta() :: #{
     keyspace := binary(),
     parent := binary(),
-    fork_hlc := binary()    %% barrel_hlc:encode/1 form (12 bytes)
+    fork_hlc := binary(),   %% barrel_hlc:encode/1 form (12 bytes)
+    %% import: a restored copy keyed by its source name, not a branch
+    %% (no parent link, never merged); absent means branch
+    kind => branch | import,
+    %% import: the copy's own source id (a read-only store cannot mint one)
+    source_id => binary()
 }.
 -export_type([meta/0]).
 
@@ -66,11 +71,13 @@ resolve(Name) ->
 read_meta(DbPath) ->
     File = filename:join(DbPath, ?SIDECAR),
     case file:consult(File) of
-        {ok, [#{keyspace := Ks, parent := Parent, fork_hlc := ForkHlc}]}
+        {ok, [#{keyspace := Ks, parent := Parent, fork_hlc := ForkHlc} = M]}
                 when is_binary(Ks), is_binary(Parent),
                      is_binary(ForkHlc), byte_size(ForkHlc) =:= 12 ->
-            {ok, #{keyspace => Ks, parent => Parent,
-                   fork_hlc => ForkHlc}};
+            {ok, with_kind(maps:get(kind, M, branch),
+                           maps:merge(maps:with([source_id], M),
+                                      #{keyspace => Ks, parent => Parent,
+                                        fork_hlc => ForkHlc}))};
         {error, enoent} ->
             not_found;
         _ ->
@@ -85,9 +92,13 @@ write_meta(DbPath, #{keyspace := Ks, parent := Parent,
              is_binary(ForkHlc), byte_size(ForkHlc) =:= 12 ->
     File = filename:join(DbPath, ?SIDECAR),
     Tmp = File ++ ".tmp",
-    Data = io_lib:format("~p.~n", [maps:with([keyspace, parent,
-                                              fork_hlc], Meta)]),
+    Data = io_lib:format("~p.~n", [maps:with([keyspace, parent, fork_hlc,
+                                              kind, source_id], Meta)]),
     case file:write_file(Tmp, Data) of
         ok -> file:rename(Tmp, File);
         {error, _} = Error -> Error
     end.
+
+%% Branch sidecars read back exactly as written before imports existed.
+with_kind(import, Meta) -> Meta#{kind => import};
+with_kind(_, Meta) -> Meta.

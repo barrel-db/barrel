@@ -67,7 +67,9 @@
     crypto :: undefined | #{key := binary(),
                             vectors_nonce := binary(),
                             pq_nonce := binary(),
-                            key_check := binary()}
+                            key_check := binary()},
+    %% read only: opened without write access, close writes no metadata
+    read_only = false :: boolean()
 }).
 
 -type diskann_file() :: #diskann_file{}.
@@ -121,8 +123,9 @@ create(Path, Config) ->
 open(Path) ->
     open(Path, #{}).
 
-%% @doc Open with options: `crypto => none | #{key := <<_:256>>}'. The
-%% open fails closed on any encrypted/plaintext mismatch or wrong key.
+%% @doc Open with options: `crypto => none | #{key := <<_:256>>}',
+%% `read_only => boolean()'. The open fails closed on any
+%% encrypted/plaintext mismatch or wrong key.
 -spec open(binary() | string(), map()) -> {ok, diskann_file()} | {error, term()}.
 open(Path, Opts) ->
     PathBin = to_binary(Path),
@@ -134,9 +137,11 @@ open(Path, Opts) ->
 
     case file:read_file(MetaPath) of
         {ok, MetaBin} ->
+            ReadOnly = maps:get(read_only, Opts, false),
             case decode_meta(MetaBin, maps:get(crypto, Opts, none)) of
                 {ok, Header, Crypto} ->
-                    case open_files(GraphPath, VectorPath, PqPath, [read, write, binary, raw]) of
+                    case open_files(GraphPath, VectorPath, PqPath,
+                                    file_modes(ReadOnly)) of
                         {ok, GraphFd, VectorFd, PqFd} ->
                             %% Try to open vector file with mmap for zero-copy reads
                             VectorMmap = try_open_mmap(VectorPath),
@@ -147,7 +152,8 @@ open(Path, Opts) ->
                                 vector_mmap = VectorMmap,
                                 pq_fd = PqFd,
                                 header = Header,
-                                crypto = Crypto
+                                crypto = Crypto,
+                                read_only = ReadOnly
                             }};
                         {error, _} = Error ->
                             Error
@@ -159,19 +165,26 @@ open(Path, Opts) ->
             Error
     end.
 
+file_modes(true) -> [read, binary, raw];
+file_modes(false) -> [read, write, binary, raw].
+
 %% @doc Close file handles
 -spec close(diskann_file()) -> ok.
 close(#diskann_file{graph_fd = GraphFd, vector_fd = VectorFd, vector_mmap = VectorMmap,
                     pq_fd = PqFd, path = Path, header = Header,
-                    crypto = Crypto}) ->
-    %% Write final metadata
-    MetaPath = filename:join(Path, "diskann.meta"),
-    ok = write_meta(MetaPath, Header, Crypto),
+                    crypto = Crypto, read_only = ReadOnly}) ->
+    %% Write final metadata (a read-only file set is left as it is)
+    ok = close_meta(ReadOnly, filename:join(Path, "diskann.meta"),
+                    Header, Crypto),
     _ = close_mmap_if_open(VectorMmap),
     _ = close_if_open(GraphFd),
     _ = close_if_open(VectorFd),
     _ = close_if_open(PqFd),
     ok.
+
+close_meta(true, _MetaPath, _Header, _Crypto) -> ok;
+close_meta(false, MetaPath, Header, Crypto) ->
+    write_meta(MetaPath, Header, Crypto).
 
 %% @doc The file set's crypto state, reduced to what companions (the
 %% pq_state term file) need: `none' or the key.

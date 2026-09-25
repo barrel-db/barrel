@@ -12,28 +12,35 @@
 %% @end
 -module(barrel_vectordb_crypto).
 
--export([init/2]).
+-export([init/2, init/3]).
 
 -type ctx() :: none | #{key := binary(), env := rocksdb:env_handle()}.
 -export_type([ctx/0]).
 
 -spec init(none | #{key := binary(), _ => _}, string() | binary()) ->
     {ok, ctx()} | {error, term()}.
-init(none, DbPath) ->
+init(Spec, DbPath) ->
+    init(Spec, DbPath, false).
+
+%% @doc As init/2; a read-only open never writes the marker.
+-spec init(none | #{key := binary(), _ => _}, string() | binary(),
+           boolean()) -> {ok, ctx()} | {error, term()}.
+init(none, DbPath, _ReadOnly) ->
     case filelib:is_regular(marker_path(DbPath)) of
         true -> {error, db_is_encrypted};
         false -> {ok, none}
     end;
-init(#{key := Key}, DbPath) when is_binary(Key), byte_size(Key) =:= 32 ->
-    check_marker(DbPath, Key);
-init(Other, _DbPath) ->
+init(#{key := Key}, DbPath, ReadOnly)
+        when is_binary(Key), byte_size(Key) =:= 32 ->
+    check_marker(DbPath, Key, ReadOnly);
+init(Other, _DbPath, _ReadOnly) ->
     {error, {bad_crypto_config, Other}}.
 
 %%====================================================================
 %% Internal
 %%====================================================================
 
-check_marker(DbPath, Key) ->
+check_marker(DbPath, Key, ReadOnly) ->
     Marker = marker_path(DbPath),
     case file:read_file(Marker) of
         {ok, Token} ->
@@ -44,10 +51,13 @@ check_marker(DbPath, Key) ->
         {error, enoent} ->
             %% CURRENT marks an existing RocksDB: refuse to encrypt a
             %% store that already has plaintext files
-            case filelib:is_regular(filename:join(DbPath, "CURRENT")) of
-                true ->
+            case {filelib:is_regular(filename:join(DbPath, "CURRENT")),
+                  ReadOnly} of
+                {true, _} ->
                     {error, cannot_encrypt_existing_db};
-                false ->
+                {false, true} ->
+                    {error, {read_only_store_missing, DbPath}};
+                {false, false} ->
                     case write_marker(Marker, Key) of
                         ok ->
                             new_env(Key);

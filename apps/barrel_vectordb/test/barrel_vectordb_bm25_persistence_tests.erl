@@ -26,7 +26,9 @@ persistence_test_() ->
           {"disk: encrypted reopen", fun disk_encrypted/1},
           {"memory: rebuilt from stored text at open", fun memory_reopen/1},
           {"disk: interrupted compaction redone at open", fun disk_torn_segment/1},
-          {"disk: store predating the durable format is rebuilt", fun disk_legacy/1}
+          {"disk: store predating the durable format is rebuilt", fun disk_legacy/1},
+          {"disk: read-only open serves hits, files untouched", fun disk_read_only/1},
+          {"disk: read-only open refuses a legacy store", fun disk_legacy_read_only/1}
       ]]}.
 
 direct_test_() ->
@@ -206,6 +208,35 @@ disk_legacy(Dir) ->
     {ok, _} = barrel_vectordb:start_link(Cfg),
     ?assertEqual(Before, snapshot()).
 
+disk_read_only(Dir) ->
+    Cfg = cfg(Dir, disk),
+    {ok, _} = barrel_vectordb:start_link(Cfg),
+    add_docs(1, 12),
+    ok = barrel_vectordb_server:bm25_compact(?STORE),
+    add_docs(13, 15),
+    Before = snapshot(),
+    ok = barrel_vectordb:stop(?STORE),
+    Files = tree(Dir),
+    {ok, _} = barrel_vectordb:start_link(Cfg#{read_only => true}),
+    ?assertEqual(Before, snapshot()),
+    ok = barrel_vectordb:stop(?STORE),
+    ?assertEqual(Files, tree(Dir)).
+
+disk_legacy_read_only(Dir) ->
+    Cfg = cfg(Dir, disk),
+    {ok, _} = barrel_vectordb:start_link(Cfg),
+    add_docs(1, 5),
+    ok = barrel_vectordb:stop(?STORE),
+    make_legacy(Dir ++ "/vs/bm25"),
+    Files = tree(Dir),
+    process_flag(trap_exit, true),
+    ?assertMatch({error, {bm25_init_failed,
+                          {read_only_upgrade_needed,
+                           #{missing_cfs := ["doc_terms", "term_df",
+                                             "pending"]}}}},
+                 barrel_vectordb:start_link(Cfg#{read_only => true})),
+    ?assertEqual(Files, tree(Dir)).
+
 %%====================================================================
 %% Direct index API
 %%====================================================================
@@ -234,6 +265,14 @@ direct_compacted(Dir) ->
 %%====================================================================
 %% Helpers
 %%====================================================================
+
+tree(Dir) ->
+    lists:sort(filelib:fold_files(
+                 Dir, ".*", true,
+                 fun(F, Acc) ->
+                         {ok, B} = file:read_file(F),
+                         [{F, erlang:md5(B)} | Acc]
+                 end, [])).
 
 -define(CFS, ["default", "terms_fwd", "terms_rev", "docs_fwd", "docs_rev",
                "doc_terms", "term_df", "pending"]).
