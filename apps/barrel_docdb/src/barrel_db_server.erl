@@ -1318,7 +1318,8 @@ commit_group(#grp{reqs = Reqs0, count = N},
     Sync = lists:any(fun(#wreq{opts = O}) -> maps:get(sync, O, false) =:= true end,
                      Reqs),
     Written = write_group(StoreRef, Ops, Sync),
-    MoreSeg = lists:foldl(fun(W, Acc) -> finish_req(W, Written, DbName, Acc) end,
+    ok = notify_written(Written, DbName, Reqs),
+    MoreSeg = lists:foldl(fun(W, Acc) -> finish_req(W, Written, Acc) end,
                           [], Reqs),
     ok = barrel_metrics:observe_write_group(DbName, N),
     {count_group(N, State), MoreSeg}.
@@ -1333,9 +1334,8 @@ write_group(StoreRef, Ops, Sync) ->
         Class:Reason -> {error, {Class, Reason}}
     end.
 
-finish_req(#wreq{seg = Seg, more = More, done = Done} = W, Written, DbName,
-           Acc) ->
-    Final = [finish_item(Item, Written, DbName) || Item <- lists:reverse(Seg)],
+finish_req(#wreq{seg = Seg, more = More, done = Done} = W, Written, Acc) ->
+    Final = [finish_item(Item, Written) || Item <- lists:reverse(Seg)],
     case More of
         true ->
             lists:reverse(Final);
@@ -1344,13 +1344,20 @@ finish_req(#wreq{seg = Seg, more = More, done = Done} = W, Written, DbName,
             Acc
     end.
 
-finish_item({Result, [], _Notify}, _Written, _DbName) ->
+finish_item({Result, [], _Notify}, _Written) ->
     Result;
-finish_item({Result, _Ops, Notify}, ok, DbName) ->
-    notify_write(DbName, Notify),
+finish_item({Result, _Ops, _Notify}, ok) ->
     Result;
-finish_item({_Result, _Ops, _Notify}, {error, _} = Err, _DbName) ->
+finish_item({_Result, _Ops, _Notify}, {error, _} = Err) ->
     Err.
+
+%% The group's writes reach their subscribers before any caller is answered.
+notify_written(ok, DbName, Reqs) ->
+    notify_group(DbName, [Notify || #wreq{seg = Seg} <- Reqs,
+                                    {_, [_ | _], Notify} <- lists:reverse(Seg),
+                                    Notify =/= none]);
+notify_written({error, _}, _DbName, _Reqs) ->
+    ok.
 
 reply_req(#wreq{from = From, kind = put_docs}, Results) ->
     gen_server:reply(From, Results);
@@ -1359,8 +1366,8 @@ reply_req(#wreq{from = From}, [Result]) ->
 
 notify_write(_DbName, none) ->
     ok;
-notify_write(DbName, {DocId, NewToken, NextHlc, Deleted, DocBody}) ->
-    notify_subscribers(DbName, DocId, NewToken, NextHlc, Deleted, DocBody).
+notify_write(DbName, Note) ->
+    notify_group(DbName, [Note]).
 
 count_group(N, #state{write_groups = #{groups := G, requests := R,
                                        max_size := M}} = State) ->
@@ -2252,43 +2259,53 @@ do_fold_local_docs(StoreRef, DbName, DocIdPrefix, Fun, Acc0) ->
 %% Subscription Notifications
 %%====================================================================
 
-%% @doc Notify subscribers of document changes
-%% Extracts paths from document, matches against subscriptions,
-%% and sends notifications to matching subscribers.
+%% @doc Notify the subscribers of one write.
 notify_subscribers(DbName, DocId, Rev, Hlc, Deleted, DocBody) ->
-    %% Extract paths from document body
-    Topics = case Deleted of
-        true ->
-            %% For deleted docs, just use the doc ID as a path
-            [DocId];
-        false ->
-            Paths = barrel_ars:analyze(DocBody),
-            barrel_ars:paths_to_topics(Paths)
-    end,
+    notify_group(DbName, [{DocId, Rev, Hlc, Deleted, DocBody}]).
 
-    %% Find matching path subscribers
-    Pids = barrel_sub:match(DbName, Topics),
+%% @doc Notify the subscribers of a commit's writes, in commit order: one
+%% cast per subscription manager, and nothing at all when the database
+%% has no subscription.
+notify_group(_DbName, []) ->
+    ok;
+notify_group(DbName, Notes) ->
+    notify_group(DbName, Notes, has_subs(?SUB_DBS_TAB, DbName),
+                 has_subs(?QUERY_SUB_DBS_TAB, DbName)).
 
-    %% Build notification
-    Notification = {barrel_change, DbName, #{
-        id => DocId,
-        rev => Rev,
-        hlc => Hlc,
-        deleted => Deleted,
-        paths => Topics
-    }},
+notify_group(_DbName, _Notes, false, false) ->
+    ok;
+notify_group(DbName, Notes, PathSubs, QuerySubs) ->
+    ok = notify_paths(PathSubs, DbName, Notes),
+    notify_queries(QuerySubs, DbName, Notes).
 
-    %% Send to each path subscriber
-    _ = [Pid ! Notification || Pid <- Pids],
+notify_paths(false, _DbName, _Notes) ->
+    ok;
+notify_paths(true, DbName, Notes) ->
+    barrel_sub:notify(DbName, [path_change(N) || N <- Notes]).
 
-    %% Notify query subscribers (only for non-deleted docs)
-    case Deleted of
-        true ->
-            ok;
-        false ->
-            barrel_query_sub:notify_change(DbName, DocId, Rev, DocBody)
-    end,
-    ok.
+%% Deleted docs are announced under their id; live ones under their paths.
+path_change({DocId, Rev, Hlc, true, _DocBody}) ->
+    {[DocId], #{id => DocId, rev => Rev, hlc => Hlc, deleted => true,
+                paths => [DocId]}};
+path_change({DocId, Rev, Hlc, false, DocBody}) ->
+    Topics = barrel_ars:paths_to_topics(barrel_ars:analyze(DocBody)),
+    {Topics, #{id => DocId, rev => Rev, hlc => Hlc, deleted => false,
+               paths => Topics}}.
+
+%% Query subscribers only see live documents.
+notify_queries(false, _DbName, _Notes) ->
+    ok;
+notify_queries(true, DbName, Notes) ->
+    case [{Id, Rev, Body} || {Id, Rev, _Hlc, false, Body} <- Notes] of
+        [] -> ok;
+        Live -> barrel_query_sub:notify_changes(DbName, Live)
+    end.
+
+%% A missing table means its manager is down: it holds no subscription.
+has_subs(Tab, DbName) ->
+    try ets:member(Tab, DbName)
+    catch error:badarg -> false
+    end.
 
 %%====================================================================
 %% Wide Column Helpers
