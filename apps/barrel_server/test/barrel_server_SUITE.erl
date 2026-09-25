@@ -24,6 +24,10 @@
     t_query_get/1,
     t_query_params_json/1,
     t_query_parse_error/1,
+    t_query_max_rows/1,
+    t_query_meta_bound/1,
+    t_query_deadline/1,
+    t_query_bad_bounds/1,
     t_query_subscribe_requires_sse/1,
     t_query_subscribe_sse/1,
     t_not_found/1,
@@ -47,7 +51,9 @@ all() ->
      t_vector_search, t_changes_json, t_changes_sse,
      t_changes_continuous, t_embedding,
      t_query_ndjson, t_query_get, t_query_params_json,
-     t_query_parse_error, t_query_subscribe_requires_sse,
+     t_query_parse_error, t_query_max_rows, t_query_meta_bound,
+     t_query_deadline, t_query_bad_bounds,
+     t_query_subscribe_requires_sse,
      t_query_subscribe_sse, t_not_found, t_no_atom_leak,
      t_create_db_att_opts_validation, t_create_db_att_opts_missing_endpoint,
      t_create_db_att_opts_redacts_secrets, t_create_db_att_opts_blob_explicit,
@@ -312,6 +318,81 @@ t_not_found(Config) ->
 %%====================================================================
 %% Helpers (hackney)
 %%====================================================================
+
+%% B2: max_rows caps a streamable query; one more row proves has_more.
+t_query_max_rows(Config) ->
+    B = base(Config),
+    Docs = [#{<<"id">> => <<"mr", (integer_to_binary(I))/binary>>,
+              <<"kind">> => <<"mr">>} || I <- lists:seq(1, 8)],
+    {201, _} = req_json(post, url("/_bulk_docs", B), #{<<"docs">> => Docs}),
+    {200, Body} = req_raw_post(url("/query", B),
+        [{<<"content-type">>, <<"application/json">>}],
+        json:encode(#{query => <<"SELECT * FROM db WHERE kind = 'mr'">>,
+                      max_rows => 5})),
+    Lines = ndjson_lines(Body),
+    {Rows, [#{<<"meta">> := Meta}]} = lists:partition(
+        fun(L) -> maps:is_key(<<"row">>, L) end, Lines),
+    ?assertEqual(5, length(Rows)),
+    ?assertMatch(#{<<"has_more">> := true, <<"count">> := 5,
+                   <<"bound">> := <<"limit_reached">>}, Meta),
+    ?assertNot(maps:is_key(<<"continuation">>, Meta)),
+    %% the observed version rides the meta line
+    {ok, Db} = barrel_server_dbs:ensure(list_to_binary(?DB)),
+    {ok, Id} = barrel_docdb:db_instance_id(maps:get(docdb, Db)),
+    ?assertEqual(Id, maps:get(<<"instance_id">>, Meta)),
+    ?assertEqual(12, byte_size(base64:decode(maps:get(<<"last_seq">>, Meta),
+                                             #{mode => urlsafe}))),
+    ok.
+
+%% bound: limit_reached when the statement's LIMIT is filled, else
+%% exhausted.
+t_query_meta_bound(Config) ->
+    B = base(Config),
+    Q = fun(Bql) ->
+            {200, Body} = req_raw_post(url("/query", B), [], Bql),
+            [#{<<"meta">> := M}] = [L || L <- ndjson_lines(Body),
+                                         maps:is_key(<<"meta">>, L)],
+            maps:get(<<"bound">>, M)
+        end,
+    ?assertEqual(<<"limit_reached">>,
+                 Q(<<"SELECT * FROM db WHERE kind = 'mr' LIMIT 3">>)),
+    ?assertEqual(<<"exhausted">>,
+                 Q(<<"SELECT * FROM db WHERE kind = 'mr' LIMIT 50">>)),
+    ?assertEqual(<<"exhausted">>,
+                 Q(<<"SELECT * FROM db WHERE kind = 'mr'">>)),
+    ok.
+
+%% A passed deadline ends the stream with an error line and no meta.
+t_query_deadline(Config) ->
+    B = base(Config),
+    Docs = [#{<<"id">> => <<"dl", (integer_to_binary(I))/binary>>,
+              <<"kind">> => <<"dl">>, <<"n">> => I}
+            || I <- lists:seq(1, 600)],
+    {201, _} = req_json(post, url("/_bulk_docs", B), #{<<"docs">> => Docs}),
+    {200, Body} = req_raw_post(url("/query", B),
+        [{<<"content-type">>, <<"application/json">>}],
+        json:encode(#{query => <<"SELECT * FROM db WHERE kind = 'dl' "
+                                 "ORDER BY n DESC LIMIT 600">>,
+                      deadline_ms => 1})),
+    Lines = ndjson_lines(Body),
+    ?assertEqual(#{<<"error">> => <<"deadline">>}, lists:last(Lines)),
+    ?assertEqual([], [L || L <- Lines, maps:is_key(<<"meta">>, L)]),
+    ok.
+
+t_query_bad_bounds(Config) ->
+    B = base(Config),
+    Post = fun(Map) ->
+                   req_json(post, url("/query", B),
+                            Map#{query => <<"SELECT * FROM db LIMIT 1">>})
+           end,
+    ?assertMatch({400, #{<<"error">> := <<"invalid_max_rows">>}},
+                 Post(#{max_rows => 0})),
+    ?assertMatch({400, #{<<"error">> := <<"invalid_deadline_ms">>}},
+                 Post(#{deadline_ms => <<"soon">>})),
+    ?assertMatch({400, #{<<"error">> := <<"invalid_max_rows">>}},
+                 req(get, url("/query?q=SELECT%20*%20FROM%20db&max_rows=x",
+                              B), <<>>)),
+    ok.
 
 base(Config) -> ?config(base, Config).
 
