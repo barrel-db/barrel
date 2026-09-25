@@ -626,9 +626,11 @@ prepare_query(Req) ->
                     case barrel_bql:compile(Bql, #{params => Params}) of
                         {ok, #{subscribe := Subscribe} = Plan} ->
                             {ok, Db, Bql,
-                             QOpts#{subscribe => Subscribe,
-                                    row_bound =>
-                                        barrel_bql_query:row_bound(Plan)}};
+                             with_embedding_meta(
+                               Db, Plan,
+                               QOpts#{subscribe => Subscribe,
+                                      row_bound =>
+                                          barrel_bql_query:row_bound(Plan)})};
                         {error, BqlError} ->
                             {error, 400, bql_error_body(BqlError)}
                     end;
@@ -641,6 +643,19 @@ prepare_query(Req) ->
         {error, Reason} ->
             {error, 500, json:encode(#{error => err_bin(Reason)})}
     end.
+
+%% Vector results carry the embedding identity (fingerprint, distance,
+%% dimensions) so a federating node can tell whether scores compare.
+with_embedding_meta(Db, #{source := {table_fn, vector_top_k, _}}, QOpts) ->
+    try barrel:embedder_info(Db) of
+        {ok, Info} ->
+            QOpts#{embedding_meta =>
+                       maps:with([fingerprint, distance, dimensions], Info)}
+    catch
+        _:_ -> QOpts
+    end;
+with_embedding_meta(_Db, _Plan, QOpts) ->
+    QOpts.
 
 query_input(Req) ->
     case livery_req:method(Req) of
@@ -739,8 +754,8 @@ bql_error_body(BqlError) ->
 %% The fold stops at max_rows (one extra row proves more exist) or at the
 %% deadline, checked per row and once more before the meta line.
 run_query(Db, Bql, QOpts, Emit) ->
-    FoldOpts = maps:without([subscribe, max_rows, deadline_ms, row_bound],
-                            QOpts),
+    FoldOpts = maps:without([subscribe, max_rows, deadline_ms, row_bound,
+                             embedding_meta], QOpts),
     MaxRows = maps:get(max_rows, QOpts, infinity),
     Deadline = deadline_at(maps:get(deadline_ms, QOpts, undefined)),
     Result = barrel:query_fold(Db, Bql, FoldOpts#{chunk_size => 100},
@@ -769,13 +784,20 @@ run_query(Db, Bql, QOpts, Emit) ->
                     ok;
                 false ->
                     Bound = maps:get(row_bound, QOpts, undefined),
-                    _ = Emit(#{meta => query_meta(Meta, Stop, Bound)}),
+                    Out = with_embedding(query_meta(Meta, Stop, Bound),
+                                         QOpts),
+                    _ = Emit(#{meta => Out}),
                     ok
             end;
         {error, Reason} ->
             _ = Emit(#{error => err_bin(Reason)}),
             ok
     end.
+
+with_embedding(Out, #{embedding_meta := Emb}) when map_size(Emb) > 0 ->
+    Out#{embedding => Emb};
+with_embedding(Out, _QOpts) ->
+    Out.
 
 deadline_at(undefined) -> infinity;
 deadline_at(Ms) -> erlang:monotonic_time(millisecond) + Ms.

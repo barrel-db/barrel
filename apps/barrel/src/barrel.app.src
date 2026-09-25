@@ -1,11 +1,12 @@
 {application, barrel, [
     {description, "Barrel: the embeddable edge-AI database composing the document and vector layers"},
-    {vsn, "1.4.0"},
+    {vsn, "1.5.0"},
     {registered, [barrel_sup]},
     {mod, {barrel_app, []}},
     {applications, [
         kernel,
         stdlib,
+        crypto,
         barrel_crypto,
         barrel_docdb,
         barrel_vectordb,

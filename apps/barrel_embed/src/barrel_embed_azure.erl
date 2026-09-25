@@ -41,6 +41,7 @@
     embed_batch/2,
     dimension/1,
     name/0,
+    model_info/1,
     init/1,
     available/1
 ]).
@@ -56,6 +57,14 @@
 %% @doc Provider name.
 -spec name() -> atom().
 name() -> azure.
+
+%% @doc Model identity (see barrel_embed_provider:model_info/2).
+-spec model_info(map()) -> barrel_embed_provider:model_info().
+model_info(#{model := _} = Config) ->
+    barrel_embed_provider:model_info_from(Config, model, undefined);
+model_info(Config) ->
+    %% the deployment names the model on Azure
+    barrel_embed_provider:model_info_from(Config, deployment, undefined).
 
 %% @doc Get dimension for this provider.
 -spec dimension(map()) -> pos_integer().

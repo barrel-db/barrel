@@ -4,6 +4,19 @@ All notable changes to the Barrel umbrella are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and each app
 is versioned independently under [Semantic Versioning](https://semver.org/).
 
+## [2026-09-25] Embedding fingerprint
+
+Vector scores from two databases only compare when both embed with the same
+model, dimensions, distance and preprocessing. Providers now report their
+model, barrel derives a fingerprint of the whole embedding space, and the
+query route puts it in the meta of vector answers.
+
+| App | Version | Change |
+|-----|---------|--------|
+| barrel_embed | 2.5.0 | provider `model_info/1` |
+| barrel | 1.5.0 | embedder identity and fingerprint in `embedder_info/1` and `info/1` |
+| barrel_server | 1.9.0 | `embedding` in the meta of `vector_top_k` answers |
+
 ## [2026-09-25] Bounded queries that report what answered
 
 A node that fans a query out to other nodes needs to bound what each one

@@ -28,6 +28,7 @@
     t_query_meta_bound/1,
     t_query_deadline/1,
     t_query_bad_bounds/1,
+    t_query_embedding_meta/1,
     t_query_subscribe_requires_sse/1,
     t_query_subscribe_sse/1,
     t_not_found/1,
@@ -52,7 +53,7 @@ all() ->
      t_changes_continuous, t_embedding,
      t_query_ndjson, t_query_get, t_query_params_json,
      t_query_parse_error, t_query_max_rows, t_query_meta_bound,
-     t_query_deadline, t_query_bad_bounds,
+     t_query_deadline, t_query_bad_bounds, t_query_embedding_meta,
      t_query_subscribe_requires_sse,
      t_query_subscribe_sse, t_not_found, t_no_atom_leak,
      t_create_db_att_opts_validation, t_create_db_att_opts_missing_endpoint,
@@ -393,6 +394,46 @@ t_query_bad_bounds(Config) ->
                  req(get, url("/query?q=SELECT%20*%20FROM%20db&max_rows=x",
                               B), <<>>)),
     ok.
+
+%% B11: a vector_top_k answer names its embedding space in the meta line;
+%% other statements do not. The embedder is mocked, never called.
+t_query_embedding_meta(Config) ->
+    B = base(Config),
+    _ = try meck:unload(barrel_embed) catch _:_ -> ok end,
+    meck:new(barrel_embed, [passthrough, no_link]),
+    Vec = fun(T) -> H = erlang:phash2(T, 1000),
+                    [H / 1000, (H rem 10) / 10, 0.5] end,
+    meck:expect(barrel_embed, embed, fun(T, _) -> {ok, Vec(T)} end),
+    meck:expect(barrel_embed, embed_batch,
+                fun(Ts, _) -> {ok, [Vec(T) || T <- Ts]} end),
+    try
+        Db = <<"srv_emb_meta">>,
+        {ok, _} = barrel_server_dbs:ensure(Db, #{
+            vectordb => #{dimension => 3, bm25_backend => memory},
+            embedding =>
+            #{fields => [<<"t">>], mode => sync,
+              embedder => {ollama, #{model => <<"nomic-embed-text">>}}}}),
+        ok = barrel_dbs:pin(Db),
+        Url = fun(P) -> B ++ "/db/srv_emb_meta" ++ P end,
+        {201, _} = req_json(post, Url("/_bulk_docs"),
+                            #{<<"docs">> => [#{<<"id">> => <<"e1">>,
+                                               <<"t">> => <<"trace events">>},
+                                             #{<<"id">> => <<"e2">>,
+                                               <<"t">> => <<"release">>}]}),
+        Meta = fun(Bql) ->
+                   {200, Body} = req_raw_post(Url("/query"), [], Bql),
+                   maps:get(<<"meta">>, lists:last(ndjson_lines(Body)))
+               end,
+        #{<<"embedding">> := #{<<"fingerprint">> := <<"sha256:", _/binary>>,
+                               <<"distance">> := <<"cosine">>,
+                               <<"dimensions">> := 3}} =
+            Meta(<<"SELECT * FROM vector_top_k('trace', k => 2) AS v">>),
+        ?assertNot(maps:is_key(<<"embedding">>,
+                               Meta(<<"SELECT * FROM db LIMIT 1">>))),
+        ok = barrel_dbs:unpin(Db)
+    after
+        meck:unload(barrel_embed)
+    end.
 
 base(Config) -> ?config(base, Config).
 
