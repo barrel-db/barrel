@@ -12,11 +12,17 @@
          init_per_testcase/2, end_per_testcase/2]).
 
 -export([no_subscriber_no_notify/1,
-         subscribers_notified_per_group/1]).
+         subscribers_notified_per_group/1,
+         prepared_batch_equals_inline/1,
+         prepared_batch_equals_inline_channels/1]).
+
+-define(TAG, <<"hb.task">>).
 
 all() ->
     [no_subscriber_no_notify,
-     subscribers_notified_per_group].
+     subscribers_notified_per_group,
+     prepared_batch_equals_inline,
+     prepared_batch_equals_inline_channels].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(barrel_docdb),
@@ -28,9 +34,15 @@ end_per_suite(Config) ->
     os:cmd("rm -rf " ++ ?config(dir, Config)),
     ok.
 
+init_per_testcase(prepared_batch_equals_inline_channels = TC, Config) ->
+    open(TC, #{channels => #{<<"steps">> => [<<"type/step">>],
+                             <<"all">> => [<<"#">>]}}, Config);
 init_per_testcase(TC, Config) ->
+    open(TC, #{}, Config).
+
+open(TC, Opts, Config) ->
     Db = atom_to_binary(TC, utf8),
-    {ok, Pid} = barrel_docdb:create_db(Db, #{data_dir => ?config(dir, Config)}),
+    {ok, Pid} = barrel_docdb:create_db(Db, Opts#{data_dir => ?config(dir, Config)}),
     [{db, Db}, {pid, Pid} | Config].
 
 end_per_testcase(_TC, Config) ->
@@ -83,6 +95,66 @@ subscribers_notified_per_group(Config) ->
     %% the flags drop with the last subscription
     Events2 = traced(Pid, fun() -> {ok, _} = (Put(9))() end),
     ?assertEqual([], sub_events(Events2)).
+
+%% A write prepared in the caller gives the batch the writer built
+%% before: new docs, updates with outbox tags and path changes (archive,
+%% version chain, history), TTL, provenance, embedding, tombstones and
+%% recreation over a tombstone.
+prepared_batch_equals_inline(Config) ->
+    same_batches(?config(db, Config)).
+
+%% The same with channel feed rows.
+prepared_batch_equals_inline_channels(Config) ->
+    same_batches(?config(db, Config)).
+
+same_batches(Db) ->
+    Tagged = #{outbox => [?TAG, <<"other">>]},
+    Steps = [
+        {#{<<"id">> => <<"a">>, <<"type">> => <<"step">>,
+           <<"input">> => #{<<"args">> => [1, 2, 3], <<"name">> => <<"x/y">>},
+           <<"n">> => 1}, #{}},
+        {#{<<"id">> => <<"b">>, <<"type">> => <<"step">>,
+           <<"_embedding">> => [0.5, 0.25]},
+         Tagged#{expires_at => 4102444800000,
+                 provenance => #{actor => <<"agent-1">>}}},
+        {rev(Db, <<"a">>, #{<<"type">> => <<"step">>, <<"n">> => 2,
+                            <<"status">> => <<"done">>}), Tagged},
+        {rev(Db, <<"a">>, #{<<"type">> => <<"step">>, <<"n">> => 2,
+                            <<"status">> => <<"done">>}), #{}},
+        {rev(Db, <<"b">>, #{<<"type">> => <<"other">>}), Tagged#{expires_at => 0}},
+        {rev(Db, <<"a">>, #{<<"_deleted">> => true}), Tagged},
+        {#{<<"id">> => <<"a">>, <<"type">> => <<"step">>, <<"again">> => true},
+         Tagged},
+        {#{<<"id">> => <<"c/é"/utf8>>, <<"list">> => [#{<<"k">> => null}, 1.5, []],
+           <<"empty">> => #{}, <<"_private">> => 1}, #{}}
+    ],
+    lists:foreach(fun({Doc0, Opts}) ->
+        Doc = resolve_rev(Db, Doc0),
+        Hlc = barrel_hlc:new_hlc(),
+        {Inline, InlineNote} =
+            barrel_db_server:doc_write_ops(inline, Db, Doc, Opts, Hlc),
+        {Prepared, PreparedNote} =
+            barrel_db_server:doc_write_ops(prepared, Db, Doc, Opts, Hlc),
+        ?assert(length(Inline) > 5),
+        ?assertEqual(no_diff, first_diff(Inline, Prepared, 1)),
+        ?assertEqual(InlineNote, erlang:delete_element(6, PreparedNote)),
+        %% advance the state for the next step
+        {ok, _} = barrel_docdb:put_doc(Db, Doc, Opts)
+    end, Steps).
+
+first_diff([], [], _N) -> no_diff;
+first_diff([Op | A], [Op | B], N) -> first_diff(A, B, N + 1);
+first_diff(A, B, N) -> {N, lists:sublist(A, 1), lists:sublist(B, 1)}.
+
+%% An update of Id whose _rev is read when the step runs.
+rev(_Db, Id, Body) ->
+    {rev, Id, Body}.
+
+resolve_rev(Db, {rev, Id, Body}) ->
+    {ok, #{<<"_rev">> := Rev}} = barrel_docdb:get_doc(Db, Id, #{include_deleted => true}),
+    Body#{<<"id">> => Id, <<"_rev">> => Rev};
+resolve_rev(_Db, Doc) ->
+    Doc.
 
 %%====================================================================
 %% Helpers

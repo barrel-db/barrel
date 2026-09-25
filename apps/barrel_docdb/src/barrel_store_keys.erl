@@ -77,7 +77,8 @@
 
 %% Prefix changes posting list keys (sharded by time bucket)
 %% Each bucket contains a sorted list of << HLC:12, Change/binary >>
--export([prefix_changes_key/3, prefix_changes_start/3, prefix_changes_end/3]).
+-export([prefix_changes_key/3, prefix_changes_start/3, prefix_changes_end/3,
+         prefix_changes_head/2]).
 -export([hlc_to_bucket/1]).
 
 %% Attachment keys
@@ -277,8 +278,7 @@ doc_hlc_end(DbName) ->
 %% Topic is an MQTT-style path like "users/123/name"
 -spec path_hlc(db_name(), binary(), barrel_hlc:timestamp()) -> binary().
 path_hlc(DbName, Topic, Hlc) ->
-    <<?PREFIX_PATH_HLC, (encode_name(DbName))/binary,
-      (encode_topic(Topic))/binary, (encode_hlc(Hlc))/binary>>.
+    <<(path_hlc_prefix(DbName, Topic))/binary, (encode_hlc(Hlc))/binary>>.
 
 %% @doc Prefix for scanning path_hlc entries for a specific topic.
 %% Returns all changes under this topic since the beginning of time.
@@ -507,9 +507,15 @@ hlc_to_bucket(Hlc) ->
 %% Key format: PREFIX_CHANGES | db_name | prefix | 0x00 | bucket (4 bytes BE)
 -spec prefix_changes_key(db_name(), binary(), non_neg_integer()) -> binary().
 prefix_changes_key(DbName, Prefix, Bucket) ->
+    <<(prefix_changes_head(DbName, Prefix))/binary, Bucket:32/big>>.
+
+%% @doc A prefix changes key without its bucket: the key is the head
+%% followed by `Bucket:32/big'.
+-spec prefix_changes_head(db_name(), binary()) -> binary().
+prefix_changes_head(DbName, Prefix) ->
     NormalizedPrefix = normalize_prefix(Prefix),
     <<?PREFIX_CHANGES, (encode_name(DbName))/binary,
-      NormalizedPrefix/binary, 0, Bucket:32/big>>.
+      NormalizedPrefix/binary, 0>>.
 
 %% @doc Start key for prefix changes range scan.
 %% Used to scan from a specific bucket onwards.

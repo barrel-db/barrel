@@ -23,7 +23,9 @@
 %% Document API
 -export([
     put_doc/3,
+    put_doc/4,
     put_docs/3,
+    put_docs/4,
     get_doc/3,
     get_docs/3,
     delete_doc/3,
@@ -32,6 +34,10 @@
     resolve_conflict/4,
     get_conflicts/2
 ]).
+
+%% One document's batch, built in the writer or from a request prepared
+%% in the caller (tests compare the two)
+-export([doc_write_ops/5]).
 
 %% Tagged outbox API (acks are writes, so they go through the server)
 -export([outbox_ack/3]).
@@ -113,6 +119,19 @@
     more = false :: boolean()
 }).
 
+%% A document write prepared in the calling process: the parts of its
+%% batch that depend on neither the database state nor the HLC.
+-record(prep, {
+    ks :: binary(),               %% keyspace the keys are built for
+    rec :: map(),                 %% barrel_doc:make_doc_record/1
+    cbor :: binary(),             %% body, plain CBOR
+    change_cbor :: binary(),      %% body, indexed CBOR (change row)
+    paths :: [{[term()], term()}] | undefined,  %% live body paths
+    topics :: [binary()],         %% feed and notification topics
+    feed_heads :: [{binary(), binary()}],  %% feed row keys before the HLC
+    index_ops :: [tuple()]        %% path index of a body indexed from scratch
+}).
+
 %% A group of write requests committed in one batch (reqs newest first).
 -record(grp, {
     reqs = [] :: [#wreq{}],
@@ -181,10 +200,21 @@ stop(Pid) ->
 put_doc(Pid, Doc, Opts) ->
     gen_server:call(Pid, {put_doc, Doc, Opts}).
 
+%% @doc put_doc/3 with the document prepared in the calling process, so
+%% the writer only reads, checks, stamps and batches it.
+-spec put_doc(pid(), binary(), map(), map()) -> {ok, map()} | {error, term()}.
+put_doc(Pid, DbName, Doc, Opts) ->
+    gen_server:call(Pid, {put_doc, prepare(DbName, Doc), Opts}).
+
 %% @doc Put multiple documents (batch write)
 -spec put_docs(pid(), [map()], map()) -> [{ok, map()} | {error, term()}].
 put_docs(Pid, Docs, Opts) ->
     gen_server:call(Pid, {put_docs, Docs, Opts}).
+
+%% @doc put_docs/3 with the documents prepared in the calling process.
+-spec put_docs(pid(), binary(), [map()], map()) -> [{ok, map()} | {error, term()}].
+put_docs(Pid, DbName, Docs, Opts) ->
+    gen_server:call(Pid, {put_docs, [prepare(DbName, D) || D <- Docs], Opts}).
 
 %% @doc Get a document
 %% When raw_body => true in Opts, returns {ok, CborBin, Meta} for zero-copy responses
@@ -1235,8 +1265,8 @@ add_req(#wreq{pending = []} = W, #grp{reqs = Reqs, count = N} = G, _State) ->
     {G#grp{reqs = [W | Reqs], count = N + 1}, none};
 add_req(#wreq{pending = [Item | Rest], seg = Seg, opts = Opts} = W,
         #grp{ids = Ids} = G,
-        #state{name = DbName, store_ref = StoreRef} = State) ->
-    case prepare_item(Item) of
+        #state{name = DbName, keyspace = Ks, store_ref = StoreRef} = State) ->
+    case prepare_item(Item, Ks) of
         {error, _} = Err ->
             add_req(W#wreq{pending = Rest, seg = [{Err, [], none} | Seg]}, G, State);
         {Id, _} when is_map_key(Id, Ids) ->
@@ -1257,25 +1287,31 @@ mark_id(none, _Built, Ids) -> Ids;
 mark_id(Id, {{ok, _}, _, _}, Ids) -> Ids#{Id => true};
 mark_id(_Id, _Built, Ids) -> Ids.
 
-prepare_item({doc, Doc}) ->
-    try barrel_doc:make_doc_record(barrel_doc:to_map(Doc)) of
-        #{id := DocId} = DocRecord -> {DocId, {doc, DocRecord}}
-    catch
-        _:Reason -> {error, Reason}
+%% A document prepared for another keyspace is prepared again here.
+prepare_item({doc, {prepared, #prep{ks = Ks, rec = #{id := DocId}} = P}}, Ks) ->
+    {DocId, P};
+prepare_item({doc, {prepared, #prep{rec = #{id := DocId} = Rec}}}, Ks) ->
+    {DocId, prepare_record(Ks, Rec)};
+prepare_item({doc, {prepared, {error, _} = Err}}, _Ks) ->
+    Err;
+prepare_item({doc, Doc}, Ks) ->
+    case prepare_ks(Ks, Doc) of
+        #prep{rec = #{id := DocId}} = P -> {DocId, P};
+        {error, _} = Err -> Err
     end;
-prepare_item({delete, DocId} = Item) ->
+prepare_item({delete, DocId} = Item, _Ks) ->
     {DocId, Item};
-prepare_item({ack, _Tag, _Hlcs} = Item) ->
+prepare_item({ack, _Tag, _Hlcs} = Item, _Ks) ->
     {none, Item}.
 
 %% Build one item: {Result, Ops, NotifyInfo}. A failed item adds no ops.
-build_item({doc, DocRecord}, StoreRef, DbName, Opts) ->
+build_item(#prep{rec = DocRecord} = P, StoreRef, DbName, Opts) ->
     try
         Old = read_current(StoreRef, DbName, maps:get(id, DocRecord)),
         case cas_check(Old, maps:get(expected_version, DocRecord)) of
             ok ->
-                {Ops, Notify} = build_write_ops(StoreRef, DbName, DocRecord,
-                                                Old, Opts),
+                {Ops, Notify} = build_prepared_ops(StoreRef, DbName, P, Old,
+                                                   Opts, barrel_hlc:new_hlc()),
                 {write_result(Notify, Opts), Ops, Notify};
             {error, conflict} = Conflict ->
                 {Conflict, [], none}
@@ -1298,6 +1334,8 @@ build_item({ack, Tag, Hlcs}, _StoreRef, DbName, _Opts) ->
 
 %% return_hlc => true adds the write's change HLC (internal atom key),
 %% used by callers that ack outbox entries.
+write_result({DocId, NewToken, NextHlc, Deleted, DocBody, _Topics}, Opts) ->
+    write_result({DocId, NewToken, NextHlc, Deleted, DocBody}, Opts);
 write_result({DocId, NewToken, NextHlc, _Deleted, _DocBody}, Opts) ->
     Result = #{<<"id">> => DocId, <<"ok">> => true, <<"rev">> => NewToken},
     case maps:get(return_hlc, Opts, false) of
@@ -1555,11 +1593,13 @@ channel_ops(DbName, NewHlc, DocInfo, DocBody, OldHlc, OldDocBody,
     end.
 
 build_write_ops(StoreRef, DbName, DocRecord, Old, Opts) ->
+    build_write_ops(StoreRef, DbName, DocRecord, Old, Opts, barrel_hlc:new_hlc()).
+
+build_write_ops(StoreRef, DbName, DocRecord, Old, Opts, NextHlc) ->
     Ks = barrel_keyspace:resolve(DbName),
     #{id := DocId, deleted := Deleted, doc := DocBody} = DocRecord,
     DocEntityKey = barrel_store_keys:doc_entity(Ks, DocId),
 
-    NextHlc = barrel_hlc:new_hlc(),
     NewVersion = barrel_version:new(NextHlc, source_id(DbName)),
     NewToken = barrel_version:to_token(NewVersion),
 
@@ -1686,6 +1726,185 @@ build_write_ops(StoreRef, DbName, DocRecord, Old, Opts) ->
         ++ ArchiveOps ++ ChainOps ++ OutboxOps ++ HistoryOps ++ ChannelOps
         ++ ExpiryOps ++ [BodyOp],
     {AllOps, {DocId, NewToken, NextHlc, Deleted, DocBody}}.
+
+%% @doc Prepare a document write for a database (runs in the caller).
+-spec prepare(binary(), map() | binary()) ->
+    {prepared, #prep{} | {error, term()}}.
+prepare(DbName, Doc) ->
+    {prepared, prepare_ks(barrel_keyspace:resolve(DbName), Doc)}.
+
+prepare_ks(Ks, Doc) ->
+    try barrel_doc:make_doc_record(barrel_doc:to_map(Doc)) of
+        DocRecord -> prepare_record(Ks, DocRecord)
+    catch
+        _:Reason -> {error, Reason}
+    end.
+
+%% The values build_write_ops/6 derives from the body alone.
+prepare_record(Ks, #{id := DocId, deleted := Deleted, doc := DocBody} = Rec) ->
+    Paths = live_paths(Deleted, DocBody),
+    Topics = barrel_changes:doc_topics(#{id => DocId, deleted => Deleted,
+                                         doc => DocBody}),
+    #prep{ks = Ks,
+          rec = Rec,
+          cbor = barrel_docdb_codec_cbor:encode_cbor(DocBody),
+          change_cbor = barrel_docdb_codec_cbor:encode(DocBody),
+          paths = Paths,
+          topics = Topics,
+          feed_heads = barrel_changes:feed_heads(
+                         Ks, barrel_changes:topics_prefixes(Topics)),
+          index_ops = fresh_index_ops(Ks, DocId, Paths)}.
+
+live_paths(true, _DocBody) -> undefined;
+live_paths(false, DocBody) -> barrel_ars:analyze(DocBody).
+
+fresh_index_ops(_Ks, _DocId, undefined) -> [];
+fresh_index_ops(Ks, DocId, Paths) -> barrel_ars_index:index_paths_ops(Ks, DocId, Paths).
+
+%% @doc The batch of one document write and its notification, with the
+%% given HLC: `inline' builds it the way the writer always did,
+%% `prepared' from a request prepared in the caller.
+-spec doc_write_ops(inline | prepared, binary(), map(), map(),
+                    barrel_hlc:timestamp()) -> {list(), tuple()}.
+doc_write_ops(Mode, DbName, Doc, Opts0, Hlc) ->
+    StoreRef = persistent_term:get({barrel_store, DbName}),
+    {ok, Opts} = validate_prov_opt(Opts0),
+    {prepared, #prep{rec = #{id := DocId} = Rec} = P} = prepare(DbName, Doc),
+    Old = read_current(StoreRef, DbName, DocId),
+    doc_write_ops(Mode, StoreRef, DbName, P, Rec, Old, Opts, Hlc).
+
+doc_write_ops(inline, StoreRef, DbName, _P, Rec, Old, Opts, Hlc) ->
+    build_write_ops(StoreRef, DbName, Rec, Old, Opts, Hlc);
+doc_write_ops(prepared, StoreRef, DbName, P, _Rec, Old, Opts, Hlc) ->
+    build_prepared_ops(StoreRef, DbName, P, Old, Opts, Hlc).
+
+%% @doc build_write_ops/6 from a prepared write: only what needs the
+%% current state or the HLC is computed here. Same ops, same order.
+build_prepared_ops(StoreRef, DbName, #prep{rec = DocRecord} = P, Old, Opts,
+                   NextHlc) ->
+    Ks = barrel_keyspace:resolve(DbName),
+    #prep{cbor = CborBody, change_cbor = ChangeCbor, paths = NewPaths,
+          topics = Topics, feed_heads = Heads, index_ops = FreshIndexOps} = P,
+    #{id := DocId, deleted := Deleted, doc := DocBody} = DocRecord,
+    DocEntityKey = barrel_store_keys:doc_entity(Ks, DocId),
+
+    NewVersion = barrel_version:new(NextHlc, source_id(DbName)),
+    NewToken = barrel_version:to_token(NewVersion),
+
+    {OldVersion, OldHlc, OldVV, OldDeleted, OldDocBody, OldDocBodyCbor,
+     NConflicts, CreatedAt, ExpiresAt, Tier} =
+        case Old of
+            undefined ->
+                {undefined, undefined, barrel_vv:new(), false, undefined,
+                 undefined, 0, barrel_hlc:encode(NextHlc), 0, 0};
+            #{version := OV, hlc := OH, vv := OVV, deleted := OD,
+              body := OB, body_cbor := OBC, num_conflicts := ONC,
+              created_at := OCA, expires_at := OEA, tier := OT} ->
+                {OV, OH, OVV, OD, OB, OBC, ONC, OCA, OEA, OT}
+        end,
+
+    NewVV = barrel_vv:bump(OldVV, NewVersion),
+
+    ProvEnc = maps:get(provenance_enc, Opts, undefined),
+    NewExpires = maps:get(expires_at, Opts, ExpiresAt),
+    ExpiryOps = expiry_index_ops(Ks, DocId, ExpiresAt, NewExpires),
+    DocColumns = [
+        {?COL_VERSION, barrel_version:encode(NewVersion)},
+        {?COL_DELETED, deleted_to_bin(Deleted)},
+        {?COL_HLC, barrel_hlc:encode(NextHlc)},
+        {?COL_VV, barrel_vv:encode(NewVV)},
+        {?COL_NCONFLICTS, NConflicts},
+        {?COL_CREATED_AT, CreatedAt},
+        {?COL_EXPIRES_AT, NewExpires},
+        {?COL_TIER, Tier}
+    ] ++ provenance_columns(ProvEnc) ++ embedding_columns(DocRecord),
+    DocOps = [{entity_put, DocEntityKey, DocColumns}],
+
+    DocInfo = #{
+        id => DocId,
+        rev => NewToken,
+        deleted => Deleted,
+        num_conflicts => NConflicts,
+        hlc => NextHlc
+    },
+
+    HlcDeleteOps = case OldHlc of
+        undefined -> [];
+        _ -> [{delete, barrel_store_keys:doc_hlc(Ks, OldHlc)}]
+    end,
+
+    %% The old body is analysed once, for the index diff and the feed rows
+    OldPaths = case OldDocBody of
+        undefined -> undefined;
+        _ -> barrel_ars:analyze(OldDocBody)
+    end,
+
+    PathIndexOps = case Deleted of
+        true when OldDocBody =/= undefined ->
+            case barrel_ars_index:get_doc_paths(StoreRef, DbName, DocId) of
+                {ok, StoredPaths} ->
+                    barrel_ars_index:remove_doc_ops(DbName, DocId, StoredPaths);
+                not_found -> []
+            end;
+        true ->
+            [];
+        false when OldDocBody =:= undefined ->
+            FreshIndexOps;
+        false when OldDeleted ->
+            FreshIndexOps;
+        false ->
+            barrel_ars_index:update_paths_ops(DbName, DocId, OldPaths, NewPaths)
+    end,
+
+    ChangeOps = barrel_changes:write_change_ops(DbName, NextHlc, DocInfo,
+                                                ChangeCbor),
+
+    PathHlcOps = case {OldHlc, OldPaths} of
+        {undefined, _} ->
+            barrel_changes:write_feed_ops(NextHlc, DocInfo, Heads);
+        {_, undefined} ->
+            barrel_changes:update_feed_ops(DbName, NextHlc, DocInfo, Heads,
+                                           OldHlc, []);
+        {_, _} ->
+            OldPrefixes = barrel_changes:topics_prefixes(
+                            barrel_ars:paths_to_topics(OldPaths)),
+            barrel_changes:update_feed_ops(DbName, NextHlc, DocInfo, Heads,
+                                           OldHlc, OldPrefixes)
+    end,
+
+    {ArchiveOps, ChainOps} = case OldVersion of
+        undefined ->
+            {[], []};
+        _ ->
+            OldVersionEnc = barrel_version:encode(OldVersion),
+            Archive = case OldDocBodyCbor of
+                undefined -> [];
+                OldCbor ->
+                    [{body_put,
+                      barrel_store_keys:doc_body_rev(Ks, DocId, OldVersionEnc),
+                      OldCbor}]
+            end,
+            Chain = [{put,
+                      barrel_store_keys:doc_version(Ks, DocId, OldVersionEnc),
+                      sibling_entry(superseded, OldDeleted, OldVV)}],
+            {Archive, Chain}
+    end,
+
+    OutboxOps = barrel_outbox:write_ops(DbName, maps:get(outbox, Opts, []),
+                                        NextHlc, OldHlc, DocId, NewToken, Deleted),
+
+    HistoryOps = barrel_history:write_ops(
+        DbName, NextHlc, DocId, NewVersion, Deleted,
+        maps:get(history_cause, Opts, local), NewVV, ProvEnc),
+
+    ChannelOps = channel_ops(DbName, NextHlc, DocInfo, DocBody, OldHlc,
+                             OldDocBody, OldDeleted),
+
+    BodyOp = {body_put, barrel_store_keys:doc_body(Ks, DocId), CborBody},
+    AllOps = DocOps ++ HlcDeleteOps ++ PathIndexOps ++ ChangeOps ++ PathHlcOps
+        ++ ArchiveOps ++ ChainOps ++ OutboxOps ++ HistoryOps ++ ChannelOps
+        ++ ExpiryOps ++ [BodyOp],
+    {AllOps, {DocId, NewToken, NextHlc, Deleted, DocBody, Topics}}.
 
 %% @doc Store a computed embedding in the doc entity (CAS on revision).
 %% Read-modify-write of the entity columns is safe here: this runs in
@@ -2284,6 +2503,9 @@ notify_paths(true, DbName, Notes) ->
     barrel_sub:notify(DbName, [path_change(N) || N <- Notes]).
 
 %% Deleted docs are announced under their id; live ones under their paths.
+path_change({DocId, Rev, Hlc, Deleted, _DocBody, Topics}) ->
+    {Topics, #{id => DocId, rev => Rev, hlc => Hlc, deleted => Deleted,
+               paths => Topics}};
 path_change({DocId, Rev, Hlc, true, _DocBody}) ->
     {[DocId], #{id => DocId, rev => Rev, hlc => Hlc, deleted => true,
                 paths => [DocId]}};
@@ -2296,10 +2518,14 @@ path_change({DocId, Rev, Hlc, false, DocBody}) ->
 notify_queries(false, _DbName, _Notes) ->
     ok;
 notify_queries(true, DbName, Notes) ->
-    case [{Id, Rev, Body} || {Id, Rev, _Hlc, false, Body} <- Notes] of
+    case [{Id, Rev, Body} || Note <- Notes,
+                             {Id, Rev, false, Body} <- [live_note(Note)]] of
         [] -> ok;
         Live -> barrel_query_sub:notify_changes(DbName, Live)
     end.
+
+live_note({Id, Rev, _Hlc, Deleted, Body, _Topics}) -> {Id, Rev, Deleted, Body};
+live_note({Id, Rev, _Hlc, Deleted, Body}) -> {Id, Rev, Deleted, Body}.
 
 %% A missing table means its manager is down: it holds no subscription.
 has_subs(Tab, DbName) ->

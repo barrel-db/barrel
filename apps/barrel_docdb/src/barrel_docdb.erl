@@ -770,7 +770,7 @@ put_doc(Db, Doc, Opts) ->
     Start = erlang:monotonic_time(millisecond),
     %% Write document locally first
     Result = with_db(Db, fun(Pid) ->
-        barrel_db_server:put_doc(Pid, Doc, Opts)
+        barrel_db_server:put_doc(Pid, DbName, Doc, Opts)
     end),
     %% Record metrics
     Duration = erlang:monotonic_time(millisecond) - Start,
@@ -876,7 +876,7 @@ put_docs(Db, Docs, Opts) ->
     ExtraAttrs = #{<<"db.batch_size">> => length(Docs)},
     barrel_trace:with_db_span(put_batch, DbName, ExtraAttrs, fun() ->
         with_db(Db, fun(Pid) ->
-            barrel_db_server:put_docs(Pid, Docs, Opts)
+            barrel_db_server:put_docs(Pid, DbName, Docs, Opts)
         end)
     end).
 
