@@ -46,26 +46,36 @@ profile(Case, Type, Opts) ->
     Duration = maps:get(duration, Opts, 3000),
     Db = setup(Case, Writers, Kind),
     {ok, Pid} = barrel_docdb:db_pid(Db),
-    %% target => clients profiles the writers' processes instead
-    Target = case maps:get(target, Opts, server) of
-        server -> Pid;
-        clients -> new
+    %% server: the database server and the processes it spawned (its
+    %% committer, when it has one), each on its own; clients: the writers
+    {Targets, Inspect} = case maps:get(target, Opts, server) of
+        server -> {[Pid | spawned(Pid)], process};
+        clients -> {[new], total}
     end,
     {ok, _} = tprof:start(#{type => Type}),
-    _ = tprof:enable_trace(Target),
+    _ = [tprof:enable_trace(T) || T <- Targets],
     _ = tprof:set_pattern('_', '_', '_'),
     Lats = drive(Db, Writers, Kind, WOpts, Duration),
-    _ = tprof:disable_trace(Target),
+    _ = [tprof:disable_trace(T) || T <- Targets],
     Sample = tprof:collect(),
     ok = tprof:stop(),
     Docs = docs_written(Lats, Kind),
-    Inspected = tprof:inspect(Sample, total, measurement),
-    [{_, Profile}] = maps:to_list(Inspected),
-    io:format("PROFILE ~p ~p docs=~p~n", [Case, Type, Docs]),
-    tprof:format(Profile),
-    print_buckets(Profile, Docs),
+    Profiles = maps:to_list(tprof:inspect(Sample, Inspect, measurement)),
+    lists:foreach(fun({Who, Profile}) ->
+        io:format("PROFILE ~p ~p ~p docs=~p~n", [Case, Type, Who, Docs]),
+        tprof:format(Profile),
+        print_buckets(Profile, Docs)
+    end, Profiles),
     teardown(Db),
-    {Docs, Profile}.
+    {Docs, Profiles}.
+
+%% Processes linked to the server that it started (not its supervisor
+%% nor the compaction filter handler, which runs no write path).
+spawned(Pid) ->
+    {links, Links} = erlang:process_info(Pid, links),
+    [L || L <- Links, is_pid(L), not is_supervisor(L),
+          element(2, erlang:process_info(L, initial_call)) =/=
+              {proc_lib, init_p, 5}].
 
 %% @doc Sample the current function and queue of the server and of the
 %% processes it links to, every millisecond while a case runs
