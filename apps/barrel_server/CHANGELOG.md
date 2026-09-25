@@ -3,6 +3,11 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.7.3] - 2026-09-24
+
+### Fixed
+- `ngram_search` rebuilds a corpus in any older on-disk format (it opens with `on_legacy => reindex`). Before, only a corpus without `corpus.meta` was rebuilt, and the barrel_ngram 0.11.0 manifest bump would have left search answering `corpus_not_open`.
+
 ## [1.7.2] - 2026-09-14
 
 ### Changed

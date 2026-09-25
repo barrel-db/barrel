@@ -100,7 +100,7 @@ unsupported_version_rejected(Dir) ->
         {ok, Bin} = file:read_file(Path),
         M = binary_to_term(Bin),
         ok = file:write_file(Path, term_to_binary(M#{version => 1})),
-        ?assertEqual({error, {unsupported_manifest_version, 1, 2}}, ?M:load(Dir))
+        ?assertEqual({error, {unsupported_manifest_version, 1, 3}}, ?M:load(Dir))
     end.
 
 config_first_open_persists(_Dir) ->

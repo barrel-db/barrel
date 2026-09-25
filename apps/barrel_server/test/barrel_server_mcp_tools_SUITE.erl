@@ -19,6 +19,7 @@
     t_search/1,
     t_ngram_search/1,
     t_ngram_search_legacy_reindex/1,
+    t_ngram_search_manifest_reindex/1,
     t_changes_cursor/1,
     t_branch_merge/1,
     t_capability_scoping/1,
@@ -37,7 +38,7 @@ groups() ->
     [
         {open, [], [t_tools_list, t_db_doc_roundtrip, t_query_paging,
                     t_query_subscribe_rejected, t_search, t_ngram_search,
-                    t_ngram_search_legacy_reindex,
+                    t_ngram_search_legacy_reindex, t_ngram_search_manifest_reindex,
                     t_changes_cursor, t_branch_merge]},
         {locked, [], [t_capability_scoping, t_server_token_full]}
     ].
@@ -265,6 +266,33 @@ t_ngram_search_legacy_reindex(_Config) ->
         call(C, <<"ngram_search">>, #{<<"db">> => Db,
                                       <<"query">> => <<"connect_timeout">>}),
     ?assertEqual([<<"a">>], [maps:get(<<"id">>, H) || H <- H2]),
+    barrel_mcp_client:close(C),
+    ok.
+
+%% A corpus written before manifest version 3 (barrel_ngram 0.11.0) fails
+%% open with unsupported_manifest_version; ngram_search rebuilds it.
+t_ngram_search_manifest_reindex(_Config) ->
+    C = connect(#{}),
+    Db = <<"mcp_ng_manifest">>,
+    {false, _} = call(C, <<"db_create">>, #{<<"db">> => Db}),
+    {false, _} = call(C, <<"doc_put">>,
+                      #{<<"db">> => Db,
+                        <<"doc">> => #{<<"id">> => <<"a">>,
+                                       <<"body">> => <<"connect_timeout in the pool">>}}),
+    Search = fun() ->
+        {false, #{<<"hits">> := H}} =
+            call(C, <<"ngram_search">>, #{<<"db">> => Db,
+                                          <<"query">> => <<"connect_timeout">>}),
+        [maps:get(<<"id">>, Hit) || Hit <- H]
+    end,
+    ?assertEqual([<<"a">>], Search()),
+    ok = barrel_ngram:close(Db),
+    DataDir0 = application:get_env(barrel_server, data_dir, "data"),
+    [Manifest | _] = filelib:wildcard(unicode:characters_to_list(
+                       filename:join([DataDir0, "ngram", Db, "**", "manifest"]))),
+    {ok, Bin} = file:read_file(Manifest),
+    ok = file:write_file(Manifest, term_to_binary((binary_to_term(Bin))#{version => 2})),
+    ?assertEqual([<<"a">>], Search()),
     barrel_mcp_client:close(C),
     ok.
 

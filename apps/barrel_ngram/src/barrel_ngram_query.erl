@@ -15,7 +15,8 @@
 %%% from both segment lanes before verification.
 %%%
 %%% The query runs in the calling process against its own immutable read
-%%% handles, never inside the shard loop.
+%%% handles, never inside the shard loop. It holds a lease on its
+%%% snapshot's segment files, so a compaction cannot delete them under it.
 %%% @end
 %%%-------------------------------------------------------------------
 -module(barrel_ngram_query).
@@ -65,11 +66,24 @@ search_case_sensitive(Corpus, Literal) ->
             merge_hits([search_shard(Ref, Config, Literal) || Ref <- Refs])
     end.
 
+%% @private Run `Fun(Segments, BufferSnapshot)' on a shard snapshot taken
+%% under a lease, released when `Fun' returns.
+with_snapshot(Ref, Fun) ->
+    case barrel_ngram:safe_shard_call(Ref, lease_snapshot) of
+        {ok, Lease, Segments, BufferSnapshot} ->
+            try
+                Fun(Segments, BufferSnapshot)
+            after
+                barrel_ngram_shard:release(Ref, Lease)
+            end;
+        {error, _} = Err ->
+            Err
+    end.
+
 %% @private Substring candidates from one shard, confirmed (the
 %% dense/positional/buffer three-lane split -- see the moduledoc).
 search_shard(Ref, Config, Literal) ->
-    case barrel_ngram:safe_shard_call(Ref, snapshot) of
-        {ok, Segments, BufferSnapshot} ->
+    with_snapshot(Ref, fun(Segments, BufferSnapshot) ->
             PositionalOpts = maps:get(phase2_selector_opts, Config, #{}),
             case segment_candidates(Segments, Literal, PositionalOpts) of
                 {error, _} = Err ->
@@ -85,10 +99,8 @@ search_shard(Ref, Config, Literal) ->
                         {error, _} = Err -> Err;
                         Hits -> {ok, Hits}
                     end
-            end;
-        {error, _} = Err ->
-            Err
-    end.
+            end
+        end).
 
 %%====================================================================
 %% Case-insensitive literal search
@@ -123,8 +135,7 @@ caseless_search(Corpus, Literal) ->
 %% @private Reuses regex_segment_keys/2 and apply_precedence/2 as-is;
 %% only the query and match/verify step differ from regex search.
 caseless_search_shard(Ref, Query, RE, ValidateDocs, Config) ->
-    case barrel_ngram:safe_shard_call(Ref, snapshot) of
-        {ok, Segments, BufferSnapshot} ->
+    with_snapshot(Ref, fun(Segments, BufferSnapshot) ->
             case regex_segment_keys(Segments, Query) of
                 {error, _} = Err ->
                     Err;
@@ -133,10 +144,8 @@ caseless_search_shard(Ref, Query, RE, ValidateDocs, Config) ->
                     Db = maps:get(db, Config),
                     Keys = lists:usort(SegCandidates ++ BufferLiveKeys),
                     caseless_confirm(Db, Keys, RE, ValidateDocs, Config)
-            end;
-        {error, _} = Err ->
-            Err
-    end.
+            end
+        end).
 
 %% @private Fetch and re-scan every candidate. When `ValidateDocs', a
 %% candidate whose text is not valid UTF-8 aborts the whole call with
@@ -252,24 +261,48 @@ segment_candidates(Segments, Literal, PositionalOpts) ->
 gather_segment_candidates([], _Literal, _LiteralPlan, DenseAcc, PosAcc) ->
     {DenseAcc, PosAcc};
 gather_segment_candidates([{_Gen, Path} | Rest], Literal, LiteralPlan, DenseAcc, PosAcc) ->
+    Eval = fun(H) ->
+        case barrel_ngram_planner:segment_plan(H, LiteralPlan) of
+            dense ->
+                Keys = candidate_keys(H, ?PHASE1_SELECTOR, #{}, Literal),
+                {Keys ++ DenseAcc, PosAcc};
+            {positional, OrdStarts} ->
+                {DenseAcc, merge_positional(H, OrdStarts, PosAcc)};
+            {error, Reason} ->
+                read_failed(Reason)
+        end
+    end,
+    case with_segment(Path, Eval) of
+        {error, _} = Err ->
+            Err;
+        {DenseAcc1, PosAcc1} ->
+            gather_segment_candidates(Rest, Literal, LiteralPlan, DenseAcc1, PosAcc1)
+    end.
+
+%% @private Open a segment, run `Fun' on it, close it. A read error inside
+%% `Fun' (thrown by `read/1') fails the query with the segment path.
+with_segment(Path, Fun) ->
     case barrel_ngram_segment:open(Path) of
         {ok, H} ->
-            {DenseAcc1, PosAcc1} =
-                try
-                    case barrel_ngram_planner:segment_plan(H, LiteralPlan) of
-                        dense ->
-                            Keys = candidate_keys(H, ?PHASE1_SELECTOR, #{}, Literal),
-                            {Keys ++ DenseAcc, PosAcc};
-                        {positional, OrdStarts} ->
-                            {DenseAcc, merge_positional(H, OrdStarts, PosAcc)}
-                    end
-                after
-                    barrel_ngram_segment:close(H)
-                end,
-            gather_segment_candidates(Rest, Literal, LiteralPlan, DenseAcc1, PosAcc1);
+            try
+                Fun(H)
+            catch
+                throw:{segment_read_error, Reason} ->
+                    {error, {segment_read_failed, Path, Reason}}
+            after
+                barrel_ngram_segment:close(H)
+            end;
         {error, _} = Err ->
             Err
     end.
+
+%% @private Unwrap a segment read, turning an error into a throw caught by
+%% `with_segment/2'.
+read({ok, V}) -> V;
+read({error, Reason}) -> read_failed(Reason).
+
+-spec read_failed(term()) -> no_return().
+read_failed(Reason) -> throw({segment_read_error, Reason}).
 
 %% @private Resolve a segment's {Ordinal, [Start]} candidates to keys and
 %% fold them into the running Key -> ordset-of-starts accumulator
@@ -277,7 +310,7 @@ gather_segment_candidates([{_Gen, Path} | Rest], Literal, LiteralPlan, DenseAcc,
 %% more starts for the same key).
 merge_positional(Handle, OrdStarts, PosAcc) ->
     Ordinals = [O || {O, _Starts} <- OrdStarts],
-    KeyMap = maps:from_list(barrel_ngram_segment:keys(Handle, Ordinals)),
+    KeyMap = maps:from_list(read(barrel_ngram_segment:keys(Handle, Ordinals))),
     lists:foldl(
         fun({O, Starts}, Acc) ->
             case maps:find(O, KeyMap) of
@@ -296,7 +329,7 @@ candidate_keys(Handle, Selector, SelectorOpts, Literal) ->
         {reliable, []} -> all_ordinals(Handle);
         {reliable, Grams} -> intersect_grams(Handle, Grams)
     end,
-    [K || {_O, K} <- barrel_ngram_segment:keys(Handle, Ordinals)].
+    [K || {_O, K} <- read(barrel_ngram_segment:keys(Handle, Ordinals))].
 
 all_ordinals(Handle) ->
     case barrel_ngram_segment:doc_count(Handle) of
@@ -319,7 +352,7 @@ collect_lists(Handle, [G | Rest], Acc) ->
     case barrel_ngram_segment:lookup_postings(Handle, G) of
         empty -> [];
         {ok, Ords} -> collect_lists(Handle, Rest, [Ords | Acc]);
-        {error, _} -> []
+        {error, Reason} -> read_failed(Reason)
     end.
 
 collect_blocks(_Handle, [], Acc) ->
@@ -328,7 +361,7 @@ collect_blocks(Handle, [G | Rest], Acc) ->
     case barrel_ngram_segment:lookup_block(Handle, G) of
         empty -> [];
         {ok, Block} -> collect_blocks(Handle, Rest, [Block | Acc]);
-        {error, _} -> []
+        {error, Reason} -> read_failed(Reason)
     end.
 
 %%====================================================================
@@ -570,8 +603,7 @@ regex_search_caseless(Corpus, Regex, HasLeadingCaseless) ->
 %% @private `full_scan': today's unchanged flow (dense-only trigram-query
 %% intersection, full re:run verification).
 regex_search_shard(Ref, Query, RE, full_scan, Config) ->
-    case barrel_ngram:safe_shard_call(Ref, snapshot) of
-        {ok, Segments, BufferSnapshot} ->
+    with_snapshot(Ref, fun(Segments, BufferSnapshot) ->
             case regex_segment_keys(Segments, Query) of
                 {error, _} = Err ->
                     Err;
@@ -584,16 +616,13 @@ regex_search_shard(Ref, Query, RE, full_scan, Config) ->
                         {error, _} = Err -> Err;
                         Hits -> {ok, Hits}
                     end
-            end;
-        {error, _} = Err ->
-            Err
-    end;
+            end
+        end);
 %% @private `{windowed, ...}': the same per-segment dense/positional split
 %% a literal search for `AnchorBytes' would use.
 regex_search_shard(Ref, _Query, RE, {windowed, AnchorBytes, PrefixMax, SuffixMax, GramOffs},
                    Config) ->
-    case barrel_ngram:safe_shard_call(Ref, snapshot) of
-        {ok, Segments, BufferSnapshot} ->
+    with_snapshot(Ref, fun(Segments, BufferSnapshot) ->
             case gather_segment_candidates(Segments, AnchorBytes, {reliable, GramOffs}, [], #{}) of
                 {error, _} = Err ->
                     Err;
@@ -611,10 +640,8 @@ regex_search_shard(Ref, _Query, RE, {windowed, AnchorBytes, PrefixMax, SuffixMax
                         {error, _} = Err -> Err;
                         Hits -> {ok, Hits}
                     end
-            end;
-        {error, _} = Err ->
-            Err
-    end.
+            end
+        end).
 
 %% @private Candidate ids across all segments for a trigram query. A
 %% segment-open error propagates (matching segment_keys/2's already-strict
@@ -624,21 +651,15 @@ regex_segment_keys(Segments, Query) ->
         fun(_Seg, {error, _} = Err) ->
                 Err;
            ({_Gen, Path}, Acc) ->
-                case barrel_ngram_segment:open(Path) of
-                    {ok, H} ->
-                        try eval_keys(H, Query) of
-                            Keys -> Keys ++ Acc
-                        after
-                            barrel_ngram_segment:close(H)
-                        end;
-                    {error, _} = Err ->
-                        Err
+                case with_segment(Path, fun(H) -> eval_keys(H, Query) end) of
+                    {error, _} = Err -> Err;
+                    Keys -> Keys ++ Acc
                 end
         end, [], Segments).
 
 eval_keys(Handle, Query) ->
     Ordinals = eval_query(Handle, Query),
-    [K || {_O, K} <- barrel_ngram_segment:keys(Handle, Ordinals)].
+    [K || {_O, K} <- read(barrel_ngram_segment:keys(Handle, Ordinals))].
 
 %% @private Evaluate a trigram query to candidate ordinals, per the
 %% segment's codec. Roaring combines binaries natively and decodes once.
@@ -656,7 +677,7 @@ eval_varint(Handle, {gram, G}) ->
     case barrel_ngram_segment:lookup_postings(Handle, G) of
         {ok, Ords} -> Ords;
         empty -> [];
-        {error, _} -> []
+        {error, Reason} -> read_failed(Reason)
     end;
 eval_varint(Handle, {'and', Qs}) ->
     barrel_ngram_postings:intersect_all([eval_varint(Handle, Q) || Q <- Qs]);
@@ -670,7 +691,8 @@ eval_roaring(_Handle, none) ->
 eval_roaring(Handle, {gram, G}) ->
     case barrel_ngram_segment:lookup_block(Handle, G) of
         {ok, Block} -> Block;
-        _ -> barrel_ngram_roaring:encode([])
+        empty -> barrel_ngram_roaring:encode([]);
+        {error, Reason} -> read_failed(Reason)
     end;
 eval_roaring(Handle, {'and', Qs}) ->
     barrel_ngram_roaring:intersect_all([eval_roaring(Handle, Q) || Q <- Qs]);

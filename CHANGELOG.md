@@ -4,6 +4,22 @@ All notable changes to the Barrel umbrella are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and each app
 is versioned independently under [Semantic Versioning](https://semver.org/).
 
+## [2026-09-24] barrel_ngram segment integrity and leases
+
+A query running during a compaction failed with `enoent`: the compaction
+deleted the segment files the query had just snapshotted. Worse, a failed
+or short segment read was taken as "no match", so a damaged or truncated
+segment silently dropped hits. Queries now lease their files, read errors
+fail the query, and each segment's sha256 and size are recorded in the
+manifest and checked at open. Files are fsynced before their rename. The
+manifest format moves to version 3, so existing corpora rebuild once;
+barrel_server's `ngram_search` now rebuilds any older format on its own.
+
+| App | Version | Change |
+|-----|---------|--------|
+| barrel_ngram | 0.11.0 | manifest v3 (sha256, size), fsync, `verify_segments`, read errors returned, segment leases |
+| barrel_server | 1.7.3 | `ngram_search` opens with `on_legacy => reindex` |
+
 ## [2026-09-24] BM25 survives store reopen
 
 A vector store with the disk BM25 backend, the default for record-mode

@@ -40,3 +40,13 @@ if(APPLE)
         LINK_FLAGS "-flat_namespace -undefined suppress"
     )
 endif()
+
+# Directory fsync (barrel_ngram_fs)
+add_library(barrel_ngram_fs_nif SHARED barrel_ngram_fs_nif.c)
+target_include_directories(barrel_ngram_fs_nif PRIVATE ${ERLANG_ERTS_INCLUDE_PATH})
+set_target_properties(barrel_ngram_fs_nif PROPERTIES PREFIX "" SUFFIX ".so")
+if(APPLE)
+    set_target_properties(barrel_ngram_fs_nif PROPERTIES
+        LINK_FLAGS "-flat_namespace -undefined suppress"
+    )
+endif()

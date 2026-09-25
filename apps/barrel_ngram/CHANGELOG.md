@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] - 2026-09-24
+
+### Changed
+
+- **Breaking (on-disk)**: manifest version 3. Each segment entry records
+  the sha256 and size written at freeze and merge. A version 2 manifest
+  fails open with `unsupported_manifest_version`; `on_legacy => reindex`
+  rebuilds it, otherwise `delete_corpus/1,2` then `open/2`.
+- Segments, manifests and `corpus.meta` are fsynced before the rename
+  that commits them, and the directory after (a small NIF built by the
+  existing CMake step). `crypto` is now a runtime dependency.
+
+### Added
+
+- `open/2` option `verify_segments`: `checksum` (default) hashes every
+  segment against its manifest sha256 at open; `layout` checks only the
+  header layout against the file size. A damaged segment fails open with
+  `{corrupt_segment, Path, Detail}`.
+
+### Fixed
+
+- A query running during a compaction no longer fails with `enoent`:
+  queries lease their snapshot's segment files, and a compaction deletes
+  an input only once no lease pins it (a lease ends when the query
+  returns or its process dies).
+- A read error on postings, keys, a phase-2 block or the offset table
+  fails the query with `{segment_read_failed, Path, Reason}` instead of
+  reading as "no match". A truncated segment is refused at open instead
+  of losing matches.
+- A read error during a compaction merge is returned as
+  `{merge_read_failed, Reason}` instead of crashing the shard.
+
 ## [0.10.0] - 2026-09-14
 
 ### Added

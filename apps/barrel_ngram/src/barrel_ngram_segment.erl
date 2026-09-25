@@ -48,7 +48,7 @@
 %%%-------------------------------------------------------------------
 -module(barrel_ngram_segment).
 
--export([write/2, open/1, close/1]).
+-export([write/2, open/1, open/2, close/1]).
 -export([lookup_postings/2, lookup_block/2, lookup_positional_block/2,
          positional_doc_count/2, keys/2, entries/1, all_postings/1,
          all_positional_postings/1, doc_count/1, watermark/1, codec/1]).
@@ -100,9 +100,11 @@
 %% Write
 %%====================================================================
 
-%% @doc Write an immutable segment to `Path'. Writes to a temp file and
-%% renames into place so a reader never sees a partial segment.
--spec write(file:name_all(), spec()) -> ok | {error, term()}.
+%% @doc Write an immutable segment to `Path'. Writes to a temp file,
+%% fsyncs it, renames into place and fsyncs the directory, so a reader
+%% never sees a partial segment. Returns the sha256 (hex) and size.
+-spec write(file:name_all(), spec()) ->
+    {ok, #{sha256 := binary(), bytes := non_neg_integer()}} | {error, term()}.
 write(Path, #{doc_count := DocCount, watermark := Wm,
               postings := Postings, entries := Entries} = Spec) ->
     12 = byte_size(Wm),
@@ -150,14 +152,16 @@ write(Path, #{doc_count := DocCount, watermark := Wm,
     PaddedHeader = pad_to_sector(Header),
 
     ok = filelib:ensure_dir(Path),
+    Parts = [PaddedHeader, OffsetTable, PostingsRegion, DocCountTable, Sidecar],
+    Sha = barrel_ngram_fs:hex(crypto:hash(sha256, Parts)),
+    Bytes = iolist_size(Parts),
     Tmp = iolist_to_binary([to_binary(Path), <<".tmp">>]),
     case file:open(Tmp, [write, binary, raw]) of
         {ok, Fd} ->
-            Res = write_all(Fd, [PaddedHeader, OffsetTable, PostingsRegion,
-                                  DocCountTable, Sidecar]),
+            Res = write_all(Fd, Parts),
             _ = file:close(Fd),
             case Res of
-                ok -> file:rename(Tmp, Path);
+                ok -> commit(Tmp, Path, #{sha256 => Sha, bytes => Bytes});
                 {error, _} = Err ->
                     _ = file:delete(Tmp),
                     Err
@@ -166,8 +170,14 @@ write(Path, #{doc_count := DocCount, watermark := Wm,
             Err
     end.
 
-write_all(_Fd, []) ->
-    ok;
+commit(Tmp, Path, Info) ->
+    case barrel_ngram_fs:commit(Tmp, Path) of
+        ok -> {ok, Info};
+        {error, _} = Err -> Err
+    end.
+
+write_all(Fd, []) ->
+    file:sync(Fd);
 write_all(Fd, [Bin | Rest]) ->
     case file:write(Fd, Bin) of
         ok -> write_all(Fd, Rest);
@@ -247,9 +257,33 @@ build_sidecar(Entries) ->
 %%====================================================================
 
 %% @doc Open a segment for reading. The returned handle owns a raw read
-%% fd; close it with {@link close/1}.
+%% fd; close it with {@link close/1}. The header layout must be
+%% consistent and match the file size, else `{corrupt_segment, _}'.
 -spec open(file:name_all()) -> {ok, handle()} | {error, term()}.
 open(Path) ->
+    open(Path, #{}).
+
+%% @doc {@link open/1}, and with `sha256 => Hex' first check the whole
+%% file against that checksum (`{corrupt_segment, checksum_mismatch}').
+-spec open(file:name_all(), #{sha256 => binary()}) -> {ok, handle()} | {error, term()}.
+open(Path, #{sha256 := Want}) ->
+    %% header first, so a format-version error wins over the checksum
+    case open(Path, #{}) of
+        {ok, H} ->
+            case barrel_ngram_fs:sha256_file(Path) of
+                {ok, Want, _Size} ->
+                    {ok, H};
+                {ok, _Got, _Size} ->
+                    close(H),
+                    {error, {corrupt_segment, checksum_mismatch}};
+                {error, _} = Err ->
+                    close(H),
+                    Err
+            end;
+        {error, _} = Err ->
+            Err
+    end;
+open(Path, _Opts) ->
     case file:open(Path, [read, binary, raw]) of
         {ok, Fd} ->
             case read_header(Fd) of
@@ -330,8 +364,10 @@ lookup_block(#segment{fd = Fd, offset_table_off = TableOff,
             empty;
         {ok, <<RegionOff:32/little>>} ->
             read_raw_block(Fd, PostingsOff + RegionOff);
+        {ok, _Short} ->
+            {error, truncated_offset_table};
         eof ->
-            empty;
+            {error, truncated_offset_table};
         {error, _} = Err ->
             Err
     end.
@@ -340,10 +376,13 @@ read_raw_block(Fd, At) ->
     case file:pread(Fd, At, 4) of
         {ok, <<Len:32/little>>} ->
             case file:pread(Fd, At + 4, Len) of
-                {ok, Block} -> {ok, Block};
+                {ok, Block} when byte_size(Block) =:= Len -> {ok, Block};
+                {ok, _Short} -> {error, truncated_postings};
+                eof when Len =:= 0 -> {ok, <<>>};
                 eof -> {error, truncated_postings};
                 {error, _} = Err -> Err
             end;
+        {ok, _Short} -> {error, truncated_postings};
         eof -> {error, truncated_postings};
         {error, _} = Err -> Err
     end.
@@ -363,8 +402,10 @@ lookup_positional_block(#segment{fd = Fd, offset_table_off = TableOff,
             not_found;
         {ok, <<RegionOff:32/little>>} ->
             read_positional_block(Fd, PostingsOff + RegionOff);
+        {ok, _Short} ->
+            {error, truncated_offset_table};
         eof ->
-            not_found;
+            {error, truncated_offset_table};
         {error, _} = Err ->
             Err
     end.
@@ -380,15 +421,19 @@ read_positional_block(Fd, At) ->
                     not_found;
                 {ok, <<Phase2Len:32/little>>} ->
                     case file:pread(Fd, Phase2LenAt + 4, Phase2Len) of
-                        {ok, Block} -> {ok, Block};
+                        {ok, Block} when byte_size(Block) =:= Phase2Len -> {ok, Block};
+                        {ok, _Short} -> {error, truncated_postings};
                         eof -> {error, truncated_postings};
                         {error, _} = Err -> Err
                     end;
+                {ok, _Short} ->
+                    {error, truncated_postings};
                 eof ->
-                    not_found;
+                    {error, truncated_postings};
                 {error, _} = Err ->
                     Err
             end;
+        {ok, _Short} -> {error, truncated_postings};
         eof -> {error, truncated_postings};
         {error, _} = Err -> Err
     end.
@@ -414,11 +459,12 @@ doc_count_bsearch(Table, Gram, Lo, Hi) ->
     end.
 
 %% @doc Resolve ordinals to `{Ordinal, Key}' pairs (one batched pread).
-%% Out-of-range ordinals are dropped.
+%% Out-of-range ordinals are dropped; a read error or short read is an
+%% error, never a shorter list.
 -spec keys(handle(), [barrel_ngram_postings:ordinal()]) ->
-    [{barrel_ngram_postings:ordinal(), binary()}].
+    {ok, [{barrel_ngram_postings:ordinal(), binary()}]} | {error, term()}.
 keys(_Handle, []) ->
-    [];
+    {ok, []};
 keys(#segment{fd = Fd, doc_count = DocCount, key_index = KeyIndex,
               key_data_start = DataStart}, Ordinals) ->
     Valid = [O || O <- Ordinals, O >= 0, O < DocCount],
@@ -427,47 +473,82 @@ keys(#segment{fd = Fd, doc_count = DocCount, key_index = KeyIndex,
                  {DataStart + Off, Len}
              end || O <- Valid],
     case file:pread(Fd, Pairs) of
-        {ok, Bins} ->
-            lists:zipwith(fun(O, Key) -> {O, Key} end, Valid, Bins);
-        eof ->
-            [];
-        {error, _} ->
-            []
+        {ok, Bins} -> zip_keys(Valid, Pairs, Bins, []);
+        eof -> {error, truncated_sidecar};
+        {error, _} = Err -> Err
     end.
+
+zip_keys([], [], [], Acc) ->
+    {ok, lists:reverse(Acc)};
+zip_keys([O | Os], [{_At, Len} | Ps], [Key | Ks], Acc)
+        when is_binary(Key), byte_size(Key) =:= Len ->
+    zip_keys(Os, Ps, Ks, [{O, Key} | Acc]);
+zip_keys([O | Os], [{_At, 0} | Ps], [eof | Ks], Acc) ->
+    zip_keys(Os, Ps, Ks, [{O, <<>>} | Acc]);
+zip_keys(_Os, _Ps, _Ks, _Acc) ->
+    {error, truncated_sidecar}.
 
 %% @doc Every ordinal as `{Ordinal, Key, Hlc, Deleted}'. Used by the merger.
 -spec entries(handle()) ->
-    [{barrel_ngram_postings:ordinal(), binary(), binary(), boolean()}].
+    {ok, [{barrel_ngram_postings:ordinal(), binary(), binary(), boolean()}]}
+    | {error, term()}.
 entries(#segment{doc_count = 0}) ->
-    [];
+    {ok, []};
 entries(#segment{doc_count = N, key_index = KI} = H) ->
     Ords = lists:seq(0, N - 1),
-    KeyMap = maps:from_list(keys(H, Ords)),
-    [begin
-         {_Off, _Len, Del, Hlc} = element(O + 1, KI),
-         {O, maps:get(O, KeyMap), Hlc, Del}
-     end || O <- Ords].
+    case keys(H, Ords) of
+        {ok, Pairs} ->
+            {ok, [begin
+                      {_Off, _Len, Del, Hlc} = element(O + 1, KI),
+                      {O, Key, Hlc, Del}
+                  end || {O, Key} <- Pairs]};
+        {error, _} = Err ->
+            Err
+    end.
 
 %% @doc Every present `{Gram, [Ordinal]}' in the segment. Reads the offset
 %% table (the gram directory) sequentially, then each posting block. Used
 %% by the merger to rebuild per-ordinal grams.
 -spec all_postings(handle()) ->
-    [{barrel_ngram_selector:gram(), [barrel_ngram_postings:ordinal()]}].
-all_postings(#segment{offset_table_len = 0}) ->
-    [];
-all_postings(#segment{fd = Fd, codec = Codec, offset_table_off = TOff,
-                      offset_table_len = TLen, postings_off = POff}) ->
-    {ok, Table} = file:pread(Fd, TOff, TLen),
-    scan_table(Table, 0, Fd, Codec, POff, []).
+    {ok, [{barrel_ngram_selector:gram(), [barrel_ngram_postings:ordinal()]}]}
+    | {error, term()}.
+all_postings(#segment{codec = Codec} = H) ->
+    fold_blocks(H, fun(Fd, At) -> read_raw_block(Fd, At) end,
+                fun(Block) -> decode_block(Codec, Block) end).
 
-scan_table(<<>>, _Gram, _Fd, _Codec, _POff, Acc) ->
-    lists:reverse(Acc);
-scan_table(<<0:32/little, Rest/binary>>, Gram, Fd, Codec, POff, Acc) ->
-    scan_table(Rest, Gram + 1, Fd, Codec, POff, Acc);
-scan_table(<<RegionOff:32/little, Rest/binary>>, Gram, Fd, Codec, POff, Acc) ->
-    {ok, Block} = read_raw_block(Fd, POff + RegionOff),
-    scan_table(Rest, Gram + 1, Fd, Codec, POff,
-               [{Gram, decode_block(Codec, Block)} | Acc]).
+read_table(Fd, TOff, TLen) ->
+    case file:pread(Fd, TOff, TLen) of
+        {ok, Table} when byte_size(Table) =:= TLen -> {ok, Table};
+        {ok, _Short} -> {error, truncated_offset_table};
+        eof -> {error, truncated_offset_table};
+        {error, _} = Err -> Err
+    end.
+
+%% @private Walk the offset table, read each present gram's block with
+%% `ReadFun', decode it with `DecodeFun'; `not_found' blocks are skipped.
+fold_blocks(#segment{offset_table_len = 0}, _ReadFun, _DecodeFun) ->
+    {ok, []};
+fold_blocks(#segment{fd = Fd, offset_table_off = TOff, offset_table_len = TLen,
+                     postings_off = POff}, ReadFun, DecodeFun) ->
+    case read_table(Fd, TOff, TLen) of
+        {ok, Table} -> scan_table(Table, 0, Fd, POff, ReadFun, DecodeFun, []);
+        {error, _} = Err -> Err
+    end.
+
+scan_table(<<>>, _Gram, _Fd, _POff, _ReadFun, _DecodeFun, Acc) ->
+    {ok, lists:reverse(Acc)};
+scan_table(<<0:32/little, Rest/binary>>, Gram, Fd, POff, ReadFun, DecodeFun, Acc) ->
+    scan_table(Rest, Gram + 1, Fd, POff, ReadFun, DecodeFun, Acc);
+scan_table(<<RegionOff:32/little, Rest/binary>>, Gram, Fd, POff, ReadFun, DecodeFun, Acc) ->
+    case ReadFun(Fd, POff + RegionOff) of
+        {ok, Block} ->
+            scan_table(Rest, Gram + 1, Fd, POff, ReadFun, DecodeFun,
+                       [{Gram, DecodeFun(Block)} | Acc]);
+        not_found ->
+            scan_table(Rest, Gram + 1, Fd, POff, ReadFun, DecodeFun, Acc);
+        {error, _} = Err ->
+            Err
+    end.
 
 %% @doc Every present `{Gram, [{Ordinal, [Offset]}]}' phase-2 payload in
 %% the segment (only grams that actually carry one -- most don't). Reads
@@ -475,24 +556,11 @@ scan_table(<<RegionOff:32/little, Rest/binary>>, Gram, Fd, Codec, POff, Acc) ->
 %% composite entry's Phase2Block instead of Phase1Block. Used by the
 %% merger to rebuild per-ordinal positional data across a compaction.
 -spec all_positional_postings(handle()) ->
-    [{barrel_ngram_selector:gram(), [barrel_ngram_postings_positional:entry()]}].
-all_positional_postings(#segment{offset_table_len = 0}) ->
-    [];
-all_positional_postings(#segment{fd = Fd, offset_table_off = TOff,
-                                 offset_table_len = TLen, postings_off = POff}) ->
-    {ok, Table} = file:pread(Fd, TOff, TLen),
-    scan_table_positional(Table, 0, Fd, POff, []).
-
-scan_table_positional(<<>>, _Gram, _Fd, _POff, Acc) ->
-    lists:reverse(Acc);
-scan_table_positional(<<0:32/little, Rest/binary>>, Gram, Fd, POff, Acc) ->
-    scan_table_positional(Rest, Gram + 1, Fd, POff, Acc);
-scan_table_positional(<<RegionOff:32/little, Rest/binary>>, Gram, Fd, POff, Acc) ->
-    Acc1 = case read_positional_block(Fd, POff + RegionOff) of
-        {ok, Block} -> [{Gram, barrel_ngram_postings_positional:decode(Block)} | Acc];
-        not_found -> Acc
-    end,
-    scan_table_positional(Rest, Gram + 1, Fd, POff, Acc1).
+    {ok, [{barrel_ngram_selector:gram(), [barrel_ngram_postings_positional:entry()]}]}
+    | {error, term()}.
+all_positional_postings(H) ->
+    fold_blocks(H, fun(Fd, At) -> read_positional_block(Fd, At) end,
+                fun(Block) -> barrel_ngram_postings_positional:decode(Block) end).
 
 %%====================================================================
 %% Header + sidecar-index parsing
@@ -525,10 +593,32 @@ byte_codec(1) -> roaring.
 
 read_header(Fd) ->
     case file:pread(Fd, 0, ?SECTOR) of
-        {ok, Bin} -> parse_header(Bin);
+        {ok, Bin} ->
+            case parse_header(Bin) of
+                {ok, H} -> check_layout(Fd, H);
+                {error, _} = Err -> Err
+            end;
         eof -> {error, empty_segment};
         {error, _} = Err -> Err
     end.
+
+%% @private Regions must be contiguous from the header sector and end
+%% exactly at the file size; anything else is a torn or damaged file.
+check_layout(Fd, #{doc_count := DocCount, offset_table_off := ?SECTOR,
+                   offset_table_len := OTLen, postings_off := POff,
+                   postings_len := PLen, doc_count_table_off := DCTOff,
+                   doc_count_table_len := DCTLen, sidecar_off := SOff,
+                   sidecar_len := SLen} = H)
+        when POff =:= ?SECTOR + OTLen, DCTOff =:= POff + PLen,
+             SOff =:= DCTOff + DCTLen, SLen >= DocCount * ?SIDECAR_ENTRY,
+             OTLen rem ?ENTRY_BYTES =:= 0, DCTLen rem ?DOC_COUNT_ENTRY =:= 0 ->
+    case file:position(Fd, eof) of
+        {ok, Size} when Size =:= SOff + SLen -> {ok, H};
+        {ok, Size} -> {error, {corrupt_segment, {size_mismatch, SOff + SLen, Size}}};
+        {error, _} = Err -> Err
+    end;
+check_layout(_Fd, _H) ->
+    {error, {corrupt_segment, bad_layout}}.
 
 parse_header(<<Magic:8/binary, Version:32/little, DocCount:32/little,
                OTOff:64/little, OTLen:64/little, POff:64/little,
