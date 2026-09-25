@@ -48,6 +48,177 @@ sync per write.
 `barrel_group_commit_SUITE:concurrent_synced_throughput` runs the 1 and 64
 writer cases and prints the ratio and the group sizes.
 
+## The Writer of One Database
+
+Every document write to a database goes through that database's
+`barrel_db_server`. This section is where a document's time went in that
+process in 1.6.0, what 1.7.0 moved out of it and why, and the result.
+
+### Reproduce
+
+```bash
+cd apps/barrel_docdb/bench
+./writer_bench.sh cases                                  # the cases
+./writer_bench.sh run new_unsynced_64 3000               # docs/s, p50, p99
+./writer_bench.sh profile new_unsynced_64 call_time      # tprof per process
+./writer_bench.sh profile new_unsynced_64 call_memory
+./writer_bench.sh profile new_unsynced_64 call_time 3000 clients
+./writer_bench.sh sample new_unsynced_64                 # untraced sampling
+./writer_bench.sh phases 5000                            # step costs, untraced
+./writer_compare.sh new_unsynced_64 5 3000 /path/to/1.6.0 /path/to/this
+```
+
+`ROOT=/path/to/checkout ./writer_bench.sh ...` runs the same harness
+against another compiled checkout. The cases write a small execution-record
+document (six fields, a nested map, a 200-byte string), from 64 or 1
+writers; the synced ones use `#{outbox => [Tag], sync => true}` like
+`barrel_group_commit_SUITE:concurrent_synced_throughput`.
+
+### Where a document's time went (1.6.0)
+
+tprof `call_time` on the server process, 64 writers of new documents,
+unsynced. Exclusive time per document, traced (tracing inflates small
+calls, so read the shares, not the absolute values):
+
+| Bucket | us/doc | Share |
+|--------|--------|-------|
+| key encoding (`barrel_store_keys`) | 74.5 | 23% |
+| lists, maps, binaries (callers mostly the rows above and below) | 72.9 | 23% |
+| RocksDB `write_batch` | 48.0 | 15% |
+| CBOR (`barrel_docdb_codec_cbor`) | 40.6 | 13% |
+| path analysis and index rows (`barrel_ars*`, `barrel_changes`) | 37.8 | 12% |
+| RocksDB batch building (a NIF call per op, 75 ops per new doc) | 21.6 | 7% |
+| calls (`hlc:now`, `barrel_sub:match`) | 9.5 | 3% |
+| reads (entity get) | 3.9 | 1% |
+
+The same steps timed without tracing, one process, per document:
+
+| Step | us | Needs state or HLC |
+|------|----|--------------------|
+| `make_doc_record` | 0.6 | no |
+| body CBOR (`encode_cbor`) | 5.6 | no |
+| path analysis and topics | 3.4 | no |
+| path index rows of a fresh document | 16.2 | no |
+| change row (holds a second, indexed CBOR of the body) | 15.0 | the HLC and rev, not the CBOR |
+| path feed rows (17 prefixes per doc here) | 21.7 | the HLC, not the key heads |
+| update path diff (old and new bodies analysed) | 6.8 to 9.4 | the old body |
+| read of the current state on an update | 10.5 to 13.6 | yes |
+| `hlc:now` | 0.9 | yes |
+| `barrel_sub:match` | 0.8 | no subscriber: none needed |
+| RocksDB batch build and write, groups of 64 | 50.8 | writes in order |
+
+`call_memory`: 9,400 words allocated in the writer per document, 75% in
+key encoding, CBOR and path analysis.
+
+Updates spent more in paths (19%) and CBOR (15%): the old body was decoded,
+then analysed twice (index diff and feed rows). Synced writes had the same
+profile plus the sync (31% in `write_batch`).
+
+### What moved, and why
+
+- **Into the caller** (`barrel_docdb:put_doc`, `put_docs`): the document
+  record, both CBOR encodings of the body, path analysis, the path index
+  rows of a fresh document, and the key heads of its feed rows. None of it
+  needs the database state or the HLC, and it was most of the writer's time.
+  The writer reads, checks, stamps the HLC and assembles the same batch in
+  the same order (`barrel_writer_SUITE:prepared_batch_equals_inline`
+  compares both builds for new docs, updates with outbox tags, TTL,
+  provenance, embeddings, tombstones, recreation, with and without
+  channels).
+- **Subscriber work, when there is none**: a table per subscription
+  manager says which databases have subscriptions. With none, a write does
+  no path analysis for notification, no call and no cast
+  (`barrel_writer_SUITE:no_subscriber_no_notify` traces 1,000 writes).
+  With some, a commit sends one cast per manager.
+- **The RocksDB write, into a committer process**: once the per-document
+  work left, the writer spent its time waiting for `write_batch`. A
+  committer writes each group, in order, and answers its callers while the
+  writer builds the next group. Unsynced groups are handed over every
+  `write_chunk` (16) documents so building and writing overlap. The writer
+  builds the RocksDB batch of an unsynced group; a synced group streams its
+  ops to the committer, which builds the batch while the group is built,
+  then writes it with one sync.
+- **Reads, batched**: the current state of the documents of the waiting
+  requests is read with two `multi_get` calls instead of one or two dirty
+  NIF calls per document.
+- **Updates**: the old body is analysed once instead of twice.
+
+### What did not move, and why
+
+- The read, the conflict check, the HLC and every row keyed by it (entity,
+  change and feed rows, history, outbox, archive, version chain, channel
+  rows): they need the database state or the HLC, so they stay serialized.
+- The update path diff and the removal of the old feed rows: they need the
+  old body. A caller could read it optimistically, but the profile after
+  the other changes puts it at about 20% of an update's writer time, and a
+  stale read would need a second check in the writer.
+- HLCs for a group in one clock call: `hlc:now` is 3.7 to 5 us per
+  document in the final writer (8 to 11%). The clock has no call that
+  reserves a range, and deriving HLCs locally lets the TTL sweeper, which
+  mints its own on the same keyspace, collide with them. Not worth a
+  wrong feed key.
+- Pre-encoding posting merge values in the caller: `term_to_binary` inside
+  `rocksdb:batch_merge`, about 2 us per document; it would change the op
+  list the batch is built from.
+- Histogram exemplars in the caller: each `put_doc` records a latency
+  histogram whose exemplar reservoir is one ETS row per database, read and
+  rewritten by every caller (54 and 83 us traced per call at 64 writers).
+  Removing the call did not change throughput (9,800 docs/s either way),
+  so it stays; the contention is in the `instrument` library.
+
+### After (this release)
+
+Same case, same harness. The writer now spends 71 us per document traced
+(322 before) and the committer 51 us, nearly all in `write_batch`:
+
+| Process | Bucket | us/doc |
+|---------|--------|--------|
+| writer | RocksDB batch building | 20.9 |
+| writer | lists, maps, binaries | 17.0 |
+| writer | own code (group building, assembly) | 10.5 |
+| writer | feed and index rows (HLC-keyed) | 7.6 |
+| writer | reads (two `multi_get` per batch of requests) | 7.5 |
+| writer | calls (`hlc:now`) | 2.2 |
+| committer | RocksDB `write_batch` | 48.4 |
+
+`call_memory`: 3,500 words per document in the writer, 240 in the
+committer. In a synced wave the writer spends 38 us per document and the
+committer 150 us, of which 110 in the synced `write_batch`.
+
+### Before and after
+
+64 writers unless noted, one database, median of 5 runs of 3 s per side,
+sides alternating in rotating order on a 14-core Mac (Apple Silicon,
+APFS). The machine was shared: load average 25 to 130 during the runs, so
+compare the sides of one row, not rows between tables. 1.6.0 is the
+group-commit release, 1.7.0-ro is the read-only change before this work.
+
+| Case | 1.6.0 docs/s | 1.7.0-ro docs/s | 1.7.0 docs/s | vs 1.6.0 | p50 us (1.6.0 / 1.7.0) | p99 us (1.6.0 / 1.7.0) |
+|------|-------------|-----------------|--------------|----------|------------------------|------------------------|
+| new docs, unsynced | 6,891 | 7,104 | 14,325 | 2.08x | 8,602 / 3,251 | 10,840 / 10,905 |
+| new docs, synced | 4,480 | 4,181 | 6,251 | 1.40x | 12,976 / 9,809 | 16,560 / 14,363 |
+| updates, unsynced | 6,677 | 6,741 | 10,768 | 1.61x | 9,584 / 5,792 | 12,033 / 11,838 |
+| updates, synced | 4,032 | 4,601 | 5,248 | 1.30x | 13,864 / 12,038 | 19,582 / 15,317 |
+| put_docs of 8, unsynced | 6,827 | 6,656 | 20,411 | 2.99x | 74,571 / 23,430 | 103,743 / 46,489 |
+| put_docs of 8, synced | 5,973 | 6,144 | 11,435 | 1.91x | 84,246 / 44,341 | 111,041 / 73,192 |
+| 1 writer, unsynced (7 runs) | 6,760 | | 6,730 | 1.00x | 141 / 143 | 213 / 207 |
+| 1 writer, synced | 83 | 90 | 91 | 1.10x | 5,954 / 5,957 | 31,909 / 32,191 |
+
+A second run of the synced case at load 45 to 80: 4,309 (1.6.0), 4,288
+(1.7.0-ro), 5,909 (1.7.0), 1.37x. A third run of the 64-writer new-doc
+cases at load 7 to 53: synced 4,971 / 4,928 / 6,272 (1.26x, p50 12,596
+/ 10,060 us), unsynced 7,296 / 7,317 / 18,501 (2.54x, p50 8,533 / 3,258
+us).
+
+Synced writes stay bound by the sync. 64 synced writers form one group per
+sync, and a cycle is the group's build, then its write and sync. Only the
+build got shorter. The write and the sync are the same work as before,
+since the batch is the same: about 8 ms per group of 64 on this machine
+under load (the committer spends 150 us traced per document, 110 of them
+in the synced `write_batch`). Splitting a synced group so that its
+building overlaps an earlier sync would make documents visible before
+their sync, which this release does not do. The 1.5x target for synced
+writers is not met here.
 ## Query Performance
 
 Query performance varies based on query pattern and result set size.

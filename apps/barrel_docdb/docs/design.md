@@ -92,35 +92,54 @@ Serializing writes does not mean syncing each one. When the server takes a
 write, it also takes the writes already waiting in its mailbox, without
 blocking, and commits them together:
 
-1. **Collect.** Up to `max_group` requests (default 256). Other messages
-   keep their place in the mailbox.
-2. **Build, in arrival order.** Each request gets its own read, conflict
-   check and ops, with its own options (`outbox`, `return_hlc`, `sync`,
-   provenance). HLCs are issued in arrival order, so the changes feed and
-   the last HLC stay monotonic. A request that fails its check or
-   validation adds no ops and gets its own error.
-3. **Close on a repeated id.** A request touching a doc id already written
+1. **Prepare, in the caller.** `barrel_docdb:put_doc` and `put_docs` do
+   the work that depends neither on the database state nor on the HLC
+   before sending the request: the body's CBOR encodings, path analysis,
+   the path index of a fresh document and the key heads of its feed rows.
+2. **Collect.** Up to `max_group` requests (default 256). Other messages
+   keep their place in the mailbox. The current state of every document
+   they write is read at once (one `multi_get` for the entities, one for
+   the bodies).
+3. **Build, in arrival order.** Each request gets its own conflict check
+   and ops, with its own options (`outbox`, `return_hlc`, `sync`,
+   provenance; in `put_docs`, a document's own `outbox` and `sync`). HLCs
+   are issued in arrival order, so the changes feed and the last HLC stay
+   monotonic. A request that fails its check or validation adds no ops and
+   gets its own error.
+4. **Close on a repeated id.** A request touching a doc id already written
    in the group ends the group and opens the next one, so its read sees the
    earlier write. The same rule applies inside `put_docs`.
-4. **Write once.** One `write_batch`, synced when any request asked for
-   `sync`.
-5. **Answer.** In arrival order, each request notifies its subscribers and
-   gets the same answer it would get alone.
+5. **Write once.** One `write_batch`, synced when any request asked for
+   `sync`, written by the database's committer process while the server
+   builds the next group. An unsynced group is handed over every
+   `write_chunk` documents (default 16). A synced group keeps taking the
+   waiting writes; its ops go to the committer as they are built, and the
+   batch is written, synced, once the group is complete. Groups are
+   written in the order they were built.
+6. **Answer.** In arrival order, the committer notifies the subscribers of
+   the group's writes (one cast per subscription manager, none when the
+   database has no subscriber) and answers each request with the answer
+   it would get alone.
 
 What a caller is promised:
 
 - The call returns after the batch holding its write is written, and
-  synced if it asked for `sync`.
+  synced if it asked for `sync`. Nothing of a synced batch is visible
+  before its sync.
 - Create-if-absent (no `_rev`) and CAS (with `_rev`) behave as if the
   writes ran one after the other: of 32 concurrent creators of one id,
-  exactly one gets `ok`.
+  exactly one gets `ok`. A write to an id of a group not yet written waits
+  for that group.
 - A write that did not ask for `sync` may be synced by a neighbour. That
   only makes it durable sooner.
 - If the batch write fails, every request of the group gets
   `{error, Reason}` and the server keeps running.
+- Any other request to the server (reads through it, checkpoints,
+  replication writes) first waits for the groups being written.
 
-A single writer with nothing waiting is a group of one. Group sizes are in
-`db_info/1` (`write_groups`) and in the `barrel_write_group_size` metric.
+A single writer with nothing waiting is a group of one, written by the
+server itself. Group sizes are in `db_info/1` (`write_groups`) and in the
+`barrel_write_group_size` metric.
 
 ### 2. Document Model
 

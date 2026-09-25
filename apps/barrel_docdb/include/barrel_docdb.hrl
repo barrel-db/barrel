@@ -157,4 +157,10 @@
 -define(EMBEDDING_SRC_CLIENT, <<"client">>).
 -define(EMBEDDING_SRC_COMPUTED, <<"computed">>).
 
+%% Databases with live subscriptions, {DbName, Count}: the writer skips
+%% notification when a database has none (owned by barrel_sub and
+%% barrel_query_sub).
+-define(SUB_DBS_TAB, barrel_sub_dbs).
+-define(QUERY_SUB_DBS_TAB, barrel_query_sub_dbs).
+
 -endif. %% BARREL_DOCDB_HRL

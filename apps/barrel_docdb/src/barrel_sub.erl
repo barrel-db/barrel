@@ -28,6 +28,7 @@
     subscribe/3,
     unsubscribe/2,
     match/2,
+    notify/2,
     list_subscriptions/1
 ]).
 
@@ -90,6 +91,12 @@ unsubscribe(SubRef, Pid) when is_reference(SubRef), is_pid(Pid) ->
 match(DbName, Paths) when is_list(Paths) ->
     gen_server:call(?MODULE, {match, DbName, Paths}).
 
+%% @doc Send each change to its matching subscribers, asynchronously.
+%% Changes are `{Topics, Change}' in commit order.
+-spec notify(db_name(), [{[binary()], map()}]) -> ok.
+notify(DbName, Changes) ->
+    gen_server:cast(?MODULE, {notify, DbName, Changes}).
+
 %% @doc List all subscriptions for a database (for debugging)
 -spec list_subscriptions(db_name()) -> [{reference(), binary(), pid()}].
 list_subscriptions(DbName) ->
@@ -100,6 +107,8 @@ list_subscriptions(DbName) ->
 %%====================================================================
 
 init([]) ->
+    _ = ets:new(?SUB_DBS_TAB, [named_table, protected, set,
+                               {read_concurrency, true}]),
     {ok, #state{}}.
 
 handle_call({subscribe, DbName, Pattern, Pid}, _From, State) ->
@@ -120,6 +129,15 @@ handle_call({list_subscriptions, DbName}, _From, State) ->
 
 handle_call(_Request, _From, State) ->
     {reply, {error, unknown_request}, State}.
+
+handle_cast({notify, DbName, Changes}, State) ->
+    lists:foreach(
+        fun({Topics, Change}) ->
+            Msg = {barrel_change, DbName, Change},
+            _ = [Pid ! Msg || Pid <- do_match(DbName, Topics, State)],
+            ok
+        end, Changes),
+    {noreply, State};
 
 handle_cast(_Msg, State) ->
     {noreply, State}.
@@ -191,7 +209,15 @@ do_subscribe(DbName, Pattern, Pid, State) ->
         monitors = NewMonitors
     },
 
+    _ = ets:update_counter(?SUB_DBS_TAB, DbName, 1, {DbName, 0}),
     {{ok, SubRef}, NewState}.
+
+%% One subscription of the database is gone.
+dec_db(DbName) ->
+    case ets:update_counter(?SUB_DBS_TAB, DbName, -1, {DbName, 0}) of
+        N when N =< 0 -> ets:delete(?SUB_DBS_TAB, DbName);
+        _ -> true
+    end.
 
 do_unsubscribe(SubRef, Pid, State) ->
     #state{
@@ -208,6 +234,7 @@ do_unsubscribe(SubRef, Pid, State) ->
         {DbName, Pattern, SubPid} when SubPid =:= Pid ->
             %% Remove from subs
             NewSubs = maps:remove(SubRef, Subs),
+            _ = dec_db(DbName),
 
             %% Remove from by_pid
             NewByPid = case maps:get(Pid, ByPid, []) of

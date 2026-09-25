@@ -13,6 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A TIMELINE sidecar with `kind => import` marks a copy restored under a new name: keys keep the source keyspace, the copy has no timeline parent. Its source id is the one stored in the copy, else the sidecar's `source_id`, else a fresh in-memory one. Branch sidecars read back as before.
 - `db_exists/2`: whether a database is open or has files under a data dir, without creating it.
 - `db_observed_version/1` (instance id and last change HLC). BQL results from `barrel_bql_exec:run/3` and `fold/5` carry both in their meta, read after the rows, so a reader can tell which state of which database answered.
+- `put_docs` entries can be `{Doc, DocOpts}` with the document's own `outbox` tags (they replace the call's) and `sync` flag, so a block and its companion documents commit in one request, each with the options it needs. The documents share one batch: it is synced when the call or any document asks for `sync`, and every document is answered after that sync. Another per-document option answers `{error, {invalid_doc_opts, DocOpts}}` for that document.
+- `write_chunk` database option (default 16): documents after which an unsynced group is handed to the committer.
+
+### Changed
+- A faster writer per database. `put_doc` and `put_docs` prepare each document in the calling process (both CBOR encodings, path analysis, the path index of a fresh document, the key heads of its feed rows); the writer reads the current state of a group's documents in two calls, checks, stamps the HLC and assembles the same batch as before; a committer process linked to the writer writes each group and answers its callers while the writer builds the next one. A synced group is still written in one batch with one sync, and nothing of it is visible before that sync. On a 14-core Mac, 64 concurrent writers of new documents go from about 6,900 to 14,300 unsynced writes per second on one database (2.1x), and 64 synced writers from about 4,500 to 6,250 (1.4x, the sync bounds them). The profile and the measurements are in `docs/benchmarks.md`.
+- With no `barrel_sub` or query subscription on a database, a write no longer analyses the document's paths for notification, calls `barrel_sub` or casts to `barrel_query_sub`. With subscribers, each commit sends one cast per subscription manager (`barrel_sub:notify/2`, `barrel_query_sub:notify_changes/2`), which match and deliver; `barrel_sub:match/2` is no longer called per document.
+- A request other than a document write (a read through the server, a checkpoint, a replication write) first waits for the groups being written, so it sees every answered write.
 
 ## [1.6.0] - 2026-09-24
 

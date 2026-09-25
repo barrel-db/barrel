@@ -283,6 +283,9 @@ create_db(Name) ->
 %%   <li>`max_group' - Maximum number of write requests committed in one
 %%       batch. Writes waiting at the database are committed together,
 %%       with one sync when any of them asked for it (default: `256')</li>
+%%   <li>`write_chunk' - Documents after which an unsynced group is
+%%       handed to the database's committer, so the next group is built
+%%       while this one is written (default: `16')</li>
 %%   <li>`read_only' - `true' refuses every write (documents, local docs,
 %%       attachments, replication) with `{error, read_only}' and runs no
 %%       compaction, retention or TTL sweep. Runtime config: pass it on
@@ -770,7 +773,7 @@ put_doc(Db, Doc, Opts) ->
     Start = erlang:monotonic_time(millisecond),
     %% Write document locally first
     Result = with_db(Db, fun(Pid) ->
-        barrel_db_server:put_doc(Pid, Doc, Opts)
+        barrel_db_server:put_doc(Pid, DbName, Doc, Opts)
     end),
     %% Record metrics
     Duration = erlang:monotonic_time(millisecond) - Start,
@@ -851,7 +854,8 @@ get_transport_for_target(_) ->
 %% @param Docs List of document maps to store
 %% @returns List of `{ok, Result}' or `{error, Reason}' in same order as input
 %% @see put_docs/3
--spec put_docs(binary() | pid(), [map()]) -> [{ok, map()} | {error, term()}].
+-spec put_docs(binary() | pid(), [map() | {map(), map()}]) ->
+    [{ok, map()} | {error, term()}].
 put_docs(Db, Docs) ->
     put_docs(Db, Docs, #{}).
 
@@ -860,23 +864,40 @@ put_docs(Db, Docs) ->
 %% == Options ==
 %% <ul>
 %%   <li>`sync' - If `true', sync to disk before returning (default: false)</li>
+%%   <li>any `put_doc/3' option (`outbox', `return_hlc', ...), applied to
+%%   every document</li>
 %% </ul>
+%%
+%% An entry of `Docs' may be `{Doc, DocOpts}' to give that document its
+%% own `outbox' tags (they replace the call's) and `sync' flag. The
+%% documents of one call are written in one batch, so the batch is synced
+%% when the call or any of its documents asks for `sync', and every
+%% document is answered after that sync. A `DocOpts' with another key
+%% answers `{error, {invalid_doc_opts, DocOpts}}' for that document.
+%%
+%% ```
+%% [{ok, _}, {ok, _}] = barrel_docdb:put_docs(Db, [
+%%     {Block, #{outbox => [<<"blocks">>], sync => true}},
+%%     Record
+%% ]).
+%% '''
 %%
 %% A document whose id already appears earlier in `Docs' is written after
 %% that earlier one, like a separate call: without its `_rev' it answers
 %% `{error, conflict}'.
 %%
 %% @param Db Database name or pid
-%% @param Docs List of document maps to store
+%% @param Docs List of documents, or `{Doc, DocOpts}' pairs
 %% @param Opts Options map
 %% @returns List of `{ok, Result}' or `{error, Reason}' in same order as input
--spec put_docs(binary() | pid(), [map()], map()) -> [{ok, map()} | {error, term()}].
+-spec put_docs(binary() | pid(), [map() | {map(), map()}], map()) ->
+    [{ok, map()} | {error, term()}].
 put_docs(Db, Docs, Opts) ->
     DbName = db_name(Db),
     ExtraAttrs = #{<<"db.batch_size">> => length(Docs)},
     barrel_trace:with_db_span(put_batch, DbName, ExtraAttrs, fun() ->
         with_db(Db, fun(Pid) ->
-            barrel_db_server:put_docs(Pid, Docs, Opts)
+            barrel_db_server:put_docs(Pid, DbName, Docs, Opts)
         end)
     end).
 

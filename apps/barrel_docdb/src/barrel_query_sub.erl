@@ -37,7 +37,8 @@
     stop/0,
     subscribe/3,
     unsubscribe/1,
-    notify_change/4
+    notify_change/4,
+    notify_changes/2
 ]).
 
 %% gen_server callbacks
@@ -110,11 +111,19 @@ unsubscribe(SubRef) when is_reference(SubRef) ->
 notify_change(DbName, DocId, Rev, DocBody) ->
     gen_server:cast(?MODULE, {notify_change, DbName, DocId, Rev, DocBody}).
 
+%% @doc Notify query subscribers about the changes of one commit, in
+%% order: `{DocId, Rev, DocBody}' of each written live document.
+-spec notify_changes(db_name(), [{docid(), binary(), map()}]) -> ok.
+notify_changes(DbName, Changes) ->
+    gen_server:cast(?MODULE, {notify_changes, DbName, Changes}).
+
 %%====================================================================
 %% gen_server callbacks
 %%====================================================================
 
 init([]) ->
+    _ = ets:new(?QUERY_SUB_DBS_TAB, [named_table, protected, set,
+                                     {read_concurrency, true}]),
     {ok, #state{}}.
 
 handle_call({subscribe, DbName, QueryPlan, Pid}, _From, State) ->
@@ -130,6 +139,12 @@ handle_call(_Request, _From, State) ->
 
 handle_cast({notify_change, DbName, DocId, Rev, DocBody}, State) ->
     do_notify_change(DbName, DocId, Rev, DocBody, State),
+    {noreply, State};
+
+handle_cast({notify_changes, DbName, Changes}, State) ->
+    lists:foreach(fun({DocId, Rev, DocBody}) ->
+        do_notify_change(DbName, DocId, Rev, DocBody, State)
+    end, Changes),
     {noreply, State};
 
 handle_cast(_Msg, State) ->
@@ -205,6 +220,8 @@ do_subscribe(DbName, QueryPlan, Pid, State) ->
     NewByPid = maps:update_with(Pid, fun(Refs) -> [SubRef | Refs] end, [SubRef], ByPid),
     NewByDb = maps:update_with(DbName, fun(Refs) -> [SubRef | Refs] end, [SubRef], ByDb),
     NewTries = maps:put(DbName, Trie, Tries),
+    true = ets:insert(?QUERY_SUB_DBS_TAB,
+                      {DbName, length(maps:get(DbName, NewByDb))}),
 
     NewState = State#state{
         subs = NewSubs,
@@ -256,9 +273,12 @@ do_unsubscribe(SubRef, State) ->
             %% Remove from by_db
             NewByDb = case maps:get(DbName, ByDb, []) of
                 [SubRef] ->
+                    true = ets:delete(?QUERY_SUB_DBS_TAB, DbName),
                     maps:remove(DbName, ByDb);
                 DbRefs ->
-                    maps:put(DbName, lists:delete(SubRef, DbRefs), ByDb)
+                    Left = lists:delete(SubRef, DbRefs),
+                    true = ets:insert(?QUERY_SUB_DBS_TAB, {DbName, length(Left)}),
+                    maps:put(DbName, Left, ByDb)
             end,
 
             %% Remove path patterns from trie (if no other subs use them)

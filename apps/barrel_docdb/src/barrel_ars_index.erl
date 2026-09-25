@@ -40,7 +40,9 @@
 -export([
     index_doc_ops/3,
     update_doc_ops/4,
-    remove_doc_ops/3
+    remove_doc_ops/3,
+    index_paths_ops/3,
+    update_paths_ops/4
 ]).
 
 %% Utility for reading stored paths
@@ -91,8 +93,14 @@ index_doc(StoreRef, DbName, DocId, Doc) ->
 %% Use this to combine with other operations in a single write_batch.
 -spec index_doc_ops(db_name(), docid(), doc()) -> [{put, binary(), binary()}].
 index_doc_ops(DbName, DocId, Doc) ->
-    Paths = barrel_ars:analyze(Doc),
-    make_index_ops(barrel_keyspace:resolve(DbName), DocId, Paths).
+    index_paths_ops(barrel_keyspace:resolve(DbName), DocId,
+                    barrel_ars:analyze(Doc)).
+
+%% @doc index_doc_ops/3 given the document's paths (barrel_ars:analyze/1)
+%% and an already resolved keyspace.
+-spec index_paths_ops(binary(), docid(), [{[term()], term()}]) -> [tuple()].
+index_paths_ops(Keyspace, DocId, Paths) ->
+    make_index_ops(Keyspace, DocId, Paths).
 
 %% @doc Update paths when a document changes.
 %% Computes the diff between old and new paths and applies changes.
@@ -116,10 +124,15 @@ update_doc(StoreRef, DbName, DocId, OldDoc, NewDoc) ->
 %% Note: Does not include posting list updates - use update_doc for full updates.
 -spec update_doc_ops(db_name(), docid(), doc(), doc()) ->
     [{put | delete, binary()} | {put, binary(), binary()}].
-update_doc_ops(DbName0, DocId, OldDoc, NewDoc) ->
+update_doc_ops(DbName, DocId, OldDoc, NewDoc) ->
+    update_paths_ops(DbName, DocId, barrel_ars:analyze(OldDoc),
+                     barrel_ars:analyze(NewDoc)).
+
+%% @doc update_doc_ops/4 given the old and new documents' paths.
+-spec update_paths_ops(db_name(), docid(), [{[term()], term()}],
+                       [{[term()], term()}]) -> [tuple()].
+update_paths_ops(DbName0, DocId, OldPaths, NewPaths) ->
     DbName = barrel_keyspace:resolve(DbName0),
-    OldPaths = barrel_ars:analyze(OldDoc),
-    NewPaths = barrel_ars:analyze(NewDoc),
     {Added, Removed} = barrel_ars:diff(OldPaths, NewPaths),
 
     case {Added, Removed} of

@@ -23,7 +23,9 @@
 %% Document API
 -export([
     put_doc/3,
+    put_doc/4,
     put_docs/3,
+    put_docs/4,
     get_doc/3,
     get_docs/3,
     delete_doc/3,
@@ -32,6 +34,10 @@
     resolve_conflict/4,
     get_conflicts/2
 ]).
+
+%% One document's batch, built in the writer or from a request prepared
+%% in the caller (tests compare the two)
+-export([doc_write_ops/5]).
 
 %% Tagged outbox API (acks are writes, so they go through the server)
 -export([outbox_ack/3]).
@@ -63,6 +69,18 @@
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
          terminate/2]).
 
+%% Write requests taken from the mailbox and not yet built, and the
+%% current state of their documents, read in one call per batch of
+%% requests (an id is read again once it is written).
+-record(fill, {
+    pending = [] :: list(),
+    cache = #{} :: #{binary() => map() | undefined}
+}).
+
+%% Groups handed to the committer and not yet written.
+-define(MAX_INFLIGHT, 8).
+-define(DEFAULT_WRITE_CHUNK, 16).
+
 -record(state, {
     name :: binary(),
     keyspace :: binary(),  %% name used for storage keys (parent's on a branch)
@@ -93,10 +111,18 @@
     %% contributed to, so its completion re-arms the periodic timer.
     sweep_workers = #{} :: #{atom() => {pid(), [term()], boolean()}},
     max_group = 256 :: pos_integer(),  %% max write requests per batch
+    %% documents after which an unsynced group goes to the committer, so
+    %% the writer builds the next group while this one is written
+    write_chunk = ?DEFAULT_WRITE_CHUNK :: pos_integer(),
     %% read_only => true in the config: writes are refused and no
     %% compaction, retention or TTL timer runs
     read_only = false :: boolean(),
-    write_groups = #{groups => 0, requests => 0, max_size => 0} :: map()
+    write_groups = #{groups => 0, requests => 0, max_size => 0} :: map(),
+    %% Writes the groups' batches and answers their callers while the
+    %% writer builds the next group; `inflight' holds the groups handed
+    %% to it and not yet written, oldest first, with their doc ids.
+    committer :: pid() | undefined,
+    inflight = [] :: [{reference(), #{binary() => true}}]
 }).
 
 %% A write request in a group commit. `seg' holds the items built in the
@@ -108,16 +134,38 @@
     kind :: put_doc | put_docs | delete_doc | outbox_ack,
     opts = #{} :: map(),
     pending = [] :: [term()],
-    seg = [] :: [{term(), list(), term()}],
+    seg = [] :: [{term(), list() | boolean(), term()}],  %% ops, or whether it had ops
     done = [] :: [term()],
-    more = false :: boolean()
+    more = false :: boolean(),
+    sync = false :: boolean()   %% the request or one of its docs asked for sync
+}).
+
+%% A document write prepared in the calling process: the parts of its
+%% batch that depend on neither the database state nor the HLC.
+-record(prep, {
+    ks :: binary(),               %% keyspace the keys are built for
+    rec :: map(),                 %% barrel_doc:make_doc_record/1
+    cbor :: binary(),             %% body, plain CBOR
+    change_cbor :: binary(),      %% body, indexed CBOR (change row)
+    paths :: [{[term()], term()}] | undefined,  %% live body paths
+    topics :: [binary()],         %% feed and notification topics
+    feed_heads :: [{binary(), binary()}],  %% feed row keys before the HLC
+    index_ops :: [tuple()]        %% path index of a body indexed from scratch
 }).
 
 %% A group of write requests committed in one batch (reqs newest first).
 -record(grp, {
     reqs = [] :: [#wreq{}],
     ids = #{} :: #{binary() => true},
-    count = 0 :: non_neg_integer()
+    count = 0 :: non_neg_integer(),
+    items = 0 :: non_neg_integer(),
+    sync = false :: boolean(),
+    %% ops of the built items not yet sent to the committer (newest
+    %% first); a synced group sends them in chunks while it is built, so
+    %% the committer builds the batch meanwhile (`ref' names that batch)
+    unsent = [] :: [list()],
+    unsent_n = 0 :: non_neg_integer(),
+    ref :: reference() | undefined
 }).
 
 %% Default compaction settings
@@ -181,10 +229,30 @@ stop(Pid) ->
 put_doc(Pid, Doc, Opts) ->
     gen_server:call(Pid, {put_doc, Doc, Opts}).
 
-%% @doc Put multiple documents (batch write)
--spec put_docs(pid(), [map()], map()) -> [{ok, map()} | {error, term()}].
+%% @doc put_doc/3 with the document prepared in the calling process, so
+%% the writer only reads, checks, stamps and batches it.
+-spec put_doc(pid(), binary(), map(), map()) -> {ok, map()} | {error, term()}.
+put_doc(Pid, DbName, Doc, Opts) ->
+    gen_server:call(Pid, {put_doc, prepare(DbName, Doc), Opts}).
+
+%% @doc Put multiple documents (batch write). A document may come as
+%% `{Doc, DocOpts}' with its own `outbox' and `sync' options.
+-spec put_docs(pid(), [map() | {map(), map()}], map()) ->
+    [{ok, map()} | {error, term()}].
 put_docs(Pid, Docs, Opts) ->
     gen_server:call(Pid, {put_docs, Docs, Opts}).
+
+%% @doc put_docs/3 with the documents prepared in the calling process.
+-spec put_docs(pid(), binary(), [map() | {map(), map()}], map()) ->
+    [{ok, map()} | {error, term()}].
+put_docs(Pid, DbName, Docs, Opts) ->
+    gen_server:call(Pid, {put_docs, [prepare_entry(DbName, D) || D <- Docs],
+                          Opts}).
+
+prepare_entry(DbName, {Doc, DocOpts}) when is_map(DocOpts) ->
+    {prepare(DbName, Doc), DocOpts};
+prepare_entry(DbName, Doc) ->
+    prepare(DbName, Doc).
 
 %% @doc Get a document
 %% When raw_body => true in Opts, returns {ok, CborBin, Meta} for zero-copy responses
@@ -467,7 +535,10 @@ init(Name, Config, CompiledChannels, DbPath, Keyspace, Parent, ForkHlc, Env) ->
                         ttl_sweep_batch = TtlBatch,
                         ttl_timer = TtlTimer,
                         max_group = maps:get(max_group, Config, 256),
-                        read_only = ReadOnly
+                        write_chunk = maps:get(write_chunk, Config,
+                                               ?DEFAULT_WRITE_CHUNK),
+                        read_only = ReadOnly,
+                        committer = start_committer(ReadOnly)
                     }};
                 {error, AttReason} ->
                     %% Close document store if attachment store fails
@@ -489,7 +560,18 @@ handle_call(Req, From, #state{read_only = true} = State) ->
         false -> handle_call_rw(Req, From, State)
     end;
 handle_call(Req, From, State) ->
-    handle_call_rw(Req, From, State).
+    case group_write(Req) of
+        true -> handle_call_rw(Req, From, State);
+        false -> handle_call_rw(Req, From, await_commit(State))
+    end.
+
+%% Writes taken into a group commit; any other request first waits for
+%% the group being written, so it sees every answered write.
+group_write({put_doc, _, _}) -> true;
+group_write({put_docs, _, _}) -> true;
+group_write({delete_doc, _, _}) -> true;
+group_write({outbox_ack, _, _}) -> true;
+group_write(_) -> false.
 
 write_request({put_doc, _, _}) -> true;
 write_request({put_docs, _, _}) -> true;
@@ -713,10 +795,23 @@ handle_info({'DOWN', _Ref, process, Pid, Reason},
             {noreply, State}
     end;
 
+handle_info({committed, Ref, _MoreSeg},
+            #state{inflight = [{Ref, _} | Rest]} = State) ->
+    {noreply, State#state{inflight = Rest}};
+
+handle_info({'EXIT', Pid, Reason}, #state{committer = Pid} = State) ->
+    {stop, {committer_down, Reason}, State#state{committer = undefined,
+                                                 inflight = []}};
+
 handle_info(_Info, State) ->
     {noreply, State}.
 
 %% @doc Clean up when terminating
+terminate(Reason, #state{committer = Committer} = State) when is_pid(Committer) ->
+    #state{} = await_commit(State),
+    unlink(Committer),
+    exit(Committer, kill),
+    terminate(Reason, State#state{committer = undefined});
 terminate(_Reason, #state{name = Name, store_ref = StoreRef, att_ref = AttRef,
                           filter_pid = FilterPid,
                           compaction_timer = CompactionTimer,
@@ -1174,108 +1269,286 @@ group_commit(Req, From, State) ->
     end.
 
 new_wreq({put_doc, Doc, Opts}, From) ->
-    wreq(put_doc, From, Opts, [{doc, Doc}]);
+    wreq(put_doc, From, Opts, [{doc, Doc, #{}}]);
 new_wreq({put_docs, Docs, Opts}, From) ->
-    wreq(put_docs, From, Opts, [{doc, D} || D <- Docs]);
+    wreq(put_docs, From, Opts, [doc_item(D) || D <- Docs]);
 new_wreq({delete_doc, DocId, Opts}, From) ->
     wreq(delete_doc, From, Opts, [{delete, DocId}]);
 new_wreq({outbox_ack, Tag, Hlcs}, From) ->
     {ok, #wreq{from = From, kind = outbox_ack, pending = [{ack, Tag, Hlcs}]}}.
 
+%% A put_docs entry: a document, or a document with its own options.
+doc_item({prepared, _} = Prepared) -> {doc, Prepared, #{}};
+doc_item({Doc, DocOpts}) when is_map(DocOpts) -> {doc, Doc, DocOpts};
+doc_item(Doc) -> {doc, Doc, #{}}.
+
 wreq(Kind, From, Opts, Items) ->
     case validate_prov_opt(Opts) of
         {ok, Opts1} ->
-            {ok, #wreq{from = From, kind = Kind, opts = Opts1, pending = Items}};
+            {ok, #wreq{from = From, kind = Kind, opts = Opts1, pending = Items,
+                       sync = sync_opt(Opts1)}};
         {error, _} = Err ->
             Err
     end.
 
 %% A request that touches a doc id already written in the group closes
-%% it and opens the next one, so its read sees the earlier write.
+%% it and opens the next one, so its read sees the earlier write. A
+%% group is handed to the committer while the writer builds the next.
 run_group(W, State) ->
-    {Grp, Carry} = case add_req(W, #grp{}, State) of
-        {G, none} -> drain(G, State);
-        Closed -> Closed
-    end,
-    {State1, MoreSeg} = commit_group(Grp, State),
-    case Carry of
-        none -> State1;
-        #wreq{done = Done} -> run_group(Carry#wreq{done = MoreSeg ++ Done}, State1)
+    {Fill, State1} = fetch(#fill{pending = [W]}, State),
+    run_group(Fill, #grp{}, State1).
+
+run_group(#fill{pending = []}, #grp{} = G, State) ->
+    dispatch_group(G, State);
+run_group(Fill0, G0, State0) ->
+    {Grp, Carry, Fill1, State} = drain(G0, Fill0, State0),
+    %% a read of an id this group writes, taken while it was built, is stale
+    Fill = forget(Grp, Fill1),
+    case {Carry, Fill} of
+        {none, #fill{pending = []}} ->
+            last_group(Grp, State);
+        {none, _} ->
+            run_group(Fill, #grp{}, dispatch_group(Grp, State));
+        {#wreq{done = Done}, _} ->
+            {State1, MoreSeg} = commit_group(Grp, State),
+            #fill{pending = Pending} = Fill,
+            run_group(Fill#fill{pending = [Carry#wreq{done = MoreSeg ++ Done}
+                                           | Pending]},
+                      #grp{}, State1)
     end.
 
-%% Take the writes waiting in the mailbox without blocking. Anything
-%% else keeps its place.
-drain(#grp{count = N} = G, #state{max_group = Max}) when N >= Max ->
-    {G, none};
-drain(G, State) ->
+%% With nothing else to build or being written, the writer writes the
+%% group itself: a lone writer does not pay the handover.
+last_group(#grp{ref = undefined} = Grp, #state{inflight = []} = State) ->
+    write_here(Grp, State);
+last_group(Grp, State) ->
+    dispatch_group(Grp, State).
+
+write_here(#grp{reqs = []}, State) ->
+    State;
+write_here(#grp{reqs = Reqs, count = N, unsent = Unsent},
+           #state{name = DbName, store_ref = StoreRef} = State) ->
+    {Sync, Plan} = group_plan(Reqs),
+    Batch = build_batch(StoreRef, lists:append(lists:reverse(Unsent))),
+    _ = write_and_answer(StoreRef, DbName, Batch, Sync, Plan),
+    ok = barrel_metrics:observe_write_group(DbName, N),
+    count_group(N, State).
+
+forget(#grp{ids = Ids}, #fill{cache = Cache} = Fill) ->
+    Fill#fill{cache = maps:without(maps:keys(Ids), Cache)}.
+
+%% Take the write requests waiting in the mailbox, without blocking,
+%% then read the current state of the documents they write.
+fetch(#fill{pending = Pending0, cache = Cache} = Fill,
+      #state{max_group = Max} = State0) ->
+    Pending = Pending0 ++ take_writes(Max - length(Pending0)),
+    Ids = lists:usort(lists:flatmap(fun wreq_ids/1, Pending)) -- maps:keys(Cache),
+    State = await_ids(Ids, State0),
+    {Fill#fill{pending = Pending, cache = maps:merge(Cache, prefetch(Ids, State))},
+     State}.
+
+take_writes(N) when N =< 0 ->
+    [];
+take_writes(N) ->
     receive
-        {'$gen_call', From, {put_doc, _, _} = Req} -> drain(Req, From, G, State);
-        {'$gen_call', From, {put_docs, _, _} = Req} -> drain(Req, From, G, State);
-        {'$gen_call', From, {delete_doc, _, _} = Req} -> drain(Req, From, G, State);
-        {'$gen_call', From, {outbox_ack, _, _} = Req} -> drain(Req, From, G, State)
+        {'$gen_call', From, {put_doc, _, _} = Req} -> take_write(Req, From, N);
+        {'$gen_call', From, {put_docs, _, _} = Req} -> take_write(Req, From, N);
+        {'$gen_call', From, {delete_doc, _, _} = Req} -> take_write(Req, From, N);
+        {'$gen_call', From, {outbox_ack, _, _} = Req} -> take_write(Req, From, N)
     after 0 ->
-        {G, none}
+        []
     end.
 
-drain(Req, From, G, State) ->
+take_write(Req, From, N) ->
     case new_wreq(Req, From) of
         {ok, W} ->
-            case add_req(W, G, State) of
-                {G1, none} -> drain(G1, State);
-                Closed -> Closed
-            end;
+            [W | take_writes(N - 1)];
         {error, _} = Err ->
             gen_server:reply(From, Err),
-            drain(G, State)
+            take_writes(N)
     end.
 
-%% Build the request's items into the group. Returns {Group, none}, or
-%% {Group, Carry} when an item's id is already written in the group.
-add_req(#wreq{pending = []} = W, #grp{reqs = Reqs, count = N} = G, _State) ->
-    {G#grp{reqs = [W | Reqs], count = N + 1}, none};
+%% Ids a request reads, when known before it is built.
+wreq_ids(#wreq{pending = Items}) ->
+    [Id || Item <- Items, Id <- item_id(Item)].
+
+item_id({doc, {prepared, #prep{rec = #{id := Id}}}, _}) -> [Id];
+item_id({doc, _, _}) -> [];
+item_id({delete, Id}) -> [Id];
+item_id({ack, _, _}) -> [].
+
+await_ids(Ids, #state{inflight = Inflight} = State) ->
+    case lists:any(fun({_Ref, Written}) ->
+                       lists:any(fun(Id) -> is_map_key(Id, Written) end, Ids)
+                   end, Inflight) of
+        true -> await_commit(State);
+        false -> State
+    end.
+
+prefetch([], _State) ->
+    #{};
+prefetch(Ids, #state{store_ref = StoreRef, keyspace = Ks}) ->
+    read_currents(StoreRef, Ks, Ids).
+
+%% Build the waiting requests into the group, taking more from the
+%% mailbox when they run out. Stops when the group is full.
+drain(#grp{count = N} = G, Fill, #state{max_group = Max} = State) when N >= Max ->
+    {G, none, Fill, State};
+drain(#grp{items = I, sync = false} = G, Fill, #state{write_chunk = Chunk} = State)
+  when I >= Chunk ->
+    {G, none, Fill, State};
+drain(G, #fill{pending = []} = Fill0, State0) ->
+    case fetch(Fill0, State0) of
+        {#fill{pending = []} = Fill, State} -> {G, none, Fill, State};
+        {Fill, State} -> drain(G, Fill, State)
+    end;
+drain(G, #fill{pending = [W | Rest]} = Fill, State) ->
+    case add_req(W, G, Fill#fill{pending = Rest}, State) of
+        {G1, none, Fill1, State1} -> drain(G1, Fill1, State1);
+        Closed -> Closed
+    end.
+
+%% Build the request's items into the group. Returns {Group, none, Fill,
+%% State}, or {Group, Carry, Fill, State} when an item's id is already
+%% written in the group. An id of a group being committed is read after
+%% that commit.
+add_req(#wreq{pending = [], sync = WSync} = W,
+        #grp{reqs = Reqs, count = N, sync = GSync} = G, Fill, State) ->
+    {G#grp{reqs = [W | Reqs], count = N + 1, sync = GSync orelse WSync},
+     none, Fill, State};
 add_req(#wreq{pending = [Item | Rest], seg = Seg, opts = Opts} = W,
-        #grp{ids = Ids} = G,
-        #state{name = DbName, store_ref = StoreRef} = State) ->
-    case prepare_item(Item) of
+        #grp{ids = Ids} = G, #fill{cache = Cache} = Fill,
+        #state{name = DbName, keyspace = Ks, store_ref = StoreRef} = State0) ->
+    case prepare_item(Item, Ks) of
         {error, _} = Err ->
-            add_req(W#wreq{pending = Rest, seg = [{Err, [], none} | Seg]}, G, State);
-        {Id, _} when is_map_key(Id, Ids) ->
-            close_group(W, G);
-        {Id, Prepared} ->
-            Built = build_item(Prepared, StoreRef, DbName, Opts),
-            add_req(W#wreq{pending = Rest, seg = [Built | Seg]},
-                    G#grp{ids = mark_id(Id, Built, Ids)}, State)
+            add_req(W#wreq{pending = Rest, seg = [{Err, [], none} | Seg]}, G,
+                    Fill, State0);
+        {Id, _, _} when is_map_key(Id, Ids) ->
+            close_group(W, G, Fill, State0);
+        {Id, Prepared, ItemOpts} ->
+            {Old, State} = current(Id, Cache, State0),
+            {_, ItemOps, _} = Built =
+                build_item(Prepared, Old, StoreRef, DbName,
+                           maps:merge(Opts, ItemOpts)),
+            W1 = W#wreq{pending = Rest, seg = [Built | Seg],
+                        sync = W#wreq.sync orelse sync_opt(ItemOpts)},
+            G1 = G#grp{ids = mark_id(Id, Built, Ids), items = G#grp.items + 1},
+            add_req(W1, stream(add_ops(ItemOps, G1), W1, State),
+                    Fill#fill{cache = maps:remove(Id, Cache)}, State)
     end.
 
-close_group(#wreq{seg = []} = W, G) ->
-    {G, W};
-close_group(#wreq{} = W, #grp{reqs = Reqs, count = N} = G) ->
+add_ops([], G) ->
+    G;
+add_ops(Ops, #grp{unsent = Unsent, unsent_n = N} = G) ->
+    G#grp{unsent = [Ops | Unsent], unsent_n = N + 1}.
+
+%% A synced group sends its ops to the committer every write_chunk
+%% documents: its batch is built while the rest of the group is.
+stream(#grp{unsent_n = N, sync = GSync} = G, #wreq{sync = WSync},
+       #state{write_chunk = Chunk} = State)
+  when N >= Chunk, GSync orelse WSync ->
+    send_ops(G, State);
+stream(G, _W, _State) ->
+    G.
+
+send_ops(#grp{unsent = Unsent, ref = Ref0} = G,
+         #state{committer = Committer, store_ref = StoreRef}) ->
+    Ref = case Ref0 of
+        undefined -> make_ref();
+        _ -> Ref0
+    end,
+    Committer ! {ops, Ref, StoreRef, lists:append(lists:reverse(Unsent))},
+    G#grp{unsent = [], unsent_n = 0, ref = Ref}.
+
+%% The document's state read with its batch, else read now.
+current(none, _Cache, State) ->
+    {none, State};
+current(Id, Cache, State) when is_map_key(Id, Cache) ->
+    {{read, map_get(Id, Cache)}, State};
+current(Id, _Cache, State) ->
+    {unread, await_id(Id, State)}.
+
+await_id(Id, State) ->
+    await_ids([Id], State).
+
+sync_opt(#{sync := true}) -> true;
+sync_opt(_Opts) -> false.
+
+close_group(#wreq{seg = []} = W, G, Fill, State) ->
+    {G, W, Fill, State};
+close_group(#wreq{} = W, #grp{reqs = Reqs, count = N} = G, Fill, State) ->
     {G#grp{reqs = [W#wreq{more = true} | Reqs], count = N + 1},
-     W#wreq{seg = []}}.
+     W#wreq{seg = []}, Fill, State}.
+
+%% Wait until the committer has written and answered every group handed
+%% to it.
+await_commit(#state{inflight = []} = State) ->
+    State;
+await_commit(State) ->
+    await_commit(await_oldest(State)).
+
+await_oldest(#state{inflight = [{Ref, _} | Rest]} = State) ->
+    receive
+        {committed, Ref, _MoreSeg} -> State#state{inflight = Rest}
+    end.
+
+%% Wait for the group Ref and return the results of its request that
+%% continues in the next group.
+await_result(Ref, #state{inflight = [{Ref, _} | Rest]} = State) ->
+    receive
+        {committed, Ref, MoreSeg} -> {State#state{inflight = Rest}, MoreSeg}
+    end;
+await_result(Ref, State) ->
+    await_result(Ref, await_oldest(State)).
 
 mark_id(none, _Built, Ids) -> Ids;
 mark_id(Id, {{ok, _}, _, _}, Ids) -> Ids#{Id => true};
 mark_id(_Id, _Built, Ids) -> Ids.
 
-prepare_item({doc, Doc}) ->
-    try barrel_doc:make_doc_record(barrel_doc:to_map(Doc)) of
-        #{id := DocId} = DocRecord -> {DocId, {doc, DocRecord}}
-    catch
-        _:Reason -> {error, Reason}
+%% {Id, Prepared, ItemOpts} or {error, Reason}.
+prepare_item({doc, Doc, DocOpts}, Ks) ->
+    case valid_doc_opts(maps:to_list(DocOpts)) of
+        true -> prepare_doc_item(Doc, DocOpts, Ks);
+        false -> {error, {invalid_doc_opts, DocOpts}}
     end;
-prepare_item({delete, DocId} = Item) ->
-    {DocId, Item};
-prepare_item({ack, _Tag, _Hlcs} = Item) ->
-    {none, Item}.
+prepare_item({delete, DocId} = Item, _Ks) ->
+    {DocId, Item, #{}};
+prepare_item({ack, _Tag, _Hlcs} = Item, _Ks) ->
+    {none, Item, #{}}.
+
+%% A document prepared for another keyspace is prepared again here.
+prepare_doc_item({prepared, #prep{ks = Ks, rec = #{id := DocId}} = P}, DocOpts, Ks) ->
+    {DocId, P, DocOpts};
+prepare_doc_item({prepared, #prep{rec = #{id := DocId} = Rec}}, DocOpts, Ks) ->
+    {DocId, prepare_record(Ks, Rec), DocOpts};
+prepare_doc_item({prepared, {error, _} = Err}, _DocOpts, _Ks) ->
+    Err;
+prepare_doc_item(Doc, DocOpts, Ks) ->
+    case prepare_ks(Ks, Doc) of
+        #prep{rec = #{id := DocId}} = P -> {DocId, P, DocOpts};
+        {error, _} = Err -> Err
+    end.
+
+%% A document's own options: its outbox tags and whether it is synced.
+valid_doc_opts([]) -> true;
+valid_doc_opts([{outbox, Tags} | Rest]) when is_list(Tags) -> valid_doc_opts(Rest);
+valid_doc_opts([{sync, Sync} | Rest]) when is_boolean(Sync) -> valid_doc_opts(Rest);
+valid_doc_opts(_Opts) -> false.
 
 %% Build one item: {Result, Ops, NotifyInfo}. A failed item adds no ops.
-build_item({doc, DocRecord}, StoreRef, DbName, Opts) ->
+%% `Read' is {read, Old} when the document was read with its batch.
+build_item(Item, unread, StoreRef, DbName, Opts) ->
+    try read_item(Item, StoreRef, DbName) of
+        Old -> build_item(Item, {read, Old}, StoreRef, DbName, Opts)
+    catch
+        _:Reason -> {{error, Reason}, [], none}
+    end;
+build_item(#prep{rec = DocRecord} = P, {read, Old}, StoreRef, DbName, Opts) ->
     try
-        Old = read_current(StoreRef, DbName, maps:get(id, DocRecord)),
         case cas_check(Old, maps:get(expected_version, DocRecord)) of
             ok ->
-                {Ops, Notify} = build_write_ops(StoreRef, DbName, DocRecord,
-                                                Old, Opts),
+                {Ops, Notify} = build_prepared_ops(StoreRef, DbName, P, Old,
+                                                   Opts, barrel_hlc:new_hlc()),
                 {write_result(Notify, Opts), Ops, Notify};
             {error, conflict} = Conflict ->
                 {Conflict, [], none}
@@ -1283,21 +1556,28 @@ build_item({doc, DocRecord}, StoreRef, DbName, Opts) ->
     catch
         _:Reason -> {{error, Reason}, [], none}
     end;
-build_item({delete, DocId}, StoreRef, DbName, Opts) ->
-    try build_delete_ops(StoreRef, DbName, DocId, Opts) of
+build_item({delete, DocId}, {read, Old}, StoreRef, DbName, Opts) ->
+    try build_delete_ops(StoreRef, DbName, DocId, Old, Opts) of
         {ok, Ops, Notify} -> {write_result(Notify, Opts), Ops, Notify};
         {error, _} = Err -> {Err, [], none}
     catch
         throw:{error, _} = Err -> {Err, [], none};
         _:Reason -> {{error, Reason}, [], none}
     end;
-build_item({ack, Tag, Hlcs}, _StoreRef, DbName, _Opts) ->
+build_item({ack, Tag, Hlcs}, none, _StoreRef, DbName, _Opts) ->
     Ks = barrel_keyspace:resolve(DbName),
     {ok, [{delete, barrel_store_keys:outbox_key(Ks, Tag, Hlc)} || Hlc <- Hlcs],
      none}.
 
+read_item(#prep{rec = #{id := DocId}}, StoreRef, DbName) ->
+    read_current(StoreRef, DbName, DocId);
+read_item({delete, DocId}, StoreRef, DbName) ->
+    read_current(StoreRef, DbName, DocId).
+
 %% return_hlc => true adds the write's change HLC (internal atom key),
 %% used by callers that ack outbox entries.
+write_result({DocId, NewToken, NextHlc, Deleted, DocBody, _Topics}, Opts) ->
+    write_result({DocId, NewToken, NextHlc, Deleted, DocBody}, Opts);
 write_result({DocId, NewToken, NextHlc, _Deleted, _DocBody}, Opts) ->
     Result = #{<<"id">> => DocId, <<"ok">> => true, <<"rev">> => NewToken},
     case maps:get(return_hlc, Opts, false) of
@@ -1305,26 +1585,107 @@ write_result({DocId, NewToken, NextHlc, _Deleted, _DocBody}, Opts) ->
         false -> {ok, Result}
     end.
 
-%% Write the group in one batch, synced when any request asked for it,
-%% then notify and answer each request in arrival order. Returns the
-%% results of a request that continues in the next group.
+%% Hand the group to the committer, keeping at most ?MAX_INFLIGHT
+%% groups in its queue.
+dispatch_group(#grp{reqs = []}, State) ->
+    State;
+dispatch_group(#grp{reqs = Reqs, count = N, ids = Ids, ref = Ref0,
+                    unsent = Unsent}, State0) ->
+    #state{name = DbName, store_ref = StoreRef, committer = Committer,
+           inflight = Inflight} = State = await_room(State0),
+    {Sync, Plan} = group_plan(Reqs),
+    Tail = lists:append(lists:reverse(Unsent)),
+    %% an unsynced group's batch is built here, the committer writes it
+    {Ref, Batch} = case Ref0 of
+        undefined -> {make_ref(), build_batch(StoreRef, Tail)};
+        _ -> {Ref0, {tail, Tail}}
+    end,
+    Committer ! {commit, Ref, StoreRef, DbName, Batch, Sync, Plan},
+    ok = barrel_metrics:observe_write_group(DbName, N),
+    (count_group(N, State))#state{inflight = Inflight ++ [{Ref, Ids}]}.
+
+build_batch(_StoreRef, []) ->
+    none;
+build_batch(StoreRef, Ops) ->
+    try barrel_store_rocksdb:build_batch(StoreRef, Ops)
+    catch Class:Reason -> {error, {Class, Reason}}
+    end.
+
+add_to_batch(StoreRef, {batch, _} = Batch, Ops) ->
+    try barrel_store_rocksdb:add_to_batch(StoreRef, Batch, Ops)
+    catch Class:Reason -> {error, {Class, Reason}}
+    end;
+add_to_batch(_StoreRef, {error, _} = Err, _Ops) ->
+    Err.
+
+await_room(#state{inflight = Inflight} = State)
+  when length(Inflight) >= ?MAX_INFLIGHT ->
+    await_room(await_oldest(State));
+await_room(State) ->
+    State.
+
+%% Commit the group and wait for it: returns the results of the request
+%% that continues in the next group.
 commit_group(#grp{reqs = []}, State) ->
     {State, []};
-commit_group(#grp{reqs = Reqs0, count = N},
-             #state{name = DbName, store_ref = StoreRef} = State) ->
+commit_group(Grp, State0) ->
+    #state{inflight = Inflight} = State = dispatch_group(Grp, State0),
+    {Ref, _} = lists:last(Inflight),
+    await_result(Ref, State).
+
+%% Whether any request or document of the group asked for sync, and the
+%% requests in arrival order without their ops.
+group_plan(Reqs0) ->
     Reqs = lists:reverse(Reqs0),
-    Ops = lists:append([ItemOps || #wreq{seg = Seg} <- Reqs,
-                                   {_, ItemOps, _} <- lists:reverse(Seg)]),
-    Sync = lists:any(fun(#wreq{opts = O}) -> maps:get(sync, O, false) =:= true end,
-                     Reqs),
-    Written = write_group(StoreRef, Ops, Sync),
-    MoreSeg = lists:foldl(fun(W, Acc) -> finish_req(W, Written, DbName, Acc) end,
-                          [], Reqs),
-    ok = barrel_metrics:observe_write_group(DbName, N),
-    {count_group(N, State), MoreSeg}.
+    Sync = lists:any(fun(#wreq{sync = S}) -> S end, Reqs),
+    {Sync, [W#wreq{seg = [{R, ItemOps =/= [], Notify}
+                          || {R, ItemOps, Notify} <- Seg]}
+            || #wreq{seg = Seg} = W <- Reqs]}.
+
+%% Write the group's batch, synced when one of its requests asked for
+%% it, then notify and answer its requests in arrival order. Returns the
+%% results of a request that continues in the next group.
+write_and_answer(StoreRef, DbName, Batch, Sync, Plan) ->
+    Written = write_group(StoreRef, Batch, Sync),
+    ok = notify_written(Written, DbName, Plan),
+    lists:foldl(fun(W, Acc) -> finish_req(W, Written, Acc) end, [], Plan).
+
+start_committer(true) ->
+    undefined;
+start_committer(false) ->
+    Server = self(),
+    spawn_link(fun() -> committer_loop(Server, none) end).
+
+%% Groups are written one after the other, in the order the writer
+%% built them, so feed rows become visible in HLC order. `Open' is the
+%% batch of a synced group whose ops are still arriving.
+committer_loop(Server, Open) ->
+    receive
+        {ops, Ref, StoreRef, Ops} ->
+            committer_loop(Server, {Ref, extend(StoreRef, Open, Ref, Ops)});
+        {commit, Ref, StoreRef, DbName, Batch0, Sync, Plan} ->
+            Batch = seal(StoreRef, Open, Ref, Batch0),
+            MoreSeg = write_and_answer(StoreRef, DbName, Batch, Sync, Plan),
+            Server ! {committed, Ref, MoreSeg},
+            committer_loop(Server, none)
+    end.
+
+extend(StoreRef, none, _Ref, Ops) ->
+    build_batch(StoreRef, Ops);
+extend(StoreRef, {Ref, Batch}, Ref, Ops) ->
+    add_to_batch(StoreRef, Batch, Ops).
+
+seal(_StoreRef, none, _Ref, Batch) ->
+    Batch;
+seal(StoreRef, {Ref, Batch}, Ref, {tail, Tail}) ->
+    add_to_batch(StoreRef, Batch, Tail).
 
 write_group(_StoreRef, [], _Sync) ->
     ok;
+write_group(_StoreRef, none, _Sync) ->
+    ok;
+write_group(_StoreRef, {error, _} = Err, _Sync) ->
+    Err;
 write_group(StoreRef, Ops, Sync) ->
     try barrel_store_rocksdb:write_batch(StoreRef, Ops, #{sync => Sync}) of
         ok -> ok;
@@ -1333,9 +1694,8 @@ write_group(StoreRef, Ops, Sync) ->
         Class:Reason -> {error, {Class, Reason}}
     end.
 
-finish_req(#wreq{seg = Seg, more = More, done = Done} = W, Written, DbName,
-           Acc) ->
-    Final = [finish_item(Item, Written, DbName) || Item <- lists:reverse(Seg)],
+finish_req(#wreq{seg = Seg, more = More, done = Done} = W, Written, Acc) ->
+    Final = [finish_item(Item, Written) || Item <- lists:reverse(Seg)],
     case More of
         true ->
             lists:reverse(Final);
@@ -1344,23 +1704,29 @@ finish_req(#wreq{seg = Seg, more = More, done = Done} = W, Written, DbName,
             Acc
     end.
 
-finish_item({Result, [], _Notify}, _Written, _DbName) ->
+%% An item that added ops shares the batch's outcome.
+finish_item({Result, false, _Notify}, _Written) ->
     Result;
-finish_item({Result, _Ops, Notify}, ok, DbName) ->
-    notify_write(DbName, Notify),
+finish_item({Result, true, _Notify}, ok) ->
     Result;
-finish_item({_Result, _Ops, _Notify}, {error, _} = Err, _DbName) ->
+finish_item({_Result, true, _Notify}, {error, _} = Err) ->
     Err.
+
+%% The group's writes reach their subscribers before any caller is answered.
+notify_written(ok, DbName, Reqs) ->
+    notify_group(DbName, [Notify || #wreq{seg = Seg} <- Reqs,
+                                    {_, true, Notify} <- lists:reverse(Seg),
+                                    Notify =/= none]);
+notify_written({error, _}, _DbName, _Reqs) ->
+    ok.
 
 reply_req(#wreq{from = From, kind = put_docs}, Results) ->
     gen_server:reply(From, Results);
 reply_req(#wreq{from = From}, [Result]) ->
     gen_server:reply(From, Result).
 
-notify_write(_DbName, none) ->
-    ok;
-notify_write(DbName, {DocId, NewToken, NextHlc, Deleted, DocBody}) ->
-    notify_subscribers(DbName, DocId, NewToken, NextHlc, Deleted, DocBody).
+notify_write(DbName, Note) ->
+    notify_group(DbName, [Note]).
 
 count_group(N, #state{write_groups = #{groups := G, requests := R,
                                        max_size := M}} = State) ->
@@ -1427,12 +1793,38 @@ read_current(StoreRef, DbName, DocId) ->
     DocEntityKey = barrel_store_keys:doc_entity(Ks, DocId),
     case barrel_store_rocksdb:get_entity(StoreRef, DocEntityKey) of
         {ok, Columns} ->
+            current_state(Columns, barrel_store_rocksdb:body_get(StoreRef,
+                                     barrel_store_keys:doc_body(Ks, DocId)));
+        not_found ->
+            undefined
+    end.
+
+%% @doc read_current/3 of several documents, two reads in all:
+%% #{DocId => State | undefined}. A document whose read fails is left
+%% out (it is read again, alone, when written).
+read_currents(StoreRef, Ks, DocIds) ->
+    Entities = barrel_store_rocksdb:multi_get_entity(
+                 StoreRef, [barrel_store_keys:doc_entity(Ks, Id) || Id <- DocIds]),
+    Read = lists:zip(DocIds, Entities),
+    Found = [{Id, Columns} || {Id, {ok, Columns}} <- Read],
+    Bodies = case Found of
+        [] -> [];
+        _ -> barrel_store_rocksdb:body_multi_get(
+                 StoreRef, [barrel_store_keys:doc_body(Ks, Id) || {Id, _} <- Found],
+                 point)
+    end,
+    maps:from_list(
+      [{Id, undefined} || {Id, not_found} <- Read] ++
+      [{Id, current_state(Columns, Body)}
+       || {{Id, Columns}, Body} <- lists:zip(Found, Bodies),
+          Body =:= not_found orelse element(1, Body) =:= ok]).
+
+current_state(Columns, BodyRead) ->
             VV = case proplists:get_value(?COL_VV, Columns, <<>>) of
                 <<>> -> barrel_vv:new();
                 VVBin -> barrel_vv:decode(VVBin)
             end,
-            {Body, BodyCbor} = case barrel_store_rocksdb:body_get(StoreRef,
-                            barrel_store_keys:doc_body(Ks, DocId)) of
+            {Body, BodyCbor} = case BodyRead of
                 {ok, OldCborBin} ->
                     {barrel_docdb_codec_cbor:decode_any(OldCborBin), OldCborBin};
                 not_found ->
@@ -1451,10 +1843,7 @@ read_current(StoreRef, DbName, DocId) ->
                 tier => proplists:get_value(?COL_TIER, Columns, 0),
                 body => Body,
                 body_cbor => BodyCbor
-            };
-        not_found ->
-            undefined
-    end.
+            }.
 
 %% @doc This database's stable source id (the version author).
 %% Per-database, not per-node: replicas on the same node must detect
@@ -1548,11 +1937,13 @@ channel_ops(DbName, NewHlc, DocInfo, DocBody, OldHlc, OldDocBody,
     end.
 
 build_write_ops(StoreRef, DbName, DocRecord, Old, Opts) ->
+    build_write_ops(StoreRef, DbName, DocRecord, Old, Opts, barrel_hlc:new_hlc()).
+
+build_write_ops(StoreRef, DbName, DocRecord, Old, Opts, NextHlc) ->
     Ks = barrel_keyspace:resolve(DbName),
     #{id := DocId, deleted := Deleted, doc := DocBody} = DocRecord,
     DocEntityKey = barrel_store_keys:doc_entity(Ks, DocId),
 
-    NextHlc = barrel_hlc:new_hlc(),
     NewVersion = barrel_version:new(NextHlc, source_id(DbName)),
     NewToken = barrel_version:to_token(NewVersion),
 
@@ -1680,6 +2071,185 @@ build_write_ops(StoreRef, DbName, DocRecord, Old, Opts) ->
         ++ ExpiryOps ++ [BodyOp],
     {AllOps, {DocId, NewToken, NextHlc, Deleted, DocBody}}.
 
+%% @doc Prepare a document write for a database (runs in the caller).
+-spec prepare(binary(), map() | binary()) ->
+    {prepared, #prep{} | {error, term()}}.
+prepare(DbName, Doc) ->
+    {prepared, prepare_ks(barrel_keyspace:resolve(DbName), Doc)}.
+
+prepare_ks(Ks, Doc) ->
+    try barrel_doc:make_doc_record(barrel_doc:to_map(Doc)) of
+        DocRecord -> prepare_record(Ks, DocRecord)
+    catch
+        _:Reason -> {error, Reason}
+    end.
+
+%% The values build_write_ops/6 derives from the body alone.
+prepare_record(Ks, #{id := DocId, deleted := Deleted, doc := DocBody} = Rec) ->
+    Paths = live_paths(Deleted, DocBody),
+    Topics = barrel_changes:doc_topics(#{id => DocId, deleted => Deleted,
+                                         doc => DocBody}),
+    #prep{ks = Ks,
+          rec = Rec,
+          cbor = barrel_docdb_codec_cbor:encode_cbor(DocBody),
+          change_cbor = barrel_docdb_codec_cbor:encode(DocBody),
+          paths = Paths,
+          topics = Topics,
+          feed_heads = barrel_changes:feed_heads(
+                         Ks, barrel_changes:topics_prefixes(Topics)),
+          index_ops = fresh_index_ops(Ks, DocId, Paths)}.
+
+live_paths(true, _DocBody) -> undefined;
+live_paths(false, DocBody) -> barrel_ars:analyze(DocBody).
+
+fresh_index_ops(_Ks, _DocId, undefined) -> [];
+fresh_index_ops(Ks, DocId, Paths) -> barrel_ars_index:index_paths_ops(Ks, DocId, Paths).
+
+%% @doc The batch of one document write and its notification, with the
+%% given HLC: `inline' builds it the way the writer always did,
+%% `prepared' from a request prepared in the caller.
+-spec doc_write_ops(inline | prepared, binary(), map(), map(),
+                    barrel_hlc:timestamp()) -> {list(), tuple()}.
+doc_write_ops(Mode, DbName, Doc, Opts0, Hlc) ->
+    StoreRef = persistent_term:get({barrel_store, DbName}),
+    {ok, Opts} = validate_prov_opt(Opts0),
+    {prepared, #prep{rec = #{id := DocId} = Rec} = P} = prepare(DbName, Doc),
+    Old = read_current(StoreRef, DbName, DocId),
+    doc_write_ops(Mode, StoreRef, DbName, P, Rec, Old, Opts, Hlc).
+
+doc_write_ops(inline, StoreRef, DbName, _P, Rec, Old, Opts, Hlc) ->
+    build_write_ops(StoreRef, DbName, Rec, Old, Opts, Hlc);
+doc_write_ops(prepared, StoreRef, DbName, P, _Rec, Old, Opts, Hlc) ->
+    build_prepared_ops(StoreRef, DbName, P, Old, Opts, Hlc).
+
+%% @doc build_write_ops/6 from a prepared write: only what needs the
+%% current state or the HLC is computed here. Same ops, same order.
+build_prepared_ops(StoreRef, DbName, #prep{rec = DocRecord} = P, Old, Opts,
+                   NextHlc) ->
+    Ks = barrel_keyspace:resolve(DbName),
+    #prep{cbor = CborBody, change_cbor = ChangeCbor, paths = NewPaths,
+          topics = Topics, feed_heads = Heads, index_ops = FreshIndexOps} = P,
+    #{id := DocId, deleted := Deleted, doc := DocBody} = DocRecord,
+    DocEntityKey = barrel_store_keys:doc_entity(Ks, DocId),
+
+    NewVersion = barrel_version:new(NextHlc, source_id(DbName)),
+    NewToken = barrel_version:to_token(NewVersion),
+
+    {OldVersion, OldHlc, OldVV, OldDeleted, OldDocBody, OldDocBodyCbor,
+     NConflicts, CreatedAt, ExpiresAt, Tier} =
+        case Old of
+            undefined ->
+                {undefined, undefined, barrel_vv:new(), false, undefined,
+                 undefined, 0, barrel_hlc:encode(NextHlc), 0, 0};
+            #{version := OV, hlc := OH, vv := OVV, deleted := OD,
+              body := OB, body_cbor := OBC, num_conflicts := ONC,
+              created_at := OCA, expires_at := OEA, tier := OT} ->
+                {OV, OH, OVV, OD, OB, OBC, ONC, OCA, OEA, OT}
+        end,
+
+    NewVV = barrel_vv:bump(OldVV, NewVersion),
+
+    ProvEnc = maps:get(provenance_enc, Opts, undefined),
+    NewExpires = maps:get(expires_at, Opts, ExpiresAt),
+    ExpiryOps = expiry_index_ops(Ks, DocId, ExpiresAt, NewExpires),
+    DocColumns = [
+        {?COL_VERSION, barrel_version:encode(NewVersion)},
+        {?COL_DELETED, deleted_to_bin(Deleted)},
+        {?COL_HLC, barrel_hlc:encode(NextHlc)},
+        {?COL_VV, barrel_vv:encode(NewVV)},
+        {?COL_NCONFLICTS, NConflicts},
+        {?COL_CREATED_AT, CreatedAt},
+        {?COL_EXPIRES_AT, NewExpires},
+        {?COL_TIER, Tier}
+    ] ++ provenance_columns(ProvEnc) ++ embedding_columns(DocRecord),
+    DocOps = [{entity_put, DocEntityKey, DocColumns}],
+
+    DocInfo = #{
+        id => DocId,
+        rev => NewToken,
+        deleted => Deleted,
+        num_conflicts => NConflicts,
+        hlc => NextHlc
+    },
+
+    HlcDeleteOps = case OldHlc of
+        undefined -> [];
+        _ -> [{delete, barrel_store_keys:doc_hlc(Ks, OldHlc)}]
+    end,
+
+    %% The old body is analysed once, for the index diff and the feed rows
+    OldPaths = case OldDocBody of
+        undefined -> undefined;
+        _ -> barrel_ars:analyze(OldDocBody)
+    end,
+
+    PathIndexOps = case Deleted of
+        true when OldDocBody =/= undefined ->
+            case barrel_ars_index:get_doc_paths(StoreRef, DbName, DocId) of
+                {ok, StoredPaths} ->
+                    barrel_ars_index:remove_doc_ops(DbName, DocId, StoredPaths);
+                not_found -> []
+            end;
+        true ->
+            [];
+        false when OldDocBody =:= undefined ->
+            FreshIndexOps;
+        false when OldDeleted ->
+            FreshIndexOps;
+        false ->
+            barrel_ars_index:update_paths_ops(DbName, DocId, OldPaths, NewPaths)
+    end,
+
+    ChangeOps = barrel_changes:write_change_ops(DbName, NextHlc, DocInfo,
+                                                ChangeCbor),
+
+    PathHlcOps = case {OldHlc, OldPaths} of
+        {undefined, _} ->
+            barrel_changes:write_feed_ops(NextHlc, DocInfo, Heads);
+        {_, undefined} ->
+            barrel_changes:update_feed_ops(DbName, NextHlc, DocInfo, Heads,
+                                           OldHlc, []);
+        {_, _} ->
+            OldPrefixes = barrel_changes:topics_prefixes(
+                            barrel_ars:paths_to_topics(OldPaths)),
+            barrel_changes:update_feed_ops(DbName, NextHlc, DocInfo, Heads,
+                                           OldHlc, OldPrefixes)
+    end,
+
+    {ArchiveOps, ChainOps} = case OldVersion of
+        undefined ->
+            {[], []};
+        _ ->
+            OldVersionEnc = barrel_version:encode(OldVersion),
+            Archive = case OldDocBodyCbor of
+                undefined -> [];
+                OldCbor ->
+                    [{body_put,
+                      barrel_store_keys:doc_body_rev(Ks, DocId, OldVersionEnc),
+                      OldCbor}]
+            end,
+            Chain = [{put,
+                      barrel_store_keys:doc_version(Ks, DocId, OldVersionEnc),
+                      sibling_entry(superseded, OldDeleted, OldVV)}],
+            {Archive, Chain}
+    end,
+
+    OutboxOps = barrel_outbox:write_ops(DbName, maps:get(outbox, Opts, []),
+                                        NextHlc, OldHlc, DocId, NewToken, Deleted),
+
+    HistoryOps = barrel_history:write_ops(
+        DbName, NextHlc, DocId, NewVersion, Deleted,
+        maps:get(history_cause, Opts, local), NewVV, ProvEnc),
+
+    ChannelOps = channel_ops(DbName, NextHlc, DocInfo, DocBody, OldHlc,
+                             OldDocBody, OldDeleted),
+
+    BodyOp = {body_put, barrel_store_keys:doc_body(Ks, DocId), CborBody},
+    AllOps = DocOps ++ HlcDeleteOps ++ PathIndexOps ++ ChangeOps ++ PathHlcOps
+        ++ ArchiveOps ++ ChainOps ++ OutboxOps ++ HistoryOps ++ ChannelOps
+        ++ ExpiryOps ++ [BodyOp],
+    {AllOps, {DocId, NewToken, NextHlc, Deleted, DocBody, Topics}}.
+
 %% @doc Store a computed embedding in the doc entity (CAS on revision).
 %% Read-modify-write of the entity columns is safe here: this runs in
 %% the database writer, which serializes all entity writes.
@@ -1739,8 +2309,12 @@ do_delete_doc(StoreRef, DbName, DocId, Opts) ->
 %% @doc Build the ops of a versioned tombstone write. Throws
 %% {error, {conflict, CurrentToken}} when the rev option does not match.
 build_delete_ops(StoreRef, DbName, DocId, Opts) ->
+    build_delete_ops(StoreRef, DbName, DocId,
+                     read_current(StoreRef, DbName, DocId), Opts).
+
+build_delete_ops(StoreRef, DbName, DocId, Current, Opts) ->
     Ks = barrel_keyspace:resolve(DbName),
-    case read_current(StoreRef, DbName, DocId) of
+    case Current of
         undefined ->
             {error, not_found};
         #{version := OldVersion, hlc := OldHlc, vv := OldVV,
@@ -2252,43 +2826,60 @@ do_fold_local_docs(StoreRef, DbName, DocIdPrefix, Fun, Acc0) ->
 %% Subscription Notifications
 %%====================================================================
 
-%% @doc Notify subscribers of document changes
-%% Extracts paths from document, matches against subscriptions,
-%% and sends notifications to matching subscribers.
+%% @doc Notify the subscribers of one write.
 notify_subscribers(DbName, DocId, Rev, Hlc, Deleted, DocBody) ->
-    %% Extract paths from document body
-    Topics = case Deleted of
-        true ->
-            %% For deleted docs, just use the doc ID as a path
-            [DocId];
-        false ->
-            Paths = barrel_ars:analyze(DocBody),
-            barrel_ars:paths_to_topics(Paths)
-    end,
+    notify_group(DbName, [{DocId, Rev, Hlc, Deleted, DocBody}]).
 
-    %% Find matching path subscribers
-    Pids = barrel_sub:match(DbName, Topics),
+%% @doc Notify the subscribers of a commit's writes, in commit order: one
+%% cast per subscription manager, and nothing at all when the database
+%% has no subscription.
+notify_group(_DbName, []) ->
+    ok;
+notify_group(DbName, Notes) ->
+    notify_group(DbName, Notes, has_subs(?SUB_DBS_TAB, DbName),
+                 has_subs(?QUERY_SUB_DBS_TAB, DbName)).
 
-    %% Build notification
-    Notification = {barrel_change, DbName, #{
-        id => DocId,
-        rev => Rev,
-        hlc => Hlc,
-        deleted => Deleted,
-        paths => Topics
-    }},
+notify_group(_DbName, _Notes, false, false) ->
+    ok;
+notify_group(DbName, Notes, PathSubs, QuerySubs) ->
+    ok = notify_paths(PathSubs, DbName, Notes),
+    notify_queries(QuerySubs, DbName, Notes).
 
-    %% Send to each path subscriber
-    _ = [Pid ! Notification || Pid <- Pids],
+notify_paths(false, _DbName, _Notes) ->
+    ok;
+notify_paths(true, DbName, Notes) ->
+    barrel_sub:notify(DbName, [path_change(N) || N <- Notes]).
 
-    %% Notify query subscribers (only for non-deleted docs)
-    case Deleted of
-        true ->
-            ok;
-        false ->
-            barrel_query_sub:notify_change(DbName, DocId, Rev, DocBody)
-    end,
-    ok.
+%% Deleted docs are announced under their id; live ones under their paths.
+path_change({DocId, Rev, Hlc, Deleted, _DocBody, Topics}) ->
+    {Topics, #{id => DocId, rev => Rev, hlc => Hlc, deleted => Deleted,
+               paths => Topics}};
+path_change({DocId, Rev, Hlc, true, _DocBody}) ->
+    {[DocId], #{id => DocId, rev => Rev, hlc => Hlc, deleted => true,
+                paths => [DocId]}};
+path_change({DocId, Rev, Hlc, false, DocBody}) ->
+    Topics = barrel_ars:paths_to_topics(barrel_ars:analyze(DocBody)),
+    {Topics, #{id => DocId, rev => Rev, hlc => Hlc, deleted => false,
+               paths => Topics}}.
+
+%% Query subscribers only see live documents.
+notify_queries(false, _DbName, _Notes) ->
+    ok;
+notify_queries(true, DbName, Notes) ->
+    case [{Id, Rev, Body} || Note <- Notes,
+                             {Id, Rev, false, Body} <- [live_note(Note)]] of
+        [] -> ok;
+        Live -> barrel_query_sub:notify_changes(DbName, Live)
+    end.
+
+live_note({Id, Rev, _Hlc, Deleted, Body, _Topics}) -> {Id, Rev, Deleted, Body};
+live_note({Id, Rev, _Hlc, Deleted, Body}) -> {Id, Rev, Deleted, Body}.
+
+%% A missing table means its manager is down: it holds no subscription.
+has_subs(Tab, DbName) ->
+    try ets:member(Tab, DbName)
+    catch error:badarg -> false
+    end.
 
 %%====================================================================
 %% Wide Column Helpers

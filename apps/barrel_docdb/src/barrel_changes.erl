@@ -26,6 +26,7 @@
 -export([
     write_change/4,
     write_change_ops/3,
+    write_change_ops/4,
     update_change_bucket_ops/3,
     delete_old_change/4
 ]).
@@ -38,6 +39,11 @@
 -export([
     write_path_index_ops/3,
     update_path_index_ops/5,
+    doc_topics/1,
+    topics_prefixes/1,
+    feed_heads/2,
+    write_feed_ops/3,
+    update_feed_ops/6,
     get_changes_by_path/5
 ]).
 
@@ -922,10 +928,20 @@ write_change(StoreRef, DbName, Hlc, DocInfo) ->
 -spec write_change_ops(db_name(), barrel_hlc:timestamp(),
                        #{id := binary(), rev := binary(), deleted := boolean(), _ => _}) ->
     [{put, binary(), binary()}].
-write_change_ops(DbName0, Hlc, DocInfo) ->
+write_change_ops(DbName, Hlc, DocInfo) ->
+    write_value_ops(DbName, Hlc, encode_change(DocInfo)).
+
+%% @doc write_change_ops/3 with the document's indexed CBOR already
+%% encoded (`barrel_docdb_codec_cbor:encode/1' of the body).
+-spec write_change_ops(db_name(), barrel_hlc:timestamp(),
+                       #{id := binary(), rev := binary(), deleted := boolean(), _ => _},
+                       binary()) -> [{put, binary(), binary()}].
+write_change_ops(DbName, Hlc, DocInfo, DocCbor) ->
+    write_value_ops(DbName, Hlc, encode_change(DocInfo, DocCbor)).
+
+write_value_ops(DbName0, Hlc, Value) ->
     DbName = barrel_keyspace:resolve(DbName0),
     Key = barrel_store_keys:doc_hlc(DbName, Hlc),
-    Value = encode_change(DocInfo),
     %% Also update last_hlc metadata for O(1) get_last_seq
     LastHlcKey = barrel_store_keys:db_last_hlc(DbName),
     LastHlcValue = barrel_hlc:encode(Hlc),
@@ -978,13 +994,7 @@ delete_old_change(StoreRef, DbName, OldHlc, _DocId) ->
 %% Stores conflict count for quick check; optionally includes doc body for filtering.
 -spec encode_change(#{id := binary(), rev := binary(), deleted => boolean(), _ => _}) -> binary().
 encode_change(DocInfo) ->
-    DocId = maps:get(id, DocInfo),
-    Rev = maps:get(rev, DocInfo),
-    Deleted = case maps:get(deleted, DocInfo, false) of true -> 1; false -> 0 end,
-    NumConflicts = count_conflicts(DocInfo),
-    DocIdLen = byte_size(DocId),
-    RevLen = byte_size(Rev),
-    Base = <<DocIdLen:16, DocId/binary, RevLen:16, Rev/binary, Deleted:8, NumConflicts:16>>,
+    Base = change_base(DocInfo),
     case maps:get(doc, DocInfo, undefined) of
         undefined ->
             <<Base/binary, 0:8>>;
@@ -994,6 +1004,21 @@ encode_change(DocInfo) ->
         _ ->
             <<Base/binary, 0:8>>
     end.
+
+%% @doc encode_change/1 of a DocInfo whose `doc' is a map, given that
+%% map's indexed CBOR.
+-spec encode_change(#{id := binary(), rev := binary(), _ => _}, binary()) -> binary().
+encode_change(DocInfo, DocCbor) ->
+    <<(change_base(DocInfo))/binary, 1:8, DocCbor/binary>>.
+
+change_base(DocInfo) ->
+    DocId = maps:get(id, DocInfo),
+    Rev = maps:get(rev, DocInfo),
+    Deleted = case maps:get(deleted, DocInfo, false) of true -> 1; false -> 0 end,
+    NumConflicts = count_conflicts(DocInfo),
+    DocIdLen = byte_size(DocId),
+    RevLen = byte_size(Rev),
+    <<DocIdLen:16, DocId/binary, RevLen:16, Rev/binary, Deleted:8, NumConflicts:16>>.
 
 count_conflicts(#{num_conflicts := N}) when is_integer(N) ->
     N;
@@ -1046,45 +1071,58 @@ decode_change(<<DocIdLen:16, DocId:DocIdLen/binary,
 -spec write_path_index_ops(db_name(), barrel_hlc:timestamp(),
                            #{id := binary(), rev := binary(), deleted := boolean(), _ => _}) ->
     [{put, binary(), binary()} | {posting_append, binary(), binary()}].
-write_path_index_ops(DbName0, Hlc, DocInfo) ->
-    DbName = barrel_keyspace:resolve(DbName0),
-    #{id := DocId, rev := Rev, deleted := Deleted} = DocInfo,
+write_path_index_ops(DbName, Hlc, DocInfo) ->
+    write_feed_ops(Hlc, DocInfo,
+                   feed_heads(barrel_keyspace:resolve(DbName),
+                              topics_prefixes(doc_topics(DocInfo)))).
 
-    %% Extract topics from document paths
-    Topics = case Deleted of
-        true ->
-            %% For deleted docs, just use the doc ID as a topic
-            [DocId];
-        false ->
-            Doc = maps:get(doc, DocInfo, #{}),
-            case Doc of
-                #{} ->
-                    Paths = barrel_ars:analyze(Doc),
-                    barrel_ars:paths_to_topics(Paths);
-                _ ->
-                    [DocId]
-            end
-    end,
+%% @doc Feed topics of a write: a deleted doc is indexed under its id,
+%% a live one under its paths.
+-spec doc_topics(#{id := binary(), deleted := boolean(), _ => _}) -> [binary()].
+doc_topics(#{id := DocId, deleted := true}) ->
+    [DocId];
+doc_topics(#{id := DocId} = DocInfo) ->
+    case maps:get(doc, DocInfo, #{}) of
+        #{} = Doc -> barrel_ars:paths_to_topics(barrel_ars:analyze(Doc));
+        _ -> [DocId]
+    end.
+
+%% @doc Every topic and each of its prefixes, sorted and unique.
+-spec topics_prefixes([binary()]) -> [binary()].
+topics_prefixes(Topics) ->
+    lists:usort(lists:flatmap(fun topic_prefixes/1, Topics)).
+
+%% @doc The key heads of a write's feed rows, per prefix: the path_hlc
+%% key before its HLC and the prefix_changes key before its bucket.
+-spec feed_heads(binary(), [binary()]) -> [{binary(), binary()}].
+feed_heads(Keyspace, Prefixes) ->
+    [{barrel_store_keys:path_hlc_prefix(Keyspace, Prefix),
+      barrel_store_keys:prefix_changes_head(Keyspace, Prefix)}
+     || Prefix <- Prefixes].
+
+%% @doc write_path_index_ops/3 given the write's feed key heads.
+-spec write_feed_ops(barrel_hlc:timestamp(),
+                     #{id := binary(), rev := binary(), deleted := boolean(), _ => _},
+                     [{binary(), binary()}]) ->
+    [{put, binary(), binary()} | {posting_append, binary(), binary()}].
+write_feed_ops(Hlc, DocInfo, Heads) ->
+    #{id := DocId, rev := Rev, deleted := Deleted} = DocInfo,
 
     %% Create index entry value using compact binary format
     %% Format: DocIdLen:16, DocId, RevLen:16, Rev, Deleted:8, NumConflicts:16, HasDoc:8
     ChangeValue = encode_change(#{id => DocId, rev => Rev, deleted => Deleted}),
 
-    %% Index each topic and all its prefixes
-    AllPrefixes = lists:usort(lists:flatmap(fun topic_prefixes/1, Topics)),
-
     %% Old path_hlc index: topic + hlc (for exact matches)
-    PathHlcOps = [{put, barrel_store_keys:path_hlc(DbName, Prefix, Hlc), ChangeValue}
-                  || Prefix <- AllPrefixes],
+    HlcBin = barrel_hlc:encode(Hlc),
+    PathHlcOps = [{put, <<PathHead/binary, HlcBin/binary>>, ChangeValue}
+                  || {PathHead, _} <- Heads],
 
     %% New prefix_changes posting list: sharded by time bucket
     %% Entry format: << HLC:12/binary, Change/binary >> - sorted by HLC in posting list
-    HlcBin = barrel_hlc:encode(Hlc),
     Bucket = barrel_store_keys:hlc_to_bucket(Hlc),
-    PrefixChangeOps = [{posting_append,
-                        barrel_store_keys:prefix_changes_key(DbName, Prefix, Bucket),
-                        <<HlcBin/binary, ChangeValue/binary>>}
-                       || Prefix <- AllPrefixes],
+    Entry = <<HlcBin/binary, ChangeValue/binary>>,
+    PrefixChangeOps = [{posting_append, <<ChangesHead/binary, Bucket:32/big>>, Entry}
+                       || {_, ChangesHead} <- Heads],
 
     PathHlcOps ++ PrefixChangeOps.
 
@@ -1131,24 +1169,34 @@ remove_path_index_ops(DbName0, Hlc, DocInfo) ->
     [tuple()].
 update_path_index_ops(DbName0, NewHlc, NewDocInfo, OldHlc, OldDoc) ->
     DbName = barrel_keyspace:resolve(DbName0),
+    NewHeads = feed_heads(barrel_keyspace:resolve(DbName),
+                          topics_prefixes(doc_topics(NewDocInfo))),
+    OldPrefixes = case {OldHlc, OldDoc} of
+        {undefined, _} -> [];
+        {_, undefined} -> [];
+        {_, _} -> topics_prefixes(barrel_ars:paths_to_topics(barrel_ars:analyze(OldDoc)))
+    end,
+    update_feed_ops(DbName, NewHlc, NewDocInfo, NewHeads, OldHlc, OldPrefixes).
+
+%% @doc update_path_index_ops/5 given the new write's feed key heads and
+%% the old body's topic prefixes (`[]' when there is no old row).
+-spec update_feed_ops(db_name(), barrel_hlc:timestamp(),
+                      #{id := binary(), rev := binary(), deleted := boolean(), _ => _},
+                      [{binary(), binary()}], barrel_hlc:timestamp() | undefined,
+                      [binary()]) -> [tuple()].
+update_feed_ops(DbName0, NewHlc, NewDocInfo, NewHeads, OldHlc, OldPrefixes) ->
+    DbName = barrel_keyspace:resolve(DbName0),
     %% Generate new path entries
-    NewOps = write_path_index_ops(DbName, NewHlc, NewDocInfo),
+    NewOps = write_feed_ops(NewHlc, NewDocInfo, NewHeads),
 
     %% Generate delete ops for old entries if document existed before
-    DeleteOps = case {OldHlc, OldDoc} of
-        {undefined, _} ->
+    DeleteOps = case OldPrefixes of
+        [] ->
             [];
-        {_, undefined} ->
-            [];
-        {_, _} ->
+        _ ->
             #{id := DocId, rev := OldRev} = NewDocInfo,
             OldDeleted = false, %% If we're updating, old wasn't deleted
             OldChangeValue = encode_change(#{id => DocId, rev => OldRev, deleted => OldDeleted}),
-
-            %% Extract old topics and delete their path_hlc entries
-            OldPaths = barrel_ars:analyze(OldDoc),
-            OldTopics = barrel_ars:paths_to_topics(OldPaths),
-            OldPrefixes = lists:usort(lists:flatmap(fun topic_prefixes/1, OldTopics)),
 
             %% Delete from old path_hlc index
             OldPathHlcDeletes = [{delete, barrel_store_keys:path_hlc(DbName, P, OldHlc)}

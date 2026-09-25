@@ -1,0 +1,362 @@
+%%%-------------------------------------------------------------------
+%%% @doc The database writer: what it does per document, and what it
+%%% leaves to the caller and to the subscription managers.
+%%% @end
+%%%-------------------------------------------------------------------
+-module(barrel_writer_SUITE).
+
+-include_lib("common_test/include/ct.hrl").
+-include_lib("stdlib/include/assert.hrl").
+
+-export([all/0, init_per_suite/1, end_per_suite/1,
+         init_per_testcase/2, end_per_testcase/2]).
+
+-export([no_subscriber_no_notify/1,
+         subscribers_notified_per_group/1,
+         prepared_batch_equals_inline/1,
+         prepared_batch_equals_inline_channels/1,
+         put_docs_doc_outbox/1,
+         put_docs_doc_sync/1,
+         put_docs_invalid_doc_opts/1,
+         same_ids_many_writers/1,
+         reads_see_answered_writes/1]).
+
+-define(TAG, <<"hb.task">>).
+
+all() ->
+    [no_subscriber_no_notify,
+     subscribers_notified_per_group,
+     prepared_batch_equals_inline,
+     prepared_batch_equals_inline_channels,
+     put_docs_doc_outbox,
+     put_docs_doc_sync,
+     put_docs_invalid_doc_opts,
+     same_ids_many_writers,
+     reads_see_answered_writes].
+
+init_per_suite(Config) ->
+    {ok, _} = application:ensure_all_started(barrel_docdb),
+    Dir = "/tmp/barrel_writer_test_"
+        ++ integer_to_list(erlang:system_time(millisecond)),
+    [{dir, Dir} | Config].
+
+end_per_suite(Config) ->
+    os:cmd("rm -rf " ++ ?config(dir, Config)),
+    ok.
+
+init_per_testcase(prepared_batch_equals_inline_channels = TC, Config) ->
+    open(TC, #{channels => #{<<"steps">> => [<<"type/step">>],
+                             <<"all">> => [<<"#">>]}}, Config);
+init_per_testcase(TC, Config) ->
+    open(TC, #{}, Config).
+
+open(TC, Opts, Config) ->
+    Db = atom_to_binary(TC, utf8),
+    {ok, Pid} = barrel_docdb:create_db(Db, Opts#{data_dir => ?config(dir, Config)}),
+    [{db, Db}, {pid, Pid} | Config].
+
+end_per_testcase(_TC, Config) ->
+    try meck:unload(barrel_store_rocksdb) catch _:_ -> ok end,
+    _ = erlang:trace(all, false, [call, send]),
+    _ = erlang:trace_pattern({'_', '_', '_'}, false, [local]),
+    try barrel_docdb:delete_db(?config(db, Config)) catch _:_ -> ok end,
+    ok.
+
+%%====================================================================
+%% Test cases
+%%====================================================================
+
+%% 1000 writes on a database nobody subscribes to: the writer calls
+%% nothing in barrel_sub or barrel_query_sub and sends them nothing.
+no_subscriber_no_notify(Config) ->
+    Db = ?config(db, Config),
+    Pid = ?config(pid, Config),
+    Events = traced(Pid, fun() -> ok = thousand_writes(Db) end),
+    {ok, Changes, _} = barrel_docdb:get_changes(Db, first),
+    ?assert(length(Changes) > 0),
+    ?assertEqual([], sub_events(Events)).
+
+%% With subscribers, each commit is one cast per manager and every
+%% subscriber still gets every matching change.
+subscribers_notified_per_group(Config) ->
+    Db = ?config(db, Config),
+    Pid = ?config(pid, Config),
+    {ok, PathRef} = barrel_docdb:subscribe(Db, <<"type/#">>),
+    {ok, QueryRef} = barrel_docdb:subscribe_query(
+                       Db, #{where => [{path, [<<"type">>], <<"step">>}]}),
+    Put = fun(I) ->
+        fun() ->
+            barrel_docdb:put_doc(Db, #{<<"id">> => integer_to_binary(I),
+                                       <<"type">> => <<"step">>})
+        end
+    end,
+    Events = traced(Pid, fun() ->
+        Results = grouped(Pid, [Put(I) || I <- lists:seq(1, 8)]),
+        8 = length([ok || {ok, _} <- Results])
+    end),
+    Calls = [MFA || {call, MFA} <- sub_events(Events)],
+    ?assertEqual([{barrel_query_sub, notify_changes, 2}, {barrel_sub, notify, 2}],
+                 lists:usort([{M, F, length(A)} || {M, F, A} <- Calls])),
+    ?assertEqual(2, length(Calls)),
+    Ids = [integer_to_binary(I) || I <- lists:seq(1, 8)],
+    ?assertEqual(Ids, [Id || #{id := Id} <- recv(barrel_change, 8)]),
+    ?assertEqual(Ids, [Id || #{id := Id} <- recv(barrel_query_change, 8)]),
+    ok = barrel_docdb:unsubscribe(PathRef),
+    ok = barrel_docdb:unsubscribe_query(QueryRef),
+    %% the flags drop with the last subscription
+    Events2 = traced(Pid, fun() -> {ok, _} = (Put(9))() end),
+    ?assertEqual([], sub_events(Events2)).
+
+%% A document with its own outbox tag beside one without, and a
+%% document opting out of the call's tag.
+put_docs_doc_outbox(Config) ->
+    Db = ?config(db, Config),
+    [{ok, _}, {ok, _}] =
+        barrel_docdb:put_docs(Db, [{#{<<"id">> => <<"block">>}, #{outbox => [?TAG]}},
+                                   #{<<"id">> => <<"record">>}]),
+    ?assertEqual([<<"block">>], pending(Db, ?TAG)),
+    [{ok, _}, {ok, _}] =
+        barrel_docdb:put_docs(Db, [#{<<"id">> => <<"block2">>},
+                                   {#{<<"id">> => <<"record2">>}, #{outbox => []}}],
+                              #{outbox => [?TAG]}),
+    ?assertEqual([<<"block">>, <<"block2">>], pending(Db, ?TAG)),
+    ok.
+
+%% A synced document beside an unsynced one: the batch is synced once,
+%% and a caller grouped with it is answered after that sync too.
+put_docs_doc_sync(Config) ->
+    Db = ?config(db, Config),
+    Pid = ?config(pid, Config),
+    ok = meck:new(barrel_store_rocksdb, [passthrough, no_link]),
+    Put = fun() -> barrel_docdb:put_doc(Db, #{<<"id">> => <<"alone">>}) end,
+    Docs = fun() ->
+        barrel_docdb:put_docs(Db, [#{<<"id">> => <<"record">>},
+                                   {#{<<"id">> => <<"block">>}, #{sync => true}}])
+    end,
+    [{ok, _}, [{ok, _}, {ok, _}]] = grouped(Pid, [Put, Docs]),
+    ?assertEqual([true], batch_syncs()),
+    ok = meck:reset(barrel_store_rocksdb),
+    [{ok, _}, {ok, _}] =
+        barrel_docdb:put_docs(Db, [#{<<"id">> => <<"u1">>},
+                                   {#{<<"id">> => <<"u2">>}, #{sync => false}}]),
+    ?assertEqual([false], batch_syncs()),
+    ok.
+
+%% Only outbox and sync are per-document options.
+put_docs_invalid_doc_opts(Config) ->
+    Db = ?config(db, Config),
+    [{ok, _}, {error, {invalid_doc_opts, #{return_hlc := true}}},
+     {error, {invalid_doc_opts, #{sync := yes}}}] =
+        barrel_docdb:put_docs(Db, [#{<<"id">> => <<"fine">>},
+                                   {#{<<"id">> => <<"x">>}, #{return_hlc => true}},
+                                   {#{<<"id">> => <<"y">>}, #{sync => yes}}]),
+    {error, not_found} = barrel_docdb:get_doc(Db, <<"x">>),
+    ok.
+
+%% 64 writers race on 8 ids while groups are built and written in
+%% parallel: one create per id wins, and every update that answered ok
+%% is in the history (none read a state older than an answered write).
+same_ids_many_writers(Config) ->
+    Db = ?config(db, Config),
+    Id = fun(I) -> <<"k", (integer_to_binary(I rem 8))/binary>> end,
+    Creates = run_parallel(64, fun(I) ->
+        barrel_docdb:put_doc(Db, #{<<"id">> => Id(I), <<"by">> => I})
+    end),
+    ?assertEqual(8, length([ok || {ok, _} <- Creates])),
+    ?assertEqual(56, length([c || {error, conflict} <- Creates])),
+    Updates = run_parallel(64, fun(I) -> update_loop(Db, Id(I), 5, 0) end),
+    ?assertEqual(64 * 5, lists:sum(Updates)),
+    {ok, Changes, _} = barrel_docdb:get_changes(Db, first),
+    ?assertEqual(8, length(Changes)),
+    {ok, Hist} = barrel_docdb:fold_history(Db, fun(E, Acc) -> {ok, [E | Acc]} end, []),
+    ?assertEqual(8 + 64 * 5, length(Hist)),
+    ok.
+
+%% A read through the server after an answer sees that write, even
+%% while later groups are still being written.
+reads_see_answered_writes(Config) ->
+    Db = ?config(db, Config),
+    Pid = ?config(pid, Config),
+    Results = run_parallel(32, fun(I) ->
+        Id = <<"r", (integer_to_binary(I))/binary>>,
+        lists:all(fun(N) ->
+            {ok, _} = barrel_docdb:put_doc(Db, #{<<"id">> => <<Id/binary, "-",
+                                                         (integer_to_binary(N))/binary>>}),
+            {ok, Info} = barrel_db_server:info(Pid),
+            is_map(Info) andalso
+                element(1, barrel_docdb:get_doc(Db, <<Id/binary, "-",
+                                                      (integer_to_binary(N))/binary>>)) =:= ok
+        end, lists:seq(1, 20))
+    end),
+    ?assertEqual(lists:duplicate(32, true), Results).
+
+%% Update Id N times, retrying on conflicts; returns the updates done.
+update_loop(_Db, _Id, 0, Done) ->
+    Done;
+update_loop(Db, Id, N, Done) ->
+    {ok, #{<<"_rev">> := Rev} = Doc} = barrel_docdb:get_doc(Db, Id),
+    case barrel_docdb:put_doc(Db, Doc#{<<"_rev">> => Rev, <<"n">> => N}) of
+        {ok, _} -> update_loop(Db, Id, N - 1, Done + 1);
+        {error, conflict} -> update_loop(Db, Id, N, Done)
+    end.
+
+%% A write prepared in the caller gives the batch the writer built
+%% before: new docs, updates with outbox tags and path changes (archive,
+%% version chain, history), TTL, provenance, embedding, tombstones and
+%% recreation over a tombstone.
+prepared_batch_equals_inline(Config) ->
+    same_batches(?config(db, Config)).
+
+%% The same with channel feed rows.
+prepared_batch_equals_inline_channels(Config) ->
+    same_batches(?config(db, Config)).
+
+same_batches(Db) ->
+    Tagged = #{outbox => [?TAG, <<"other">>]},
+    Steps = [
+        {#{<<"id">> => <<"a">>, <<"type">> => <<"step">>,
+           <<"input">> => #{<<"args">> => [1, 2, 3], <<"name">> => <<"x/y">>},
+           <<"n">> => 1}, #{}},
+        {#{<<"id">> => <<"b">>, <<"type">> => <<"step">>,
+           <<"_embedding">> => [0.5, 0.25]},
+         Tagged#{expires_at => 4102444800000,
+                 provenance => #{actor => <<"agent-1">>}}},
+        {rev(Db, <<"a">>, #{<<"type">> => <<"step">>, <<"n">> => 2,
+                            <<"status">> => <<"done">>}), Tagged},
+        {rev(Db, <<"a">>, #{<<"type">> => <<"step">>, <<"n">> => 2,
+                            <<"status">> => <<"done">>}), #{}},
+        {rev(Db, <<"b">>, #{<<"type">> => <<"other">>}), Tagged#{expires_at => 0}},
+        {rev(Db, <<"a">>, #{<<"_deleted">> => true}), Tagged},
+        {#{<<"id">> => <<"a">>, <<"type">> => <<"step">>, <<"again">> => true},
+         Tagged},
+        {#{<<"id">> => <<"c/é"/utf8>>, <<"list">> => [#{<<"k">> => null}, 1.5, []],
+           <<"empty">> => #{}, <<"_private">> => 1}, #{}}
+    ],
+    lists:foreach(fun({Doc0, Opts}) ->
+        Doc = resolve_rev(Db, Doc0),
+        Hlc = barrel_hlc:new_hlc(),
+        {Inline, InlineNote} =
+            barrel_db_server:doc_write_ops(inline, Db, Doc, Opts, Hlc),
+        {Prepared, PreparedNote} =
+            barrel_db_server:doc_write_ops(prepared, Db, Doc, Opts, Hlc),
+        ?assert(length(Inline) > 5),
+        ?assertEqual(no_diff, first_diff(Inline, Prepared, 1)),
+        ?assertEqual(InlineNote, erlang:delete_element(6, PreparedNote)),
+        %% advance the state for the next step
+        {ok, _} = barrel_docdb:put_doc(Db, Doc, Opts)
+    end, Steps).
+
+first_diff([], [], _N) -> no_diff;
+first_diff([Op | A], [Op | B], N) -> first_diff(A, B, N + 1);
+first_diff(A, B, N) -> {N, lists:sublist(A, 1), lists:sublist(B, 1)}.
+
+%% An update of Id whose _rev is read when the step runs.
+rev(_Db, Id, Body) ->
+    {rev, Id, Body}.
+
+resolve_rev(Db, {rev, Id, Body}) ->
+    {ok, #{<<"_rev">> := Rev}} = barrel_docdb:get_doc(Db, Id, #{include_deleted => true}),
+    Body#{<<"id">> => Id, <<"_rev">> => Rev};
+resolve_rev(_Db, Doc) ->
+    Doc.
+
+%%====================================================================
+%% Helpers
+%%====================================================================
+
+%% New docs, updates, deletes and put_docs from 8 writers: 1000 writes.
+thousand_writes(Db) ->
+    Results = run_parallel(8, fun(W) ->
+        Prefix = <<"w", (integer_to_binary(W))/binary, "-">>,
+        lists:foreach(fun(I) ->
+            Id = <<Prefix/binary, (integer_to_binary(I))/binary>>,
+            {ok, #{<<"rev">> := Rev}} =
+                barrel_docdb:put_doc(Db, #{<<"id">> => Id, <<"type">> => <<"step">>}),
+            {ok, #{<<"rev">> := Rev2}} =
+                barrel_docdb:put_doc(Db, #{<<"id">> => Id, <<"_rev">> => Rev,
+                                           <<"v">> => 2}, #{sync => true}),
+            {ok, _} = barrel_docdb:delete_doc(Db, Id, #{rev => Rev2})
+        end, lists:seq(1, 40)),
+        [{ok, _}, {ok, _}, {ok, _}, {ok, _}, {ok, _}] =
+            barrel_docdb:put_docs(Db, [#{<<"id">> => <<Prefix/binary, "b",
+                                                     (integer_to_binary(I))/binary>>}
+                                       || I <- lists:seq(1, 5)]),
+        ok
+    end),
+    %% 8 x (40 x 3 + 5) = 1000
+    ?assertEqual(lists:duplicate(8, ok), Results),
+    ok.
+
+%% Trace the calls and sends of the writer and the processes linked to
+%% it (its committer among them) while Fun runs.
+traced(Pid, Fun) ->
+    Tracer = spawn_link(fun() -> collect([]) end),
+    {links, Links} = erlang:process_info(Pid, links),
+    Traced = [Pid | [L || L <- Links, is_pid(L)]],
+    _ = [1 = erlang:trace(P, true, [call, send, {tracer, Tracer}]) || P <- Traced],
+    _ = erlang:trace_pattern({barrel_sub, '_', '_'}, true, [local]),
+    _ = erlang:trace_pattern({barrel_query_sub, '_', '_'}, true, [local]),
+    Fun(),
+    _ = [erlang:trace(P, false, [call, send]) || P <- Traced],
+    _ = erlang:trace_pattern({'_', '_', '_'}, false, [local]),
+    Tracer ! {done, self()},
+    receive {events, Events} -> Events after 10000 -> error(tracer_timeout) end.
+
+collect(Acc) ->
+    receive
+        {trace, _, call, MFA} -> collect([{call, MFA} | Acc]);
+        {trace, _, send, Msg, To} -> collect([{send, To, Msg} | Acc]);
+        {done, From} -> From ! {events, lists:reverse(Acc)}
+    end.
+
+%% Calls into the managers and messages sent to them.
+sub_events(Events) ->
+    Managers = [barrel_sub, barrel_query_sub,
+                whereis(barrel_sub), whereis(barrel_query_sub)],
+    [E || {call, {M, _, _}} = E <- Events,
+          M =:= barrel_sub orelse M =:= barrel_query_sub]
+    ++ [E || {send, To, _} = E <- Events, lists:member(To, Managers)].
+
+%% Run N funs at once (released together); results in order.
+run_parallel(N, Fun) ->
+    Parent = self(),
+    Pids = [spawn_link(fun() ->
+                receive go -> ok end,
+                Parent ! {self(), Fun(I)}
+            end) || I <- lists:seq(1, N)],
+    _ = [P ! go || P <- Pids],
+    [receive {P, R} -> R after 60000 -> error(timeout) end || P <- Pids].
+
+%% Queue the calls at a suspended server, in order, then resume it so
+%% they are taken as one group. Results in call order.
+grouped(Pid, Funs) ->
+    ok = sys:suspend(Pid),
+    Parent = self(),
+    Callers = lists:map(
+        fun({Idx, Fun}) ->
+            C = spawn_link(fun() -> Parent ! {self(), Fun()} end),
+            wait_queue(Pid, Idx),
+            C
+        end, lists:zip(lists:seq(1, length(Funs)), Funs)),
+    ok = sys:resume(Pid),
+    [receive {C, R} -> R after 10000 -> error(timeout) end || C <- Callers].
+
+wait_queue(Pid, N) ->
+    case erlang:process_info(Pid, message_queue_len) of
+        {message_queue_len, L} when L >= N -> ok;
+        _ -> timer:sleep(1), wait_queue(Pid, N)
+    end.
+
+%% The sync flag of each group batch written since the mock was set.
+batch_syncs() ->
+    [maps:get(sync, Opts, false)
+     || {_, {barrel_store_rocksdb, write_batch, [_, _, Opts]}, _}
+            <- meck:history(barrel_store_rocksdb)].
+
+pending(Db, Tag) ->
+    lists:reverse(
+        barrel_docdb:outbox_fold(Db, Tag, fun(#{id := Id}, Acc) -> {ok, [Id | Acc]} end, [])).
+
+recv(Tag, N) ->
+    [receive {Tag, _Db, Change} -> Change after 5000 -> error({missing, Tag}) end
+     || _ <- lists:seq(1, N)].
