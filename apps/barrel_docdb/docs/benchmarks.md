@@ -205,7 +205,10 @@ group-commit release, 1.7.0-ro is the read-only change before this work.
 | 1 writer, synced | 83 | 90 | 91 | 1.10x | 5,954 / 5,957 | 31,909 / 32,191 |
 
 A second run of the synced case at load 45 to 80: 4,309 (1.6.0), 4,288
-(1.7.0-ro), 5,909 (1.7.0), 1.37x.
+(1.7.0-ro), 5,909 (1.7.0), 1.37x. A third run of the 64-writer new-doc
+cases at load 7 to 53: synced 4,971 / 4,928 / 6,272 (1.26x, p50 12,596
+/ 10,060 us), unsynced 7,296 / 7,317 / 18,501 (2.54x, p50 8,533 / 3,258
+us).
 
 Synced writes stay bound by the sync. 64 synced writers form one group per
 sync, and a cycle is the group's build, then its write and sync. Only the
