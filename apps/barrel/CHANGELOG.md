@@ -3,6 +3,14 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.7.0] - 2026-09-25
+
+### Added
+- `barrel_ctx_export:export/3`: quiesced export of a composed database to a directory. It holds the database (`barrel_dbs:hold/2`), copies the docdb and vector store files, and writes a manifest with a sha256 per file, the source identity (keyspace, instance id, last seq) and the portable vector config. Encrypted databases export as ciphertext. A record-mode policy that names a secret (`api_key`, `token`, `password`, ...) at any depth is refused with `{policy_holds_secret, Key}` and nothing is copied.
+- `barrel_ctx_export:import/2`: copies and verifies every file into a partial directory, resumes from files already verified, writes an import sidecar (source keyspace, a fresh source id minted into the sidecar) and renames into place only when complete. `open/1`, `open_opts/1`, `import_info/1`, `list_imports/0`, `remove_import/1` serve and manage imported generations, always read only: opening, querying and closing an import creates or rewrites no file, so every file keeps the checksum of the manifest and several nodes can serve one directory. The import keeps the source's BM25 backend: a disk index is copied as written, a memory one is rebuilt at open.
+- A source that an older version wrote (a column family added since, a disk BM25 index from before the durable format or with an interrupted compaction) fails a read-only open with `read_only_upgrade_needed`. Export then opens it once writable and closes it under the hold before copying, so the exported files open read only and match their checksums; a source opened read only by its owner is not upgraded and the export fails with the error.
+- `barrel_ctx_manifest`: manifest read, write, scan and per-file verification.
+
 ## [1.6.0] - 2026-09-25
 
 ### Added

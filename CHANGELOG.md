@@ -4,6 +4,20 @@ All notable changes to the Barrel umbrella are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and each app
 is versioned independently under [Semantic Versioning](https://semver.org/).
 
+## [2026-09-25] Export and read-only import of a database
+
+A context can be copied to another node and queried there without the
+network. An export holds the database, copies its files and writes a
+checksummed manifest; an import verifies each file, resumes an interrupted
+copy and serves the result read only under a new name, writing nothing to the
+copied files. A source written by an older version is upgraded by one writable
+open under the export hold. A record policy that carries a secret is never
+exported.
+
+| App | Version | Change |
+|-----|---------|--------|
+| barrel | 1.7.0 | `barrel_ctx_export` (export, verified import), `barrel_ctx_manifest` |
+
 ## [2026-09-25] Read-only barrel opens and database leases
 
 A query that spans databases must keep each one open while it runs, and an
