@@ -46,11 +46,16 @@ profile(Case, Type, Opts) ->
     Duration = maps:get(duration, Opts, 3000),
     Db = setup(Case, Writers, Kind),
     {ok, Pid} = barrel_docdb:db_pid(Db),
+    %% target => clients profiles the writers' processes instead
+    Target = case maps:get(target, Opts, server) of
+        server -> Pid;
+        clients -> new
+    end,
     {ok, _} = tprof:start(#{type => Type}),
-    _ = tprof:enable_trace(Pid),
+    _ = tprof:enable_trace(Target),
     _ = tprof:set_pattern('_', '_', '_'),
     Lats = drive(Db, Writers, Kind, WOpts, Duration),
-    _ = tprof:disable_trace(Pid),
+    _ = tprof:disable_trace(Target),
     Sample = tprof:collect(),
     ok = tprof:stop(),
     Docs = docs_written(Lats, Kind),
@@ -62,24 +67,61 @@ profile(Case, Type, Opts) ->
     teardown(Db),
     {Docs, Profile}.
 
-%% @doc Sample the server's current function and queue every millisecond
-%% while a case runs (untraced): where the writer's wall time goes.
+%% @doc Sample the current function and queue of the server and of the
+%% processes it links to, every millisecond while a case runs
+%% (untraced): where the writer's wall time goes.
 sample(Case, Opts) ->
     {Writers, Kind, WOpts} = maps:get(Case, cases()),
     Duration = maps:get(duration, Opts, 3000),
     Db = setup(Case, Writers, Kind),
     {ok, Pid} = barrel_docdb:db_pid(Db),
+    {links, Links} = erlang:process_info(Pid, links),
     Self = self(),
-    Sampler = spawn_link(fun() -> sample_loop(Pid, Self, #{}, 0, 0) end),
+    Sampled = [Pid | [L || L <- Links, is_pid(L), not is_supervisor(L)]],
+    Samplers0 = [{P, spawn_link(fun() -> sample_loop(P, Self, #{}, 0, 0) end)}
+                 || P <- Sampled],
+    %% and two of the writers, once they run
+    Finder = spawn_link(fun() ->
+        timer:sleep(200),
+        Clients = lists:sublist([P || P <- erlang:processes(), is_client(P)], 2),
+        Self ! {clients, [{P, spawn_link(fun() -> sample_loop(P, Self, #{}, 0, 0) end)}
+                          || P <- Clients]}
+    end),
     Lats = drive(Db, Writers, Kind, WOpts, Duration),
-    Sampler ! stop,
-    {Counts, N, QSum} = receive {samples, C, SN, Q} -> {C, SN, Q} end,
-    io:format("SAMPLES ~p docs=~p samples=~p mean_queue=~.1f~n",
-              [Case, docs_written(Lats, Kind), N, QSum / max(N, 1)]),
-    _ = [io:format("  ~5.1f%  ~p~n", [100 * V / N, K])
-         || {K, V} <- lists:sublist(lists:reverse(lists:keysort(2, maps:to_list(Counts))), 15)],
+    Samplers = Samplers0 ++ receive {clients, Cs} -> Cs after 1000 -> [] end,
+    unlink(Finder),
+    io:format("SAMPLES ~p docs=~p~n", [Case, docs_written(Lats, Kind)]),
+    lists:foreach(fun({P, S}) ->
+        S ! stop,
+        {Counts, N, QSum} = receive {samples, C, SN, Q} -> {C, SN, Q} end,
+        io:format(" ~p samples=~p mean_queue=~.1f~n", [P, N, QSum / max(N, 1)]),
+        _ = [io:format("  ~5.1f%  ~p~n", [100 * V / N, K])
+             || {K, V} <- lists:sublist(
+                            lists:reverse(lists:keysort(2, maps:to_list(Counts))), 8)]
+    end, Samplers),
     teardown(Db),
     ok.
+
+is_client(P) ->
+    case erlang:process_info(P, current_stacktrace) of
+        {current_stacktrace, St} ->
+            lists:any(fun({barrel_bench_writer, loop, _, _}) -> true;
+                         (_) -> false
+                      end, St);
+        undefined ->
+            false
+    end.
+
+is_supervisor(P) ->
+    case erlang:process_info(P, dictionary) of
+        {dictionary, D} ->
+            case proplists:get_value('$initial_call', D) of
+                {supervisor, _, _} -> true;
+                _ -> false
+            end;
+        undefined ->
+            true
+    end.
 
 sample_loop(Pid, Parent, Acc, N, QSum) ->
     receive

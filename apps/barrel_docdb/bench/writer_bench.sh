@@ -4,7 +4,7 @@
 #
 # Usage:
 #   ./writer_bench.sh run CASE [DURATION_MS]
-#   ./writer_bench.sh profile CASE call_time|call_memory [DURATION_MS]
+#   ./writer_bench.sh profile CASE call_time|call_memory [DURATION_MS] [server|clients]
 #   ./writer_bench.sh sample CASE [DURATION_MS]
 #   ./writer_bench.sh phases [DOCS]
 #   ./writer_bench.sh cases
@@ -41,7 +41,7 @@ case "$1" in
         run_erl "barrel_bench_writer:run($2, #{duration => ${3:-3000}})"
         ;;
     profile)
-        run_erl "barrel_bench_writer:profile($2, $3, #{duration => ${4:-3000}})"
+        run_erl "barrel_bench_writer:profile($2, $3, #{duration => ${4:-3000}, target => ${5:-server}})"
         ;;
     sample)
         run_erl "barrel_bench_writer:sample($2, #{duration => ${3:-3000}})"
