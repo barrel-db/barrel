@@ -6,7 +6,7 @@
 %%%-------------------------------------------------------------------
 -module(barrel_bench_writer).
 
--export([run/1, run/2, profile/2, profile/3, phases/1, cases/0]).
+-export([run/1, run/2, profile/2, profile/3, phases/1, sample/2, cases/0]).
 
 -define(TAG, <<"hb.task">>).
 
@@ -62,6 +62,40 @@ profile(Case, Type, Opts) ->
     teardown(Db),
     {Docs, Profile}.
 
+%% @doc Sample the server's current function and queue every millisecond
+%% while a case runs (untraced): where the writer's wall time goes.
+sample(Case, Opts) ->
+    {Writers, Kind, WOpts} = maps:get(Case, cases()),
+    Duration = maps:get(duration, Opts, 3000),
+    Db = setup(Case, Writers, Kind),
+    {ok, Pid} = barrel_docdb:db_pid(Db),
+    Self = self(),
+    Sampler = spawn_link(fun() -> sample_loop(Pid, Self, #{}, 0, 0) end),
+    Lats = drive(Db, Writers, Kind, WOpts, Duration),
+    Sampler ! stop,
+    {Counts, N, QSum} = receive {samples, C, SN, Q} -> {C, SN, Q} end,
+    io:format("SAMPLES ~p docs=~p samples=~p mean_queue=~.1f~n",
+              [Case, docs_written(Lats, Kind), N, QSum / max(N, 1)]),
+    _ = [io:format("  ~5.1f%  ~p~n", [100 * V / N, K])
+         || {K, V} <- lists:sublist(lists:reverse(lists:keysort(2, maps:to_list(Counts))), 15)],
+    teardown(Db),
+    ok.
+
+sample_loop(Pid, Parent, Acc, N, QSum) ->
+    receive
+        stop -> Parent ! {samples, Acc, N, QSum}
+    after 0 ->
+        case erlang:process_info(Pid, [current_function, status, message_queue_len]) of
+            [{current_function, F}, {status, St}, {message_queue_len, Q}] ->
+                K = {St, F},
+                timer:sleep(1),
+                sample_loop(Pid, Parent, maps:update_with(K, fun(X) -> X + 1 end, 1, Acc),
+                            N + 1, QSum + Q);
+            undefined ->
+                Parent ! {samples, Acc, N, QSum}
+        end
+    end.
+
 %% Exclusive totals per bucket, per document (traced, so inflated).
 print_buckets({_Type, Total, Rows}, Docs) ->
     Sums = lists:foldl(
@@ -111,7 +145,7 @@ bucket(_, _, _) -> other.
 %% @doc Untraced cost of each writer step, one process, per document (us).
 phases(N) ->
     Db = <<"bench_phases_", (integer_to_binary(erlang:unique_integer([positive])))/binary>>,
-    {ok, _} = barrel_docdb:create_db(Db, #{}),
+    {ok, _} = barrel_docdb:create_db(Db, #{data_dir => data_dir()}),
     StoreRef = persistent_term:get({barrel_store, Db}),
     Docs = [doc(id(1, I), I) || I <- lists:seq(1, N)],
     Recs = [barrel_doc:make_doc_record(barrel_doc:to_map(D)) || D <- Docs],
@@ -200,9 +234,13 @@ time_per(Fun, N) ->
 setup(Case, Writers, Kind) ->
     Db = <<"bench_", (atom_to_binary(Case))/binary, "_",
            (integer_to_binary(erlang:unique_integer([positive])))/binary>>,
-    {ok, _} = barrel_docdb:create_db(Db, #{}),
+    {ok, _} = barrel_docdb:create_db(Db, #{data_dir => data_dir()}),
     ok = seed(Db, Writers, Kind),
     Db.
+
+data_dir() ->
+    {ok, Dir} = application:get_env(barrel_docdb, data_dir),
+    Dir.
 
 teardown(Db) ->
     _ = barrel_docdb:delete_db(Db),

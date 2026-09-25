@@ -5,6 +5,7 @@
 # Usage:
 #   ./writer_bench.sh run CASE [DURATION_MS]
 #   ./writer_bench.sh profile CASE call_time|call_memory [DURATION_MS]
+#   ./writer_bench.sh sample CASE [DURATION_MS]
 #   ./writer_bench.sh phases [DOCS]
 #   ./writer_bench.sh cases
 #
@@ -28,6 +29,7 @@ run_erl() {
     # shellcheck disable=SC2086
     erl -noshell -pa "$OUT" $PA \
         -eval "logger:set_primary_config(level, warning),
+               ok = application:load(barrel_docdb),
                application:set_env(barrel_docdb, data_dir, \"$DATA\"),
                {ok, _} = application:ensure_all_started(barrel_docdb),
                $1,
@@ -40,6 +42,9 @@ case "$1" in
         ;;
     profile)
         run_erl "barrel_bench_writer:profile($2, $3, #{duration => ${4:-3000}})"
+        ;;
+    sample)
+        run_erl "barrel_bench_writer:sample($2, #{duration => ${3:-3000}})"
         ;;
     phases)
         run_erl "barrel_bench_writer:phases(${2:-5000})"
