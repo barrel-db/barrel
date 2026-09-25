@@ -1304,20 +1304,35 @@ run_group(Fill0, G0, State0) ->
     {Grp, Carry, Fill1, State} = drain(G0, Fill0, State0),
     %% a read of an id this group writes, taken while it was built, is stale
     Fill = forget(Grp, Fill1),
-    case Carry of
-        none ->
-            State1 = dispatch_group(Grp, State),
-            case Fill of
-                #fill{pending = []} -> State1;
-                _ -> run_group(Fill, #grp{}, State1)
-            end;
-        #wreq{done = Done} ->
+    case {Carry, Fill} of
+        {none, #fill{pending = []}} ->
+            last_group(Grp, State);
+        {none, _} ->
+            run_group(Fill, #grp{}, dispatch_group(Grp, State));
+        {#wreq{done = Done}, _} ->
             {State1, MoreSeg} = commit_group(Grp, State),
             #fill{pending = Pending} = Fill,
             run_group(Fill#fill{pending = [Carry#wreq{done = MoreSeg ++ Done}
                                            | Pending]},
                       #grp{}, State1)
     end.
+
+%% With nothing else to build or being written, the writer writes the
+%% group itself: a lone writer does not pay the handover.
+last_group(#grp{ref = undefined} = Grp, #state{inflight = []} = State) ->
+    write_here(Grp, State);
+last_group(Grp, State) ->
+    dispatch_group(Grp, State).
+
+write_here(#grp{reqs = []}, State) ->
+    State;
+write_here(#grp{reqs = Reqs, count = N, unsent = Unsent},
+           #state{name = DbName, store_ref = StoreRef} = State) ->
+    {Sync, Plan} = group_plan(Reqs),
+    Batch = build_batch(StoreRef, lists:append(lists:reverse(Unsent))),
+    _ = write_and_answer(StoreRef, DbName, Batch, Sync, Plan),
+    ok = barrel_metrics:observe_write_group(DbName, N),
+    count_group(N, State).
 
 forget(#grp{ids = Ids}, #fill{cache = Cache} = Fill) ->
     Fill#fill{cache = maps:without(maps:keys(Ids), Cache)}.
