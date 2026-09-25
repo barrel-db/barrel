@@ -14,7 +14,10 @@
 -export([no_subscriber_no_notify/1,
          subscribers_notified_per_group/1,
          prepared_batch_equals_inline/1,
-         prepared_batch_equals_inline_channels/1]).
+         prepared_batch_equals_inline_channels/1,
+         put_docs_doc_outbox/1,
+         put_docs_doc_sync/1,
+         put_docs_invalid_doc_opts/1]).
 
 -define(TAG, <<"hb.task">>).
 
@@ -22,7 +25,10 @@ all() ->
     [no_subscriber_no_notify,
      subscribers_notified_per_group,
      prepared_batch_equals_inline,
-     prepared_batch_equals_inline_channels].
+     prepared_batch_equals_inline_channels,
+     put_docs_doc_outbox,
+     put_docs_doc_sync,
+     put_docs_invalid_doc_opts].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(barrel_docdb),
@@ -46,6 +52,7 @@ open(TC, Opts, Config) ->
     [{db, Db}, {pid, Pid} | Config].
 
 end_per_testcase(_TC, Config) ->
+    try meck:unload(barrel_store_rocksdb) catch _:_ -> ok end,
     _ = erlang:trace(all, false, [call, send]),
     _ = erlang:trace_pattern({'_', '_', '_'}, false, [local]),
     try barrel_docdb:delete_db(?config(db, Config)) catch _:_ -> ok end,
@@ -95,6 +102,52 @@ subscribers_notified_per_group(Config) ->
     %% the flags drop with the last subscription
     Events2 = traced(Pid, fun() -> {ok, _} = (Put(9))() end),
     ?assertEqual([], sub_events(Events2)).
+
+%% A document with its own outbox tag beside one without, and a
+%% document opting out of the call's tag.
+put_docs_doc_outbox(Config) ->
+    Db = ?config(db, Config),
+    [{ok, _}, {ok, _}] =
+        barrel_docdb:put_docs(Db, [{#{<<"id">> => <<"block">>}, #{outbox => [?TAG]}},
+                                   #{<<"id">> => <<"record">>}]),
+    ?assertEqual([<<"block">>], pending(Db, ?TAG)),
+    [{ok, _}, {ok, _}] =
+        barrel_docdb:put_docs(Db, [#{<<"id">> => <<"block2">>},
+                                   {#{<<"id">> => <<"record2">>}, #{outbox => []}}],
+                              #{outbox => [?TAG]}),
+    ?assertEqual([<<"block">>, <<"block2">>], pending(Db, ?TAG)),
+    ok.
+
+%% A synced document beside an unsynced one: the batch is synced once,
+%% and a caller grouped with it is answered after that sync too.
+put_docs_doc_sync(Config) ->
+    Db = ?config(db, Config),
+    Pid = ?config(pid, Config),
+    ok = meck:new(barrel_store_rocksdb, [passthrough, no_link]),
+    Put = fun() -> barrel_docdb:put_doc(Db, #{<<"id">> => <<"alone">>}) end,
+    Docs = fun() ->
+        barrel_docdb:put_docs(Db, [#{<<"id">> => <<"record">>},
+                                   {#{<<"id">> => <<"block">>}, #{sync => true}}])
+    end,
+    [{ok, _}, [{ok, _}, {ok, _}]] = grouped(Pid, [Put, Docs]),
+    ?assertEqual([true], batch_syncs()),
+    ok = meck:reset(barrel_store_rocksdb),
+    [{ok, _}, {ok, _}] =
+        barrel_docdb:put_docs(Db, [#{<<"id">> => <<"u1">>},
+                                   {#{<<"id">> => <<"u2">>}, #{sync => false}}]),
+    ?assertEqual([false], batch_syncs()),
+    ok.
+
+%% Only outbox and sync are per-document options.
+put_docs_invalid_doc_opts(Config) ->
+    Db = ?config(db, Config),
+    [{ok, _}, {error, {invalid_doc_opts, #{return_hlc := true}}},
+     {error, {invalid_doc_opts, #{sync := yes}}}] =
+        barrel_docdb:put_docs(Db, [#{<<"id">> => <<"fine">>},
+                                   {#{<<"id">> => <<"x">>}, #{return_hlc => true}},
+                                   {#{<<"id">> => <<"y">>}, #{sync => yes}}]),
+    {error, not_found} = barrel_docdb:get_doc(Db, <<"x">>),
+    ok.
 
 %% A write prepared in the caller gives the batch the writer built
 %% before: new docs, updates with outbox tags and path changes (archive,
@@ -239,6 +292,16 @@ wait_queue(Pid, N) ->
         {message_queue_len, L} when L >= N -> ok;
         _ -> timer:sleep(1), wait_queue(Pid, N)
     end.
+
+%% The sync flag of each group batch written since the mock was set.
+batch_syncs() ->
+    [maps:get(sync, Opts, false)
+     || {_, {barrel_store_rocksdb, write_batch, [_, _, Opts]}, _}
+            <- meck:history(barrel_store_rocksdb)].
+
+pending(Db, Tag) ->
+    lists:reverse(
+        barrel_docdb:outbox_fold(Db, Tag, fun(#{id := Id}, Acc) -> {ok, [Id | Acc]} end, [])).
 
 recv(Tag, N) ->
     [receive {Tag, _Db, Change} -> Change after 5000 -> error({missing, Tag}) end

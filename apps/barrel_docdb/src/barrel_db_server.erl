@@ -116,7 +116,8 @@
     pending = [] :: [term()],
     seg = [] :: [{term(), list(), term()}],
     done = [] :: [term()],
-    more = false :: boolean()
+    more = false :: boolean(),
+    sync = false :: boolean()   %% the request or one of its docs asked for sync
 }).
 
 %% A document write prepared in the calling process: the parts of its
@@ -206,15 +207,24 @@ put_doc(Pid, Doc, Opts) ->
 put_doc(Pid, DbName, Doc, Opts) ->
     gen_server:call(Pid, {put_doc, prepare(DbName, Doc), Opts}).
 
-%% @doc Put multiple documents (batch write)
--spec put_docs(pid(), [map()], map()) -> [{ok, map()} | {error, term()}].
+%% @doc Put multiple documents (batch write). A document may come as
+%% `{Doc, DocOpts}' with its own `outbox' and `sync' options.
+-spec put_docs(pid(), [map() | {map(), map()}], map()) ->
+    [{ok, map()} | {error, term()}].
 put_docs(Pid, Docs, Opts) ->
     gen_server:call(Pid, {put_docs, Docs, Opts}).
 
 %% @doc put_docs/3 with the documents prepared in the calling process.
--spec put_docs(pid(), binary(), [map()], map()) -> [{ok, map()} | {error, term()}].
+-spec put_docs(pid(), binary(), [map() | {map(), map()}], map()) ->
+    [{ok, map()} | {error, term()}].
 put_docs(Pid, DbName, Docs, Opts) ->
-    gen_server:call(Pid, {put_docs, [prepare(DbName, D) || D <- Docs], Opts}).
+    gen_server:call(Pid, {put_docs, [prepare_entry(DbName, D) || D <- Docs],
+                          Opts}).
+
+prepare_entry(DbName, {Doc, DocOpts}) when is_map(DocOpts) ->
+    {prepare(DbName, Doc), DocOpts};
+prepare_entry(DbName, Doc) ->
+    prepare(DbName, Doc).
 
 %% @doc Get a document
 %% When raw_body => true in Opts, returns {ok, CborBin, Meta} for zero-copy responses
@@ -1204,18 +1214,24 @@ group_commit(Req, From, State) ->
     end.
 
 new_wreq({put_doc, Doc, Opts}, From) ->
-    wreq(put_doc, From, Opts, [{doc, Doc}]);
+    wreq(put_doc, From, Opts, [{doc, Doc, #{}}]);
 new_wreq({put_docs, Docs, Opts}, From) ->
-    wreq(put_docs, From, Opts, [{doc, D} || D <- Docs]);
+    wreq(put_docs, From, Opts, [doc_item(D) || D <- Docs]);
 new_wreq({delete_doc, DocId, Opts}, From) ->
     wreq(delete_doc, From, Opts, [{delete, DocId}]);
 new_wreq({outbox_ack, Tag, Hlcs}, From) ->
     {ok, #wreq{from = From, kind = outbox_ack, pending = [{ack, Tag, Hlcs}]}}.
 
+%% A put_docs entry: a document, or a document with its own options.
+doc_item({prepared, _} = Prepared) -> {doc, Prepared, #{}};
+doc_item({Doc, DocOpts}) when is_map(DocOpts) -> {doc, Doc, DocOpts};
+doc_item(Doc) -> {doc, Doc, #{}}.
+
 wreq(Kind, From, Opts, Items) ->
     case validate_prov_opt(Opts) of
         {ok, Opts1} ->
-            {ok, #wreq{from = From, kind = Kind, opts = Opts1, pending = Items}};
+            {ok, #wreq{from = From, kind = Kind, opts = Opts1, pending = Items,
+                       sync = sync_opt(Opts1)}};
         {error, _} = Err ->
             Err
     end.
@@ -1269,13 +1285,18 @@ add_req(#wreq{pending = [Item | Rest], seg = Seg, opts = Opts} = W,
     case prepare_item(Item, Ks) of
         {error, _} = Err ->
             add_req(W#wreq{pending = Rest, seg = [{Err, [], none} | Seg]}, G, State);
-        {Id, _} when is_map_key(Id, Ids) ->
+        {Id, _, _} when is_map_key(Id, Ids) ->
             close_group(W, G);
-        {Id, Prepared} ->
-            Built = build_item(Prepared, StoreRef, DbName, Opts),
-            add_req(W#wreq{pending = Rest, seg = [Built | Seg]},
+        {Id, Prepared, ItemOpts} ->
+            Built = build_item(Prepared, StoreRef, DbName,
+                               maps:merge(Opts, ItemOpts)),
+            add_req(W#wreq{pending = Rest, seg = [Built | Seg],
+                           sync = W#wreq.sync orelse sync_opt(ItemOpts)},
                     G#grp{ids = mark_id(Id, Built, Ids)}, State)
     end.
+
+sync_opt(#{sync := true}) -> true;
+sync_opt(_Opts) -> false.
 
 close_group(#wreq{seg = []} = W, G) ->
     {G, W};
@@ -1287,22 +1308,35 @@ mark_id(none, _Built, Ids) -> Ids;
 mark_id(Id, {{ok, _}, _, _}, Ids) -> Ids#{Id => true};
 mark_id(_Id, _Built, Ids) -> Ids.
 
-%% A document prepared for another keyspace is prepared again here.
-prepare_item({doc, {prepared, #prep{ks = Ks, rec = #{id := DocId}} = P}}, Ks) ->
-    {DocId, P};
-prepare_item({doc, {prepared, #prep{rec = #{id := DocId} = Rec}}}, Ks) ->
-    {DocId, prepare_record(Ks, Rec)};
-prepare_item({doc, {prepared, {error, _} = Err}}, _Ks) ->
-    Err;
-prepare_item({doc, Doc}, Ks) ->
-    case prepare_ks(Ks, Doc) of
-        #prep{rec = #{id := DocId}} = P -> {DocId, P};
-        {error, _} = Err -> Err
+%% {Id, Prepared, ItemOpts} or {error, Reason}.
+prepare_item({doc, Doc, DocOpts}, Ks) ->
+    case valid_doc_opts(maps:to_list(DocOpts)) of
+        true -> prepare_doc_item(Doc, DocOpts, Ks);
+        false -> {error, {invalid_doc_opts, DocOpts}}
     end;
 prepare_item({delete, DocId} = Item, _Ks) ->
-    {DocId, Item};
+    {DocId, Item, #{}};
 prepare_item({ack, _Tag, _Hlcs} = Item, _Ks) ->
-    {none, Item}.
+    {none, Item, #{}}.
+
+%% A document prepared for another keyspace is prepared again here.
+prepare_doc_item({prepared, #prep{ks = Ks, rec = #{id := DocId}} = P}, DocOpts, Ks) ->
+    {DocId, P, DocOpts};
+prepare_doc_item({prepared, #prep{rec = #{id := DocId} = Rec}}, DocOpts, Ks) ->
+    {DocId, prepare_record(Ks, Rec), DocOpts};
+prepare_doc_item({prepared, {error, _} = Err}, _DocOpts, _Ks) ->
+    Err;
+prepare_doc_item(Doc, DocOpts, Ks) ->
+    case prepare_ks(Ks, Doc) of
+        #prep{rec = #{id := DocId}} = P -> {DocId, P, DocOpts};
+        {error, _} = Err -> Err
+    end.
+
+%% A document's own options: its outbox tags and whether it is synced.
+valid_doc_opts([]) -> true;
+valid_doc_opts([{outbox, Tags} | Rest]) when is_list(Tags) -> valid_doc_opts(Rest);
+valid_doc_opts([{sync, Sync} | Rest]) when is_boolean(Sync) -> valid_doc_opts(Rest);
+valid_doc_opts(_Opts) -> false.
 
 %% Build one item: {Result, Ops, NotifyInfo}. A failed item adds no ops.
 build_item(#prep{rec = DocRecord} = P, StoreRef, DbName, Opts) ->
@@ -1353,8 +1387,7 @@ commit_group(#grp{reqs = Reqs0, count = N},
     Reqs = lists:reverse(Reqs0),
     Ops = lists:append([ItemOps || #wreq{seg = Seg} <- Reqs,
                                    {_, ItemOps, _} <- lists:reverse(Seg)]),
-    Sync = lists:any(fun(#wreq{opts = O}) -> maps:get(sync, O, false) =:= true end,
-                     Reqs),
+    Sync = lists:any(fun(#wreq{sync = S}) -> S end, Reqs),
     Written = write_group(StoreRef, Ops, Sync),
     ok = notify_written(Written, DbName, Reqs),
     MoreSeg = lists:foldl(fun(W, Acc) -> finish_req(W, Written, Acc) end,

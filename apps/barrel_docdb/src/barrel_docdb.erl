@@ -851,7 +851,8 @@ get_transport_for_target(_) ->
 %% @param Docs List of document maps to store
 %% @returns List of `{ok, Result}' or `{error, Reason}' in same order as input
 %% @see put_docs/3
--spec put_docs(binary() | pid(), [map()]) -> [{ok, map()} | {error, term()}].
+-spec put_docs(binary() | pid(), [map() | {map(), map()}]) ->
+    [{ok, map()} | {error, term()}].
 put_docs(Db, Docs) ->
     put_docs(Db, Docs, #{}).
 
@@ -860,17 +861,34 @@ put_docs(Db, Docs) ->
 %% == Options ==
 %% <ul>
 %%   <li>`sync' - If `true', sync to disk before returning (default: false)</li>
+%%   <li>any `put_doc/3' option (`outbox', `return_hlc', ...), applied to
+%%   every document</li>
 %% </ul>
+%%
+%% An entry of `Docs' may be `{Doc, DocOpts}' to give that document its
+%% own `outbox' tags (they replace the call's) and `sync' flag. The
+%% documents of one call are written in one batch, so the batch is synced
+%% when the call or any of its documents asks for `sync', and every
+%% document is answered after that sync. A `DocOpts' with another key
+%% answers `{error, {invalid_doc_opts, DocOpts}}' for that document.
+%%
+%% ```
+%% [{ok, _}, {ok, _}] = barrel_docdb:put_docs(Db, [
+%%     {Block, #{outbox => [<<"blocks">>], sync => true}},
+%%     Record
+%% ]).
+%% '''
 %%
 %% A document whose id already appears earlier in `Docs' is written after
 %% that earlier one, like a separate call: without its `_rev' it answers
 %% `{error, conflict}'.
 %%
 %% @param Db Database name or pid
-%% @param Docs List of document maps to store
+%% @param Docs List of documents, or `{Doc, DocOpts}' pairs
 %% @param Opts Options map
 %% @returns List of `{ok, Result}' or `{error, Reason}' in same order as input
--spec put_docs(binary() | pid(), [map()], map()) -> [{ok, map()} | {error, term()}].
+-spec put_docs(binary() | pid(), [map() | {map(), map()}], map()) ->
+    [{ok, map()} | {error, term()}].
 put_docs(Db, Docs, Opts) ->
     DbName = db_name(Db),
     ExtraAttrs = #{<<"db.batch_size">> => length(Docs)},
