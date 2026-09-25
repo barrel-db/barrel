@@ -13,9 +13,16 @@ that writes nothing to disk (RocksDB `OpenForReadOnly`, flat files opened
 without write access), docdb learns an import sidecar, and BQL results say
 which database state answered.
 
+The same docdb release makes one database's writer faster: callers prepare
+their documents, the writer reads a group's documents in two calls, and a
+committer writes each group while the writer builds the next. A database
+with no subscriber does no notification work. `put_docs` takes per-document
+`outbox` and `sync` options, so a block and its companion documents commit
+in one request.
+
 | App | Version | Change |
 |-----|---------|--------|
-| barrel_docdb | 1.7.0 | `read_only` open (group commit included, no file written), import sidecar, `db_exists/2`, observed version in BQL meta, `read_only_store_missing` / `read_only_upgrade_needed` errors |
+| barrel_docdb | 1.7.0 | `read_only` open (group commit included, no file written), import sidecar, `db_exists/2`, observed version in BQL meta, `read_only_store_missing` / `read_only_upgrade_needed` errors; faster writer (prepared writes, batched reads, committer process, `write_chunk`), no notification work without subscribers, per-document `outbox` / `sync` in `put_docs` |
 | barrel_vectordb | 2.5.0 | `read_only` store option (no file written, DiskANN included), `read_only_store_missing` / `read_only_upgrade_needed` errors |
 
 ## [2026-09-24] barrel_ngram segment integrity and leases

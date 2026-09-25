@@ -283,6 +283,9 @@ create_db(Name) ->
 %%   <li>`max_group' - Maximum number of write requests committed in one
 %%       batch. Writes waiting at the database are committed together,
 %%       with one sync when any of them asked for it (default: `256')</li>
+%%   <li>`write_chunk' - Documents after which an unsynced group is
+%%       handed to the database's committer, so the next group is built
+%%       while this one is written (default: `16')</li>
 %%   <li>`read_only' - `true' refuses every write (documents, local docs,
 %%       attachments, replication) with `{error, read_only}' and runs no
 %%       compaction, retention or TTL sweep. Runtime config: pass it on
