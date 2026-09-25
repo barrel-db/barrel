@@ -17,7 +17,9 @@
          prepared_batch_equals_inline_channels/1,
          put_docs_doc_outbox/1,
          put_docs_doc_sync/1,
-         put_docs_invalid_doc_opts/1]).
+         put_docs_invalid_doc_opts/1,
+         same_ids_many_writers/1,
+         reads_see_answered_writes/1]).
 
 -define(TAG, <<"hb.task">>).
 
@@ -28,7 +30,9 @@ all() ->
      prepared_batch_equals_inline_channels,
      put_docs_doc_outbox,
      put_docs_doc_sync,
-     put_docs_invalid_doc_opts].
+     put_docs_invalid_doc_opts,
+     same_ids_many_writers,
+     reads_see_answered_writes].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(barrel_docdb),
@@ -148,6 +152,53 @@ put_docs_invalid_doc_opts(Config) ->
                                    {#{<<"id">> => <<"y">>}, #{sync => yes}}]),
     {error, not_found} = barrel_docdb:get_doc(Db, <<"x">>),
     ok.
+
+%% 64 writers race on 8 ids while groups are built and written in
+%% parallel: one create per id wins, and every update that answered ok
+%% is in the history (none read a state older than an answered write).
+same_ids_many_writers(Config) ->
+    Db = ?config(db, Config),
+    Id = fun(I) -> <<"k", (integer_to_binary(I rem 8))/binary>> end,
+    Creates = run_parallel(64, fun(I) ->
+        barrel_docdb:put_doc(Db, #{<<"id">> => Id(I), <<"by">> => I})
+    end),
+    ?assertEqual(8, length([ok || {ok, _} <- Creates])),
+    ?assertEqual(56, length([c || {error, conflict} <- Creates])),
+    Updates = run_parallel(64, fun(I) -> update_loop(Db, Id(I), 5, 0) end),
+    ?assertEqual(64 * 5, lists:sum(Updates)),
+    {ok, Changes, _} = barrel_docdb:get_changes(Db, first),
+    ?assertEqual(8, length(Changes)),
+    {ok, Hist} = barrel_docdb:fold_history(Db, fun(E, Acc) -> {ok, [E | Acc]} end, []),
+    ?assertEqual(8 + 64 * 5, length(Hist)),
+    ok.
+
+%% A read through the server after an answer sees that write, even
+%% while later groups are still being written.
+reads_see_answered_writes(Config) ->
+    Db = ?config(db, Config),
+    Pid = ?config(pid, Config),
+    Results = run_parallel(32, fun(I) ->
+        Id = <<"r", (integer_to_binary(I))/binary>>,
+        lists:all(fun(N) ->
+            {ok, _} = barrel_docdb:put_doc(Db, #{<<"id">> => <<Id/binary, "-",
+                                                         (integer_to_binary(N))/binary>>}),
+            {ok, Info} = barrel_db_server:info(Pid),
+            is_map(Info) andalso
+                element(1, barrel_docdb:get_doc(Db, <<Id/binary, "-",
+                                                      (integer_to_binary(N))/binary>>)) =:= ok
+        end, lists:seq(1, 20))
+    end),
+    ?assertEqual(lists:duplicate(32, true), Results).
+
+%% Update Id N times, retrying on conflicts; returns the updates done.
+update_loop(_Db, _Id, 0, Done) ->
+    Done;
+update_loop(Db, Id, N, Done) ->
+    {ok, #{<<"_rev">> := Rev} = Doc} = barrel_docdb:get_doc(Db, Id),
+    case barrel_docdb:put_doc(Db, Doc#{<<"_rev">> => Rev, <<"n">> => N}) of
+        {ok, _} -> update_loop(Db, Id, N - 1, Done + 1);
+        {error, conflict} -> update_loop(Db, Id, N, Done)
+    end.
 
 %% A write prepared in the caller gives the batch the writer built
 %% before: new docs, updates with outbox tags and path changes (archive,

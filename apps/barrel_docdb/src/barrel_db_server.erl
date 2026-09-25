@@ -69,6 +69,14 @@
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
          terminate/2]).
 
+%% Write requests taken from the mailbox and not yet built, and the
+%% current state of their documents, read in one call per batch of
+%% requests (an id is read again once it is written).
+-record(fill, {
+    pending = [] :: list(),
+    cache = #{} :: #{binary() => map() | undefined}
+}).
+
 %% Groups handed to the committer and not yet written.
 -define(MAX_INFLIGHT, 8).
 -define(DEFAULT_WRITE_CHUNK, 16).
@@ -1279,87 +1287,151 @@ wreq(Kind, From, Opts, Items) ->
 %% A request that touches a doc id already written in the group closes
 %% it and opens the next one, so its read sees the earlier write. A
 %% group is handed to the committer while the writer builds the next.
-run_group(W, State0) ->
-    {Grp, Carry, State} = case add_req(W, #grp{}, State0) of
-        {G, none, S} -> drain(G, S);
-        Closed -> Closed
-    end,
+run_group(W, State) ->
+    {Fill, State1} = fetch(#fill{pending = [W]}, State),
+    run_group(Fill, #grp{}, State1).
+
+run_group(#fill{pending = []}, #grp{} = G, State) ->
+    dispatch_group(G, State);
+run_group(Fill0, G0, State0) ->
+    {Grp, Carry, Fill1, State} = drain(G0, Fill0, State0),
+    %% a read of an id this group writes, taken while it was built, is stale
+    Fill = forget(Grp, Fill1),
     case Carry of
         none ->
-            dispatch_group(Grp, State);
+            State1 = dispatch_group(Grp, State),
+            case Fill of
+                #fill{pending = []} -> State1;
+                _ -> run_group(Fill, #grp{}, State1)
+            end;
         #wreq{done = Done} ->
             {State1, MoreSeg} = commit_group(Grp, State),
-            run_group(Carry#wreq{done = MoreSeg ++ Done}, State1)
+            #fill{pending = Pending} = Fill,
+            run_group(Fill#fill{pending = [Carry#wreq{done = MoreSeg ++ Done}
+                                           | Pending]},
+                      #grp{}, State1)
     end.
 
-%% Take the writes waiting in the mailbox without blocking. Anything
-%% else keeps its place.
-drain(#grp{count = N} = G, #state{max_group = Max} = State) when N >= Max ->
-    {G, none, State};
-drain(#grp{items = I, sync = false} = G, #state{write_chunk = Chunk} = State)
-  when I >= Chunk ->
-    {G, none, State};
-drain(G, State) ->
+forget(#grp{ids = Ids}, #fill{cache = Cache} = Fill) ->
+    Fill#fill{cache = maps:without(maps:keys(Ids), Cache)}.
+
+%% Take the write requests waiting in the mailbox, without blocking,
+%% then read the current state of the documents they write.
+fetch(#fill{pending = Pending0, cache = Cache} = Fill,
+      #state{max_group = Max} = State0) ->
+    Pending = Pending0 ++ take_writes(Max - length(Pending0)),
+    Ids = lists:usort(lists:flatmap(fun wreq_ids/1, Pending)) -- maps:keys(Cache),
+    State = await_ids(Ids, State0),
+    {Fill#fill{pending = Pending, cache = maps:merge(Cache, prefetch(Ids, State))},
+     State}.
+
+take_writes(N) when N =< 0 ->
+    [];
+take_writes(N) ->
     receive
-        {'$gen_call', From, {put_doc, _, _} = Req} -> drain(Req, From, G, State);
-        {'$gen_call', From, {put_docs, _, _} = Req} -> drain(Req, From, G, State);
-        {'$gen_call', From, {delete_doc, _, _} = Req} -> drain(Req, From, G, State);
-        {'$gen_call', From, {outbox_ack, _, _} = Req} -> drain(Req, From, G, State)
+        {'$gen_call', From, {put_doc, _, _} = Req} -> take_write(Req, From, N);
+        {'$gen_call', From, {put_docs, _, _} = Req} -> take_write(Req, From, N);
+        {'$gen_call', From, {delete_doc, _, _} = Req} -> take_write(Req, From, N);
+        {'$gen_call', From, {outbox_ack, _, _} = Req} -> take_write(Req, From, N)
     after 0 ->
-        {G, none, State}
+        []
     end.
 
-drain(Req, From, G, State) ->
+take_write(Req, From, N) ->
     case new_wreq(Req, From) of
         {ok, W} ->
-            case add_req(W, G, State) of
-                {G1, none, State1} -> drain(G1, State1);
-                Closed -> Closed
-            end;
+            [W | take_writes(N - 1)];
         {error, _} = Err ->
             gen_server:reply(From, Err),
-            drain(G, State)
+            take_writes(N)
     end.
 
-%% Build the request's items into the group. Returns {Group, none, State},
-%% or {Group, Carry, State} when an item's id is already written in the
-%% group. An id of the group being committed is read after that commit.
+%% Ids a request reads, when known before it is built.
+wreq_ids(#wreq{pending = Items}) ->
+    [Id || Item <- Items, Id <- item_id(Item)].
+
+item_id({doc, {prepared, #prep{rec = #{id := Id}}}, _}) -> [Id];
+item_id({doc, _, _}) -> [];
+item_id({delete, Id}) -> [Id];
+item_id({ack, _, _}) -> [].
+
+await_ids(Ids, #state{inflight = Inflight} = State) ->
+    case lists:any(fun({_Ref, Written}) ->
+                       lists:any(fun(Id) -> is_map_key(Id, Written) end, Ids)
+                   end, Inflight) of
+        true -> await_commit(State);
+        false -> State
+    end.
+
+prefetch([], _State) ->
+    #{};
+prefetch(Ids, #state{store_ref = StoreRef, keyspace = Ks}) ->
+    read_currents(StoreRef, Ks, Ids).
+
+%% Build the waiting requests into the group, taking more from the
+%% mailbox when they run out. Stops when the group is full.
+drain(#grp{count = N} = G, Fill, #state{max_group = Max} = State) when N >= Max ->
+    {G, none, Fill, State};
+drain(#grp{items = I, sync = false} = G, Fill, #state{write_chunk = Chunk} = State)
+  when I >= Chunk ->
+    {G, none, Fill, State};
+drain(G, #fill{pending = []} = Fill0, State0) ->
+    case fetch(Fill0, State0) of
+        {#fill{pending = []} = Fill, State} -> {G, none, Fill, State};
+        {Fill, State} -> drain(G, Fill, State)
+    end;
+drain(G, #fill{pending = [W | Rest]} = Fill, State) ->
+    case add_req(W, G, Fill#fill{pending = Rest}, State) of
+        {G1, none, Fill1, State1} -> drain(G1, Fill1, State1);
+        Closed -> Closed
+    end.
+
+%% Build the request's items into the group. Returns {Group, none, Fill,
+%% State}, or {Group, Carry, Fill, State} when an item's id is already
+%% written in the group. An id of a group being committed is read after
+%% that commit.
 add_req(#wreq{pending = [], sync = WSync} = W,
-        #grp{reqs = Reqs, count = N, sync = GSync} = G, State) ->
+        #grp{reqs = Reqs, count = N, sync = GSync} = G, Fill, State) ->
     {G#grp{reqs = [W | Reqs], count = N + 1, sync = GSync orelse WSync},
-     none, State};
+     none, Fill, State};
 add_req(#wreq{pending = [Item | Rest], seg = Seg, opts = Opts} = W,
-        #grp{ids = Ids} = G,
+        #grp{ids = Ids} = G, #fill{cache = Cache} = Fill,
         #state{name = DbName, keyspace = Ks, store_ref = StoreRef} = State0) ->
     case prepare_item(Item, Ks) of
         {error, _} = Err ->
-            add_req(W#wreq{pending = Rest, seg = [{Err, [], none} | Seg]}, G, State0);
+            add_req(W#wreq{pending = Rest, seg = [{Err, [], none} | Seg]}, G,
+                    Fill, State0);
         {Id, _, _} when is_map_key(Id, Ids) ->
-            close_group(W, G, State0);
+            close_group(W, G, Fill, State0);
         {Id, Prepared, ItemOpts} ->
-            State = await_id(Id, State0),
-            Built = build_item(Prepared, StoreRef, DbName,
+            {Old, State} = current(Id, Cache, State0),
+            Built = build_item(Prepared, Old, StoreRef, DbName,
                                maps:merge(Opts, ItemOpts)),
             add_req(W#wreq{pending = Rest, seg = [Built | Seg],
                            sync = W#wreq.sync orelse sync_opt(ItemOpts)},
                     G#grp{ids = mark_id(Id, Built, Ids), items = G#grp.items + 1},
-                    State)
+                    Fill#fill{cache = maps:remove(Id, Cache)}, State)
     end.
+
+%% The document's state read with its batch, else read now.
+current(none, _Cache, State) ->
+    {none, State};
+current(Id, Cache, State) when is_map_key(Id, Cache) ->
+    {{read, map_get(Id, Cache)}, State};
+current(Id, _Cache, State) ->
+    {unread, await_id(Id, State)}.
+
+await_id(Id, State) ->
+    await_ids([Id], State).
 
 sync_opt(#{sync := true}) -> true;
 sync_opt(_Opts) -> false.
 
-close_group(#wreq{seg = []} = W, G, State) ->
-    {G, W, State};
-close_group(#wreq{} = W, #grp{reqs = Reqs, count = N} = G, State) ->
+close_group(#wreq{seg = []} = W, G, Fill, State) ->
+    {G, W, Fill, State};
+close_group(#wreq{} = W, #grp{reqs = Reqs, count = N} = G, Fill, State) ->
     {G#grp{reqs = [W#wreq{more = true} | Reqs], count = N + 1},
-     W#wreq{seg = []}, State}.
-
-await_id(Id, #state{inflight = Inflight} = State) ->
-    case lists:any(fun({_Ref, Ids}) -> is_map_key(Id, Ids) end, Inflight) of
-        true -> await_commit(State);
-        false -> State
-    end.
+     W#wreq{seg = []}, Fill, State}.
 
 %% Wait until the committer has written and answered every group handed
 %% to it.
@@ -1408,9 +1480,15 @@ valid_doc_opts([{sync, Sync} | Rest]) when is_boolean(Sync) -> valid_doc_opts(Re
 valid_doc_opts(_Opts) -> false.
 
 %% Build one item: {Result, Ops, NotifyInfo}. A failed item adds no ops.
-build_item(#prep{rec = DocRecord} = P, StoreRef, DbName, Opts) ->
+%% `Read' is {read, Old} when the document was read with its batch.
+build_item(Item, unread, StoreRef, DbName, Opts) ->
+    try read_item(Item, StoreRef, DbName) of
+        Old -> build_item(Item, {read, Old}, StoreRef, DbName, Opts)
+    catch
+        _:Reason -> {{error, Reason}, [], none}
+    end;
+build_item(#prep{rec = DocRecord} = P, {read, Old}, StoreRef, DbName, Opts) ->
     try
-        Old = read_current(StoreRef, DbName, maps:get(id, DocRecord)),
         case cas_check(Old, maps:get(expected_version, DocRecord)) of
             ok ->
                 {Ops, Notify} = build_prepared_ops(StoreRef, DbName, P, Old,
@@ -1422,18 +1500,23 @@ build_item(#prep{rec = DocRecord} = P, StoreRef, DbName, Opts) ->
     catch
         _:Reason -> {{error, Reason}, [], none}
     end;
-build_item({delete, DocId}, StoreRef, DbName, Opts) ->
-    try build_delete_ops(StoreRef, DbName, DocId, Opts) of
+build_item({delete, DocId}, {read, Old}, StoreRef, DbName, Opts) ->
+    try build_delete_ops(StoreRef, DbName, DocId, Old, Opts) of
         {ok, Ops, Notify} -> {write_result(Notify, Opts), Ops, Notify};
         {error, _} = Err -> {Err, [], none}
     catch
         throw:{error, _} = Err -> {Err, [], none};
         _:Reason -> {{error, Reason}, [], none}
     end;
-build_item({ack, Tag, Hlcs}, _StoreRef, DbName, _Opts) ->
+build_item({ack, Tag, Hlcs}, none, _StoreRef, DbName, _Opts) ->
     Ks = barrel_keyspace:resolve(DbName),
     {ok, [{delete, barrel_store_keys:outbox_key(Ks, Tag, Hlc)} || Hlc <- Hlcs],
      none}.
+
+read_item(#prep{rec = #{id := DocId}}, StoreRef, DbName) ->
+    read_current(StoreRef, DbName, DocId);
+read_item({delete, DocId}, StoreRef, DbName) ->
+    read_current(StoreRef, DbName, DocId).
 
 %% return_hlc => true adds the write's change HLC (internal atom key),
 %% used by callers that ack outbox entries.
@@ -1635,12 +1718,38 @@ read_current(StoreRef, DbName, DocId) ->
     DocEntityKey = barrel_store_keys:doc_entity(Ks, DocId),
     case barrel_store_rocksdb:get_entity(StoreRef, DocEntityKey) of
         {ok, Columns} ->
+            current_state(Columns, barrel_store_rocksdb:body_get(StoreRef,
+                                     barrel_store_keys:doc_body(Ks, DocId)));
+        not_found ->
+            undefined
+    end.
+
+%% @doc read_current/3 of several documents, two reads in all:
+%% #{DocId => State | undefined}. A document whose read fails is left
+%% out (it is read again, alone, when written).
+read_currents(StoreRef, Ks, DocIds) ->
+    Entities = barrel_store_rocksdb:multi_get_entity(
+                 StoreRef, [barrel_store_keys:doc_entity(Ks, Id) || Id <- DocIds]),
+    Read = lists:zip(DocIds, Entities),
+    Found = [{Id, Columns} || {Id, {ok, Columns}} <- Read],
+    Bodies = case Found of
+        [] -> [];
+        _ -> barrel_store_rocksdb:body_multi_get(
+                 StoreRef, [barrel_store_keys:doc_body(Ks, Id) || {Id, _} <- Found],
+                 point)
+    end,
+    maps:from_list(
+      [{Id, undefined} || {Id, not_found} <- Read] ++
+      [{Id, current_state(Columns, Body)}
+       || {{Id, Columns}, Body} <- lists:zip(Found, Bodies),
+          Body =:= not_found orelse element(1, Body) =:= ok]).
+
+current_state(Columns, BodyRead) ->
             VV = case proplists:get_value(?COL_VV, Columns, <<>>) of
                 <<>> -> barrel_vv:new();
                 VVBin -> barrel_vv:decode(VVBin)
             end,
-            {Body, BodyCbor} = case barrel_store_rocksdb:body_get(StoreRef,
-                            barrel_store_keys:doc_body(Ks, DocId)) of
+            {Body, BodyCbor} = case BodyRead of
                 {ok, OldCborBin} ->
                     {barrel_docdb_codec_cbor:decode_any(OldCborBin), OldCborBin};
                 not_found ->
@@ -1659,10 +1768,7 @@ read_current(StoreRef, DbName, DocId) ->
                 tier => proplists:get_value(?COL_TIER, Columns, 0),
                 body => Body,
                 body_cbor => BodyCbor
-            };
-        not_found ->
-            undefined
-    end.
+            }.
 
 %% @doc This database's stable source id (the version author).
 %% Per-database, not per-node: replicas on the same node must detect
@@ -2128,8 +2234,12 @@ do_delete_doc(StoreRef, DbName, DocId, Opts) ->
 %% @doc Build the ops of a versioned tombstone write. Throws
 %% {error, {conflict, CurrentToken}} when the rev option does not match.
 build_delete_ops(StoreRef, DbName, DocId, Opts) ->
+    build_delete_ops(StoreRef, DbName, DocId,
+                     read_current(StoreRef, DbName, DocId), Opts).
+
+build_delete_ops(StoreRef, DbName, DocId, Current, Opts) ->
     Ks = barrel_keyspace:resolve(DbName),
-    case read_current(StoreRef, DbName, DocId) of
+    case Current of
         undefined ->
             {error, not_found};
         #{version := OldVersion, hlc := OldHlc, vv := OldVV,
