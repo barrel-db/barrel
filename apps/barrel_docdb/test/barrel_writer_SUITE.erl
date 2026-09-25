@@ -236,14 +236,17 @@ thousand_writes(Db) ->
     ?assertEqual(lists:duplicate(8, ok), Results),
     ok.
 
-%% Trace the writer's calls and sends while Fun runs.
+%% Trace the calls and sends of the writer and the processes linked to
+%% it (its committer among them) while Fun runs.
 traced(Pid, Fun) ->
     Tracer = spawn_link(fun() -> collect([]) end),
-    1 = erlang:trace(Pid, true, [call, send, {tracer, Tracer}]),
+    {links, Links} = erlang:process_info(Pid, links),
+    Traced = [Pid | [L || L <- Links, is_pid(L)]],
+    _ = [1 = erlang:trace(P, true, [call, send, {tracer, Tracer}]) || P <- Traced],
     _ = erlang:trace_pattern({barrel_sub, '_', '_'}, true, [local]),
     _ = erlang:trace_pattern({barrel_query_sub, '_', '_'}, true, [local]),
     Fun(),
-    1 = erlang:trace(Pid, false, [call, send]),
+    _ = [erlang:trace(P, false, [call, send]) || P <- Traced],
     _ = erlang:trace_pattern({'_', '_', '_'}, false, [local]),
     Tracer ! {done, self()},
     receive {events, Events} -> Events after 10000 -> error(tracer_timeout) end.

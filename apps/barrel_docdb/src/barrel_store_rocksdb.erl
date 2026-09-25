@@ -11,7 +11,7 @@
 -export([open/2, close/1, checkpoint/2]).
 -export([put/3, put/4, get/2, key_exists/2, multi_key_exists/2, multi_get/2, delete/2]).
 -export([merge/3]).
--export([write_batch/2, write_batch/3]).
+-export([write_batch/2, write_batch/3, build_batch/2]).
 -export([fold/4, fold_range/5, fold_range/6, fold_range_reverse/5, fold_range_reverse/6]).
 -export([fold_range_with_snapshot/6, fold_range_prefix_with_snapshot/6]).
 -export([fold_range_long_scan/5]).
@@ -216,10 +216,26 @@ write_batch(DbRef, Operations) ->
 %%   - {entity_delete, Key} - delete entity from default CF
 %%   - {local_put, Key, Value} - put to local CF (config/state)
 %%   - {local_delete, Key} - delete from local CF
--spec write_batch(db_ref(), list(), map()) -> ok | {error, term()}.
-write_batch(#{ref := Ref, posting_cf := PostingCF,
-              body_cf := BodyCF, local_cf := LocalCF}, Operations, Opts) ->
-    Sync = maps:get(sync, Opts, false),
+%%
+%% Operations may also be `{batch, Batch}' from build_batch/2: the batch
+%% is written, then released.
+-spec write_batch(db_ref(), list() | {batch, rocksdb:batch_handle()}, map()) ->
+    ok | {error, term()}.
+write_batch(#{ref := Ref}, {batch, Batch}, Opts) ->
+    try
+        rocksdb:write_batch(Ref, Batch, [{sync, maps:get(sync, Opts, false)}])
+    after
+        rocksdb:release_batch(Batch)
+    end;
+write_batch(DbRef, Operations, Opts) ->
+    {batch, Batch} = build_batch(DbRef, Operations),
+    write_batch(DbRef, {batch, Batch}, Opts).
+
+%% @doc Build the RocksDB batch of the operations (see write_batch/3)
+%% without writing it, so another process can write it.
+-spec build_batch(db_ref(), list()) -> {batch, rocksdb:batch_handle()}.
+build_batch(#{posting_cf := PostingCF, body_cf := BodyCF, local_cf := LocalCF},
+            Operations) ->
     {ok, Batch} = rocksdb:batch(),
     try
         lists:foreach(
@@ -249,10 +265,11 @@ write_batch(#{ref := Ref, posting_cf := PostingCF,
             end,
             Operations
         ),
-        Result = rocksdb:write_batch(Ref, Batch, [{sync, Sync}]),
-        Result
-    after
-        rocksdb:release_batch(Batch)
+        {batch, Batch}
+    catch
+        Class:Reason:St ->
+            rocksdb:release_batch(Batch),
+            erlang:raise(Class, Reason, St)
     end.
 
 %% @doc Fold over all keys with a given prefix

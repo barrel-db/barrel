@@ -69,6 +69,10 @@
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
          terminate/2]).
 
+%% Groups handed to the committer and not yet written.
+-define(MAX_INFLIGHT, 8).
+-define(DEFAULT_WRITE_CHUNK, 16).
+
 -record(state, {
     name :: binary(),
     keyspace :: binary(),  %% name used for storage keys (parent's on a branch)
@@ -99,10 +103,18 @@
     %% contributed to, so its completion re-arms the periodic timer.
     sweep_workers = #{} :: #{atom() => {pid(), [term()], boolean()}},
     max_group = 256 :: pos_integer(),  %% max write requests per batch
+    %% documents after which an unsynced group goes to the committer, so
+    %% the writer builds the next group while this one is written
+    write_chunk = ?DEFAULT_WRITE_CHUNK :: pos_integer(),
     %% read_only => true in the config: writes are refused and no
     %% compaction, retention or TTL timer runs
     read_only = false :: boolean(),
-    write_groups = #{groups => 0, requests => 0, max_size => 0} :: map()
+    write_groups = #{groups => 0, requests => 0, max_size => 0} :: map(),
+    %% Writes the groups' batches and answers their callers while the
+    %% writer builds the next group; `inflight' holds the groups handed
+    %% to it and not yet written, oldest first, with their doc ids.
+    committer :: pid() | undefined,
+    inflight = [] :: [{reference(), #{binary() => true}}]
 }).
 
 %% A write request in a group commit. `seg' holds the items built in the
@@ -137,7 +149,9 @@
 -record(grp, {
     reqs = [] :: [#wreq{}],
     ids = #{} :: #{binary() => true},
-    count = 0 :: non_neg_integer()
+    count = 0 :: non_neg_integer(),
+    items = 0 :: non_neg_integer(),
+    sync = false :: boolean()
 }).
 
 %% Default compaction settings
@@ -507,7 +521,10 @@ init(Name, Config, CompiledChannels, DbPath, Keyspace, Parent, ForkHlc, Env) ->
                         ttl_sweep_batch = TtlBatch,
                         ttl_timer = TtlTimer,
                         max_group = maps:get(max_group, Config, 256),
-                        read_only = ReadOnly
+                        write_chunk = maps:get(write_chunk, Config,
+                                               ?DEFAULT_WRITE_CHUNK),
+                        read_only = ReadOnly,
+                        committer = start_committer(ReadOnly)
                     }};
                 {error, AttReason} ->
                     %% Close document store if attachment store fails
@@ -529,7 +546,18 @@ handle_call(Req, From, #state{read_only = true} = State) ->
         false -> handle_call_rw(Req, From, State)
     end;
 handle_call(Req, From, State) ->
-    handle_call_rw(Req, From, State).
+    case group_write(Req) of
+        true -> handle_call_rw(Req, From, State);
+        false -> handle_call_rw(Req, From, await_commit(State))
+    end.
+
+%% Writes taken into a group commit; any other request first waits for
+%% the group being written, so it sees every answered write.
+group_write({put_doc, _, _}) -> true;
+group_write({put_docs, _, _}) -> true;
+group_write({delete_doc, _, _}) -> true;
+group_write({outbox_ack, _, _}) -> true;
+group_write(_) -> false.
 
 write_request({put_doc, _, _}) -> true;
 write_request({put_docs, _, _}) -> true;
@@ -753,10 +781,22 @@ handle_info({'DOWN', _Ref, process, Pid, Reason},
             {noreply, State}
     end;
 
+handle_info({committed, Ref}, #state{inflight = [{Ref, _} | Rest]} = State) ->
+    {noreply, State#state{inflight = Rest}};
+
+handle_info({'EXIT', Pid, Reason}, #state{committer = Pid} = State) ->
+    {stop, {committer_down, Reason}, State#state{committer = undefined,
+                                                 inflight = []}};
+
 handle_info(_Info, State) ->
     {noreply, State}.
 
 %% @doc Clean up when terminating
+terminate(Reason, #state{committer = Committer} = State) when is_pid(Committer) ->
+    #state{} = await_commit(State),
+    unlink(Committer),
+    exit(Committer, kill),
+    terminate(Reason, State#state{committer = undefined});
 terminate(_Reason, #state{name = Name, store_ref = StoreRef, att_ref = AttRef,
                           filter_pid = FilterPid,
                           compaction_timer = CompactionTimer,
@@ -1237,22 +1277,28 @@ wreq(Kind, From, Opts, Items) ->
     end.
 
 %% A request that touches a doc id already written in the group closes
-%% it and opens the next one, so its read sees the earlier write.
-run_group(W, State) ->
-    {Grp, Carry} = case add_req(W, #grp{}, State) of
-        {G, none} -> drain(G, State);
+%% it and opens the next one, so its read sees the earlier write. A
+%% group is handed to the committer while the writer builds the next.
+run_group(W, State0) ->
+    {Grp, Carry, State} = case add_req(W, #grp{}, State0) of
+        {G, none, S} -> drain(G, S);
         Closed -> Closed
     end,
-    {State1, MoreSeg} = commit_group(Grp, State),
     case Carry of
-        none -> State1;
-        #wreq{done = Done} -> run_group(Carry#wreq{done = MoreSeg ++ Done}, State1)
+        none ->
+            dispatch_group(Grp, State);
+        #wreq{done = Done} ->
+            {State1, MoreSeg} = commit_group(Grp, State),
+            run_group(Carry#wreq{done = MoreSeg ++ Done}, State1)
     end.
 
 %% Take the writes waiting in the mailbox without blocking. Anything
 %% else keeps its place.
-drain(#grp{count = N} = G, #state{max_group = Max}) when N >= Max ->
-    {G, none};
+drain(#grp{count = N} = G, #state{max_group = Max} = State) when N >= Max ->
+    {G, none, State};
+drain(#grp{items = I, sync = false} = G, #state{write_chunk = Chunk} = State)
+  when I >= Chunk ->
+    {G, none, State};
 drain(G, State) ->
     receive
         {'$gen_call', From, {put_doc, _, _} = Req} -> drain(Req, From, G, State);
@@ -1260,14 +1306,14 @@ drain(G, State) ->
         {'$gen_call', From, {delete_doc, _, _} = Req} -> drain(Req, From, G, State);
         {'$gen_call', From, {outbox_ack, _, _} = Req} -> drain(Req, From, G, State)
     after 0 ->
-        {G, none}
+        {G, none, State}
     end.
 
 drain(Req, From, G, State) ->
     case new_wreq(Req, From) of
         {ok, W} ->
             case add_req(W, G, State) of
-                {G1, none} -> drain(G1, State);
+                {G1, none, State1} -> drain(G1, State1);
                 Closed -> Closed
             end;
         {error, _} = Err ->
@@ -1275,34 +1321,57 @@ drain(Req, From, G, State) ->
             drain(G, State)
     end.
 
-%% Build the request's items into the group. Returns {Group, none}, or
-%% {Group, Carry} when an item's id is already written in the group.
-add_req(#wreq{pending = []} = W, #grp{reqs = Reqs, count = N} = G, _State) ->
-    {G#grp{reqs = [W | Reqs], count = N + 1}, none};
+%% Build the request's items into the group. Returns {Group, none, State},
+%% or {Group, Carry, State} when an item's id is already written in the
+%% group. An id of the group being committed is read after that commit.
+add_req(#wreq{pending = [], sync = WSync} = W,
+        #grp{reqs = Reqs, count = N, sync = GSync} = G, State) ->
+    {G#grp{reqs = [W | Reqs], count = N + 1, sync = GSync orelse WSync},
+     none, State};
 add_req(#wreq{pending = [Item | Rest], seg = Seg, opts = Opts} = W,
         #grp{ids = Ids} = G,
-        #state{name = DbName, keyspace = Ks, store_ref = StoreRef} = State) ->
+        #state{name = DbName, keyspace = Ks, store_ref = StoreRef} = State0) ->
     case prepare_item(Item, Ks) of
         {error, _} = Err ->
-            add_req(W#wreq{pending = Rest, seg = [{Err, [], none} | Seg]}, G, State);
+            add_req(W#wreq{pending = Rest, seg = [{Err, [], none} | Seg]}, G, State0);
         {Id, _, _} when is_map_key(Id, Ids) ->
-            close_group(W, G);
+            close_group(W, G, State0);
         {Id, Prepared, ItemOpts} ->
+            State = await_id(Id, State0),
             Built = build_item(Prepared, StoreRef, DbName,
                                maps:merge(Opts, ItemOpts)),
             add_req(W#wreq{pending = Rest, seg = [Built | Seg],
                            sync = W#wreq.sync orelse sync_opt(ItemOpts)},
-                    G#grp{ids = mark_id(Id, Built, Ids)}, State)
+                    G#grp{ids = mark_id(Id, Built, Ids), items = G#grp.items + 1},
+                    State)
     end.
 
 sync_opt(#{sync := true}) -> true;
 sync_opt(_Opts) -> false.
 
-close_group(#wreq{seg = []} = W, G) ->
-    {G, W};
-close_group(#wreq{} = W, #grp{reqs = Reqs, count = N} = G) ->
+close_group(#wreq{seg = []} = W, G, State) ->
+    {G, W, State};
+close_group(#wreq{} = W, #grp{reqs = Reqs, count = N} = G, State) ->
     {G#grp{reqs = [W#wreq{more = true} | Reqs], count = N + 1},
-     W#wreq{seg = []}}.
+     W#wreq{seg = []}, State}.
+
+await_id(Id, #state{inflight = Inflight} = State) ->
+    case lists:any(fun({_Ref, Ids}) -> is_map_key(Id, Ids) end, Inflight) of
+        true -> await_commit(State);
+        false -> State
+    end.
+
+%% Wait until the committer has written and answered every group handed
+%% to it.
+await_commit(#state{inflight = []} = State) ->
+    State;
+await_commit(State) ->
+    await_commit(await_oldest(State)).
+
+await_oldest(#state{inflight = [{Ref, _} | Rest]} = State) ->
+    receive
+        {committed, Ref} -> State#state{inflight = Rest}
+    end.
 
 mark_id(none, _Built, Ids) -> Ids;
 mark_id(Id, {{ok, _}, _, _}, Ids) -> Ids#{Id => true};
@@ -1377,26 +1446,86 @@ write_result({DocId, NewToken, NextHlc, _Deleted, _DocBody}, Opts) ->
         false -> {ok, Result}
     end.
 
-%% Write the group in one batch, synced when any request asked for it,
-%% then notify and answer each request in arrival order. Returns the
-%% results of a request that continues in the next group.
+%% Hand the group to the committer, keeping at most ?MAX_INFLIGHT
+%% groups in its queue.
+dispatch_group(#grp{reqs = []}, State) ->
+    State;
+dispatch_group(#grp{reqs = Reqs, count = N, ids = Ids}, State0) ->
+    #state{name = DbName, store_ref = StoreRef, committer = Committer,
+           inflight = Inflight} = State = await_room(State0),
+    {Ops, Sync, Plan} = group_batch(Reqs),
+    Ref = make_ref(),
+    Committer ! {commit, Ref, StoreRef, DbName, build_batch(StoreRef, Ops),
+                 Sync, Plan},
+    ok = barrel_metrics:observe_write_group(DbName, N),
+    (count_group(N, State))#state{inflight = Inflight ++ [{Ref, Ids}]}.
+
+%% The RocksDB batch is built here, the committer only writes it.
+build_batch(_StoreRef, []) ->
+    none;
+build_batch(StoreRef, Ops) ->
+    try barrel_store_rocksdb:build_batch(StoreRef, Ops)
+    catch Class:Reason -> {error, {Class, Reason}}
+    end.
+
+await_room(#state{inflight = Inflight} = State)
+  when length(Inflight) >= ?MAX_INFLIGHT ->
+    await_room(await_oldest(State));
+await_room(State) ->
+    State.
+
+%% Commit the group here and return the results of the request that
+%% continues in the next group.
 commit_group(#grp{reqs = []}, State) ->
     {State, []};
-commit_group(#grp{reqs = Reqs0, count = N},
-             #state{name = DbName, store_ref = StoreRef} = State) ->
+commit_group(#grp{reqs = Reqs, count = N}, State0) ->
+    #state{name = DbName, store_ref = StoreRef} = State = await_commit(State0),
+    {Ops, Sync, Plan} = group_batch(Reqs),
+    MoreSeg = write_and_answer(StoreRef, DbName, Ops, Sync, Plan),
+    ok = barrel_metrics:observe_write_group(DbName, N),
+    {count_group(N, State), MoreSeg}.
+
+%% The group's batch in arrival order, synced when any request or
+%% document asked for it, and the requests without their ops.
+group_batch(Reqs0) ->
     Reqs = lists:reverse(Reqs0),
     Ops = lists:append([ItemOps || #wreq{seg = Seg} <- Reqs,
                                    {_, ItemOps, _} <- lists:reverse(Seg)]),
     Sync = lists:any(fun(#wreq{sync = S}) -> S end, Reqs),
-    Written = write_group(StoreRef, Ops, Sync),
-    ok = notify_written(Written, DbName, Reqs),
-    MoreSeg = lists:foldl(fun(W, Acc) -> finish_req(W, Written, Acc) end,
-                          [], Reqs),
-    ok = barrel_metrics:observe_write_group(DbName, N),
-    {count_group(N, State), MoreSeg}.
+    {Ops, Sync, [W#wreq{seg = [{R, ItemOps =/= [], Notify}
+                               || {R, ItemOps, Notify} <- Seg]}
+                 || #wreq{seg = Seg} = W <- Reqs]}.
+
+%% Write the group's batch, synced when one of its requests asked for
+%% it, then notify and answer its requests in arrival order. Returns the
+%% results of a request that continues in the next group.
+write_and_answer(StoreRef, DbName, Batch, Sync, Plan) ->
+    Written = write_group(StoreRef, Batch, Sync),
+    ok = notify_written(Written, DbName, Plan),
+    lists:foldl(fun(W, Acc) -> finish_req(W, Written, Acc) end, [], Plan).
+
+start_committer(true) ->
+    undefined;
+start_committer(false) ->
+    Server = self(),
+    spawn_link(fun() -> committer_loop(Server) end).
+
+%% Groups are written one after the other, in the order the writer
+%% built them, so feed rows become visible in HLC order.
+committer_loop(Server) ->
+    receive
+        {commit, Ref, StoreRef, DbName, Batch, Sync, Plan} ->
+            _ = write_and_answer(StoreRef, DbName, Batch, Sync, Plan),
+            Server ! {committed, Ref},
+            committer_loop(Server)
+    end.
 
 write_group(_StoreRef, [], _Sync) ->
     ok;
+write_group(_StoreRef, none, _Sync) ->
+    ok;
+write_group(_StoreRef, {error, _} = Err, _Sync) ->
+    Err;
 write_group(StoreRef, Ops, Sync) ->
     try barrel_store_rocksdb:write_batch(StoreRef, Ops, #{sync => Sync}) of
         ok -> ok;
@@ -1415,17 +1544,18 @@ finish_req(#wreq{seg = Seg, more = More, done = Done} = W, Written, Acc) ->
             Acc
     end.
 
-finish_item({Result, [], _Notify}, _Written) ->
+%% An item that added ops shares the batch's outcome.
+finish_item({Result, false, _Notify}, _Written) ->
     Result;
-finish_item({Result, _Ops, _Notify}, ok) ->
+finish_item({Result, true, _Notify}, ok) ->
     Result;
-finish_item({_Result, _Ops, _Notify}, {error, _} = Err) ->
+finish_item({_Result, true, _Notify}, {error, _} = Err) ->
     Err.
 
 %% The group's writes reach their subscribers before any caller is answered.
 notify_written(ok, DbName, Reqs) ->
     notify_group(DbName, [Notify || #wreq{seg = Seg} <- Reqs,
-                                    {_, [_ | _], Notify} <- lists:reverse(Seg),
+                                    {_, true, Notify} <- lists:reverse(Seg),
                                     Notify =/= none]);
 notify_written({error, _}, _DbName, _Reqs) ->
     ok.
