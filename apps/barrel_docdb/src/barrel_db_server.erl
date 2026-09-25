@@ -159,7 +159,13 @@
     ids = #{} :: #{binary() => true},
     count = 0 :: non_neg_integer(),
     items = 0 :: non_neg_integer(),
-    sync = false :: boolean()
+    sync = false :: boolean(),
+    %% ops of the built items not yet sent to the committer (newest
+    %% first); a synced group sends them in chunks while it is built, so
+    %% the committer builds the batch meanwhile (`ref' names that batch)
+    unsent = [] :: [list()],
+    unsent_n = 0 :: non_neg_integer(),
+    ref :: reference() | undefined
 }).
 
 %% Default compaction settings
@@ -789,7 +795,8 @@ handle_info({'DOWN', _Ref, process, Pid, Reason},
             {noreply, State}
     end;
 
-handle_info({committed, Ref}, #state{inflight = [{Ref, _} | Rest]} = State) ->
+handle_info({committed, Ref, _MoreSeg},
+            #state{inflight = [{Ref, _} | Rest]} = State) ->
     {noreply, State#state{inflight = Rest}};
 
 handle_info({'EXIT', Pid, Reason}, #state{committer = Pid} = State) ->
@@ -1405,13 +1412,38 @@ add_req(#wreq{pending = [Item | Rest], seg = Seg, opts = Opts} = W,
             close_group(W, G, Fill, State0);
         {Id, Prepared, ItemOpts} ->
             {Old, State} = current(Id, Cache, State0),
-            Built = build_item(Prepared, Old, StoreRef, DbName,
-                               maps:merge(Opts, ItemOpts)),
-            add_req(W#wreq{pending = Rest, seg = [Built | Seg],
-                           sync = W#wreq.sync orelse sync_opt(ItemOpts)},
-                    G#grp{ids = mark_id(Id, Built, Ids), items = G#grp.items + 1},
+            {_, ItemOps, _} = Built =
+                build_item(Prepared, Old, StoreRef, DbName,
+                           maps:merge(Opts, ItemOpts)),
+            W1 = W#wreq{pending = Rest, seg = [Built | Seg],
+                        sync = W#wreq.sync orelse sync_opt(ItemOpts)},
+            G1 = G#grp{ids = mark_id(Id, Built, Ids), items = G#grp.items + 1},
+            add_req(W1, stream(add_ops(ItemOps, G1), W1, State),
                     Fill#fill{cache = maps:remove(Id, Cache)}, State)
     end.
+
+add_ops([], G) ->
+    G;
+add_ops(Ops, #grp{unsent = Unsent, unsent_n = N} = G) ->
+    G#grp{unsent = [Ops | Unsent], unsent_n = N + 1}.
+
+%% A synced group sends its ops to the committer every write_chunk
+%% documents: its batch is built while the rest of the group is.
+stream(#grp{unsent_n = N, sync = GSync} = G, #wreq{sync = WSync},
+       #state{write_chunk = Chunk} = State)
+  when N >= Chunk, GSync orelse WSync ->
+    send_ops(G, State);
+stream(G, _W, _State) ->
+    G.
+
+send_ops(#grp{unsent = Unsent, ref = Ref0} = G,
+         #state{committer = Committer, store_ref = StoreRef}) ->
+    Ref = case Ref0 of
+        undefined -> make_ref();
+        _ -> Ref0
+    end,
+    Committer ! {ops, Ref, StoreRef, lists:append(lists:reverse(Unsent))},
+    G#grp{unsent = [], unsent_n = 0, ref = Ref}.
 
 %% The document's state read with its batch, else read now.
 current(none, _Cache, State) ->
@@ -1442,8 +1474,17 @@ await_commit(State) ->
 
 await_oldest(#state{inflight = [{Ref, _} | Rest]} = State) ->
     receive
-        {committed, Ref} -> State#state{inflight = Rest}
+        {committed, Ref, _MoreSeg} -> State#state{inflight = Rest}
     end.
+
+%% Wait for the group Ref and return the results of its request that
+%% continues in the next group.
+await_result(Ref, #state{inflight = [{Ref, _} | Rest]} = State) ->
+    receive
+        {committed, Ref, MoreSeg} -> {State#state{inflight = Rest}, MoreSeg}
+    end;
+await_result(Ref, State) ->
+    await_result(Ref, await_oldest(State)).
 
 mark_id(none, _Built, Ids) -> Ids;
 mark_id(Id, {{ok, _}, _, _}, Ids) -> Ids#{Id => true};
@@ -1533,17 +1574,21 @@ write_result({DocId, NewToken, NextHlc, _Deleted, _DocBody}, Opts) ->
 %% groups in its queue.
 dispatch_group(#grp{reqs = []}, State) ->
     State;
-dispatch_group(#grp{reqs = Reqs, count = N, ids = Ids}, State0) ->
+dispatch_group(#grp{reqs = Reqs, count = N, ids = Ids, ref = Ref0,
+                    unsent = Unsent}, State0) ->
     #state{name = DbName, store_ref = StoreRef, committer = Committer,
            inflight = Inflight} = State = await_room(State0),
-    {Ops, Sync, Plan} = group_batch(Reqs),
-    Ref = make_ref(),
-    Committer ! {commit, Ref, StoreRef, DbName, build_batch(StoreRef, Ops),
-                 Sync, Plan},
+    {Sync, Plan} = group_plan(Reqs),
+    Tail = lists:append(lists:reverse(Unsent)),
+    %% an unsynced group's batch is built here, the committer writes it
+    {Ref, Batch} = case Ref0 of
+        undefined -> {make_ref(), build_batch(StoreRef, Tail)};
+        _ -> {Ref0, {tail, Tail}}
+    end,
+    Committer ! {commit, Ref, StoreRef, DbName, Batch, Sync, Plan},
     ok = barrel_metrics:observe_write_group(DbName, N),
     (count_group(N, State))#state{inflight = Inflight ++ [{Ref, Ids}]}.
 
-%% The RocksDB batch is built here, the committer only writes it.
 build_batch(_StoreRef, []) ->
     none;
 build_batch(StoreRef, Ops) ->
@@ -1551,33 +1596,36 @@ build_batch(StoreRef, Ops) ->
     catch Class:Reason -> {error, {Class, Reason}}
     end.
 
+add_to_batch(StoreRef, {batch, _} = Batch, Ops) ->
+    try barrel_store_rocksdb:add_to_batch(StoreRef, Batch, Ops)
+    catch Class:Reason -> {error, {Class, Reason}}
+    end;
+add_to_batch(_StoreRef, {error, _} = Err, _Ops) ->
+    Err.
+
 await_room(#state{inflight = Inflight} = State)
   when length(Inflight) >= ?MAX_INFLIGHT ->
     await_room(await_oldest(State));
 await_room(State) ->
     State.
 
-%% Commit the group here and return the results of the request that
-%% continues in the next group.
+%% Commit the group and wait for it: returns the results of the request
+%% that continues in the next group.
 commit_group(#grp{reqs = []}, State) ->
     {State, []};
-commit_group(#grp{reqs = Reqs, count = N}, State0) ->
-    #state{name = DbName, store_ref = StoreRef} = State = await_commit(State0),
-    {Ops, Sync, Plan} = group_batch(Reqs),
-    MoreSeg = write_and_answer(StoreRef, DbName, Ops, Sync, Plan),
-    ok = barrel_metrics:observe_write_group(DbName, N),
-    {count_group(N, State), MoreSeg}.
+commit_group(Grp, State0) ->
+    #state{inflight = Inflight} = State = dispatch_group(Grp, State0),
+    {Ref, _} = lists:last(Inflight),
+    await_result(Ref, State).
 
-%% The group's batch in arrival order, synced when any request or
-%% document asked for it, and the requests without their ops.
-group_batch(Reqs0) ->
+%% Whether any request or document of the group asked for sync, and the
+%% requests in arrival order without their ops.
+group_plan(Reqs0) ->
     Reqs = lists:reverse(Reqs0),
-    Ops = lists:append([ItemOps || #wreq{seg = Seg} <- Reqs,
-                                   {_, ItemOps, _} <- lists:reverse(Seg)]),
     Sync = lists:any(fun(#wreq{sync = S}) -> S end, Reqs),
-    {Ops, Sync, [W#wreq{seg = [{R, ItemOps =/= [], Notify}
-                               || {R, ItemOps, Notify} <- Seg]}
-                 || #wreq{seg = Seg} = W <- Reqs]}.
+    {Sync, [W#wreq{seg = [{R, ItemOps =/= [], Notify}
+                          || {R, ItemOps, Notify} <- Seg]}
+            || #wreq{seg = Seg} = W <- Reqs]}.
 
 %% Write the group's batch, synced when one of its requests asked for
 %% it, then notify and answer its requests in arrival order. Returns the
@@ -1591,17 +1639,31 @@ start_committer(true) ->
     undefined;
 start_committer(false) ->
     Server = self(),
-    spawn_link(fun() -> committer_loop(Server) end).
+    spawn_link(fun() -> committer_loop(Server, none) end).
 
 %% Groups are written one after the other, in the order the writer
-%% built them, so feed rows become visible in HLC order.
-committer_loop(Server) ->
+%% built them, so feed rows become visible in HLC order. `Open' is the
+%% batch of a synced group whose ops are still arriving.
+committer_loop(Server, Open) ->
     receive
-        {commit, Ref, StoreRef, DbName, Batch, Sync, Plan} ->
-            _ = write_and_answer(StoreRef, DbName, Batch, Sync, Plan),
-            Server ! {committed, Ref},
-            committer_loop(Server)
+        {ops, Ref, StoreRef, Ops} ->
+            committer_loop(Server, {Ref, extend(StoreRef, Open, Ref, Ops)});
+        {commit, Ref, StoreRef, DbName, Batch0, Sync, Plan} ->
+            Batch = seal(StoreRef, Open, Ref, Batch0),
+            MoreSeg = write_and_answer(StoreRef, DbName, Batch, Sync, Plan),
+            Server ! {committed, Ref, MoreSeg},
+            committer_loop(Server, none)
     end.
+
+extend(StoreRef, none, _Ref, Ops) ->
+    build_batch(StoreRef, Ops);
+extend(StoreRef, {Ref, Batch}, Ref, Ops) ->
+    add_to_batch(StoreRef, Batch, Ops).
+
+seal(_StoreRef, none, _Ref, Batch) ->
+    Batch;
+seal(StoreRef, {Ref, Batch}, Ref, {tail, Tail}) ->
+    add_to_batch(StoreRef, Batch, Tail).
 
 write_group(_StoreRef, [], _Sync) ->
     ok;

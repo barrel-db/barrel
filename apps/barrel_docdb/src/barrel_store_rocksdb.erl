@@ -11,7 +11,7 @@
 -export([open/2, close/1, checkpoint/2]).
 -export([put/3, put/4, get/2, key_exists/2, multi_key_exists/2, multi_get/2, delete/2]).
 -export([merge/3]).
--export([write_batch/2, write_batch/3, build_batch/2]).
+-export([write_batch/2, write_batch/3, build_batch/2, add_to_batch/3]).
 -export([fold/4, fold_range/5, fold_range/6, fold_range_reverse/5, fold_range_reverse/6]).
 -export([fold_range_with_snapshot/6, fold_range_prefix_with_snapshot/6]).
 -export([fold_range_long_scan/5]).
@@ -234,9 +234,16 @@ write_batch(DbRef, Operations, Opts) ->
 %% @doc Build the RocksDB batch of the operations (see write_batch/3)
 %% without writing it, so another process can write it.
 -spec build_batch(db_ref(), list()) -> {batch, rocksdb:batch_handle()}.
-build_batch(#{posting_cf := PostingCF, body_cf := BodyCF, local_cf := LocalCF},
-            Operations) ->
+build_batch(DbRef, Operations) ->
     {ok, Batch} = rocksdb:batch(),
+    add_to_batch(DbRef, {batch, Batch}, Operations).
+
+%% @doc Append operations to a batch from build_batch/2. On failure the
+%% batch is released and the error raised.
+-spec add_to_batch(db_ref(), {batch, rocksdb:batch_handle()}, list()) ->
+    {batch, rocksdb:batch_handle()}.
+add_to_batch(#{posting_cf := PostingCF, body_cf := BodyCF, local_cf := LocalCF},
+             {batch, Batch}, Operations) ->
     try
         lists:foreach(
             fun({put, Key, Value}) ->
