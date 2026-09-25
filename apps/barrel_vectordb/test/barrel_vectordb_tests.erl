@@ -421,7 +421,7 @@ test_stale_graph_rebuilt() ->
     exit(Pid, kill),
     receive {'DOWN', MRef, _, _, _} -> ok end,
 
-    {ok, _} = barrel_vectordb:start_link(Cfg),
+    {ok, _} = start_retry(Cfg, 50),
     {ok, Stats} = barrel_vectordb:stats(graph_stale_store),
     ?assertEqual(rebuilt, maps:get(index_origin, Stats)),
     ?assertEqual(2, barrel_vectordb:count(graph_stale_store)),
@@ -446,7 +446,7 @@ test_changed_object_rebuilt() ->
     exit(Pid, kill),
     receive {'DOWN', MRef, _, _, _} -> ok end,
 
-    {ok, _} = barrel_vectordb:start_link(Cfg),
+    {ok, _} = start_retry(Cfg, 50),
     {ok, Stats} = barrel_vectordb:stats(graph_chg_store),
     ?assertEqual(rebuilt, maps:get(index_origin, Stats)),
     %% the rebuilt index serves the CHANGED vector, not the persisted one
@@ -608,3 +608,23 @@ test_search_include_options() ->
     ?assertNot(maps:is_key(metadata, R4)),
     ?assert(maps:is_key(key, R4)),
     ?assert(maps:is_key(score, R4)).
+
+%% A killed store's RocksDB lock is released when its handle is garbage
+%% collected, not at once: retry the reopen for up to N * 100 ms.
+start_retry(Cfg, N) ->
+    Old = process_flag(trap_exit, true),
+    try do_start_retry(Cfg, N)
+    after
+        process_flag(trap_exit, Old)
+    end.
+
+do_start_retry(Cfg, 0) ->
+    barrel_vectordb:start_link(Cfg);
+do_start_retry(Cfg, N) ->
+    case catch barrel_vectordb:start_link(Cfg) of
+        {ok, _} = Ok -> Ok;
+        _ ->
+            receive {'EXIT', _, _} -> ok after 0 -> ok end,
+            timer:sleep(100),
+            do_start_retry(Cfg, N - 1)
+    end.
