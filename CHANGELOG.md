@@ -4,6 +4,18 @@ All notable changes to the Barrel umbrella are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and each app
 is versioned independently under [Semantic Versioning](https://semver.org/).
 
+## [2026-09-25] Read-only barrel opens and database leases
+
+A query that spans databases must keep each one open while it runs, and an
+export must take a database away from its users while it copies the files.
+barrel opens a database read only or with its stored policy, and the open
+databases manager gains counted leases, exclusive holds and opens that never
+create a database.
+
+| App | Version | Change |
+|-----|---------|--------|
+| barrel | 1.6.0 | `read_only` and `embedding => stored` opens; `barrel_dbs` leases, holds, `lookup/1`, `must_exist` |
+
 ## [2026-09-25] Embedding fingerprint
 
 Vector scores from two databases only compare when both embed with the same

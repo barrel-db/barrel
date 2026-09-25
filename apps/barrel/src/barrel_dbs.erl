@@ -43,7 +43,9 @@
          close/1, close_owned/1, destroy/1,
          branch/3,
          pin/1, unpin/1,
+         lease/2, release/1, leases/0,
          list/0,
+         lookup/1, hold/2, unhold/1,
          sweep/0]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
          terminate/2]).
@@ -59,9 +61,13 @@
     db :: barrel:db(),
     last_used :: integer(),  %% monotonic ms
     pinned = false :: boolean(),
+    %% query-scoped holds (lease/2): counted, released on holder exit
+    leases = 0 :: non_neg_integer(),
     %% opaque tag from the ensure opts (`owner => Term'): lets a
     %% subsystem close exactly the entries it opened (see close_owned/1)
-    owner :: term()
+    owner :: term(),
+    %% the open options (without owner), to reopen after a hold
+    opts = #{} :: map()
 }).
 
 %% `opening' holds cold opens in flight in a worker (so a slow open never
@@ -69,7 +75,12 @@
 %% second open of the same name would race on the RocksDB lock).
 %% #{Name => {WorkerPid, [{From, Opts}]}}.
 -record(state, {dbs = #{} :: #{binary() => #entry{}},
-                opening = #{} :: #{binary() => {pid(), [{term(), map()}]}}}).
+                opening = #{} :: #{binary() => {pid(), [{term(), map()}]}},
+                %% lease monitor ref -> leased name
+                lease_mons = #{} :: #{reference() => binary()},
+                %% names closed for exclusive file access (export): ensure
+                %% refuses them until unhold/1
+                held = #{} :: #{binary() => term()}}).
 
 %%====================================================================
 %% API
@@ -88,7 +99,8 @@ ensure(Name) ->
 %% cached handle is returned as-is; runtime config such as encryption
 %% must match what the db was opened with). The extra `owner => Term'
 %% option tags the entry for {@link close_owned/1} and is not passed
-%% to {@link barrel:open/2}.
+%% to {@link barrel:open/2}; `must_exist => true' fails a cold open with
+%% `{error, not_found}' instead of creating the database.
 -spec ensure(barrel:db_name(), map()) ->
     {ok, barrel:db()} | {error, term()}.
 ensure(Name, Opts) when is_map(Opts) ->
@@ -132,10 +144,64 @@ pin(Name) ->
 unpin(Name) ->
     gen_server:call(?SERVER, {pin, to_name(Name), false}, infinity).
 
+%% @doc Open `Name' like {@link ensure/2} and hold it against idle
+%% closing and eviction until {@link release/1} or the caller exits.
+%% Leases are counted, unlike the boolean {@link pin/1}.
+-spec lease(barrel:db_name(), map()) ->
+    {ok, barrel:db(), reference()} | {error, term()}.
+lease(Name, Opts) when is_map(Opts) ->
+    lease(to_name(Name), Opts, 2).
+
+lease(_Name, _Opts, 0) ->
+    {error, not_open};
+lease(Name, Opts, Tries) ->
+    case ensure(Name, Opts) of
+        {ok, _Db} ->
+            case gen_server:call(?SERVER, {lease, Name, self()}, infinity) of
+                {ok, _Db1, _Ref} = Ok -> Ok;
+                {error, not_open} -> lease(Name, Opts, Tries - 1)
+            end;
+        {error, _} = Err ->
+            Err
+    end.
+
+%% @doc Drop a lease taken with {@link lease/2}. Idempotent.
+-spec release(reference()) -> ok.
+release(Lease) when is_reference(Lease) ->
+    gen_server:call(?SERVER, {release, Lease}, infinity).
+
+%% @doc Held lease counts by name (names with no lease are absent).
+-spec leases() -> #{binary() => pos_integer()}.
+leases() ->
+    gen_server:call(?SERVER, leases, infinity).
+
 %% @doc Names of the databases this manager holds open.
 -spec list() -> [binary()].
 list() ->
     gen_server:call(?SERVER, list, infinity).
+
+%% @doc What the manager knows about an open database: pinned flag,
+%% owner tag, and the options it was opened with.
+-spec lookup(barrel:db_name()) ->
+    {ok, #{pinned := boolean(), owner := term(), opts := map()}} |
+    {error, not_open}.
+lookup(Name) ->
+    gen_server:call(?SERVER, {lookup, to_name(Name)}, infinity).
+
+%% @doc Take exclusive file access to `Name': close it if this manager
+%% holds it, then refuse every ensure until {@link unhold/1}. Refused
+%% when the database is pinned or leased, tagged with another owner than
+%% `owner' in `Opts', held already, or open outside this manager.
+%% Returns whether it was open and with which options.
+-spec hold(barrel:db_name(), map()) ->
+    {ok, #{was_open := boolean(), opts := map()}} | {error, term()}.
+hold(Name, Opts) when is_map(Opts) ->
+    gen_server:call(?SERVER, {hold, to_name(Name), Opts}, infinity).
+
+%% @doc End a {@link hold/2}. Idempotent.
+-spec unhold(barrel:db_name()) -> ok.
+unhold(Name) ->
+    gen_server:call(?SERVER, {unhold, to_name(Name)}, infinity).
 
 %% @doc Run one idle sweep synchronously (test hook; the periodic
 %% timer calls the same code).
@@ -171,8 +237,7 @@ handle_info({opened, Name, Result}, #state{opening = Opening} = State) ->
                 {ok, Db} ->
                     %% the first-arrived waiter's owner tags the entry
                     {_From0, Opts0} = lists:last(Waiters),
-                    Owner = maps:get(owner, Opts0, undefined),
-                    State2 = insert(Name, Db, Owner, State1),
+                    State2 = insert(Name, Db, Opts0, State1),
                     _ = [gen_server:reply(F, {ok, Db}) || {F, _} <- Waiters],
                     {noreply, State2};
                 {error, _} = Err ->
@@ -191,6 +256,11 @@ handle_info({retry_call, Req, From}, State) ->
         {noreply, State1} ->
             {noreply, State1}
     end;
+%% A lease holder exited without releasing.
+handle_info({'DOWN', Ref, process, _Pid, _Reason},
+            #state{lease_mons = Mons} = State)
+  when is_map_key(Ref, Mons) ->
+    {noreply, drop_lease(Ref, State)};
 %% Safety net: an open worker died without reporting (it traps its own
 %% errors and always sends {opened,...}, so only an external kill lands
 %% here). Fail the waiters rather than leave them blocked.
@@ -211,8 +281,26 @@ handle_info(_Info, State) ->
 %% Call dispatch (also re-entered by {retry_call, ...})
 %%====================================================================
 
+do_call({ensure, Name, _Opts}, _From, #state{held = Held} = State)
+        when is_map_key(Name, Held) ->
+    {reply, {error, {held, maps:get(Name, Held)}}, State};
 do_call({ensure, Name, Opts}, From, State) ->
     {noreply, ensure_async(Name, Opts, From, State)};
+do_call({lookup, Name}, _From, #state{dbs = Dbs} = State) ->
+    case maps:find(Name, Dbs) of
+        {ok, #entry{pinned = P, owner = O, opts = Opts}} ->
+            {reply, {ok, #{pinned => P, owner => O, opts => Opts}}, State};
+        error ->
+            {reply, {error, not_open}, State}
+    end;
+do_call({hold, Name, _Opts}, _From, #state{held = Held} = State)
+        when is_map_key(Name, Held) ->
+    {reply, {error, {held, maps:get(Name, Held)}}, State};
+do_call({hold, Name, Opts} = Req, From, State) ->
+    with_free_name(Name, Req, From, State,
+        fun(S) -> do_hold(Name, maps:get(owner, Opts, undefined), S) end);
+do_call({unhold, Name}, _From, #state{held = Held} = State) ->
+    {reply, ok, State#state{held = maps:remove(Name, Held)}};
 do_call({close, Name} = Req, From, State) ->
     with_free_name(Name, Req, From, State,
         fun(#state{dbs = Dbs} = S) ->
@@ -253,7 +341,6 @@ do_call({branch, Parent, BranchName, Opts} = Req, From, State) ->
         fun(S) ->
             OpenOpts = maps:get(open_opts, Opts, #{}),
             BranchOpts = maps:without([open_opts], Opts),
-            Owner = maps:get(owner, OpenOpts, undefined),
             case do_ensure(Parent, OpenOpts, S) of
                 {ok, ParentDb, S1} ->
                     case maybe_make_room(S1) of
@@ -262,7 +349,8 @@ do_call({branch, Parent, BranchName, Opts} = Req, From, State) ->
                                                BranchOpts) of
                                 {ok, BranchDb} ->
                                     {reply, {ok, BranchDb},
-                                     insert(BranchName, BranchDb, Owner, S2)};
+                                     insert(BranchName, BranchDb,
+                                            OpenOpts, S2)};
                                 {error, _} = Err ->
                                     {reply, Err, S2}
                             end;
@@ -284,6 +372,27 @@ do_call({pin, Name, Flag} = Req, From, State) ->
                     {reply, {error, not_open}, S}
             end
         end);
+do_call({lease, Name, Pid} = Req, From, State) ->
+    with_free_name(Name, Req, From, State,
+        fun(#state{dbs = Dbs, lease_mons = Mons} = S) ->
+            case maps:find(Name, Dbs) of
+                {ok, #entry{db = Db, leases = N} = Entry} ->
+                    Ref = erlang:monitor(process, Pid),
+                    Entry1 = Entry#entry{leases = N + 1,
+                                         last_used = now_ms()},
+                    {reply, {ok, Db, Ref},
+                     S#state{dbs = Dbs#{Name := Entry1},
+                             lease_mons = Mons#{Ref => Name}}};
+                error ->
+                    {reply, {error, not_open}, S}
+            end
+        end);
+do_call({release, Ref}, _From, State) ->
+    erlang:demonitor(Ref, [flush]),
+    {reply, ok, drop_lease(Ref, State)};
+do_call(leases, _From, #state{dbs = Dbs} = State) ->
+    {reply, maps:from_list([{N, L} || {N, #entry{leases = L}} <- maps:to_list(Dbs),
+                                      L > 0]), State};
 do_call(list, _From, #state{dbs = Dbs} = State) ->
     {reply, maps:keys(Dbs), State};
 do_call(sweep, _From, State) ->
@@ -335,7 +444,7 @@ start_open(Name, Opts, From, State) ->
             Server = self(),
             OpenOpts = open_opts(Opts),
             {Pid, _Ref} = spawn_monitor(fun() ->
-                Result = try barrel:open(Name, OpenOpts)
+                Result = try open_checked(Name, Opts, OpenOpts)
                          catch C:E -> {error, {C, E}} end,
                 Server ! {opened, Name, Result}
             end),
@@ -356,6 +465,9 @@ terminate(_Reason, #state{dbs = Dbs}) ->
 %% Internal
 %%====================================================================
 
+do_ensure(Name, _Opts, #state{held = Held} = State)
+        when is_map_key(Name, Held) ->
+    {error, {held, maps:get(Name, Held)}, State};
 do_ensure(Name, Opts, #state{dbs = Dbs} = State) ->
     case maps:find(Name, Dbs) of
         {ok, #entry{db = Db} = Entry} ->
@@ -379,12 +491,11 @@ do_ensure(Name, Opts, #state{dbs = Dbs} = State) ->
     end.
 
 reopen(Name, Opts, State) ->
-    Owner = maps:get(owner, Opts, undefined),
     case maybe_make_room(State) of
         {ok, State1} ->
-            case barrel:open(Name, open_opts(Opts)) of
+            case open_checked(Name, Opts, open_opts(Opts)) of
                 {ok, Db} ->
-                    {ok, Db, insert(Name, Db, Owner, State1)};
+                    {ok, Db, insert(Name, Db, Opts, State1)};
                 {error, Reason} ->
                     {error, Reason, State1}
             end;
@@ -396,11 +507,64 @@ reopen(Name, Opts, State) ->
 %% manager-owned store is tracked by name and must not be linked to the
 %% (transient or loop) process that opens it.
 open_opts(Opts) ->
-    (maps:without([owner], Opts))#{store_supervised => true}.
+    (maps:without([owner, must_exist], Opts))#{store_supervised => true}.
 
-insert(Name, Db, Owner, #state{dbs = Dbs} = State) ->
-    Entry = #entry{db = Db, last_used = now_ms(), owner = Owner},
+%% `must_exist => true' refuses to create a database that is not there.
+open_checked(Name, #{must_exist := true} = Opts, OpenOpts) ->
+    case barrel_docdb:db_exists(Name, maps:get(docdb, Opts, #{})) of
+        true -> barrel:open(Name, OpenOpts);
+        false -> {error, not_found}
+    end;
+open_checked(Name, _Opts, OpenOpts) ->
+    barrel:open(Name, OpenOpts).
+
+insert(Name, Db, Opts, #state{dbs = Dbs} = State) ->
+    Entry = #entry{db = Db, last_used = now_ms(),
+                   owner = maps:get(owner, Opts, undefined),
+                   opts = maps:without([owner, must_exist], Opts)},
     State#state{dbs = Dbs#{Name => Entry}}.
+
+drop_lease(Ref, #state{dbs = Dbs, lease_mons = Mons} = State) ->
+    case maps:take(Ref, Mons) of
+        {Name, Mons1} ->
+            Dbs1 = case maps:find(Name, Dbs) of
+                {ok, #entry{leases = N} = Entry} when N > 0 ->
+                    Dbs#{Name := Entry#entry{leases = N - 1,
+                                             last_used = now_ms()}};
+                _ ->
+                    Dbs
+            end,
+            State#state{dbs = Dbs1, lease_mons = Mons1};
+        error ->
+            State
+    end.
+
+in_use(#entry{pinned = true}) -> true;
+in_use(#entry{leases = N}) -> N > 0.
+
+%% Close `Name' for exclusive access unless something else relies on it.
+do_hold(Name, Owner, #state{dbs = Dbs, held = Held} = State) ->
+    case maps:find(Name, Dbs) of
+        {ok, #entry{pinned = true}} ->
+            {reply, {error, pinned}, State};
+        {ok, #entry{leases = N}} when N > 0 ->
+            {reply, {error, {leased, N}}, State};
+        {ok, #entry{owner = O}} when O =/= undefined, O =/= Owner ->
+            {reply, {error, {owned_by, O}}, State};
+        {ok, #entry{db = Db, opts = Opts}} ->
+            _ = barrel:close(Db),
+            {reply, {ok, #{was_open => true, opts => Opts}},
+             State#state{dbs = maps:remove(Name, Dbs),
+                         held = Held#{Name => Owner}}};
+        error ->
+            case docdb_alive(Name) of
+                true ->
+                    {reply, {error, open_outside_manager}, State};
+                false ->
+                    {reply, {ok, #{was_open => false, opts => #{}}},
+                     State#state{held = Held#{Name => Owner}}}
+            end
+    end.
 
 %% The manager holds stores by name (never linked): a handle is live only
 %% while both its docdb server and its supervised vector store are up.
@@ -428,7 +592,7 @@ maybe_make_room(#state{dbs = Dbs} = State) ->
             Cutoff = now_ms() - Guard,
             Candidates = [{E#entry.last_used, N, E}
                           || {N, E} <- maps:to_list(Dbs),
-                             not E#entry.pinned,
+                             not in_use(E),
                              E#entry.last_used =< Cutoff],
             case lists:sort(Candidates) of
                 [{_, Name, #entry{db = Db}} | _] ->
@@ -446,7 +610,7 @@ do_sweep(#state{dbs = Dbs} = State) ->
         IdleTimeout ->
             Cutoff = now_ms() - IdleTimeout,
             Expired = [{N, E} || {N, E} <- maps:to_list(Dbs),
-                                 not E#entry.pinned,
+                                 not in_use(E),
                                  E#entry.last_used =< Cutoff],
             Dbs1 = lists:foldl(
                 fun({Name, #entry{db = Db}}, Acc) ->

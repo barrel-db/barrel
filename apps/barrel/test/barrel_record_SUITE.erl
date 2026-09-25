@@ -36,6 +36,7 @@
          explicit_vector_skips_embedder/1,
          embed_accessors/1,
          embedder_fingerprint/1,
+         read_only_stored_policy/1,
          explicit_vector_dimension_check/1,
          search_end_to_end/1,
          vector_add_guards/1,
@@ -76,6 +77,7 @@ all() ->
      search_end_to_end,
      embed_accessors,
      embedder_fingerprint,
+     read_only_stored_policy,
      vector_add_guards,
      byo_embedding_async,
      byo_embedding_sync_and_precedence,
@@ -135,6 +137,7 @@ meck_cases() ->
      explicit_vector_dimension_check,
      search_end_to_end,
      embed_accessors,
+     read_only_stored_policy,
      vector_add_guards,
      byo_embedding_async,
      byo_embedding_sync_and_precedence,
@@ -526,6 +529,49 @@ search_end_to_end(Config) ->
     ?assertEqual(<<"quick brown fox">>, maps:get(text, HTop)),
     ?assertEqual(#{<<"kind">> => <<"animal">>}, maps:get(metadata, HTop)),
     ok = barrel:close(Db).
+
+%% A record database reopened read only with its stored policy: reads
+%% and searches work (disk BM25 as written, memory BM25 rebuilt from the
+%% documents), writes are refused and no indexer runs.
+read_only_stored_policy(Config) ->
+    Dir = ?config(dir, Config),
+    Vec = Dir ++ "/ro_stored_vec",
+    DocOpts = #{data_dir => Dir},
+    {ok, Db0} = barrel:open(ro_stored_db, #{
+        embedding => #{fields => [<<"title">>], mode => sync},
+        docdb => DocOpts, vectordb => #{dimension => 3, db_path => Vec}}),
+    [{ok, _} = barrel:put_doc(Db0, #{<<"id">> => Id, <<"title">> => T})
+     || {Id, T} <- [{<<"a">>, <<"quick brown fox">>},
+                    {<<"b">>, <<"lazy dog">>}]],
+    ok = barrel:close(Db0),
+    Reopen = fun(VecOpts) ->
+        barrel:open(ro_stored_db, #{embedding => stored, read_only => true,
+                                    docdb => DocOpts,
+                                    vectordb => VecOpts#{dimension => 3,
+                                                         db_path => Vec}})
+    end,
+    lists:foreach(
+        fun(VecOpts) ->
+            {ok, Db} = Reopen(VecOpts),
+            ?assertMatch(#{read_only := true,
+                           embedding := #{fields := [[<<"title">>]]}}, Db),
+            {ok, #{<<"title">> := <<"lazy dog">>}} = barrel:get_doc(Db, <<"b">>),
+            {ok, [{<<"a">>, _}]} = barrel:search_bm25(Db, <<"fox">>, #{k => 2}),
+            {ok, [#{key := <<"a">>} | _]} =
+                barrel:search(Db, <<"quick brown fox">>, #{k => 1}),
+            ?assertEqual({error, read_only},
+                         barrel:put_doc(Db, #{<<"id">> => <<"c">>,
+                                              <<"title">> => <<"new">>})),
+            ok = barrel:close(Db)
+        end, [#{}, #{bm25_backend => memory}]),
+    %% a plain database has no stored policy
+    {ok, P} = barrel:open(ro_plain_db, #{docdb => DocOpts,
+                                         vectordb => #{dimension => 3,
+                                                       db_path => Dir ++ "/ro_plain_vec"}}),
+    ok = barrel:close(P),
+    ?assertEqual({error, no_stored_policy},
+                 barrel:open(ro_plain_db, #{embedding => stored,
+                                            docdb => DocOpts})).
 
 byo_embedding_async(Config) ->
     %% Fields-less policy: bring-your-own embeddings, no embedder needed.

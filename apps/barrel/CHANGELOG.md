@@ -3,6 +3,20 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.6.0] - 2026-09-25
+
+### Added
+- `open/2` takes `read_only => true`: both stores open read only, every write answers `{error, read_only}`, record mode persists no policy and starts no indexer. The handle carries `read_only => true`. BM25 needs no refill: the vector store rebuilds a memory index from the documents at open, and a disk index is durable.
+- `open/2` takes `embedding => stored`: record mode with the policy the database persisted (`{error, no_stored_policy}` on a plain database), for copies that carry their source's policy.
+- `barrel_dbs:lease/2`, `release/1`, `leases/0`: counted, monitored holds that keep a database open against idle close and eviction until released or until the holder exits.
+- `barrel_dbs:hold/2`, `unhold/1`: exclusive file access. A hold closes the database and refuses every `ensure` until `unhold`; it is refused on a pinned or leased database, one owned by another tag, or one open outside the manager.
+- `barrel_dbs:lookup/1`: pinned flag, owner tag and the options a database was opened with.
+- `barrel_dbs:ensure/2` takes `must_exist => true`: a cold open of a database that is not there answers `{error, not_found}` instead of creating it.
+
+### Changed
+- Idle close and eviction skip leased databases as well as pinned ones.
+- Requires `barrel_vectordb ~> 2.5` (read-only stores).
+
 ## [1.5.0] - 2026-09-25
 
 ### Added
