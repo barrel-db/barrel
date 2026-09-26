@@ -57,7 +57,7 @@ unregister_name(Name) ->
 %% @doc via callback: resolve Name to a live pid or `undefined'.
 -spec whereis_name(term()) -> pid() | undefined.
 whereis_name(Name) ->
-    case ets:lookup(?TAB, Name) of
+    case lookup(Name) of
         [{_, Pid}] ->
             case is_process_alive(Pid) of
                 true -> Pid;
@@ -65,6 +65,12 @@ whereis_name(Name) ->
             end;
         [] ->
             undefined
+    end.
+
+%% The table dies with the registry: while it restarts, nothing is registered.
+lookup(Name) ->
+    try ets:lookup(?TAB, Name)
+    catch error:badarg -> []
     end.
 
 %% @doc via callback.
