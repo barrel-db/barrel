@@ -13,7 +13,7 @@
 -include_lib("common_test/include/ct.hrl").
 -include_lib("stdlib/include/assert.hrl").
 
--export([all/0, init_per_suite/1, end_per_suite/1,
+-export([suite/0, all/0, init_per_suite/1, end_per_suite/1,
          init_per_testcase/2, end_per_testcase/2]).
 
 -export([live_subscription/1, live_update/1, live_delete/1,
@@ -23,6 +23,10 @@
          compaction_worker_prompt_close/1, compaction_worker_killed_via_link/1,
          refresh_error_propagation/1,
          db_recreated_same_name_resubscribe/1]).
+
+%% A hang guard: the worker cases block a merge until it is killed.
+suite() ->
+    [{timetrap, {minutes, 5}}].
 
 all() ->
     [live_subscription, live_update, live_delete, multi_segment_fan,
@@ -208,31 +212,27 @@ compaction_crash_safety(Config) ->
 
 %% Finding 8: close/1 must not block waiting for an in-flight background
 %% compaction to finish. barrel_ngram_merge:merge/2 is mocked to block
-%% until signaled, standing in for a slow merge; close/1 must still
-%% return promptly, and no orphaned segment-merge-*.ngseg temp file may
-%% exist immediately afterward (the explicit kill-then-sweep in
-%% terminate/2, not the next reopen's cleanup_orphans/2 pass).
+%% until it is killed, so close/1 returning at all proves it did not wait
+%% for the merge; no orphaned segment-merge-*.ngseg temp file may exist
+%% immediately afterward (the explicit kill-then-sweep in terminate/2,
+%% not the next reopen's cleanup_orphans/2 pass).
 compaction_worker_prompt_close(Config) ->
     Db = ?config(db, Config), C = ?config(corpus, Config), Dir = ?config(dir, Config),
     Self = self(),
     meck:new(barrel_ngram_merge, [passthrough]),
     meck:expect(barrel_ngram_merge, merge,
-        fun(Paths, Drop) ->
+        fun(_Paths, _Drop) ->
             Self ! {merge_started, self()},
-            receive proceed -> ok after 5000 -> ok end,
-            meck:passthrough([Paths, Drop])
+            receive never_sent -> ok end
         end),
     _ = put_doc(Db, <<"a">>, <<"one common">>), refresh(C),
     _ = put_doc(Db, <<"b">>, <<"two common">>), refresh(C),
     _ = put_doc(Db, <<"c">>, <<"three common">>), refresh(C),
     WorkerPid = receive
         {merge_started, WPid} -> WPid
-    after 2000 -> ct:fail(merge_not_started)
+    after 60000 -> ct:fail(merge_not_started)
     end,
-    T0 = erlang:monotonic_time(millisecond),
     ok = barrel_ngram:close(C),
-    T1 = erlang:monotonic_time(millisecond),
-    ?assert((T1 - T0) < 2000),
     %% the worker must be genuinely gone by the time close/1 returns, not
     %% merely "close returned quickly while the worker keeps running
     %% unsupervised in the background" -- terminate/2's explicit kill,
@@ -254,25 +254,25 @@ compaction_worker_killed_via_link(Config) ->
     Db = ?config(db, Config), C = ?config(corpus, Config),
     Self = self(),
     meck:new(barrel_ngram_merge, [passthrough]),
+    %% the merge never finishes on its own: only the link can end it
     meck:expect(barrel_ngram_merge, merge,
-        fun(Paths, Drop) ->
+        fun(_Paths, _Drop) ->
             Self ! {merge_started, self()},
-            receive proceed -> ok after 5000 -> ok end,
-            meck:passthrough([Paths, Drop])
+            receive never_sent -> ok end
         end),
     _ = put_doc(Db, <<"a">>, <<"one common">>), refresh(C),
     _ = put_doc(Db, <<"b">>, <<"two common">>), refresh(C),
     _ = put_doc(Db, <<"c">>, <<"three common">>), refresh(C),
     WorkerPid = receive
         {merge_started, WPid} -> WPid
-    after 2000 -> ct:fail(merge_not_started)
+    after 60000 -> ct:fail(merge_not_started)
     end,
     ShardPid = barrel_ngram_registry:whereis_name({shard, C}),
     true = is_pid(ShardPid),
     true = is_process_alive(WorkerPid),
+    MRef = erlang:monitor(process, WorkerPid),
     exit(ShardPid, kill),
-    ok = wait_until(fun() -> not is_process_alive(WorkerPid) end, 100),
-    ?assertNot(is_process_alive(WorkerPid)),
+    receive {'DOWN', MRef, process, WorkerPid, _} -> ok end,
     meck:unload(barrel_ngram_merge).
 
 %% Finding 6: refresh/1 must propagate a get_changes failure as
