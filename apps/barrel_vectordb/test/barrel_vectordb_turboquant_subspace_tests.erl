@@ -27,13 +27,14 @@ new_test_() ->
             ?assertEqual(96, maps:get(subdim, Info))
         end},
         {"create config with explicit M", fun() ->
+            %% auto M would be 2; small subspaces keep the rotations cheap
             {ok, Config} = barrel_vectordb_turboquant_subspace:new(#{
-                dimension => 768,
+                dimension => 256,
                 m => 4
             }),
             Info = barrel_vectordb_turboquant_subspace:info(Config),
             ?assertEqual(4, maps:get(m, Info)),
-            ?assertEqual(192, maps:get(subdim, Info))
+            ?assertEqual(64, maps:get(subdim, Info))
         end},
         {"fail on odd dimension", fun() ->
             ?assertMatch({error, {dimension_must_be_even, _}},
@@ -222,59 +223,5 @@ nif_safety_test_() ->
         end}
     ].
 
-%% Performance comparison test (disabled by default, run manually)
-performance_comparison_test_() ->
-    {timeout, 60, fun() ->
-        %% Compare encode latency between full TQ and subspace TQ
-        Dim = 768,
-        M = 8,
-
-        %% Create configs
-        {ok, FullConfig} = barrel_vectordb_turboquant:new(#{dimension => Dim}),
-        {ok, SubspaceConfig} = barrel_vectordb_turboquant_subspace:new(#{
-            dimension => Dim,
-            m => M
-        }),
-
-        %% Generate test vector
-        Vec = [rand:uniform() - 0.5 || _ <- lists:seq(1, Dim)],
-
-        %% Warm up
-        _ = barrel_vectordb_turboquant:encode(FullConfig, Vec),
-        _ = barrel_vectordb_turboquant_subspace:encode(SubspaceConfig, Vec),
-
-        %% Benchmark full TQ (reduced iterations for CI)
-        N = 10,
-        {FullTime, _} = timer:tc(fun() ->
-            [barrel_vectordb_turboquant:encode(FullConfig, Vec) || _ <- lists:seq(1, N)]
-        end),
-
-        %% Benchmark subspace TQ
-        {SubspaceTime, _} = timer:tc(fun() ->
-            [barrel_vectordb_turboquant_subspace:encode(SubspaceConfig, Vec) || _ <- lists:seq(1, N)]
-        end),
-
-        FullAvgMs = FullTime / N / 1000,
-        SubspaceAvgMs = SubspaceTime / N / 1000,
-        Speedup = FullTime / max(1, SubspaceTime),
-
-        io:format("~nPerformance comparison (D=~p, M=~p):~n", [Dim, M]),
-        io:format("  Full TQ:      ~.3f ms/encode~n", [FullAvgMs]),
-        io:format("  Subspace TQ:  ~.3f ms/encode~n", [SubspaceAvgMs]),
-        io:format("  Speedup:      ~.2fx~n", [Speedup]),
-
-        %% Memory comparison
-        SubspaceInfo = barrel_vectordb_turboquant_subspace:info(SubspaceConfig),
-
-        %% Subspace TQ should use less rotation matrix memory
-        SubspaceRotBytes = maps:get(rotation_matrix_bytes, SubspaceInfo),
-        FullRotBytes = Dim * Dim * 8,  %% Full TQ uses D*D matrix
-
-        io:format("~n  Rotation matrix memory:~n"),
-        io:format("    Full TQ:     ~.2f MB~n", [FullRotBytes / 1024 / 1024]),
-        io:format("    Subspace TQ: ~.2f MB~n", [SubspaceRotBytes / 1024 / 1024]),
-        io:format("    Reduction:   ~.1fx~n", [FullRotBytes / SubspaceRotBytes]),
-
-        %% Verify subspace is faster (or at least not much slower)
-        ?assert(SubspaceAvgMs < FullAvgMs * 1.5)
-    end}.
+%% Encode latency against full TurboQuant, whose D x D rotation takes tens
+%% of seconds to build at D = 768: bench/barrel_vectordb_turboquant_bench.erl.

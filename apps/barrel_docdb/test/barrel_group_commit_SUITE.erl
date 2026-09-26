@@ -66,34 +66,39 @@ open(TC, Opts, Config) ->
 %% Test cases
 %%====================================================================
 
-%% 64 synced writers commit at least 10x faster than one, when a sync
-%% costs enough to measure (it is near free on some CI disks).
+%% 64 synced writers share syncs: their first writes, queued together,
+%% commit as one group (one batch, one sync). Throughput is only logged,
+%% it depends on the disk and the host load.
 concurrent_synced_throughput(Config) ->
     Db = ?config(db, Config),
+    Pid = ?config(pid, Config),
     SingleN = 100,
     {T1, ok} = timer:tc(fun() -> writer(Db, <<"single">>, SingleN) end),
     Single = SingleN * 1000000 / T1,
+    {ok, #{write_groups := #{groups := G0, requests := R0}}} =
+        barrel_docdb:db_info(Db),
 
     Writers = 64,
     PerWriter = 20,
+    ok = sys:suspend(Pid),
     {T64, Results} = timer:tc(fun() ->
         run_parallel(Writers, fun(I) ->
             writer(Db, <<"w", (integer_to_binary(I))/binary>>, PerWriter)
-        end)
+        end, fun() -> wait_queue(Pid, Writers), ok = sys:resume(Pid) end)
     end),
     ?assertEqual(lists:duplicate(Writers, ok), Results),
     Concurrent = Writers * PerWriter * 1000000 / T64,
 
-    {ok, #{write_groups := Groups}} = barrel_docdb:db_info(Db),
+    {ok, #{write_groups := #{groups := G1, requests := R1} = Groups}} =
+        barrel_docdb:db_info(Db),
     ct:pal("single writer: ~.1f/s, 64 writers: ~.1f/s (x~.1f), groups: ~p",
            [Single, Concurrent, Concurrent / Single, Groups]),
-    ?assert(maps:get(max_size, Groups) > 1),
+    %% every write is synced and each group is one synced batch
+    ?assertEqual(Writers * PerWriter, R1 - R0),
+    ?assertEqual(Writers, maps:get(max_size, Groups)),
+    ?assert(G1 - G0 =< Writers * PerWriter - (Writers - 1)),
     {ok, Changes, _} = barrel_docdb:get_changes(Db, first),
-    ?assertEqual(SingleN + Writers * PerWriter, length(Changes)),
-    case Single < 1000 of
-        true -> ?assert(Concurrent >= 10 * Single);
-        false -> ct:pal("sync is cheap on this disk, ratio not asserted")
-    end.
+    ?assertEqual(SingleN + Writers * PerWriter, length(Changes)).
 
 %% 32 creators of the same id: one ok, 31 conflicts, one outbox entry.
 create_if_absent_race(Config) ->
@@ -255,12 +260,17 @@ writer(Db, Prefix, N) ->
 
 %% Run N funs at once (released together); results in order.
 run_parallel(N, Fun) ->
+    run_parallel(N, Fun, fun() -> ok end).
+
+%% Same, running Released once they are all released.
+run_parallel(N, Fun, Released) ->
     Parent = self(),
     Pids = [spawn_link(fun() ->
                 receive go -> ok end,
                 Parent ! {self(), Fun(I)}
             end) || I <- lists:seq(1, N)],
     _ = [P ! go || P <- Pids],
+    ok = Released(),
     [receive {P, R} -> R after 60000 -> error(timeout) end || P <- Pids].
 
 %% Queue the calls at a suspended server, in order, then resume it so
@@ -277,9 +287,11 @@ grouped(Pid, Funs) ->
     ok = sys:resume(Pid),
     [receive {C, R} -> R after 10000 -> error(timeout) end || C <- Callers].
 
+%% Wait for N calls in the server's mailbox; other messages do not count.
 wait_queue(Pid, N) ->
-    case erlang:process_info(Pid, message_queue_len) of
-        {message_queue_len, L} when L >= N -> ok;
+    {messages, Msgs} = erlang:process_info(Pid, messages),
+    case length([C || {'$gen_call', _, _} = C <- Msgs]) of
+        L when L >= N -> ok;
         _ -> timer:sleep(1), wait_queue(Pid, N)
     end.
 

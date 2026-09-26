@@ -36,6 +36,7 @@
          lifecycle_unavailable_when_sup_gone/1,
          registry_crash_cascades_and_fails_closed/1,
          registry_crash_makes_every_corpus_report_not_open/1,
+         registry_down_reads_as_not_registered/1,
          concurrent_open_same_corpus_serialized/1,
          validate_open_opts_path_traversal_and_shape/1,
          search_on_never_opened_corpus_fails_closed/1,
@@ -67,6 +68,7 @@ all() ->
      lifecycle_unavailable_when_sup_gone,
      registry_crash_cascades_and_fails_closed,
      registry_crash_makes_every_corpus_report_not_open,
+     registry_down_reads_as_not_registered,
      concurrent_open_same_corpus_serialized,
      validate_open_opts_path_traversal_and_shape,
      search_on_never_opened_corpus_fails_closed,
@@ -436,12 +438,26 @@ registry_crash_makes_every_corpus_report_not_open(Config) ->
     ?assertEqual(true, barrel_ngram:is_open(CorpusB)),
     RegistryPid = whereis(barrel_ngram_registry),
     exit(RegistryPid, kill),
-    ok = wait_until(fun() -> is_pid(whereis(barrel_ngram_registry)) end, 100),
-    ok = wait_until(fun() -> not barrel_ngram:is_open(Corpus) end, 100),
+    ok = wait_restarted(barrel_ngram_sup, barrel_ngram_registry, RegistryPid),
     ?assertEqual(false, barrel_ngram:is_open(Corpus)),
     ?assertEqual(false, barrel_ngram:is_open(CorpusB)),
     ?assertEqual(ok, barrel_ngram:close(Corpus)),
     ?assertEqual(ok, barrel_ngram:close(CorpusB)).
+
+%% While the registry is down its table is gone: lookups answer not
+%% registered and is_open/1 false, never badarg.
+registry_down_reads_as_not_registered(Config) ->
+    Db = ?config(db, Config), Corpus = ?config(corpus, Config), DataDir = ?config(data_dir, Config),
+    ok = barrel_ngram:open(Corpus, #{db => Db, data_dir => DataDir}),
+    %% stop the tree like the rest_for_one cascade does, registry last
+    Children = [barrel_ngram_corpus_lifecycle_sup, barrel_ngram_shard_sup,
+                barrel_ngram_registry],
+    _ = [ok = supervisor:terminate_child(barrel_ngram_sup, C) || C <- Children],
+    ?assertEqual(undefined, barrel_ngram_registry:whereis_name({shard, Corpus})),
+    ?assertEqual(false, barrel_ngram:is_open(Corpus)),
+    _ = [{ok, _} = supervisor:restart_child(barrel_ngram_sup, C)
+         || C <- lists:reverse(Children)],
+    ?assertEqual(ok, barrel_ngram:close(Corpus)).
 
 %% supervisor:start_child/2 is itself an RPC into the lifecycle
 %% supervisor's own process; if that process doesn't exist right now
@@ -468,7 +484,7 @@ registry_crash_cascades_and_fails_closed(Config) ->
     RegistryPid = whereis(barrel_ngram_registry),
     exit(RegistryPid, kill),
     ok = wait_until(fun() -> not is_process_alive(ShardPid) end, 100),
-    ok = wait_until(fun() -> is_pid(whereis(barrel_ngram_registry)) end, 100),
+    ok = wait_restarted(barrel_ngram_sup, barrel_ngram_registry, RegistryPid),
     ?assertEqual(undefined, barrel_ngram_registry:whereis_name({shard, Corpus})),
     ?assertEqual({error, corpus_not_open}, barrel_ngram:search(Corpus, <<"whatever">>)),
     %% is_open/1 checks live shard registration, not just meta (meta is
@@ -673,6 +689,17 @@ on_legacy_reindex_keeps_config_mismatch(Config) ->
 %%====================================================================
 %% Helpers
 %%====================================================================
+
+%% Wait for a new Name, then for Sup to finish the rest_for_one restart:
+%% it answers a call only once every restarted child is up.
+wait_restarted(Sup, Name, OldPid) ->
+    ok = wait_until(fun() -> restarted(whereis(Name), OldPid) end, 100),
+    _ = supervisor:which_children(Sup),
+    ok.
+
+restarted(undefined, _OldPid) -> false;
+restarted(OldPid, OldPid) -> false;
+restarted(_NewPid, _OldPid) -> true.
 
 wait_until(_Pred, 0) ->
     {error, timeout};

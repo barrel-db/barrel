@@ -83,8 +83,10 @@ t_live_e2e(_Config) ->
                       #{<<"db">> => <<"live_db">>,
                         <<"doc">> => #{<<"id">> => <<"l1">>,
                                        <<"kind">> => <<"live">>}}),
-    ok = wait_updated(Uri),
-    #{<<"rows">> := [Row]} = read(C, Uri),
+    #{<<"rows">> := [Row]} =
+        await_read(C, Uri, fun(#{<<"count">> := 1}) -> true;
+                              (_) -> false
+                           end),
     ?assertEqual(<<"l1">>, maps:get(<<"id">>, Row)),
     %% a non-matching write does not appear in the rows
     {false, _} = call(C, <<"doc_put">>,
@@ -94,8 +96,10 @@ t_live_e2e(_Config) ->
     %% deletion flows too
     {false, _} = call(C, <<"doc_delete">>, #{<<"db">> => <<"live_db">>,
                                              <<"id">> => <<"l1">>}),
-    ok = wait_updated(Uri),
-    ?assertMatch(#{<<"rows">> := [], <<"count">> := 0}, read(C, Uri)),
+    ?assertMatch(#{<<"rows">> := [], <<"count">> := 0},
+                 await_read(C, Uri, fun(#{<<"count">> := 0}) -> true;
+                                       (_) -> false
+                                    end)),
     barrel_mcp_client:close(C),
     ok.
 
@@ -271,6 +275,17 @@ wait_ready(C, Uri, N) ->
     case read(C, Uri) of
         #{<<"ready">> := true} -> ok;
         _ -> timer:sleep(50), wait_ready(C, Uri, N - 1)
+    end.
+
+%% An update notification may be one sent before the awaited change
+%% (the ready one, an earlier debounced write): re-read on each until
+%% the resource shows the change.
+await_read(C, Uri, Pred) ->
+    ok = wait_updated(Uri),
+    Res = read(C, Uri),
+    case Pred(Res) of
+        true -> Res;
+        false -> await_read(C, Uri, Pred)
     end.
 
 wait_updated(Uri) ->

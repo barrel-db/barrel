@@ -71,7 +71,7 @@ groups() ->
         {tasks, [sequence], [
             task_config_round_trip,
             task_restore_after_manager_restart,
-            task_event_driven_latency,
+            task_event_driven_wake,
             task_continuous_survives_error,
             task_one_shot_replicates_attachment,
             task_continuous_replicates_attachment_only_change,
@@ -756,11 +756,7 @@ direction_push(_Config) ->
     }),
 
     %% Wait for completion
-    timer:sleep(500),
-
-    %% Verify task completed
-    {ok, Task} = barrel_rep_tasks:get_task(TaskId),
-    ?assertEqual(completed, maps:get(status, Task)),
+    ok = wait_until(task_status(TaskId, completed), 50, 600),
 
     %% Verify document was replicated to target
     {ok, TargetDoc} = barrel_docdb:get_doc(Target, DocId),
@@ -795,11 +791,7 @@ direction_pull(_Config) ->
     }),
 
     %% Wait for completion
-    timer:sleep(500),
-
-    %% Verify task completed
-    {ok, Task} = barrel_rep_tasks:get_task(TaskId),
-    ?assertEqual(completed, maps:get(status, Task)),
+    ok = wait_until(task_status(TaskId, completed), 50, 600),
 
     %% Verify document was pulled to source
     {ok, SourceDoc} = barrel_docdb:get_doc(Source, DocId),
@@ -833,11 +825,7 @@ direction_both(_Config) ->
     }),
 
     %% Wait for completion
-    timer:sleep(1000),
-
-    %% Verify task completed
-    {ok, Task} = barrel_rep_tasks:get_task(TaskId),
-    ?assertEqual(completed, maps:get(status, Task)),
+    ok = wait_until(task_status(TaskId, completed), 50, 600),
 
     %% Verify source doc is now in target
     {ok, TargetSourceDoc} = barrel_docdb:get_doc(Target, SourceDocId),
@@ -888,11 +876,7 @@ chain_replication_wait_for(_Config) ->
 
     %% Wait for task A->B to complete
     %% Since wait_for is set, it should only complete after doc reaches C
-    timer:sleep(6000),
-
-    %% Verify task completed
-    {ok, Task} = barrel_rep_tasks:get_task(TaskAB),
-    ?assertEqual(completed, maps:get(status, Task)),
+    ok = wait_until(task_status(TaskAB, completed), 50, 600),
 
     %% Verify document is in C (the final destination)
     {ok, DocC} = barrel_docdb:get_doc(<<"chain_c">>, DocId),
@@ -971,6 +955,14 @@ wait_until(Fun, IntervalMs, Tries) ->
             wait_until(Fun, IntervalMs, Tries - 1)
     end.
 
+task_status(TaskId, Status) ->
+    fun() ->
+        case barrel_rep_tasks:get_task(TaskId) of
+            {ok, #{status := Status}} -> true;
+            _ -> false
+        end
+    end.
+
 doc_in(Db, DocId) ->
     fun() ->
         case barrel_docdb:get_doc(Db, DocId) of
@@ -1035,8 +1027,7 @@ task_restore_after_manager_restart(_Config) ->
             NewPid -> NewPid =/= OldPid
         end
     end, 50, 100),
-    timer:sleep(300),
-    {ok, #{status := running}} = barrel_rep_tasks:get_task(TaskId),
+    ok = wait_until(task_status(TaskId, running), 50, 600),
     {ok, _} = barrel_docdb:put_doc(<<"test_source">>,
                                    #{<<"id">> => <<"restored">>}),
     ok = wait_until(doc_in(<<"test_target">>, <<"restored">>), 50, 100),
@@ -1044,27 +1035,56 @@ task_restore_after_manager_restart(_Config) ->
     ok = barrel_rep_tasks:delete_task(TaskId),
     ok.
 
-task_event_driven_latency(_Config) ->
-    {ok, TaskId} = barrel_rep_tasks:start_task(#{
-        source => <<"test_source">>,
-        target => <<"test_target">>,
-        mode => continuous,
-        direction => push
-    }),
-    %% let the task drain and go idle on the changes stream
-    timer:sleep(400),
-    {ok, _} = barrel_docdb:put_doc(<<"test_source">>,
-                                   #{<<"id">> => <<"fast">>}),
-    T0 = erlang:monotonic_time(millisecond),
-    ok = wait_until(doc_in(<<"test_target">>, <<"fast">>), 10, 200),
-    Elapsed = erlang:monotonic_time(millisecond) - T0,
-    ct:pal("local continuous convergence in ~p ms", [Elapsed]),
-    %% the old loop slept a fixed 1000 ms between drains; the stream
-    %% wake must beat that comfortably
-    ?assert(Elapsed < 800),
-    ok = barrel_rep_tasks:stop_task(TaskId),
-    ok = barrel_rep_tasks:delete_task(TaskId),
+%% A continuous local task is woken by its changes stream: it receives the
+%% write's change event (traced on barrel_changes_stream:await/2), and the
+%% doc reaches the target. A polling task never calls await.
+task_event_driven_wake(_Config) ->
+    MS = [{'_', [], [{return_trace}]}],
+    1 = erlang:trace_pattern({barrel_changes_stream, await, 2}, MS, [global]),
+    _ = erlang:trace(all, true, [call, {tracer, self()}]),
+    try
+        {ok, TaskId} = barrel_rep_tasks:start_task(#{
+            source => <<"test_source">>,
+            target => <<"test_target">>,
+            mode => continuous,
+            direction => push
+        }),
+        {ok, _} = barrel_docdb:put_doc(<<"test_source">>,
+                                       #{<<"id">> => <<"fast">>}),
+        ok = wait_until(doc_in(<<"test_target">>, <<"fast">>), 50, 600),
+        ok = await_change_event(<<"fast">>),
+        ok = barrel_rep_tasks:stop_task(TaskId),
+        ok = barrel_rep_tasks:delete_task(TaskId)
+    after
+        _ = erlang:trace(all, false, [call]),
+        _ = erlang:trace_pattern({barrel_changes_stream, await, 2}, false, [global]),
+        flush_trace()
+    end,
     ok.
+
+await_change_event(DocId) ->
+    receive
+        {trace, _Pid, return_from, {barrel_changes_stream, await, 2},
+         {_ReqId, Changes}} when is_list(Changes) ->
+            case [C || #{id := Id} = C <- Changes, Id =:= DocId] of
+                [] -> await_change_event(DocId);
+                [_ | _] -> ok
+            end;
+        {trace, _Pid, _Kind, _Call} ->
+            await_change_event(DocId);
+        {trace, _Pid, _Kind, _Call, _Ret} ->
+            await_change_event(DocId)
+    after 30000 ->
+        ct:fail({no_change_event, DocId})
+    end.
+
+flush_trace() ->
+    receive
+        {trace, _, _, _} -> flush_trace();
+        {trace, _, _, _, _} -> flush_trace()
+    after 0 ->
+        ok
+    end.
 
 task_continuous_survives_error(_Config) ->
     %% unreachable remote target: a continuous task records the error

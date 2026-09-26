@@ -68,7 +68,7 @@ hot_layer_test_() ->
         {"hot layer compaction threshold", fun test_hot_compaction_threshold/0},
         {"hot layer compaction correctness", fun test_hot_compaction_correctness/0},
         {"hot layer recall", fun test_hot_layer_recall/0},
-        {"hot layer latency under 1ms", fun test_hot_layer_latency/0}
+        {"hot layer inserts stay in memory", fun test_hot_layer_no_disk_writes/0}
     ].
 
 %%====================================================================
@@ -1408,10 +1408,13 @@ test_hot_layer_recall() ->
         cleanup_disk(TmpDir)
     end.
 
-test_hot_layer_latency() ->
+%% What keeps hot layer inserts fast: below the compaction threshold they
+%% stay in memory and write nothing to the index files.
+test_hot_layer_no_disk_writes() ->
     TmpDir = setup_disk(),
+    ok = meck:new(barrel_vectordb_diskann_file, [passthrough]),
     try
-        BasePath = filename:join(TmpDir, "hot_latency_idx"),
+        BasePath = filename:join(TmpDir, "hot_nowrite_idx"),
         Dim = 64,
 
         {ok, Index0} = barrel_vectordb_diskann:new(#{
@@ -1421,33 +1424,41 @@ test_hot_layer_latency() ->
             hot_layer => true,
             hot_max_size => 10000
         }),
+        ok = meck:reset(barrel_vectordb_diskann_file),
 
-        %% Insert first vector
-        Vec1 = [rand:uniform() || _ <- lists:seq(1, Dim)],
-        {ok, Index1} = barrel_vectordb_diskann:insert(Index0, <<"first">>, Vec1),
-
-        %% Measure insert latency for subsequent inserts
         NumInserts = 50,
-        {TotalTime, FinalIndex} = lists:foldl(
-            fun(I, {AccTime, AccIndex}) ->
-                Vec = [rand:uniform() || _ <- lists:seq(1, Dim)],
-                Id = list_to_binary("v" ++ integer_to_list(I)),
-                Start = erlang:monotonic_time(microsecond),
+        Vecs = [{list_to_binary("v" ++ integer_to_list(I)),
+                 [rand:uniform() || _ <- lists:seq(1, Dim)]}
+                || I <- lists:seq(1, NumInserts)],
+        FinalIndex = lists:foldl(
+            fun({Id, Vec}, AccIndex) ->
                 {ok, NewIndex} = barrel_vectordb_diskann:insert(AccIndex, Id, Vec),
-                End = erlang:monotonic_time(microsecond),
-                {AccTime + (End - Start), NewIndex}
+                NewIndex
             end,
-            {0, Index1},
-            lists:seq(1, NumInserts)
+            Index0,
+            Vecs
         ),
 
-        AvgLatencyUs = TotalTime / NumInserts,
-        AvgLatencyMs = AvgLatencyUs / 1000.0,
-
-        %% Average insert latency should be under 1ms
-        ?assert(AvgLatencyMs < 1.0),
+        Writes = [F || {_Pid, {barrel_vectordb_diskann_file, F, _Args}, _Res}
+                           <- meck:history(barrel_vectordb_diskann_file),
+                       is_write(F)],
+        ?assertEqual([], Writes),
+        #{hot_layer := HotInfo} = barrel_vectordb_diskann:info(FinalIndex),
+        ?assertMatch(#{size := NumInserts, compaction_in_progress := false},
+                     HotInfo),
+        [?assertEqual({ok, Vec}, barrel_vectordb_diskann:get_vector(FinalIndex, Id))
+         || {Id, Vec} <- Vecs],
 
         barrel_vectordb_diskann:close(FinalIndex)
     after
+        meck:unload(barrel_vectordb_diskann_file),
         cleanup_disk(TmpDir)
     end.
+
+is_write(write_vector) -> true;
+is_write(write_node_int) -> true;
+is_write(write_node) -> true;
+is_write(write_pq_codes) -> true;
+is_write(write_header) -> true;
+is_write(sync) -> true;
+is_write(_) -> false.

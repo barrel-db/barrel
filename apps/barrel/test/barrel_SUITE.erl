@@ -276,14 +276,13 @@ t_supervised_store_survives_opener(Config) ->
     Name = <<"sup_survives_db">>,
     VCfg = #{dimension => ?DIM, db_path => VPath, bm25_backend => memory},
     Parent = self(),
-    Opener = spawn(fun() ->
+    {Opener, MRef} = spawn_monitor(fun() ->
         {ok, _Db} = barrel:open(Name, #{vectordb => VCfg,
                                         store_supervised => true}),
         Parent ! opened
     end),
     receive opened -> ok after 20000 -> ct:fail(open_timeout) end,
-    timer:sleep(200),
-    ?assertNot(is_process_alive(Opener)),
+    receive {'DOWN', MRef, process, Opener, normal} -> ok end,
     ?assertNotEqual(undefined,
                     barrel_vectordb_registry:whereis_name({vstore, Name})),
     ?assert(is_pid(persistent_term:get({barrel_db, Name}, undefined))),

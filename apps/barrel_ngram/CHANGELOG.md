@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- `is_open/1` and shard name lookups no longer raise `badarg` while
+  `barrel_ngram_registry` restarts after a crash: its table is gone
+  until the new registry has started, and lookups now answer not
+  registered (`is_open/1` returns `false`) in that window.
+
 ## [0.11.0] - 2026-09-24
 
 ### Changed

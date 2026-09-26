@@ -273,11 +273,11 @@ process_exit_cleanup(Config) ->
     DbName = ?config(db_name, Config),
     Parent = self(),
 
-    %% Spawn a subscriber that exits
-    Pid = spawn(fun() ->
+    %% Spawn a subscriber that exits when told
+    {Pid, MRef} = spawn_monitor(fun() ->
         {ok, SubRef} = barrel_sub:subscribe(DbName, <<"cleanup/#">>, self()),
         Parent ! {subscribed, SubRef},
-        receive after 100 -> ok end
+        receive stop -> ok end
     end),
 
     receive {subscribed, _SubRef} -> ok end,
@@ -286,12 +286,13 @@ process_exit_cleanup(Config) ->
     Pids1 = barrel_sub:match(DbName, [<<"cleanup/test">>]),
     ?assertEqual([Pid], Pids1),
 
-    %% Wait for process to exit
-    timer:sleep(200),
+    Pid ! stop,
+    receive {'DOWN', MRef, process, Pid, _} -> ok end,
 
-    %% Verify cleanup happened
-    Pids2 = barrel_sub:match(DbName, [<<"cleanup/test">>]),
-    ?assertEqual([], Pids2).
+    %% The registry drops it on its own DOWN
+    ok = wait_until(fun() ->
+        barrel_sub:match(DbName, [<<"cleanup/test">>]) =:= []
+    end, 200).
 
 %%====================================================================
 %% Integration test cases
@@ -441,4 +442,12 @@ public_api_subscribe_unsubscribe(_Config) ->
         end
     after
         barrel_docdb:delete_db(DbName)
+    end.
+
+wait_until(_Fun, 0) ->
+    ct:fail(condition_never_met);
+wait_until(Fun, N) ->
+    case Fun() of
+        true -> ok;
+        false -> timer:sleep(25), wait_until(Fun, N - 1)
     end.
