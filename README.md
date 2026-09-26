@@ -10,22 +10,24 @@ together, while each stays a standalone OTP application with its own public API.
 
 | App | Path | Responsibility |
 |-----|------|----------------|
-| `barrel` | `apps/barrel` | The embeddable database. Composes docdb + vectordb + crypto so a document, its blobs, and its vector share one id. Record mode, timeline (branch/PITR/merge), BQL. Pulls no transports. |
+| `barrel` | `apps/barrel` | The embeddable database. Composes docdb + vectordb + crypto so a document, its blobs, and its vector share one id. Record mode, timeline (branch/PITR/merge), BQL, the database lifecycle manager, and contexts (federated queries over local and remote databases, working sets, export and read-only import). Serves no network protocol. |
 | `barrel_docdb` | `apps/barrel_docdb` | The document layer. HLC version-vector MVCC, changes feed, replication, attachments (blobs), TTL, retained history, BQL query. Standalone embedded document database. |
-| `barrel_ngram` | `apps/barrel_ngram` | Exact substring and regex search over a `barrel_docdb` database via a byte-level trigram index. Opt-in behind the `server`/`s3`/`s3_server` profiles. |
+| `barrel_ngram` | `apps/barrel_ngram` | Exact substring and regex search over a `barrel_docdb` database via a byte-level trigram index with checksummed segments. |
 | `barrel_vectordb` | `apps/barrel_vectordb` | The vector layer. Local ANN indexes (HNSW, DiskANN, FAISS), BM25, hybrid search, quantization. Standalone embedded vector database. |
 | `barrel_embed` | `apps/barrel_embed` | Embedding generation across providers (local Python, Ollama, OpenAI, and more). Used by `barrel_vectordb` for text and hybrid search. |
 | `barrel_rerank` | `apps/barrel_rerank` | Cross-encoder reranking. Optional, used by `barrel_vectordb`. |
 | `barrel_crypto` | `apps/barrel_crypto` | Encryption-at-rest primitives: AES-256-GCM envelope, offset-addressable CTR, HKDF key derivation, key providers. |
 | `barrel_spaces` | `apps/barrel_spaces` | The agent layer: spaces (shared context databases), capability tokens, sessions with TTL, and handoffs. |
-| `barrel_server` | `apps/barrel_server` | The network server. Exposes `barrel` over HTTP (REST/JSON) and MCP using `livery`. Opt-in behind the `server` profile. |
+| `barrel_server` | `apps/barrel_server` | The network server. Exposes `barrel` over HTTP (REST/JSON) and MCP using `livery`, contexts and working sets included. Opt-in behind the `server` profile. |
+| `barrel_att_s3` | `apps/barrel_att_s3` | S3-compatible attachment backend for `barrel_docdb`. Opt-in behind the `s3` profile. |
 | `barrel_faiss` | `apps/barrel_faiss` | Erlang NIF bindings for FAISS. Optional; needs the FAISS C++ library, so it is excluded from the default build. |
 
 Dependency direction (no cycles): `barrel_server` -> {`barrel`, `barrel_spaces`,
 `barrel_ngram`}; `barrel_spaces` -> {`barrel`, `barrel_docdb`, `barrel_crypto`};
 `barrel` -> {`barrel_docdb`, `barrel_vectordb`, `barrel_crypto`}; `barrel_vectordb`
 -> {`barrel_embed`, `barrel_crypto`} (optionally `barrel_faiss`, `barrel_rerank`);
-`barrel_ngram` -> `barrel_docdb`; `barrel_docdb` -> `barrel_crypto`. Leaves:
+`barrel_ngram` -> `barrel_docdb`; `barrel_att_s3` -> `barrel_docdb`;
+`barrel_docdb` -> `barrel_crypto`. Leaves:
 `barrel_crypto`, `barrel_embed`, `barrel_rerank`, `barrel_faiss`.
 
 ## Build
@@ -38,12 +40,14 @@ rebar3 compile
 ```
 
 This builds the default app set (`barrel_crypto`, `barrel_docdb`,
-`barrel_vectordb`, `barrel_embed`, `barrel_rerank`, `barrel`, `barrel_spaces`).
-`barrel_faiss` and `barrel_server` are opt-in:
+`barrel_ngram`, `barrel_vectordb`, `barrel_embed`, `barrel_rerank`, `barrel`,
+`barrel_spaces`). `barrel_faiss`, `barrel_server` and `barrel_att_s3` are
+opt-in:
 
 ```
 rebar3 as faiss compile      # add the FAISS NIF app
 rebar3 as server compile     # add the HTTP/MCP server
+rebar3 as s3 compile         # add the S3 attachment backend
 ```
 
 ## Test

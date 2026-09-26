@@ -1,8 +1,8 @@
 # MCP endpoint
 
 `barrel_server` mounts an MCP endpoint (Streamable HTTP) at `/mcp`: tools for
-databases, documents, BQL, search, the timeline, and the agent layer, plus
-resources with live-query subscriptions. Read this when an MCP client (an
+databases, documents, BQL, search, the timeline, the agent layer, and
+contexts, plus resources with live-query subscriptions. Read this when an MCP client (an
 agent runtime, an IDE, `barrel_mcp_client`) should talk to barrel directly.
 
 ## When to use it
@@ -65,8 +65,8 @@ Core (rights a capability needs in parens):
 ```
 db_create (write)      db_list (read)          db_info (read)
 doc_get (read)         doc_put (write)         doc_delete (write)
-query (read)           search (read)           changes (read)
-branch_create (admin)  branch_list (read)      merge (admin)
+query (read)           search (read)           ngram_search (read)
+changes (read)         branch_create (admin)  branch_list (read)      merge (admin)
 query_subscribe (write)                        query_unsubscribe
 ```
 
@@ -80,6 +80,44 @@ session_add_message (write)      session_get_messages (read)
 handoff_create (admin)           handoff_list (read)
 handoff_accept (token in args)   handoff_complete (token in args)
 ```
+
+Contexts (see [contexts](contexts.md) for a walkthrough):
+
+| Tool | Required arguments | Returns |
+|---|---|---|
+| `context_capabilities` | none | accepted statement shapes with examples, merges, limits, working-set budgets, offline state |
+| `context_list` | none (`prefix`, `unlisted`) | `{contexts: [card]}` |
+| `context_discover` | `q` | `{contexts, summary}`: cards where every word of `q` matches |
+| `context_inspect` | `context` (name or id) | one card |
+| `context_query` | `query`, and `contexts` or `working_set` | `rows` or `groups`, `sources`, `coverage`, `execution`, `summary` |
+| `context_attach` | `context` (`working_set`, `mode`, `credential_ref`) | the working set (a new one without `working_set`) |
+| `context_detach` | `working_set`, `context` | the working set |
+| `context_materialize` | `from_query` (`query`, `contexts`) | the slices saved, usage and budget |
+| `context_import` | `dir` (`working_set`, `name`) | the working set with the imported member |
+| `context_working_sets` | none (`working_set` to read one) | the working sets, or one in full |
+| `context_working_set_delete` | `working_set` | `{ok: true, deleted}` |
+| `context_offline` | none (`offline` to switch) | `{offline: bool}` |
+
+`context_query` also takes `merge`, `offline`, `params`, `deadline_ms`
+(default 5000, at most 60000), `per_context_timeout_ms` and `max_parallel`.
+
+A capability token can use `context_capabilities`, `context_list`,
+`context_discover`, `context_inspect`, `context_query` (each local context
+is checked as a read on its database) and read the offline mode. Working
+sets, imports and switching offline need a server token.
+
+Context tools answer failures in one shape, the same as the REST routes:
+
+```json
+{"error": "unknown_context",
+ "message": "No context has the id or name otp/sasll.",
+ "hint": "Did you mean: otp/sasl? context_list (GET /contexts) shows every context.",
+ "details": {"context": "otp/sasll", "suggestions": ["..."]}}
+```
+
+A `context_query` that no context answered (`execution: failed`) comes back
+as a tool error result (`isError: true`) carrying the full answer, so you
+can read each source's `error`.
 
 `query` compiles the statement first (parse errors are readable), bounds
 rows with `max_rows` (default 100, cap 1000), and pages with a
@@ -131,5 +169,8 @@ receive {mcp_resource_updated, Uri, _} -> refetch end,
 - For a capability principal, the database a tool touches must be the
   granted space itself; branch databases of a space are not reachable with
   a capability in v1.
+- `ngram_search` takes `db` and `query`, with `mode` (`literal`, the
+  default, or `regex`) and `limit`; each hit carries the document id and
+  the match spans.
 - A stdio entry point (for local MCP hosts) is not wired; the engine
   supports it if you need one.

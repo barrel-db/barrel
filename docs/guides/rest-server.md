@@ -9,8 +9,8 @@ network instead of embedding it.
 
 ## When to use it
 
-- You want HTTP access to documents, attachments, vectors, search, and the
-  changes feed (from other languages or remote clients).
+- You want HTTP access to documents, attachments, vectors, search, the
+  changes feed, and contexts (from other languages or remote clients).
 - For in-process Erlang use, embed `barrel` directly instead (see the embedding
   guide).
 
@@ -50,6 +50,7 @@ POST   /db/:db/_bulk_docs          {"docs":[...]} -> {"results":[...]}
 POST   /db/:db/_bulk_get           {"ids":[...]}  -> {"results":[...]}
 POST   /db/:db/find                body = query, returns rows
 POST   /db/:db/query               BQL (ndjson rows; SUBSCRIBE over SSE)
+GET    /db/:db/query?q=            the same, for EventSource clients
 GET    /db/:db/changes            changes feed (JSON, or SSE via Accept)
 
 GET    /db/:db/_history            audit trail (see audit-provenance guide)
@@ -69,8 +70,92 @@ POST   /db/:db/search/hybrid       {"query":"...","k":10}
 
 POST|GET /spaces, /spaces/:space, .../grants, .../sessions, /handoffs
                                    the agent layer (see the spaces guide)
+POST|GET /contexts, /contexts/:id, /contexts/_query, /worksets, ...
+                                   contexts and working sets (below)
 POST|GET /mcp                      the MCP endpoint (see the mcp guide)
 ```
+
+## Bound a query and read what answered
+
+`POST /db/:db/query` takes the statement as raw BQL text, or as JSON with
+`query`, `params`, `continuation`, `max_rows` and `deadline_ms`. `GET`
+takes the same as `?q=`, `?max_rows=`, `?deadline_ms=`.
+
+```console
+$ curl -XPOST localhost:8080/db/mydb/query -H 'content-type: application/json' \
+    -d '{"query": "SELECT id, title FROM c ORDER BY id LIMIT 2", "max_rows": 100, "deadline_ms": 2000}'
+{"row":{"id":"a","title":"hello"}}
+{"row":{"id":"b","title":"world"}}
+{"meta":{"has_more":false,"bound":"limit_reached","instance_id":"19ab40285574d671","last_seq":"AAABoNO_U7sAAAAE"}}
+```
+
+- `max_rows` caps the rows streamed (at most 1000); `deadline_ms` bounds the
+  request (at most 300000). A value that is not a positive integer answers
+  400 `invalid_max_rows` or `invalid_deadline_ms`.
+- The last line is `{"meta": ...}`: `bound` is `limit_reached` when the cap
+  cut the stream or the statement's `LIMIT` or `k` was filled (more rows may
+  exist), `exhausted` otherwise; `instance_id` and `last_seq` (base64url)
+  name the state of the database that answered; `continuation` is present
+  when the statement pages.
+- A `vector_top_k` answer adds `embedding: {fingerprint, distance,
+  dimensions}` to the meta, so a caller merging answers from several
+  databases can check that their scores compare.
+- When the deadline passes after rows started, the stream ends with an
+  in-band `{"error":"deadline"}` line and no meta. Any other failure after
+  the first row ends the same way with its reason.
+
+## Contexts and working sets
+
+The `contexts` route group serves context cards, federated queries, and
+working sets. The [contexts guide](contexts.md) walks through each call
+with real responses.
+
+```
+POST   /contexts                    register a card (201)
+GET    /contexts                    list (?prefix=, ?unlisted=true); ?q= discovers
+GET    /contexts/:id                one card, by id or URL-encoded name
+DELETE /contexts/:id                unregister
+GET    /contexts/_capabilities      accepted query shapes, merges, limits, budgets
+POST   /contexts/_query             one BQL statement over several contexts
+GET    /contexts/_offline           {"offline": bool}
+PUT    /contexts/_offline           {"offline": true | false}
+
+POST   /worksets                    create ({"owner", "budget"}, 201)
+GET    /worksets                    list
+GET    /worksets/:ws                read one
+DELETE /worksets/:ws                delete it and its slices
+POST   /worksets/:ws/members        attach {"context", "mode", "credential_ref"}
+DELETE /worksets/:ws/members/:ctx   detach
+POST   /worksets/:ws/_materialize   save a query's documents as slices
+POST   /worksets/:ws/_import        import an exported snapshot {"dir", "name"}
+```
+
+```console
+$ curl -XPOST localhost:8080/contexts/_query -H 'content-type: application/json' \
+    -d '{"query": "SELECT id, path FROM c ORDER BY path LIMIT 10",
+         "contexts": ["otp/tools", "otp/sasl"]}'
+```
+
+The answer (200) carries `execution` (`succeeded`, `partial`, `failed`),
+`rows` or `groups`, one `sources` entry per context, `coverage`, and a
+`summary`. A context that did not answer is reported in its source, not as
+a request error. A request error answers one shape with an HTTP status per
+code (400 for a bad argument or statement, 404 `unknown_context`, 409
+`ambiguous_context`, 413 `over_budget`, 403 `forbidden`, 502
+`source_unavailable`, 500 `internal`):
+
+```json
+{"error": "limit_required",
+ "message": "A row query over contexts needs a LIMIT.",
+ "hint": "Add LIMIT n (n <= 1000), and ORDER BY a selected field to merge rows in order.",
+ "details": {"max_limit": 1000}}
+```
+
+A capability token can read cards and run `POST /contexts/_query`; each
+local context is checked as a `POST /db/:db/query` on that database.
+Registering cards, working sets, imports and switching offline need a
+global token. Tokens for remote servers live in the node's
+`ctx_credentials`, never in a card.
 
 ## Auth
 
@@ -89,7 +174,8 @@ granted space: `read` opens the pull leg (GETs, `changes`, `query`,
 `search`, and the `_sync` reads), `write` adds document writes and the push
 leg (`_sync/doc` PUT, `_sync/local` and `_sync/att` writes). Database
 lifecycle (`PUT`/`DELETE /db/:db`), `_timeline`, and any unmapped route stay
-off-limits to capability tokens (403, fail closed); dead or wrong-space
+off-limits to capability tokens (403, fail closed); for the contexts routes
+see [Contexts and working sets](#contexts-and-working-sets); dead or wrong-space
 tokens answer 401. `/mcp` authenticates through its own provider covering
 both kinds. See [spaces](spaces.md), [mcp](mcp.md), and
 [barrel-lite](barrel-lite.md).

@@ -36,6 +36,32 @@ whole document flattened in). A missing attribute leaves its key absent
 from the row. Embedded docdb-only users get the same document queries
 through `barrel_docdb:query/2,3`.
 
+## Know which state answered
+
+Every result meta, from `query/2,3` and `query_fold/5`, for collection
+queries and table functions alike, carries the observed version of the
+database: `instance_id` (the database instance) and `last_seq` (its last
+committed sequence when the query ran). Two answers with the same pair saw
+the same state.
+
+```erlang
+{ok, _Rows, #{instance_id := Instance, last_seq := Seq, has_more := false}} =
+    barrel:query(Db, <<"SELECT title FROM db ORDER BY title LIMIT 2">>).
+%% Instance = <<"03798dac60334e1e">>, Seq = <<0,0,1,160,221,21,85,206,0,0,0,0>>
+```
+
+`barrel_bql_query:row_bound/1` tells you the most rows a compiled plan can
+return: its `LIMIT`, or `k` capped by `LIMIT` for a table function
+(`undefined` without either).
+
+```erlang
+{ok, Plan} = barrel_bql:compile(
+    <<"SELECT * FROM vector_top_k('x', k => 20) AS v LIMIT 5">>, #{}),
+5 = barrel_bql_query:row_bound(Plan).
+```
+
+## Stream large results
+
 Queries without ORDER BY, UNNEST or LIMIT stream in chunks: pass
 `chunk_size` and follow `Meta` (`has_more`, `continuation`), or fold
 without materializing:
@@ -162,10 +188,15 @@ ok = barrel:unsubscribe_query(Sub).
 ## Over HTTP
 
 `POST /db/:db/query` takes the BQL text as the body (or JSON
-`{"query", "params", "continuation"}`) and streams ndjson: one
-`{"row": ...}` line per row, then one `{"meta": ...}` line with
-`has_more` and a `continuation` token to POST back. Query errors are a
-400 with `message`, `line` and `column`.
+`{"query", "params", "continuation", "max_rows", "deadline_ms"}`) and
+streams ndjson: one `{"row": ...}` line per row, then one `{"meta": ...}`
+line with `has_more`, `bound` (`limit_reached` or `exhausted`), the
+observed version (`instance_id`, `last_seq` in base64url) and, when the
+statement pages, a `continuation` token to POST back. `max_rows` (at most
+1000) and `deadline_ms` (at most 300000) bound the request; see
+[Bound a query](rest-server.md#bound-a-query-and-read-what-answered).
+Query errors are a 400 with `error: invalid_query`, `message`, `line` and
+`column`.
 
 ```sh
 curl -s http://localhost:8080/db/mydb/query \
@@ -173,7 +204,7 @@ curl -s http://localhost:8080/db/mydb/query \
 {"row":{"id":"post:1","title":"..."}}
 {"row":{"id":"post:2","title":"..."}}
 {"row":{"id":"post:3","title":"..."}}
-{"meta":{"has_more":false}}
+{"meta":{"bound":"limit_reached","has_more":false,"instance_id":"03798dac60334e1e","last_seq":"AAABoN0VVc4AAAAA"}}
 ```
 
 SUBSCRIBE statements need `Accept: text/event-stream` (or a browser

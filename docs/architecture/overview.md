@@ -10,8 +10,9 @@ Barrel is a rebar3 umbrella. Each application is a separate OTP application with
 a clear responsibility and its own public API.
 
 - **barrel_docdb**: the document layer. Document metadata, MVCC, the changes
-  feed, replication primitives, manifests, and the catalog/indexing foundation.
-  Usable standalone as an embedded document database.
+  feed, replication primitives, attachments, the timeline (branch, PITR,
+  merge), and the catalog/indexing foundation. Usable standalone as an
+  embedded document database.
 - **barrel_vectordb**: the vector layer. The embedded vector database, local ANN
   indexes (HNSW, FAISS, DiskANN), BM25, and the local hybrid search that
   combines them. Usable standalone as an embedded vector database.
@@ -23,18 +24,28 @@ a clear responsibility and its own public API.
 - **barrel_faiss**: Erlang NIF bindings for FAISS. Optional backend for
   `barrel_vectordb`. Needs the FAISS C++ library, so it is excluded from the
   default build.
+- **barrel_ngram**: trigram substring and regex index over `barrel_docdb`
+  documents, with immutable checksummed segments. `barrel_server` serves it
+  as the `ngram_search` MCP tool.
 - **barrel_crypto**: encryption-at-rest primitives. AES-256-GCM envelope,
   offset-addressable CTR, HKDF key derivation, and pluggable key providers. Used
   by docdb and vectordb for encrypted databases.
 - **barrel**: the embeddable database. Composes `barrel_docdb`,
   `barrel_vectordb`, and `barrel_crypto` so a document, its attachments (blobs),
-  and its vector share one id. Adds record mode and the timeline
-  (branch/PITR/merge). Pulls no transports. The hex "edge" package.
+  and its vector share one id. Adds record mode, BQL, the database lifecycle
+  manager (`barrel_dbs`), and contexts (`barrel_ctx*`: the context catalog,
+  federated queries, working sets, export and read-only import). The
+  timeline itself lives in `barrel_docdb`; `barrel` exposes it on the
+  composed database. Serves no network protocol; its remote context client
+  calls other nodes over HTTP. The hex "edge" package.
 - **barrel_spaces**: the agent layer. Spaces (shared context databases),
   capability tokens, sessions with TTL, and handoffs, built on `barrel`.
 - **barrel_server**: the network server. Exposes `barrel` and `barrel_spaces`
-  over HTTP (REST/JSON) and MCP using `livery`. Opt-in behind the `server`
-  profile; not part of the default embeddable build.
+  over HTTP (REST/JSON) and MCP using `livery`, including the `/contexts` and
+  `/worksets` routes and the `context_*` MCP tools. Opt-in behind the
+  `server` profile; not part of the default embeddable build.
+- **barrel_att_s3**: an S3-compatible attachment backend for `barrel_docdb`.
+  Opt-in behind the `s3` profile.
 
 ## Intended split
 
@@ -46,13 +57,18 @@ The longer-term shape of the stack separates these concerns:
 - **barrel** (exists): composes docdb and vectordb under one id space.
 - **server** (exists, `barrel_server`): transports over the `barrel` API.
 - **object storage**: blobs are docdb attachments with a pluggable backend per
-  database (`barrel_att_backend`: RocksDB BlobDB today; local filesystem and S3
-  planned as additional backends). There is no separate object-store app; a
+  database (`barrel_att_backend`: RocksDB BlobDB by default, `none` for
+  databases without attachments, and S3-compatible storage through
+  `barrel_att_s3`). There is no separate object-store app; a
   document owns its blob, matching how vectors and metadata attach to the same id.
 - **agent layer** (exists, `barrel_spaces` + MCP): spaces, capability tokens,
   sessions, and handoffs over the `barrel` API; exposed through `barrel_server`.
+- **contexts** (exists, `barrel_ctx*` in `barrel`, REST and MCP in
+  `barrel_server`): named datasets queried together across nodes, with
+  working sets and portable read-only copies. See the
+  [contexts guide](../guides/contexts.md).
 - **fabric** (future, `barrel_fabric`): dataset agents, durability, placement,
-  replication orchestration, and query routing across nodes.
+  and replication orchestration across nodes.
 
 ## Boundary rules
 
@@ -60,7 +76,9 @@ These rules keep the umbrella maintainable as it grows:
 
 - Clear OTP application boundaries. Each app owns its modules and public API.
 - No circular dependencies between apps. The direction is
-  `barrel_server` -> `barrel` -> {`barrel_docdb`, `barrel_vectordb`}, and
+  `barrel_server` -> `barrel_spaces` -> `barrel` ->
+  {`barrel_docdb`, `barrel_vectordb`}, `barrel_server` -> `barrel_ngram` ->
+  `barrel_docdb`, and
   `barrel_vectordb` -> `barrel_embed` (and optionally `barrel_faiss`,
   `barrel_rerank`). `barrel_docdb` and `barrel_vectordb` are leaves;
   `barrel_docdb` -> `barrel_vectordb` is forbidden.
@@ -74,8 +92,10 @@ These rules keep the umbrella maintainable as it grows:
 ## Scope and rationale
 
 This umbrella holds the Barrel data-stack libraries (`barrel_docdb`,
-`barrel_vectordb`, `barrel_embed`, `barrel_rerank`, `barrel_faiss`), the
-embeddable database (`barrel`), and the network server (`barrel_server`). Products
+`barrel_vectordb`, `barrel_embed`, `barrel_rerank`, `barrel_faiss`,
+`barrel_ngram`, `barrel_crypto`, `barrel_att_s3`), the embeddable database
+(`barrel`), the agent layer (`barrel_spaces`), and the network server
+(`barrel_server`). Products
 and clients that build on top of the stack stay in their own repositories.
 
 ### What the umbrella buys you
@@ -116,6 +136,7 @@ products together.
 - `apps/` holds the applications.
 - The top-level `rebar.config` coordinates the build and aggregates each app's
   declared dependencies. It restricts the default app set so the FAISS app is
-  opt-in (`rebar3 as faiss compile`).
+  opt-in (`rebar3 as faiss compile`), as are the server (`rebar3 as server
+  compile`) and the S3 backend (`rebar3 as s3 compile`).
 - `rel/` holds the umbrella release skeleton.
 - `docs/` holds umbrella-level documentation; per-app docs stay under each app.

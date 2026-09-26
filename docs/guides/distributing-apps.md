@@ -16,7 +16,8 @@ Before publishing an app:
   apps that depend on it (for example bumping `barrel_vectordb` means updating
   the `{barrel_vectordb, ...}` pin in `barrel`).
 - Ensure the app has a `README.md`, a `LICENSE`, a `CHANGELOG.md`, an `ex_doc`
-  block, and `rebar3_hex` in its `project_plugins`.
+  block, and `{rebar3_hex, "7.2.0"}` in its `project_plugins` (see the plugin
+  note below).
 - Tag the release: per app `<app>-v<version>` (e.g. `barrel_docdb-v1.0.0`), and
   the umbrella `v<version>`. CI recognizes both tag globs.
 
@@ -24,21 +25,26 @@ Before publishing an app:
 
 The apps depend on each other, so publish leaves first and work up. A package
 can only be published after every sibling it depends on is already on Hex.
-Current versions and order:
+The order, with the version each app carries in the tree:
 
-1. `barrel_crypto` 1.0.0
-2. `barrel_embed` 2.3.0
-3. `barrel_docdb` 1.0.0 (needs barrel_crypto)
-4. `barrel_rerank` 1.0.0
-5. `barrel_faiss` 1.0.0 (optional; needs the FAISS C++ library to build)
-6. `barrel_vectordb` 2.1.2 (needs barrel_embed, barrel_crypto)
-7. `barrel` 1.0.1 (needs barrel_docdb, barrel_vectordb, barrel_crypto)
-8. `barrel_spaces` 1.0.1 (needs barrel, barrel_docdb, barrel_crypto)
-9. `barrel_server` 1.0.1 (needs barrel, barrel_spaces)
+| # | App | Version | Needs |
+|---|---|---|---|
+| 1 | `barrel_crypto` | 1.0.0 | |
+| 2 | `barrel_embed` | 2.5.0 | |
+| 3 | `barrel_docdb` | 1.7.0 | barrel_crypto |
+| 4 | `barrel_rerank` | 1.0.2 | |
+| 5 | `barrel_faiss` | 1.0.1 | (optional; the FAISS C++ library to build) |
+| 6 | `barrel_vectordb` | 2.5.0 | barrel_embed, barrel_crypto |
+| 7 | `barrel_ngram` | 0.11.1 | barrel_docdb |
+| 8 | `barrel_att_s3` | 0.1.1 | barrel_docdb |
+| 9 | `barrel` | 1.10.0 | barrel_crypto, barrel_docdb, barrel_vectordb, barrel_embed |
+| 10 | `barrel_spaces` | 1.2.2 | barrel, barrel_docdb, barrel_crypto |
+| 11 | `barrel_server` | 1.10.0 | barrel, barrel_spaces, barrel_ngram |
 
-`barrel_vectordb` and `barrel_embed` keep their 2.x lines: they were already
-past 1.0, and `barrel_embed` 2.2.1 is on Hex. Everything else moves to 1.0.0,
-which is a promise that its API will not break without a major bump.
+Publish only the apps whose version is not on Hex yet
+(`curl -s https://hex.pm/api/packages/<app>` shows the latest), in this
+order. `barrel_vectordb` and `barrel_embed` keep their 2.x lines; the other
+1.x apps promise that their API will not break without a major bump.
 
 ## Publish to Hex
 
@@ -55,7 +61,7 @@ For example `apps/barrel_spaces/rebar.config`:
 {deps, [
     {barrel_crypto, "~> 1.0"},
     {barrel_docdb, "~> 1.0"},
-    {barrel, "~> 1.0"}
+    {barrel, "~> 1.3"}
 ]}.
 ```
 
@@ -68,14 +74,19 @@ $ cd apps/barrel_embed
 $ rebar3 hex publish
 ```
 
-Publish in dependency order:
+Publish in dependency order, for example the apps of one release:
 
 ```console
-$ for app in barrel_crypto barrel_embed barrel_docdb barrel_rerank \
-             barrel_faiss barrel_vectordb barrel barrel_spaces barrel_server; do
+$ for app in barrel_ngram barrel barrel_server; do
     (cd apps/$app && rebar3 hex publish --yes)
   done
 ```
+
+The Hex plugin is pinned to `{rebar3_hex, "7.2.0"}` in every `rebar.config`.
+rebar3_hex 7.3.0 with hex_core 0.19.0 crashes on publish (a `badmatch` on
+`cli_auth_callbacks` in `hex_cli_auth:call_callback`). 7.2.0 resolves
+hex_core 0.18.0; check with `ls _build/default/plugins` after a build and
+keep the pin until a fixed release is out.
 
 Before publishing, dry-run each tarball with `rebar3 hex build` and check
 its contents (especially the NIF apps `barrel_vectordb`/`barrel_faiss`, whose
@@ -120,7 +131,7 @@ Notes:
 - The `{files, [...]}` list in each `.app.src` controls what ships in the
   tarball. Keep it current when you add `priv/` assets or includes.
 - Every dependency resolves from Hex, including `barrel_server`'s `livery`
-  (0.5.1) and `barrel_mcp` (2.2.4). Hex rejects git deps, so keep it that way:
+  (0.9.2) and `barrel_mcp` (3.0.1). Hex rejects git deps, so keep it that way:
   do not reintroduce a `{git, ...}` dep in an app you intend to publish.
 - `barrel_faiss` ships an NIF that needs the FAISS C++ library at build time.
   The package builds only where that toolchain is present.
@@ -170,7 +181,7 @@ Hex package (after publishing):
 
 ```erlang
 {deps, [
-    {barrel_embed, "~> 2.2"}
+    {barrel_embed, "~> 2.5"}
 ]}.
 ```
 

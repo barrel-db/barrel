@@ -16,6 +16,7 @@ Start here.
 - [Encryption at rest](guides/encryption.md): per-database keys over every store and index file.
 - [Audit and provenance](guides/audit-provenance.md): who wrote what, when, and past versions.
 - [Spaces, sessions, and handoffs](guides/spaces.md): the agent layer with capability tokens.
+- [Contexts](guides/contexts.md): query named datasets on several nodes together, keep working sets, work offline.
 - [MCP endpoint](guides/mcp.md): tools, resources, and live queries for MCP clients.
 - [barrel-lite (browser client)](guides/barrel-lite.md): an offline-first TypeScript client that syncs over the wire.
 - [Distribute the umbrella apps](guides/distributing-apps.md): Hex packages, git mirrors, and consuming an app elsewhere.
@@ -23,6 +24,6 @@ Start here.
 ## Architecture
 
 - [Vision](architecture/vision.md): what barrel is becoming (the database for agents) and the settled decisions.
-- [Contexts (proposal)](architecture/contexts.md): portable datasets as agent-attachable contexts, the proposed scale-out model.
+- [Contexts](architecture/contexts.md): the design of contexts (identity, cards, manifests, working sets, query contract, merge rules, budgets, permissions) and the measured decisions behind it.
 - [Overview](architecture/overview.md): how the umbrella is split and why.
 - [Responsibilities](migration/responsibilities.md): per-app responsibilities.

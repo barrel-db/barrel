@@ -46,7 +46,7 @@ FastEmbed is a lighter alternative to sentence-transformers:
 
 barrel_embed manages its own Python virtualenv automatically and installs
 `fastembed` into it on first use. See
-[Python Virtualenv Setup](venv-setup.md) for the managed venv API.
+[Python Virtualenv Setup](../venv-setup.md) for the managed venv API.
 
 ## Supported Models
 

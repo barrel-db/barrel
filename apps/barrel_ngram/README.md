@@ -77,6 +77,17 @@ configured, verifies a match by reading a small window instead of the
 whole document, for both substring and (a bounded subset of) regex
 queries. See [selectors](docs/selectors.md).
 
+Segments, manifests and `corpus.meta` are fsynced before the rename that
+commits them. The manifest (version 3) records each segment's sha256 and
+size, and `open/2` checks them (`verify_segments => checksum`, the default,
+or `layout` for a header check only); a damaged segment fails open with
+`{corrupt_segment, Path, Detail}`. A query leases its segment files, so a
+compaction never deletes a file under a running query, and a read error
+fails the query with `{segment_read_failed, Path, Reason}` instead of
+answering "no match". A corpus written by 0.10 or earlier is rebuilt once
+when opened with `on_legacy => reindex` (see
+[operations](docs/operations.md#upgrading-the-on-disk-format)).
+
 ## License
 
 Apache 2.0. See [LICENSE](LICENSE).

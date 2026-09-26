@@ -79,9 +79,11 @@ The corpus directory is wiped and reindexed from the start of the changes feed. 
 mismatch is never treated as legacy. To do it by hand instead: `delete_corpus/1,2`, then
 `open/2`. Both run in the live VM; neither the app nor the VM needs a restart.
 
-Version 0.11.0 moves the manifest to version 3 (segment checksums), so every corpus written
-by 0.10.x or earlier fails open with `{unsupported_manifest_version, 2, 3}` and is rebuilt
-once this way.
+Version 0.11 moves the manifest to version 3 (segment checksums; 0.11.1 is the first
+published 0.11 release), so every corpus written by 0.10.x or earlier fails open with
+`{unsupported_manifest_version, 2, 3}` and is rebuilt once this way. barrel_server 1.10.0
+and later open their `ngram_search` corpora with `on_legacy => reindex`; run 0.11 with
+those, not with barrel_server 1.7.2.
 
 ## Recovery
 
@@ -106,7 +108,9 @@ than catching silent corruption.
 
 A damaged segment fails open with `{corrupt_segment, Path, Detail}`. The index is derived
 data: `delete_corpus/1,2` then `open/2` rebuilds it. A read error during a query fails the
-query with `{segment_read_failed, Path, Reason}`; it is never read as "no match".
+query with `{segment_read_failed, Path, Reason}`; it is never read as "no match". A read
+error while a compaction merges segments returns `{merge_read_failed, Reason}` and the shard
+keeps running.
 
 A query leases the segment files of its snapshot. A compaction commits its manifest at once
 but deletes a merged input only when no query holds it, so queries and compactions can run

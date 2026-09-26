@@ -210,8 +210,8 @@ Add `barrel_rerank` to your dependencies:
 ```erlang
 %% rebar.config
 {deps, [
-    {barrel_vectordb, "2.1.1"},
-    {barrel_rerank, "1.0.0"}
+    {barrel_vectordb, "~> 2.5"},
+    {barrel_rerank, "~> 1.0"}
 ]}.
 ```
 
@@ -258,4 +258,6 @@ Results = barrel_vectordb_bm25:search(Index2, <<"quick fox">>, 10).
 
 > #### Note
 >
-> BM25 index is in-memory and not persisted. Rebuild from documents on startup.
+> `barrel_vectordb_bm25` is a standalone in-memory index. Inside a store,
+> `bm25_backend => disk` persists every write, and a `memory` backend is
+> rebuilt from the stored text at open. See [disk BM25](bm25-disk.md).

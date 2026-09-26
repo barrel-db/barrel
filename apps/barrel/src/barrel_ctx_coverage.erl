@@ -1,5 +1,5 @@
 %%%-------------------------------------------------------------------
-%%% @doc Offline coverage (B17, action plan 3.9 and 4): decides, per
+%%% @doc Offline coverage (see docs/architecture/contexts.md): decides, per
 %%% working-set member, whether it can answer and what its answer
 %%% covers, then summarizes the request. Pure: callers pass the facts
 %%% (offline flag, local availability, the query's conditions).

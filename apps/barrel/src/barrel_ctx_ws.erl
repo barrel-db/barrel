@@ -1,6 +1,6 @@
 %%%-------------------------------------------------------------------
-%%% @doc Working sets (B13, action plan 3.5): a local record of the
-%%% contexts an agent works with, with budgets (6.1). One document per
+%%% @doc Working sets (see docs/architecture/contexts.md): a local record of the
+%%% contexts an agent works with, with budgets. One document per
 %%% working set in the local database `_barrel_worksets'.
 %%%
 %%% Attach and detach are logical: they open, pin, and download
@@ -55,7 +55,7 @@
 %% Lifecycle
 %%====================================================================
 
-%% @doc 6.1 defaults; `open_dbs' follows barrel_dbs `dbs_max_open'.
+%% @doc Default budget; `open_dbs' follows barrel_dbs `dbs_max_open'.
 -spec budget_defaults() -> budget().
 budget_defaults() ->
     #{bytes => 1073741824, contexts => 8,

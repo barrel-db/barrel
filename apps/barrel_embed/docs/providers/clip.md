@@ -44,7 +44,7 @@ pip install transformers torch pillow
 
 barrel_embed manages its own Python virtualenv automatically and installs
 `transformers`, `torch`, and `pillow` into it on first use. See
-[Python Virtualenv Setup](venv-setup.md) for the managed venv API.
+[Python Virtualenv Setup](../venv-setup.md) for the managed venv API.
 
 ## Supported Models
 

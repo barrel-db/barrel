@@ -50,7 +50,7 @@ Add to your `rebar.config`:
 
 ```erlang
 {deps, [
-    {barrel_embed, "~> 2.3"}
+    {barrel_embed, "~> 2.5"}
 ]}.
 ```
 
@@ -122,6 +122,23 @@ Add to your `rebar.config`:
     batch_size => 64
 }
 ```
+
+### Identify the Model
+
+Two stores compare vector scores only when the same model produced them.
+`info/1` names the model of each provider, from the config and without a
+network call:
+
+```erlang
+#{providers := [#{model := Model} | _]} = barrel_embed:info(State).
+%% Model = <<"nomic-embed-text:latest">> for the Ollama config above
+```
+
+Pin a model revision with `revision => <<"...">>` in the provider config; it
+is reported next to `model`. Ollama resolves an untagged name to `:latest`,
+Azure falls back to the deployment name. A custom provider can implement the
+optional `model_info/1` callback; without it, the config's `model` and
+`revision` keys are reported.
 
 ## Ollama Example
 
@@ -214,7 +231,7 @@ Score = barrel_embed_colbert:maxsim_score(QueryVecs, DocVecs).
 | `embed_batch(Texts, State)` | Generate embeddings for multiple texts |
 | `embed_batch(Texts, Opts, State)` | Batch embed with options |
 | `dimension(State)` | Get embedding dimension |
-| `info(State)` | Get provider information |
+| `info(State)` | Provider modules, names and model identity (`model`, `revision`) |
 
 ## Application Configuration
 

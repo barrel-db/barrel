@@ -166,7 +166,7 @@ Implement `barrel_vectordb_docstore` to route them anywhere else.
 
 ## Benchmarks
 
-barrel_vectordb includes a comprehensive benchmark suite for measuring performance.
+barrel_vectordb includes a benchmark suite for measuring performance.
 
 ### Quick Start
 

@@ -1,5 +1,5 @@
 %%%-------------------------------------------------------------------
-%%% @doc Snapshot manifests (contexts action plan 3.3): a small root
+%%% @doc Snapshot manifests (see docs/architecture/contexts.md): a small root
 %%% per generation pointing at content-addressed parts, each part
 %%% listing artifacts with their sha256 and size. Pure functions over
 %%% a staging directory; no database access.
@@ -26,7 +26,7 @@
 -type root() :: map().
 
 %% @doc Mint an id: `Prefix' then 24 lowercase base32 characters
-%% (15 random bytes), as `ctx_...' in 3.1.
+%% (15 random bytes), as context ids `ctx_...'.
 -spec new_id(binary()) -> binary().
 new_id(Prefix) ->
     <<Prefix/binary, (base32(crypto:strong_rand_bytes(15)))/binary>>.

@@ -122,6 +122,60 @@ end.
 Branch forks at now (or a past HLC for point-in-time restore); merge is a
 one-shot replication since the fork point.
 
+## Batch writes with per-document options
+
+Concurrent writes to one database are committed together: one `write_batch`
+and at most one sync per group, up to `max_group` requests (default 256).
+Each request keeps its own conflict check and answer. In `put_docs`, give a
+document its own `outbox` tags and `sync` flag with a `{Doc, DocOpts}` entry:
+
+```erlang
+[{ok, _}, {ok, _}] = barrel_docdb:put_docs(<<"mydb">>, [
+    {Block, #{outbox => [<<"blocks">>], sync => true}},
+    Record
+], #{}).
+```
+
+The call's documents share one batch, synced when the call or any document
+asks for `sync`. Another key in `DocOpts` answers
+`{error, {invalid_doc_opts, DocOpts}}` for that document. Tune the writer
+with the `max_group` and `write_chunk` (default 16) database options; see
+[design](docs/design.md#write-serialization-and-group-commit).
+
+## Open a copy read only
+
+Pass `read_only => true` on every open to serve a copy (an export, an
+imported snapshot) without changing its files:
+
+```erlang
+{ok, _} = barrel_docdb:create_db(<<"snapshot">>, #{
+    data_dir => "/srv/imports", read_only => true
+}).
+{error, read_only} = barrel_docdb:put_doc(<<"snapshot">>, #{<<"id">> => <<"x">>}).
+```
+
+- The stores open with RocksDB `OpenForReadOnly`: open, reads and close
+  write no file, and several nodes can open the same directory.
+- A missing store fails with `{read_only_store_missing, Path}`; nothing is
+  created.
+- A store an older version wrote, without a column family added since,
+  fails with `{read_only_upgrade_needed, #{store, missing_cfs}}` until one
+  writable open adds it.
+- `barrel_docdb:db_exists(Name, #{data_dir => Dir})` tells you whether a
+  database is open or has files, without creating it.
+
+## Know which state answered
+
+`db_observed_version/1` returns the database's instance id and the HLC of
+its last write, and BQL results carry the same two fields in their meta:
+
+```erlang
+{ok, #{instance_id := Id, last_seq := Seq}} =
+    barrel_docdb:db_observed_version(<<"mydb">>).
+```
+
+It is a freshness hint read after the rows, not a snapshot.
+
 ## Configuration
 
 In your `sys.config`:
@@ -143,7 +197,7 @@ Add to your `rebar.config`:
 
 ```erlang
 {deps, [
-    {barrel_docdb, "~> 1.0"}
+    {barrel_docdb, "~> 1.7"}
 ]}.
 ```
 
@@ -176,6 +230,7 @@ barrel_docdb_sup
 | `query/2,3`, `find/2,3` | Query documents (BQL / find) |
 | `fold_docs/3,4` | Iterate documents |
 | `get_conflicts/2`, `resolve_conflict/4` | Inspect and resolve conflicts |
+| `db_exists/2`, `db_info/1`, `db_observed_version/1` | Database presence, stats, instance id and last write HLC |
 
 ### Timeline & Replication
 

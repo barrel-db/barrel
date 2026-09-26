@@ -1,5 +1,5 @@
 %%%-------------------------------------------------------------------
-%%% @doc Retrieved-set slices (B16, action plan 3.8): an explicit id
+%%% @doc Retrieved-set slices (see docs/architecture/contexts.md): an explicit id
 %%% list fetched from one source context (a local database through
 %%% barrel:get_docs, or a remote Barrel server through _bulk_get) and
 %%% frozen into its own local database, one per source context and
