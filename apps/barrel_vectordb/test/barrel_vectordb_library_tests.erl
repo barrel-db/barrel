@@ -192,9 +192,10 @@ test_supervised_store() ->
     {ok, Doc} = barrel_vectordb:get(test_supervised_store, <<"mem1">>),
     ?assertEqual(<<"memory content">>, maps:get(text, Doc)),
 
-    %% Stop the supervisor
+    %% Stop the supervisor; the store is gone once it is down
+    MRef = erlang:monitor(process, StorePid),
     SupPid ! stop,
-    timer:sleep(100),
+    receive {'DOWN', MRef, process, StorePid, _} -> ok end,
 
     ?assertEqual(undefined, whereis(test_supervised_store)),
     ok.
