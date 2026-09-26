@@ -126,12 +126,17 @@ and records the verified result -- a store that didn't verifiably enforce it
 gets `{error, conditional_writes_unsupported}` on every `create_only`/
 `expected_etag` call, rather than a silent, unprotected overwrite.
 
-| Store | Conditional writes (`create_only`/`expected_etag`) | Notes |
-|-------|------------------------------------------------------|-------|
-| AWS S3 | Supported (since 2024) | |
-| MinIO | Supported (since 2023) | |
-| Garage | **Not supported** | ["Structurally impossible to implement in Garage due to the lack of a consensus algorithm, which is one of Garage's core design choices which we cannot reconsider."](https://garagehq.deuxfleurs.fr/documentation/reference-manual/known-issues/) Not a bug, not planned. |
+| Store | Conditional writes (`create_only`/`expected_etag`) | Tested in CI | Notes |
+|-------|------------------------------------------------------|--------------|-------|
+| AWS S3 | Supported (since 2024) | No | |
+| RustFS | Supported | Yes (`rustfs/rustfs:1.0.0`) | Also answers 503 for a few seconds after `/health` first reports ready; retry at startup. |
+| MinIO | Supported (since 2023) | No | Its `ListMultipartUploads` returns nothing for a non-empty `prefix`; the multipart GC lists unfiltered to work around it (covered by an emulating test). |
+| Garage | **Not supported** | Yes (`dxflrs/garage:v1.0.1`) | ["Structurally impossible to implement in Garage due to the lack of a consensus algorithm, which is one of Garage's core design choices which we cannot reconsider."](https://garagehq.deuxfleurs.fr/documentation/reference-manual/known-issues/) Not a bug, not planned. |
 
 If you need real protection against concurrent writers to the same
-attachment key, use AWS S3 or MinIO. On Garage, the one-writer-per-key
+attachment key, use AWS S3, RustFS or MinIO. On Garage, the one-writer-per-key
 discipline is a purely operational rule -- there is no backstop.
+
+CI runs the backend suites against RustFS and Garage only. MinIO remains a
+supported target, but its public image is gone from Docker Hub, so it is no
+longer tested; AWS S3 is not tested either.

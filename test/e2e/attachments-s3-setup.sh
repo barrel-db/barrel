@@ -1,26 +1,22 @@
 #!/usr/bin/env bash
 #
-# Brings up MinIO + Garage (docker-compose.attachments-s3.yml) and provisions
-# both: barrel_att_s3_store's open/2 never creates a bucket itself (confirmed
-# by reading it -- it only checks that `bucket` was configured), so nothing
-# put through this backend works until the bucket exists. Garage additionally
-# needs a one-time layout assignment before it serves any S3 request at all,
-# and (unlike MinIO) a Garage key can't create its own bucket either way.
+# Brings up RustFS + Garage (docker-compose.attachments-s3.yml) and
+# provisions both: barrel_att_s3_store:open/2 never creates a bucket, Garage
+# also needs a one-time layout assignment before it serves any S3 request,
+# and a Garage key cannot create its own bucket.
 #
 # Usage:
 #   test/e2e/attachments-s3-setup.sh              # start + provision, print exports
 #   eval "$(test/e2e/attachments-s3-setup.sh)"    # ... and load them into the shell
 #
-# Idempotent for MinIO (bucket creation is `--ignore-existing`). NOT
-# idempotent for Garage past the first run: Garage never reveals a key's
-# secret again after creation, so re-running against an already-provisioned
-# volume fails loudly rather than silently reusing a key whose secret this
-# script can no longer print. Run `docker compose -f
-# docker-compose.attachments-s3.yml down -v` first to start clean.
+# Idempotent for RustFS. NOT idempotent for Garage past the first run: Garage
+# never reveals a key's secret again, so re-running against a provisioned
+# volume fails. Run `docker compose -f docker-compose.attachments-s3.yml
+# down -v` first to start clean.
 #
-# On success, prints `export FOO=bar` lines for the Garage credentials to
-# stdout ONLY -- all progress/log output goes to stderr, so the stdout stream
-# stays safe to eval. Exit 0 = both stores ready, non-zero = failed.
+# Prints `export FOO=bar` lines on stdout only once both stores answer a
+# signed request on their bucket; logs go to stderr. Any failed pull, start
+# or provisioning step exits non-zero before anything is printed.
 
 set -euo pipefail
 
@@ -28,31 +24,55 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 COMPOSE="docker compose -f $DIR/docker-compose.attachments-s3.yml"
 BUCKET=barrel-att-s3-test
 KEY_NAME=barrel-att-s3-key
+# Must match the rustfs service in the compose file.
+RUSTFS_ENDPOINT=http://127.0.0.1:19000
+RUSTFS_ACCESS_KEY=s3testadmin
+RUSTFS_SECRET_KEY=s3testsecret
+RUSTFS_REGION=us-east-1
+GARAGE_ENDPOINT=http://127.0.0.1:13900
 
 log() { echo "$@" >&2; }
+die() { log "!!! $*"; exit 1; }
+trap 'log "!!! attachments-s3-setup.sh failed at line $LINENO"' ERR
 
-log "--- starting minio + garage"
-$COMPOSE up -d minio garage
+# s3_head <endpoint> <region> <access> <secret>: signed HEAD on the bucket.
+s3_head() {
+    curl -fsS -o /dev/null --aws-sigv4 "aws:amz:$2:s3" --user "$3:$4" \
+        -I "$1/$BUCKET"
+}
 
-log "--- waiting for minio"
-minio_up=0
+log "--- pulling rustfs + garage"
+$COMPOSE pull rustfs garage >&2
+
+log "--- starting rustfs + garage"
+$COMPOSE up -d rustfs garage >&2
+
+log "--- waiting for rustfs"
+rustfs_up=0
 for _ in $(seq 1 30); do
-    if curl -fsS http://127.0.0.1:19000/minio/health/live >/dev/null 2>&1; then
-        minio_up=1; break
+    if curl -fsS "$RUSTFS_ENDPOINT/health" >/dev/null 2>&1; then
+        rustfs_up=1; break
     fi
     sleep 1
 done
-[ "$minio_up" -eq 1 ] || { log "  minio did not become healthy"; exit 1; }
-log "  minio is up"
+[ "$rustfs_up" -eq 1 ] || die "rustfs did not become healthy"
+log "  rustfs is up"
 
-# --network container:<name> shares the minio container's own network
-# namespace, so this reaches it on 127.0.0.1 regardless of the compose
-# project's network name (which depends on the directory this repo is
-# checked out into and isn't worth depending on here).
-log "--- ensuring minio bucket $BUCKET"
-docker run --rm --network container:barrel-att-s3-minio \
-    -e MC_HOST_local="http://minioadmin:minioadmin@127.0.0.1:9000" \
-    minio/mc mb --ignore-existing "local/$BUCKET" >&2
+# Signed PUT Bucket; RustFS answers 200 for a bucket it already owns, and
+# 503 for a few seconds after /health first reports ready.
+log "--- ensuring rustfs bucket $BUCKET"
+rustfs_bucket=0
+for _ in $(seq 1 30); do
+    if curl -fsS -o /dev/null --aws-sigv4 "aws:amz:$RUSTFS_REGION:s3" \
+        --user "$RUSTFS_ACCESS_KEY:$RUSTFS_SECRET_KEY" \
+        -X PUT "$RUSTFS_ENDPOINT/$BUCKET" 2>/dev/null; then
+        rustfs_bucket=1; break
+    fi
+    sleep 1
+done
+[ "$rustfs_bucket" -eq 1 ] || die "could not create rustfs bucket $BUCKET"
+s3_head "$RUSTFS_ENDPOINT" "$RUSTFS_REGION" "$RUSTFS_ACCESS_KEY" "$RUSTFS_SECRET_KEY" \
+    || die "rustfs bucket $BUCKET not reachable with the test credentials"
 
 log "--- waiting for garage rpc"
 garage_up=0
@@ -62,7 +82,7 @@ for _ in $(seq 1 30); do
     fi
     sleep 1
 done
-[ "$garage_up" -eq 1 ] || { log "  garage did not become reachable"; exit 1; }
+[ "$garage_up" -eq 1 ] || die "garage did not become reachable"
 log "  garage is up"
 
 NODE_ID=$($COMPOSE exec -T garage /garage node id -q 2>/dev/null | tr -d '\r\n')
@@ -92,20 +112,34 @@ fi
 
 if $COMPOSE exec -T garage /garage key list 2>/dev/null | awk '{print $2}' | grep -qx "$KEY_NAME"; then
     log "!!! key $KEY_NAME already exists and its secret cannot be recovered"
-    log "!!! run '$COMPOSE down -v' to start from a clean volume, then retry"
-    exit 1
+    die "run '$COMPOSE down -v' to start from a clean volume, then retry"
 fi
 
 log "--- creating garage key $KEY_NAME"
 KEY_OUT=$($COMPOSE exec -T garage /garage key create "$KEY_NAME" 2>/dev/null)
 ACCESS_KEY=$(echo "$KEY_OUT" | sed -n 's/^Key ID: //p' | tr -d '\r')
 SECRET_KEY=$(echo "$KEY_OUT" | sed -n 's/^Secret key: //p' | tr -d '\r')
-[ -n "$ACCESS_KEY" ] && [ -n "$SECRET_KEY" ] || { log "!!! could not parse garage key output"; exit 1; }
+[ -n "$ACCESS_KEY" ] && [ -n "$SECRET_KEY" ] || die "could not parse garage key output"
 
 log "--- authorizing $KEY_NAME on $BUCKET"
 $COMPOSE exec -T garage /garage bucket allow "$BUCKET" --key "$KEY_NAME" --read --write >&2
 
+log "--- checking the garage key can reach $BUCKET"
+garage_ok=0
+for _ in $(seq 1 15); do
+    if s3_head "$GARAGE_ENDPOINT" garage "$ACCESS_KEY" "$SECRET_KEY" 2>/dev/null; then
+        garage_ok=1; break
+    fi
+    sleep 1
+done
+[ "$garage_ok" -eq 1 ] || die "garage bucket $BUCKET not reachable with the new key"
+
 log "--- ready"
+echo "export RUSTFS_S3_TEST_ENDPOINT=$RUSTFS_ENDPOINT"
+echo "export RUSTFS_S3_TEST_ACCESS_KEY=$RUSTFS_ACCESS_KEY"
+echo "export RUSTFS_S3_TEST_SECRET_KEY=$RUSTFS_SECRET_KEY"
+echo "export RUSTFS_S3_TEST_REGION=$RUSTFS_REGION"
+echo "export RUSTFS_S3_TEST_BUCKET=$BUCKET"
 echo "export GARAGE_S3_TEST_ACCESS_KEY=$ACCESS_KEY"
 echo "export GARAGE_S3_TEST_SECRET_KEY=$SECRET_KEY"
 echo "export GARAGE_S3_TEST_BUCKET=$BUCKET"

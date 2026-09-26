@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 #
 # End-to-end test for the S3 attachment storage backend (barrel_att_s3),
-# against real MinIO and Garage containers and a real barrel_server release
+# against real RustFS and Garage containers and a real barrel_server release
 # built with the S3 backend included (the `s3_server` rebar3 profile) --
 # not CT against the backend module directly (that's
 # apps/barrel_att_s3/test/barrel_att_s3_SUITE.erl), and not a mock store.
 #
 # peer-a keeps the default (RocksDB) attachment backend; peer-b's databases
-# point their att_opts at MinIO or Garage. Both run the same release image.
+# point their att_opts at RustFS or Garage. Both run the same release image.
 #
 # Most databases below are still created via `barrel_server eval`
 # (barrel_docdb:create_db/2), for brevity in scenarios where HTTP db
@@ -70,9 +70,9 @@ trap cleanup EXIT
 
 echo "--- building peer image and starting the stack"
 $COMPOSE build peer-a
-echo "--- provisioning minio + garage"
-GARAGE_ENV=$("$DIR"/attachments-s3-setup.sh)
-eval "$GARAGE_ENV"
+echo "--- provisioning rustfs + garage"
+STORE_ENV=$("$DIR"/attachments-s3-setup.sh)
+eval "$STORE_ENV"
 
 echo "--- starting the peers"
 $COMPOSE up -d peer-a peer-b
@@ -90,40 +90,40 @@ wait_healthy() {  # wait_healthy <base-url> <name>
 wait_healthy "$A" peer-a
 wait_healthy "$B" peer-b
 
-eval_b() {  # eval_b <erlang-expr>   -- runs inside peer-b, network-adjacent to minio/garage
+eval_b() {  # eval_b <erlang-expr>   -- runs inside peer-b, network-adjacent to rustfs/garage
     $COMPOSE exec -T peer-b barrel_server eval "$1"
 }
 eval_a() {  # eval_a <erlang-expr>
     $COMPOSE exec -T peer-a barrel_server eval "$1"
 }
 
-# --- MinIO-backed database: whole-blob round trip (small + multipart-crossing) ---
+# --- RustFS-backed database: whole-blob round trip (small + multipart-crossing) ---
 
-MINIO_ATT_OPTS='#{backend => s3, s3 => #{bucket => <<"barrel-att-s3-test">>, endpoint => <<"http://minio:9000">>, region => <<"us-east-1">>, access_key_id => <<"minioadmin">>, secret_access_key => <<"minioadmin">>}}'
+RUSTFS_ATT_OPTS='#{backend => s3, s3 => #{bucket => <<"barrel-att-s3-test">>, endpoint => <<"http://rustfs:9000">>, region => <<"us-east-1">>, access_key_id => <<"s3testadmin">>, secret_access_key => <<"s3testsecret">>}}'
 
-echo "--- creating minio-backed db on peer-b"
-eval_b "barrel_docdb:create_db(<<\"s3db\">>, #{att_opts => $MINIO_ATT_OPTS})." >/dev/null
+echo "--- creating rustfs-backed db on peer-b"
+eval_b "barrel_docdb:create_db(<<\"s3db\">>, #{att_opts => $RUSTFS_ATT_OPTS})." >/dev/null
 curl -fsS -X PUT "$B/db/s3db/doc/doc1" -H 'content-type: application/json' -d '{"n":1}' >/dev/null
 
-echo "--- small attachment round trip (minio)"
+echo "--- small attachment round trip (rustfs)"
 curl -fsS -X PUT "$B/db/s3db/doc/doc1/att/small.txt" \
     -H 'content-type: text/plain' -d 'hello from the s3 backend e2e test' >/dev/null
 body=$(curl -fsS "$B/db/s3db/doc/doc1/att/small.txt")
-check "minio small attachment content" 'hello from the s3 backend e2e test' "$body"
+check "rustfs small attachment content" 'hello from the s3 backend e2e test' "$body"
 
-echo "--- large (multipart-crossing) attachment round trip (minio)"
+echo "--- large (multipart-crossing) attachment round trip (rustfs)"
 head -c 6000000 /dev/urandom > "$WORKDIR/large.bin"
 sum_before=$(shasum -a 256 "$WORKDIR/large.bin" | awk '{print $1}')
 curl -fsS -X PUT "$B/db/s3db/doc/doc1/att/large.bin" \
     -H 'content-type: application/octet-stream' --data-binary "@$WORKDIR/large.bin" >/dev/null
 curl -fsS "$B/db/s3db/doc/doc1/att/large.bin" -o "$WORKDIR/large.roundtrip.bin"
 sum_after=$(shasum -a 256 "$WORKDIR/large.roundtrip.bin" | awk '{print $1}')
-check "minio large attachment digest" "$sum_before" "$sum_after"
+check "rustfs large attachment digest" "$sum_before" "$sum_after"
 
-echo "--- delete + 404 (minio)"
+echo "--- delete + 404 (rustfs)"
 curl -fsS -X DELETE "$B/db/s3db/doc/doc1/att/small.txt" >/dev/null
 code=$(curl -s -o /dev/null -w '%{http_code}' "$B/db/s3db/doc/doc1/att/small.txt")
-check "minio attachment gone after delete" 404 "$code"
+check "rustfs attachment gone after delete" 404 "$code"
 
 # --- Garage-backed database: same whole-blob round trip ---
 
@@ -145,14 +145,14 @@ check "garage attachment gone after delete" 404 "$code"
 # --- Backend selection over HTTP: PUT /db/:name with att_opts in the body ---
 #
 # create_db/1 now parses an optional JSON body -- this creates an S3
-# (minio)-backed database purely over HTTP, no barrel_server eval
-# involved, and confirms the write actually landed in the minio bucket
+# (rustfs)-backed database purely over HTTP, no barrel_server eval
+# involved, and confirms the write actually landed in the rustfs bucket
 # (not silently RocksDB, which would round-trip the content identically
 # and so not be caught by a content check alone).
 
-echo "--- creating s3httpdb (minio) via PUT /db/:name with att_opts in the body"
-MINIO_ATT_OPTS_JSON='{"att_opts":{"backend":"s3","s3":{"bucket":"barrel-att-s3-test","endpoint":"http://minio:9000","region":"us-east-1","access_key_id":"minioadmin","secret_access_key":"minioadmin"}}}'
-create_resp=$(curl -fsS -X PUT "$B/db/s3httpdb" -H 'content-type: application/json' -d "$MINIO_ATT_OPTS_JSON")
+echo "--- creating s3httpdb (rustfs) via PUT /db/:name with att_opts in the body"
+RUSTFS_ATT_OPTS_JSON='{"att_opts":{"backend":"s3","s3":{"bucket":"barrel-att-s3-test","endpoint":"http://rustfs:9000","region":"us-east-1","access_key_id":"s3testadmin","secret_access_key":"s3testsecret"}}}'
+create_resp=$(curl -fsS -X PUT "$B/db/s3httpdb" -H 'content-type: application/json' -d "$RUSTFS_ATT_OPTS_JSON")
 check_match "create_db with att_opts over HTTP succeeds" '"ok":true' "$create_resp"
 
 curl -fsS -X PUT "$B/db/s3httpdb/doc/doc1" -H 'content-type: application/json' -d '{"n":1}' >/dev/null
@@ -162,15 +162,14 @@ body=$(curl -fsS "$B/db/s3httpdb/doc/doc1/att/note.txt")
 check "s3httpdb attachment round trip" 'created via http att_opts' "$body"
 
 # hex("doc1") = 646f6331; the prefix is the db's own name on first open
-# (see barrel_att_s3_store's "Key scheme" moduledoc section). The `docker
-# run` itself must be the `if` condition, not a separate statement: under
-# `set -e`, a non-zero exit from a plain statement kills the script before
-# a later `[ $? -eq 0 ]` ever runs.
-if docker run --rm --network container:barrel-att-s3-minio \
-    -e MC_HOST_local="http://minioadmin:minioadmin@127.0.0.1:9000" \
-    minio/mc stat "local/barrel-att-s3-test/s3httpdb/646f6331/note.txt" >/dev/null 2>&1
+# (see barrel_att_s3_store's "Key scheme" moduledoc section). A signed HEAD
+# straight against RustFS; it must be the `if` condition, not a separate
+# statement: under `set -e`, a non-zero exit from a plain statement kills
+# the script before a later `[ $? -eq 0 ]` ever runs.
+if curl -fsS -o /dev/null --aws-sigv4 "aws:amz:us-east-1:s3" --user "s3testadmin:s3testsecret" \
+    -I "http://127.0.0.1:19000/barrel-att-s3-test/s3httpdb/646f6331/note.txt" 2>/dev/null
 then rc=0; else rc=1; fi
-check_bool "s3httpdb object exists in the minio bucket (att_opts over HTTP genuinely selected S3)" "$rc"
+check_bool "s3httpdb object exists in the rustfs bucket (att_opts over HTTP genuinely selected S3)" "$rc"
 
 # --- Write-conflict detection: real behavior, not the doc's claim ---
 #
@@ -178,14 +177,14 @@ check_bool "s3httpdb object exists in the minio bucket (att_opts over HTTP genui
 # coverage of barrel_docdb:put_attachment/5 itself) and real HTTP headers
 # (If-None-Match/If-Match, now wired on the attachment PUT route).
 
-echo "--- create_only conflict detection (minio: verifiably enforced)"
+echo "--- create_only conflict detection (rustfs: verifiably enforced)"
 # `eval` echoes the final expression's own return value, not anything an
 # inner io:format prints (io:format/2 itself returns `ok` -- see
 # replication.sh's own note on this), so the conflicting put must be the
 # trailing expression, unwrapped.
-MINIO_CONFLICT='{ok, _} = barrel_docdb:put_attachment(<<"s3db">>, <<"doc1">>, <<"conf.txt">>, <<"first">>, #{create_only => true}), barrel_docdb:put_attachment(<<"s3db">>, <<"doc1">>, <<"conf.txt">>, <<"second">>, #{create_only => true}).'
-out=$(eval_b "$MINIO_CONFLICT" | tr -d '\r\n ')
-check_match "minio create_only conflict detected (erlang API)" '^\{error,\{conflict,' "$out"
+RUSTFS_CONFLICT='{ok, _} = barrel_docdb:put_attachment(<<"s3db">>, <<"doc1">>, <<"conf.txt">>, <<"first">>, #{create_only => true}), barrel_docdb:put_attachment(<<"s3db">>, <<"doc1">>, <<"conf.txt">>, <<"second">>, #{create_only => true}).'
+out=$(eval_b "$RUSTFS_CONFLICT" | tr -d '\r\n ')
+check_match "rustfs create_only conflict detected (erlang API)" '^\{error,\{conflict,' "$out"
 
 echo "--- create_only fails fast (garage: not structurally supported, by design)"
 GARAGE_CONFLICT='barrel_docdb:put_attachment(<<"garagedb">>, <<"doc1">>, <<"conf.txt">>, <<"first">>, #{create_only => true}).'
@@ -193,13 +192,13 @@ out=$(eval_b "$GARAGE_CONFLICT" | tr -d '\r\n ')
 check "garage create_only refuses rather than pretends to protect (erlang API)" \
     '{error,conditional_writes_unsupported}' "$out"
 
-echo "--- create_only conflict detection over real HTTP headers (minio)"
+echo "--- create_only conflict detection over real HTTP headers (rustfs)"
 code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT "$B/db/s3httpdb/doc/doc1/att/http-conf.txt" \
     -H 'If-None-Match: *' -H 'content-type: text/plain' -d 'first')
-check "minio If-None-Match: * succeeds on a fresh key" 201 "$code"
+check "rustfs If-None-Match: * succeeds on a fresh key" 201 "$code"
 code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT "$B/db/s3httpdb/doc/doc1/att/http-conf.txt" \
     -H 'If-None-Match: *' -H 'content-type: text/plain' -d 'second')
-check "minio If-None-Match: * conflicts on an existing key" 409 "$code"
+check "rustfs If-None-Match: * conflicts on an existing key" 409 "$code"
 
 echo "--- create_only fails fast over real HTTP headers (garage) -- must not hang or retry"
 t0=$(date +%s)
@@ -210,16 +209,16 @@ check "garage If-None-Match: * fails fast (501)" 501 "$code"
 if [ "$elapsed" -le 5 ]; then rc=0; else rc=1; fi
 check_bool "garage conditional-write rejection was fast (${elapsed}s)" "$rc"
 
-# --- Replication asymmetry: RocksDB source -> S3(minio) target ---
+# --- Replication asymmetry: RocksDB source -> S3(rustfs) target ---
 #
 # Mirrors replication.sh's push pattern, over the real HTTP transport
 # between two separate containers, landing on an S3-backed target this
 # time (barrel_att_s3_rep_SUITE covers this at the CT level against real
-# MinIO/Garage; this confirms it live, over the wire, between two peers).
+# RustFS/Garage; this confirms it live, over the wire, between two peers).
 
-echo "--- creating repdb (default backend) on peer-a, (s3/minio backend) on peer-b"
+echo "--- creating repdb (default backend) on peer-a, (s3/rustfs backend) on peer-b"
 curl -fsS -X PUT "$A/db/repdb" >/dev/null
-eval_b "barrel_docdb:create_db(<<\"repdb\">>, #{att_opts => $MINIO_ATT_OPTS})." >/dev/null
+eval_b "barrel_docdb:create_db(<<\"repdb\">>, #{att_opts => $RUSTFS_ATT_OPTS})." >/dev/null
 
 curl -fsS -X PUT "$A/db/repdb/doc/doc1" -H 'content-type: application/json' -d '{"n":1}' >/dev/null
 curl -fsS -X PUT "$A/db/repdb/doc/doc1/att/note.txt" -H 'content-type: text/plain' -d 'replicated to s3' >/dev/null
@@ -243,9 +242,9 @@ check "peer-b (s3-backed) received the attachment via replication" 'replicated t
 # bidirectional_lww_convergence_rocksdb_and_s3, over the wire instead of
 # the local transport CT uses) and checks convergence, not just delivery.
 
-echo "--- creating bidirdb: default backend on peer-a, minio-backed on peer-b"
+echo "--- creating bidirdb: default backend on peer-a, rustfs-backed on peer-b"
 curl -fsS -X PUT "$A/db/bidirdb" >/dev/null
-eval_b "barrel_docdb:create_db(<<\"bidirdb\">>, #{att_opts => $MINIO_ATT_OPTS})." >/dev/null
+eval_b "barrel_docdb:create_db(<<\"bidirdb\">>, #{att_opts => $RUSTFS_ATT_OPTS})." >/dev/null
 curl -fsS -X PUT "$A/db/bidirdb/doc/doc1" -H 'content-type: application/json' -d '{"n":1}' >/dev/null
 curl -fsS -X PUT "$B/db/bidirdb/doc/doc1" -H 'content-type: application/json' -d '{"n":1}' >/dev/null
 
@@ -273,7 +272,7 @@ IDLE_CHECK='E = barrel_rep_transport_http:endpoint(<<"http://peer-b:8080/db/bidi
 out=$(eval_a "$IDLE_CHECK" | tr -d '\r\n ')
 check_match "idle round: nothing left to write" 'atts_written=>0' "$out"
 
-# --- Branching: fork an S3(minio)-backed database ---
+# --- Branching: fork an S3(rustfs)-backed database ---
 #
 # barrel_docdb:branch_db/3 has a real HTTP route (unlike att_opts on
 # create_db), so this drives it the same way a client would:
@@ -282,8 +281,8 @@ check_match "idle round: nothing left to write" 'atts_written=>0' "$out"
 # actual work, so branch_db returning fast is a meaningful check, not
 # trivially true because there was nothing to copy.
 
-echo "--- creating s3branchparent (minio) with several attachments on peer-b"
-eval_b "barrel_docdb:create_db(<<\"s3branchparent\">>, #{att_opts => $MINIO_ATT_OPTS})." >/dev/null
+echo "--- creating s3branchparent (rustfs) with several attachments on peer-b"
+eval_b "barrel_docdb:create_db(<<\"s3branchparent\">>, #{att_opts => $RUSTFS_ATT_OPTS})." >/dev/null
 curl -fsS -X PUT "$B/db/s3branchparent/doc/doc1" -H 'content-type: application/json' -d '{"n":1}' >/dev/null
 for i in $(seq 1 15); do
     curl -fsS -X PUT "$B/db/s3branchparent/doc/doc1/att/f$i.txt" \
