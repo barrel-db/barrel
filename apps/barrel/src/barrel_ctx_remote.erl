@@ -155,7 +155,6 @@ request(Mode, Method, Url, Accept, Body, Loc, Opts) ->
                 {pool, false}],
     try hackney:request(Method, Url, Headers, Body, HttpOpts) of
         {ok, Conn} ->
-            own(Conn),
             loop(#st{conn = Conn, mode = Mode,
                      deadline = Deadline, timeout = Timeout,
                      max_bytes = maps:get(max_bytes, Opts,
@@ -166,11 +165,6 @@ request(Mode, Method, Url, Accept, Body, Loc, Opts) ->
         Class:Reason ->
             {error, failure(error, {Class, Reason}, 0, 0)}
     end.
-
-%% hackney ties a connection to its supervisor, not to the caller: make
-%% the caller the owner so the connection closes if the caller dies.
-own(Conn) ->
-    try hackney_conn:set_owner(Conn, self()) catch exit:_ -> ok end.
 
 with_slot(Fun) ->
     case acquire_slot() of

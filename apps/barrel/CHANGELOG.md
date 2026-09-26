@@ -3,6 +3,11 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.10.1] - 2026-09-26
+
+### Changed
+- Requires hackney `~> 4.8.2`, where a direct connection is owned by the process that opened it. `barrel_ctx_remote` no longer hands its connection over with `hackney_conn:set_owner/2`.
+
 ## [1.10.0] - 2026-09-26
 
 The first release since 1.3.1: versions 1.4.0 to 1.9.0 were never published and their changes are listed here.
