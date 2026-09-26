@@ -14,6 +14,7 @@
 
 %% @private
 start(_StartType, _StartArgs) ->
+    ok = barrel_ctx_remote:init_slots(),
     barrel_sup:start_link().
 
 %% @private

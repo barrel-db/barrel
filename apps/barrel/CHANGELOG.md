@@ -3,6 +3,15 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.8.0] - 2026-09-25
+
+### Added
+- `barrel_ctx_catalog`: context cards stored in a local catalog database (`_barrel_catalog` by default). A card names a context and where it lives (local database, remote endpoint, imported copy), with title, description, topics and an optional `embedding` block. Cards are validated (size, name, locations) and refused when they carry a secret. `register/1`, `get/1`, `list/1`, `discover/2` (every word of the query matches name, title, description or topics), `update/2`, `unregister/1`, `resolve_name/1`.
+- `barrel_ctx_remote`: client for another node's `POST /db/:db/query` (NDJSON stream), `_bulk_get` and a one-row observation of its version. Each call runs under a caller deadline, caps response bytes (16 MiB by default) and closes its connection on every path; remote calls share a node-wide slot pool (`ctx_node_remote_max`). Failures come back as one map (`status`, `reason`, `rows_received`, ...). Credentials resolve from an explicit option, a `credential_ref` looked up in `ctx_credentials`, or the endpoint entry.
+
+### Changed
+- Depends on `hackney ~> 4.4` (the remote client calls it directly).
+
 ## [1.7.0] - 2026-09-25
 
 ### Added
