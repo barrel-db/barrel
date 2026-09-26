@@ -28,6 +28,48 @@ ok = barrel:close(Db).
 A database links its vector store to the process that opened it. Open it from a
 long-lived process (a gen_server or supervisor), not a transient one.
 
+## Open read only
+
+Open with `read_only => true` to serve a database without writing any file,
+for example an imported copy that several nodes share. Every write answers
+`{error, read_only}`.
+
+```erlang
+{ok, Ro} = barrel:open(mydb, #{read_only => true}),
+{error, read_only} = barrel:put_doc(Ro, #{<<"id">> => <<"z">>}),
+{ok, _} = barrel:get_doc(Ro, <<"a">>),
+ok = barrel:close(Ro).
+```
+
+- The database must exist: a missing one fails with
+  `read_only_store_missing`. One written by an older version that needs an
+  upgrade fails with `read_only_upgrade_needed`; open it writable once.
+- Record mode persists no policy and starts no indexer. Pass
+  `embedding => stored` to use the policy the database persisted
+  (`{error, no_stored_policy}` on a plain database).
+
+## Share handles through barrel_dbs
+
+`barrel_dbs` caches open handles by name, closes idle ones and evicts past a
+cap. Take a lease when a process needs a database to stay open while it
+works; take a hold when you need its files closed (an export does).
+
+```erlang
+{error, not_found} = barrel_dbs:ensure(<<"nope">>, #{must_exist => true}),
+{ok, Db, Lease} = barrel_dbs:lease(<<"mydb">>, #{}),
+%% ... Db stays open against idle close and eviction ...
+ok = barrel_dbs:release(Lease),
+
+{ok, #{was_open := _}} = barrel_dbs:hold(<<"mydb">>, #{}),
+%% ... every ensure of mydb is refused until unhold ...
+ok = barrel_dbs:unhold(<<"mydb">>).
+```
+
+- Leases are counted and end when the holder exits; `barrel_dbs:leases/0`
+  lists them. `lookup/1` returns the pinned flag, owner and open options.
+- A hold is refused on a pinned or leased database, or one opened outside
+  the manager.
+
 ## Documents
 
 ```erlang
@@ -48,7 +90,8 @@ _       = barrel:delete_docs(Db, [<<"a">>, <<"b">>]).
 ## Attachments (blobs)
 
 Blobs are document attachments; the storage backend is pluggable per database via
-the docdb `barrel_att_backend` seam (RocksDB BlobDB by default).
+the docdb `barrel_att_backend` seam (RocksDB BlobDB by default; `barrel_att_s3`
+stores them in an S3-compatible bucket).
 
 ```erlang
 {ok, _}          = barrel:put_attachment(Db, <<"a">>, <<"f.txt">>, <<"bytes">>),
@@ -92,6 +135,8 @@ Notes:
   or `{Id, Text, Metadata, Vector}` (explicit) tuples; a batch must be all one
   shape.
 - BM25 is opt-in: open with `vectordb => #{bm25_backend => memory}` (or `disk`).
+  A disk index survives a reopen; a memory index is rebuilt from the stored
+  text at open.
 - `search_hybrid/3` and auto-embedding adds need an embedder configured via
   `barrel_embed`; without one they return `{error, embedder_not_configured}`.
 - To embed text yourself with the database's own embedder (same model and

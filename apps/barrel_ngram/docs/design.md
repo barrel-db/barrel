@@ -40,7 +40,8 @@ older or newer format than the reader expects fails to open with a distinguishab
 `{unsupported_segment_version, Path, Got, Expected}` -- there is no migration, reindex
 into a fresh corpus.
 
-The manifest (the list of live segments plus the watermark) also persists the corpus's
+The manifest (version 3: the list of live segments with the sha256 and size of each,
+plus the watermark) also persists the corpus's
 own configuration -- `phase2_selector_opts` and `fields` -- and validates it on every
 `open/2`: a reopen with a different value fails with
 `{error, {config_mismatch, Field, Persisted, Requested}}` rather than silently reindexing

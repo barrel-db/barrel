@@ -7,7 +7,6 @@
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
 [Documentation](https://barrel-db.eu/docs/lib/vectordb/) |
-[Examples](./examples) |
 [barrel-db.eu](https://barrel-db.eu)
 
 </div>
@@ -58,7 +57,7 @@ Add to your `rebar.config`:
 
 ```erlang
 {deps, [
-    {barrel_vectordb, "2.1.1"}
+    {barrel_vectordb, "~> 2.5"}
 ]}.
 ```
 
@@ -70,8 +69,8 @@ For cross-encoder reranking, add barrel_rerank:
 
 ```erlang
 {deps, [
-    {barrel_vectordb, "2.1.1"},
-    {barrel_rerank, "1.0.0"}
+    {barrel_vectordb, "~> 2.5"},
+    {barrel_rerank, "~> 1.0"}
 ]}.
 ```
 
@@ -526,9 +525,9 @@ Cross-encoder reranking for improved search relevance. Use after initial vector 
 ```erlang
 %% Add barrel_rerank to your deps
 {deps, [
-    {barrel_vectordb, "2.1.1"},
-    {barrel_embed, "2.3.0"},
-    {barrel_rerank, "1.0.0"}
+    {barrel_vectordb, "~> 2.5"},
+    {barrel_embed, "~> 2.5"},
+    {barrel_rerank, "~> 1.0"}
 ]}.
 ```
 
@@ -596,7 +595,11 @@ Stats = barrel_vectordb_bm25:stats(Index2).
 %% => #{doc_count => 2, avg_doc_len => 3.5, ...}
 ```
 
-**Note:** BM25 index is in-memory and not persisted. Rebuild from documents on startup.
+`barrel_vectordb_bm25` is a standalone in-memory index. Inside a store, pick
+the backend with `bm25_backend`: `memory` keeps no files and is rebuilt from
+the stored text at every open; `disk` writes every add and remove to its
+`bm25.ids` RocksDB before the call returns, so hits and scores survive a
+close, a kill or an interrupted compaction. See [disk BM25](docs/bm25-disk.md).
 
 ## Search Options
 
@@ -696,6 +699,31 @@ checksum) loads directly; otherwise the index rebuilds from the vectors
 column family. `stats/1` reports how the index came up:
 `index_origin => new | loaded | rebuilt`. A store killed before any
 persist simply rebuilds; no data is lost either way.
+
+## Read-only stores
+
+Pass `read_only => true` to serve a store you must not change, such as an
+imported copy that several nodes open at once:
+
+```erlang
+{ok, _} = barrel_vectordb:start_link(#{
+    name => snapshot_vec,
+    path => "/srv/imports/snapshot_vec",
+    dimensions => 768,
+    read_only => true
+}).
+```
+
+- Searches work, BM25 included: a memory index is rebuilt at open, a disk
+  index is read as is.
+- Adds, updates, upserts, deletes, `persist_index` and `bm25_compact` answer
+  `{error, read_only}`; `checkpoint` does nothing and close writes nothing.
+- RocksDB stores open with `OpenForReadOnly` and flat files without write
+  access: nothing in the store directory is created, rewritten or removed.
+- A missing store fails with `{read_only_store_missing, Path}`. A store that
+  needs an upgrade (a column family added since, a disk BM25 index from
+  before 2.4.1 or with an interrupted compaction, a DiskANN V1 index) fails
+  with `{read_only_upgrade_needed, _}` until one writable open upgrades it.
 
 ## Architecture
 

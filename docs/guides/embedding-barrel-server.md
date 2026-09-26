@@ -17,7 +17,7 @@ instead of running the standalone `barrel_server` listener.
 ## How
 
 Start `barrel` and `barrel_spaces`, then mount barrel's router into yours. The DB
-surface needs no `barrel_server` supervisor — the handlers are stateless.
+surface needs no `barrel_server` supervisor: the handlers are stateless.
 
 ```erlang
 %% 1. Point barrel at a data dir and start it (not barrel_server).
@@ -37,7 +37,7 @@ Router = livery_router:nest(<<"/barrel">>, BarrelRouter, MyHostRouter),
 }).
 ```
 
-`barrel-lite` then points at the sub-path — no client change:
+`barrel-lite` then points at the sub-path, with no client change:
 
 ```ts
 const db = openBarrel({ url: "https://host/barrel", db: "mydb" });
@@ -46,8 +46,9 @@ const db = openBarrel({ url: "https://host/barrel", db: "mydb" });
 ## Selecting routes
 
 `routes/0` (and `router/0`) return the default DB surface: the `db`, `sync`,
-`timeline`, and `search` groups — what barrel-lite drives. Pass `groups` to widen
-or narrow it; `mcp` and the `spaces`/`handoffs` agent layer are opt-in.
+`timeline`, and `search` groups, which is what barrel-lite drives. Pass `groups` to widen
+or narrow it; `mcp`, `contexts`, and the `spaces`/`handoffs` agent layer are
+opt-in.
 
 ```erlang
 barrel_server_api:routes().                              %% DB surface (default)
@@ -57,7 +58,7 @@ barrel_server_api:router(#{prefix => <<"/barrel">>}).    %% pre-nested router
 ```
 
 Groups: `meta` (`/`, `/health`), `db`, `sync`, `timeline`, `search`, `spaces`,
-`mcp`. Unknown names raise `{unknown_route_group, Name}`.
+`contexts` (`/contexts`, `/worksets`), `mcp`. Unknown names raise `{unknown_route_group, Name}`.
 
 ## Notes
 
@@ -72,4 +73,4 @@ Groups: `meta` (`/`, `/health`), `db`, `sync`, `timeline`, `search`, `spaces`,
   `barrel_server` application with the HTTP listener disabled for those, and note
   that `/mcp` under a sub-path is not yet verified. The DB surface needs neither.
 - Route paths, request/response shapes, and the changes/SSE behavior are identical
-  to the standalone server — see [rest-server](rest-server.md).
+  to the standalone server; see [rest-server](rest-server.md).

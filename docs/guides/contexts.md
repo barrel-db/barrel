@@ -12,10 +12,11 @@ snapshots. Use this guide when an agent (over MCP) or a program (over REST or
 Erlang) needs to search or list data spread over several Barrel servers, or
 keep working offline.
 
-Status: experimental (branch `exp/contexts-api`). Every request and response
-below comes from `scripts/contexts-demo.sh`; the full run is in
-`docs/experiments/contexts/demo-transcript.md`. Responses are trimmed with
-`"..."`.
+Contexts ship in barrel 1.10.0 (the Erlang API, `barrel_ctx`) and
+barrel_server 1.10.0 (the REST routes and MCP tools). Every request and
+response below comes from a run of `scripts/contexts-demo.sh`, trimmed with
+`"..."`; ids and sequence numbers differ on each run. The design behind it
+is in [contexts](../architecture/contexts.md).
 
 ## Run the demo
 

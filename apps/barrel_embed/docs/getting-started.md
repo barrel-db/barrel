@@ -6,7 +6,7 @@ Add barrel_embed to your `rebar.config`:
 
 ```erlang
 {deps, [
-    {barrel_embed, "~> 2.3"}
+    {barrel_embed, "~> 2.5"}
 ]}.
 ```
 
@@ -106,8 +106,15 @@ Dim = barrel_embed:dimension(State).
 
 %% Get provider info
 Info = barrel_embed:info(State).
-%% => #{configured => true, providers => [...], dimension => 768}
+%% => #{configured => true, dimension => 768,
+%%      providers => [#{module => barrel_embed_ollama, name => ollama,
+%%                      model => <<"nomic-embed-text:latest">>}]}
 ```
+
+Each provider entry names the model behind the vectors (`model`, plus
+`revision` when the config pins one). It is computed from the config, with
+no network call. Ask one provider directly with
+`barrel_embed_provider:model_info(Module, Config)`.
 
 ## Provider Chain (Fallback)
 

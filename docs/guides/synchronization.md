@@ -277,17 +277,19 @@ wire). To couple clocks by hand:
 
 The same `/db/:db/_sync/*` wire drives `barrel-lite`, the TypeScript browser
 client: it keeps an offline-first OPFS store, stamps local mutations with its
-own source id, and pushes and pulls over this protocol (adaptive polling, not
-SSE). Enable CORS and issue a capability token for it. See
+own source id, and pushes and pulls over this protocol (adaptive polling; with
+`continuous: true` it also holds a `GET /db/:db/changes?feed=continuous` SSE
+stream that wakes the poller). Enable CORS and issue a capability token for it. See
 [barrel-lite](barrel-lite.md).
 
 ## What is not covered yet
 
-- **TLS serving.** `barrel_server` listens on plain HTTP; the client can
-  reach https servers. Put a TLS terminator in front for now.
 - **Vectors.** Vector indexes are not shipped; with record mode the text and
-  metadata replicate as documents and the index rebuilds locally. Quantized
-  vector sync is planned with the TypeScript client.
+  metadata replicate as documents and the index rebuilds locally. A client
+  that needs the stored vectors pulls them with `include_embedding` on
+  `GET /db/:db/doc/:id` or `POST /db/:db/_bulk_get` (barrel-lite does).
+- **Client certificates over HTTP/3.** H3 listeners serve TLS but do not
+  check client certificates; use H1-TLS or H2 for an mTLS gate.
 - **Barrel API.** `barrel` (the full embeddable database) does not expose replication;
   call `barrel_rep` and `barrel_rep_tasks` on the underlying docdb name.
 - **Provenance.** The actor/session/source a write carries (see

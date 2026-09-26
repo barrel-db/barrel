@@ -27,6 +27,7 @@ OTP = {
     "net_kernel", "erl_eval", "ct", "eunit", "meck", "hackney", "jsx",
     "opentelemetry", "otel_tracer", "otel_span", "instrument", "rocksdb",
     "prometheus", "telemetry", "hlc", "match_trie",
+    "livery", "livery_router", "barrel_mcp", "barrel_mcp_client",
 }
 
 CLOSERS = {"(": ")", "[": "]", "{": "}", "<<": ">>"}

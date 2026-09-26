@@ -172,12 +172,31 @@ ok = barrel_vectordb_server:bm25_compact(Store).
 ├── bm25.meta           # Header + global stats (4KB aligned)
 ├── bm25.postings       # Compressed posting blocks (4KB aligned)
 ├── bm25.blockmax       # Block-max index (mmap'd)
-└── bm25.ids/           # RocksDB: term/doc ID mapping
+└── bm25.ids/           # RocksDB: ID mapping and the durable forward index
     ├── terms_fwd       # term string → integer ID
     ├── terms_rev       # integer ID → term string
     ├── docs_fwd        # doc string ID → integer ID
-    └── docs_rev        # integer ID → doc string ID
+    ├── docs_rev        # integer ID → doc string ID
+    ├── doc_terms       # doc integer ID → its terms and frequencies
+    ├── term_df         # term integer ID → document frequency
+    └── pending         # docs changed since the last compaction
 ```
+
+The `stats` key of the default column family holds the corpus totals.
+
+### Durability
+
+Every add and remove is written to `bm25.ids` (forward index, document
+frequencies, stats) before the call returns. Hits and scores are the same
+after a close, a kill or an interrupted compaction, and a compaction
+rewrites the segment from the forward index. The hot layer is a cache of
+what `bm25.ids` already holds.
+
+An index written before 2.4.1 is detected on the first open and rebuilt
+from the stored text before the store serves requests. Documents added
+with `add_index_only` on the default docstore keep no text; they are
+logged as missing. After that open, 2.4.0 can no longer open the store
+(`bm25.ids` gains three column families).
 
 ### Block-Max MaxScore Algorithm
 
@@ -301,13 +320,14 @@ Varint bytes:      [0x64, 0x05, 0x03, 0x2A]  (4 bytes vs 16 bytes)
 %% 2. Update config to use disk backend
 NewConfig = OldConfig#{bm25_backend => disk},
 
-%% 3. Restart store - documents need to be re-indexed
+%% 3. Restart the store
 barrel_vectordb:stop(Store),
 {ok, _} = barrel_vectordb:start_link(NewConfig).
-
-%% 4. Re-index existing documents if needed
-%% (Documents added after restart will be auto-indexed)
 ```
+
+The memory backend keeps no files: it is rebuilt at every open from the
+stored text. Switching to disk starts an empty disk index, so re-add the
+documents you want searchable by BM25.
 
 ### From External Search Engine
 

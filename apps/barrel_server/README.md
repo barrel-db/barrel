@@ -41,7 +41,7 @@ All keys live in the `barrel_server` app env. Set them in `sys.config`, or with
     {data_dir, "/var/lib/barrel"},
     %% Request body ceiling. Must clear the largest attachment you sync.
     {max_body, 1073741824},
-    %% Options passed to barrel:open_db/2 when a database opens lazily.
+    %% Options passed to barrel:open/2 when a database opens lazily.
     {open_opts, #{}},
     %% Auth. Omit the key entirely to leave the server open. Without an
     %% `accept' key this is bearer-only (unchanged). With `accept' it opts
@@ -86,8 +86,8 @@ GET    /db/:db/doc/:id/_versions/:rev   one version's body
 POST   /db/:db/_bulk_docs               {"docs":[...]}  -> {"results":[...]}
 POST   /db/:db/_bulk_get                {"ids":[...]}   -> {"results":[...]}
 POST   /db/:db/find                     body = query, returns rows
-POST   /db/:db/query                    BQL: {"query":"..."}
-GET    /db/:db/query                    BQL via query string
+POST   /db/:db/query                    BQL: {"query":"...","max_rows":N,"deadline_ms":N}
+GET    /db/:db/query                    BQL via ?q= (and ?max_rows=, ?deadline_ms=)
 GET    /db/:db/changes                  changes feed (JSON, or SSE)
 GET    /db/:db/_history                 provenance history
 
@@ -157,11 +157,50 @@ POST   /handoffs/accept                 accept a handoff
 POST   /handoffs/complete               complete a handoff
 ```
 
+### Contexts and working sets
+
+One BQL statement over several databases, local, imported or on other
+barrel_server nodes, and the working sets that keep local copies for offline
+use. See the [contexts guide](https://github.com/barrel-db/barrel/blob/main/docs/guides/contexts.md).
+
+```
+POST   /contexts                        register a context card
+GET    /contexts                        list cards (?q= discover, ?prefix=, ?unlisted=true)
+GET    /contexts/:id                    read a card (id or URL-encoded name)
+DELETE /contexts/:id                    unregister a card
+POST   /contexts/_query                 {"query":"...","contexts":[...]} or {"working_set":"..."}
+GET    /contexts/_capabilities          query shapes, merges, limits
+GET    /contexts/_offline               offline mode
+PUT    /contexts/_offline               {"offline":true|false}
+
+POST   /worksets                        create a working set
+GET    /worksets                        list working sets
+GET    /worksets/:ws                    one working set
+DELETE /worksets/:ws                    delete it and its slices
+POST   /worksets/:ws/members            attach a context
+DELETE /worksets/:ws/members/:ctx       detach a context
+POST   /worksets/:ws/_materialize       save a query's documents as slices
+POST   /worksets/:ws/_import            import an exported snapshot
+```
+
+Errors from these routes share one body:
+`{"error": code, "message": ..., "hint": ..., "details": {...}}`, with an
+HTTP status per code. Capability tokens may read cards and run context
+queries (each local member is checked as a `POST /db/:db/query` on that
+database); registering cards, working sets, imports and offline mode need a
+global token.
+
 ### MCP
 
 When `mcp` is enabled, `/mcp` serves the Model Context Protocol (`POST`, `GET`,
 `DELETE`, `OPTIONS`) over the same databases: resources, tools, and the agent
 layer. It carries its own origin policy, so the CORS middleware skips it.
+
+The context tools mirror the routes above: `context_capabilities`,
+`context_list`, `context_discover`, `context_inspect`, `context_query`,
+`context_attach`, `context_detach`, `context_materialize`, `context_import`,
+`context_working_sets`, `context_working_set_delete`, `context_offline`. A
+query no context answered is an MCP error result.
 
 ## Examples
 
@@ -186,6 +225,20 @@ $ curl localhost:8080/db/mydb
  "history_floor":null,"keyspace":"mydb","retention_period":2592000}
 ```
 
+A BQL query streams NDJSON: one `{"row":...}` line per row and a final
+`{"meta":...}` line. The meta carries `bound` (`limit_reached` or
+`exhausted`) and the observed version (`instance_id`, `last_seq`); a
+`vector_top_k` answer adds `embedding: {fingerprint, distance, dimensions}`.
+`max_rows` is capped at 1000 and `deadline_ms` at 300000; past the deadline
+the stream ends with `{"error":"deadline"}` and no meta.
+
+```console
+$ curl -XPOST localhost:8080/db/mydb/query -H 'content-type: application/json' \
+    -d '{"query":"SELECT id FROM c LIMIT 1","max_rows":10}'
+{"row":{"id":"a"}}
+{"meta":{"bound":"limit_reached","has_more":false,"instance_id":"03798dac60334e1e","last_seq":"AAABoN0VVc4AAAAA"}}
+```
+
 A `rev` is a version token, `<hex(hlc)>@<author>`: the HLC of the write and the
 id of the database that authored it. There is no revision tree.
 
@@ -206,6 +259,15 @@ Two kinds of bearer are accepted:
 
 Unmapped routes answer 403, so a new route has to be classified before it can be
 reached with a capability token. Bad or revoked tokens answer 401.
+
+## Upgrading
+
+barrel_server 1.10.0 requires `barrel ~> 1.10` and `barrel_ngram ~> 0.11.1`.
+barrel_ngram 0.11 writes manifest version 3; `ngram_search` opens corpora
+with `on_legacy => reindex`, so an older corpus is rebuilt once on first
+search. Upgrade barrel_server and barrel_ngram together: barrel_server 1.7.2
+pins `barrel_ngram ~> 0.10`, and forced onto 0.11 it does not rebuild older
+corpora, so its search answers `corpus_not_open`.
 
 ## Notes
 

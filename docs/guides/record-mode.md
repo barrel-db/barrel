@@ -67,8 +67,34 @@ fields:
 ```erlang
 {ok, Vector}  = barrel:embed(Db, <<"fast fox">>),
 {ok, Vectors} = barrel:embed_batch(Db, [<<"a">>, <<"b">>]),
-{ok, #{dimension := Dim}} = barrel:embedder_info(Db).
+{ok, #{dimensions := Dim}} = barrel:embedder_info(Db).
 ```
+
+## Check that two databases embed alike
+
+`embedder_info/1` also returns the embedder's identity, and `info/1` carries
+the same map under `embedder`. Two databases with the same `fingerprint`
+produce comparable vector scores: a context query merges `vector_top_k` hits
+by score only when every database reports the same fingerprint and cosine
+distance (see [contexts](contexts.md)).
+
+```erlang
+{ok, Db} = barrel:open(notes, #{embedding => #{
+    fields => [<<"title">>], dimensions => 768,
+    embedder => {ollama, #{model => <<"nomic-embed-text">>}}}}),
+{ok, Info} = barrel:embedder_info(Db).
+%% #{provider => ollama, model => <<"nomic-embed-text:latest">>,
+%%   dimensions => 768, distance => cosine,
+%%   preprocessing => #{fields => [[<<"title">>]], join => <<"\n">>},
+%%   fingerprint => <<"sha256:1b7105d2466397b07e625dbd608d33f5e76ecdf03c4f37aabaf8caa905165890">>,
+%%   ...}
+```
+
+- `fingerprint` is `sha256:` of the canonical JSON of provider, model,
+  `revision` (when the provider reports one), dimensions, distance and
+  preprocessing. Every provider of a fallback chain is part of it.
+- No fingerprint without a configured embedder, or when a provider does not
+  name its model. A plain database reports `preprocessing => none`.
 
 ## Async and sync
 

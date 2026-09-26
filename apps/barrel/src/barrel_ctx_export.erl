@@ -1,11 +1,11 @@
 %%%-------------------------------------------------------------------
 %%% @doc Quiesced export of a composed database to a checksummed
-%%% directory (B14) and read-only import of such a generation (B15).
+%%% directory and read-only import of such a generation.
 %%%
 %%% Export takes exclusive access through {@link barrel_dbs:hold/2},
 %%% copies the docdb directory (documents, blob attachments, CRYPTO,
 %%% TIMELINE) and the vector store directory into `Dest', and writes a
-%%% manifest (3.3) with a sha256 per file. Encrypted databases export
+%%% manifest with a sha256 per file. Encrypted databases export
 %%% as ciphertext; the importer resolves the key through its
 %%% keyprovider under the source keyspace.
 %%%

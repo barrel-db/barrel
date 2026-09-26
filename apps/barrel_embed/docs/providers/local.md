@@ -34,7 +34,7 @@ pip install sentence-transformers
 
 barrel_embed manages its own Python virtualenv automatically and installs
 `sentence-transformers` into it on first use. See
-[Python Virtualenv Setup](venv-setup.md) for the managed venv API and how to
+[Python Virtualenv Setup](../venv-setup.md) for the managed venv API and how to
 change its location.
 
 ## Supported Models
@@ -86,7 +86,7 @@ startup and installs `sentence-transformers` there automatically:
 ```
 
 Set a custom venv location via the `venv_dir` application env (see
-[Python Virtualenv Setup](venv-setup.md)).
+[Python Virtualenv Setup](../venv-setup.md)).
 
 ### Using a Different Python Interpreter
 
