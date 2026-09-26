@@ -198,18 +198,18 @@ t_continuous_push_over_http(Config) ->
         mode => continuous,
         direction => push
     }),
-    timer:sleep(300),
     {ok, _} = barrel_docdb:put_doc(Local, #{<<"id">> => <<"cp1">>}),
-    ok = wait_until(doc_in(Served, <<"cp1">>), 50, 100),
+    ok = wait_until(doc_in(Served, <<"cp1">>), 100, 300),
     %% still alive: a second write flows too
     {ok, _} = barrel_docdb:put_doc(Local, #{<<"id">> => <<"cp2">>}),
-    ok = wait_until(doc_in(Served, <<"cp2">>), 50, 100),
+    ok = wait_until(doc_in(Served, <<"cp2">>), 100, 300),
     ok = barrel_rep_tasks:stop_task(TaskId),
     ok = barrel_rep_tasks:delete_task(TaskId),
     ok.
 
 %% A continuous pull from a remote URL source: adaptive polling picks
-%% up remote writes (500ms floor, doubling while idle).
+%% up remote writes (500ms floor, doubling while idle up to 15 s, so the
+%% wait outlasts the longest poll).
 t_continuous_pull_over_http(Config) ->
     Local = ?config(local, Config),
     Served = ?config(served, Config),
@@ -221,9 +221,8 @@ t_continuous_pull_over_http(Config) ->
         mode => continuous,
         direction => pull
     }),
-    timer:sleep(300),
     {ok, _} = barrel_docdb:put_doc(Served, #{<<"id">> => <<"cl1">>}),
-    ok = wait_until(doc_in(Local, <<"cl1">>), 100, 100),
+    ok = wait_until(doc_in(Local, <<"cl1">>), 100, 300),
     ok = barrel_rep_tasks:stop_task(TaskId),
     ok = barrel_rep_tasks:delete_task(TaskId),
     ok.
