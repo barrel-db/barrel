@@ -46,7 +46,7 @@
 -export([set_doc_embedding/4]).
 
 %% Retention sweep (also runs on a timer; exposed for tests and tools)
--export([sweep_retention/1]).
+-export([sweep_retention/1, sweep_retention/2]).
 
 %% Timeline fork (checkpoint both stores from inside the writer)
 -export([checkpoint_to/3]).
@@ -320,6 +320,12 @@ set_doc_embedding(Pid, DocId, ExpectedRev, Vector) ->
 sweep_retention(Pid) ->
     gen_server:call(Pid, sweep_retention, infinity).
 
+%% @doc Run a retention sweep as if the wall clock read `NowMs' (unix ms).
+%% Test hook: the window is judged against a chosen instant.
+-spec sweep_retention(pid(), non_neg_integer()) -> {ok, map()} | {error, term()}.
+sweep_retention(Pid, NowMs) when is_integer(NowMs), NowMs >= 0 ->
+    gen_server:call(Pid, {sweep_retention, NowMs}, infinity).
+
 %% @doc Run one doc TTL sweep pass now (test and ops hook). Returns
 %% the number of docs tombstoned.
 -spec sweep_ttl(pid()) -> {ok, non_neg_integer()}.
@@ -579,6 +585,7 @@ write_request({delete_doc, _, _}) -> true;
 write_request({outbox_ack, _, _}) -> true;
 write_request({set_doc_embedding, _, _, _}) -> true;
 write_request(sweep_retention) -> true;
+write_request({sweep_retention, _}) -> true;
 write_request(ttl_sweep) -> true;
 write_request({resolve_conflict, _, _, _}) -> true;
 write_request({put_version, _, _, _, _}) -> true;
@@ -676,14 +683,17 @@ handle_call_rw({set_doc_embedding, DocId, ExpectedRev, Vector}, _From,
 %% Retention sweep (manual trigger; also runs on the timer). Runs in the
 %% shared worker so it does not block the writer loop; the reply is deferred
 %% until the sweep finishes.
-handle_call_rw(sweep_retention, _From,
+handle_call_rw(sweep_retention, From, State) ->
+    handle_call_rw({sweep_retention, erlang:system_time(millisecond)}, From,
+                   State);
+handle_call_rw({sweep_retention, _NowMs}, _From,
                #state{retention_period = 0} = State) ->
     {reply, {ok, #{retention => infinite}}, State};
-handle_call_rw(sweep_retention, From,
+handle_call_rw({sweep_retention, NowMs}, From,
                #state{name = DbName, store_ref = StoreRef, att_ref = AttRef,
                       retention_period = RetentionPeriod} = State) ->
     Fun = fun() -> do_retention_sweep(StoreRef, AttRef, DbName,
-                                      RetentionPeriod) end,
+                                      RetentionPeriod, NowMs) end,
     {noreply, start_sweep(retention, Fun, From, false, State)};
 
 %% Doc TTL sweep (manual trigger; also runs on the timer).
@@ -771,7 +781,8 @@ handle_info(retention_sweep, #state{name = DbName, store_ref = StoreRef,
                                     retention_period = RetentionPeriod}
                              = State) ->
     Fun = fun() -> do_retention_sweep(StoreRef, AttRef, DbName,
-                                      RetentionPeriod) end,
+                                      RetentionPeriod,
+                                      erlang:system_time(millisecond)) end,
     {noreply, start_sweep(retention, Fun, none, true, State)};
 
 handle_info(ttl_sweep, #state{name = DbName, store_ref = StoreRef,
@@ -1106,9 +1117,9 @@ drop_expiry_row(StoreRef, Key) ->
 
 %% All deletes and the floor advance commit in one batch; re-running a
 %% sweep is a no-op (deletes of missing keys do nothing).
-do_retention_sweep(StoreRef, AttRef, DbName, RetentionPeriod) ->
+do_retention_sweep(StoreRef, AttRef, DbName, RetentionPeriod, NowMs) ->
     Ks = barrel_keyspace:resolve(DbName),
-    CutoffMs = erlang:system_time(millisecond) - RetentionPeriod * 1000,
+    CutoffMs = NowMs - RetentionPeriod * 1000,
     Cutoff = barrel_hlc:from_wall_time(CutoffMs),
     %% Attachment feed tombstones follow the same window (separate
     %% RocksDB; the two floors are independent)

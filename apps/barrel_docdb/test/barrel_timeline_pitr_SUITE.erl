@@ -61,6 +61,13 @@ end_per_testcase(_Case, Config) ->
 
 %% The cursor for "now": the HLC of the last applied write, taken
 %% from the changes feed (what a client would hold).
+%% Sleep until the wall clock (unix ms) is past T.
+wait_wall_past(T) ->
+    case erlang:system_time(millisecond) of
+        Now when Now > T -> ok;
+        Now -> timer:sleep(T - Now + 1), wait_wall_past(T)
+    end.
+
 cursor(Db) ->
     {ok, Changes, Last} = barrel_docdb:get_changes(Db, first),
     ?assert(length(Changes) >= 0),
@@ -289,7 +296,8 @@ rewind_stale_doc_guard(Config) ->
                                             retention_period => 1}),
     {ok, _} = barrel_docdb:put_doc(Db0, #{<<"id">> => <<"a">>,
                                           <<"v">> => 1}),
-    timer:sleep(1500),
+    Ta = barrel_hlc:wall_time(cursor(Db0)),
+    ok = wait_wall_past(Ta + 1),
     %% T anchored by ANOTHER doc's write, so the floor lands between
     %% a's only pre-T entry and T
     {ok, _} = barrel_docdb:put_doc(Db0, #{<<"id">> => <<"anchor">>}),
@@ -298,7 +306,10 @@ rewind_stale_doc_guard(Config) ->
     {ok, _} = barrel_docdb:put_doc(Db0, #{<<"id">> => <<"a">>,
                                           <<"v">> => 2,
                                           <<"_rev">> => R}),
-    {ok, _} = barrel_docdb:sweep_retention(Db0),
+    %% sweep as if one second minus 1 ms after T: the floor is just below T
+    {ok, Pid} = barrel_docdb:open_db(Db0),
+    {ok, _} = barrel_db_server:sweep_retention(
+                Pid, barrel_hlc:wall_time(T) + 999),
     ?assertEqual({error, {pitr_window_exceeded, <<"a">>}},
                  barrel_docdb:branch_db(Db0, Branch, #{at => T})),
     ok.
