@@ -27,13 +27,14 @@ new_test_() ->
             ?assertEqual(96, maps:get(subdim, Info))
         end},
         {"create config with explicit M", fun() ->
+            %% auto M would be 2; small subspaces keep the rotations cheap
             {ok, Config} = barrel_vectordb_turboquant_subspace:new(#{
-                dimension => 768,
+                dimension => 256,
                 m => 4
             }),
             Info = barrel_vectordb_turboquant_subspace:info(Config),
             ?assertEqual(4, maps:get(m, Info)),
-            ?assertEqual(192, maps:get(subdim, Info))
+            ?assertEqual(64, maps:get(subdim, Info))
         end},
         {"fail on odd dimension", fun() ->
             ?assertMatch({error, {dimension_must_be_even, _}},
