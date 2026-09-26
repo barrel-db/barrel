@@ -86,19 +86,24 @@ t_idle_close(Config) ->
     ?assertMatch({error, not_found}, barrel_docdb:open_db(Name)),
     ok.
 
+%% Sweeps run at chosen clock values: a timeout far beyond the test keeps
+%% the periodic sweep out of it.
 t_touch_resets(Config) ->
     Name = uname(<<"touch">>),
-    application:set_env(barrel, dbs_idle_timeout, 100),
+    Idle = 600000,
+    application:set_env(barrel, dbs_idle_timeout, Idle),
     {ok, _} = barrel_dbs:ensure(Name, open_opts(Name, Config)),
-    timer:sleep(60),
-    %% a use inside the window resets last_used
+    Opened = now_ms(),
+    ok = wait_clock_past(Opened),
+    %% a use resets last_used to the use time
+    TouchedFrom = now_ms(),
     {ok, _} = barrel_dbs:ensure(Name),
-    timer:sleep(60),
-    ok = barrel_dbs:sweep(),
+    TouchedTo = now_ms(),
+    %% a full window after the open, but not after the touch: kept
+    ok = barrel_dbs:sweep(TouchedFrom + Idle - 1),
     ?assertEqual([Name], barrel_dbs:list()),
-    %% and past the full window it closes
-    timer:sleep(120),
-    ok = barrel_dbs:sweep(),
+    %% a full window after the touch: closed
+    ok = barrel_dbs:sweep(TouchedTo + Idle),
     ?assertEqual([], barrel_dbs:list()),
     ok.
 
@@ -296,6 +301,16 @@ wait_until(Fun, N) ->
     case Fun() of
         true -> ok;
         false -> timer:sleep(50), wait_until(Fun, N - 1)
+    end.
+
+now_ms() ->
+    erlang:monotonic_time(millisecond).
+
+%% Spin until the monotonic clock is past T (ms).
+wait_clock_past(T) ->
+    case now_ms() of
+        Now when Now > T -> ok;
+        _ -> timer:sleep(1), wait_clock_past(T)
     end.
 
 mock_embed() ->

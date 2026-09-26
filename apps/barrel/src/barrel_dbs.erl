@@ -46,7 +46,7 @@
          lease/2, release/1, leases/0,
          list/0,
          lookup/1, hold/2, unhold/1,
-         sweep/0]).
+         sweep/0, sweep/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
          terminate/2]).
 
@@ -208,6 +208,12 @@ unhold(Name) ->
 -spec sweep() -> ok.
 sweep() ->
     gen_server:call(?SERVER, sweep, infinity).
+
+%% @doc Run one idle sweep as if the monotonic clock read `NowMs'
+%% (`erlang:monotonic_time(millisecond)'). Test hook.
+-spec sweep(integer()) -> ok.
+sweep(NowMs) when is_integer(NowMs) ->
+    gen_server:call(?SERVER, {sweep, NowMs}, infinity).
 
 %%====================================================================
 %% gen_server
@@ -396,7 +402,9 @@ do_call(leases, _From, #state{dbs = Dbs} = State) ->
 do_call(list, _From, #state{dbs = Dbs} = State) ->
     {reply, maps:keys(Dbs), State};
 do_call(sweep, _From, State) ->
-    {reply, ok, do_sweep(State)}.
+    {reply, ok, do_sweep(State)};
+do_call({sweep, NowMs}, _From, State) ->
+    {reply, ok, do_sweep(NowMs, State)}.
 
 %% Run `Thunk(State)' now if `Name' is not mid-open; otherwise defer the
 %% whole call until the open finishes, so no synchronous open can race the
@@ -603,12 +611,15 @@ maybe_make_room(#state{dbs = Dbs} = State) ->
             end
     end.
 
-do_sweep(#state{dbs = Dbs} = State) ->
+do_sweep(State) ->
+    do_sweep(now_ms(), State).
+
+do_sweep(NowMs, #state{dbs = Dbs} = State) ->
     case env(dbs_idle_timeout, ?DEFAULT_IDLE_TIMEOUT) of
         0 ->
             State;
         IdleTimeout ->
-            Cutoff = now_ms() - IdleTimeout,
+            Cutoff = NowMs - IdleTimeout,
             Expired = [{N, E} || {N, E} <- maps:to_list(Dbs),
                                  not in_use(E),
                                  E#entry.last_used =< Cutoff],
