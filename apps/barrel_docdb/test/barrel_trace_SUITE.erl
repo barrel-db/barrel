@@ -309,19 +309,20 @@ inject_extract_roundtrip(_Config) ->
         Headers = barrel_trace:inject_headers([]),
 
         %% Simulate new process - extract headers
-        spawn_link(fun() ->
+        Parent = self(),
+        Child = spawn_link(fun() ->
             ok = barrel_trace:extract_headers(Headers),
 
             %% Create child span
             barrel_trace:with_db_span(get, <<"db1">>, fun() ->
-                ChildTraceId = instrument_tracer:trace_id(),
-                %% Trace ID should match
-                ?assertEqual(OriginalTraceId, ChildTraceId)
+                Parent ! {self(), instrument_tracer:trace_id()}
             end)
         end),
 
-        %% Wait for spawned process
-        timer:sleep(100),
+        %% The child continues the trace
+        receive {Child, ChildTraceId} ->
+            ?assertEqual(OriginalTraceId, ChildTraceId)
+        end,
 
         %% Verify original context unchanged
         ?assertEqual(OriginalTraceId, instrument_tracer:trace_id()),
