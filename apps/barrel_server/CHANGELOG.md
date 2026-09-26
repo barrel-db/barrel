@@ -3,9 +3,14 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [1.10.0] - 2026-09-25
+## [1.10.0] - 2026-09-26
+
+The first release since 1.7.2: versions 1.7.3 to 1.9.0 were never published and their changes are listed here.
 
 ### Added
+- `POST /db/:db/query` (and `GET ?q=`) accepts `max_rows` (capped at 1000) and `deadline_ms` (capped at 300000). The stream stops at the row cap, or answers an in-band `{"error":"deadline"}` line and no meta once the deadline passed.
+- The final meta line carries `bound` (`limit_reached` or `exhausted`) and the observed version (`instance_id`, `last_seq`, base64url), so a caller knows whether rows were cut and which state of the database answered.
+- A `vector_top_k` answer on the query route ends with `embedding: {fingerprint, distance, dimensions}` in its meta line, so a node merging answers from several databases can check that their scores compare.
 - Contexts over REST (`contexts` route group): `POST|GET /contexts` (register, list, `?q=` discover), `GET|DELETE /contexts/:id`, `POST /contexts/_query`, `GET /contexts/_capabilities`, `GET|PUT /contexts/_offline`. Names are accepted wherever ids are.
 - Working sets over REST: `POST|GET /worksets`, `GET|DELETE /worksets/:ws`, `POST /worksets/:ws/members`, `DELETE /worksets/:ws/members/:ctx`, `POST /worksets/:ws/_materialize`, `POST /worksets/:ws/_import`.
 - MCP tools in `barrel_server_mcp_contexts`: `context_capabilities`, `context_list`, `context_discover`, `context_inspect`, `context_query`, `context_attach`, `context_detach`, `context_materialize`, `context_import`, `context_working_sets`, `context_working_set_delete`, `context_offline`, with their own argument checks. A query no context answered is an MCP error result.
@@ -14,32 +19,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 - Capability tokens may read context cards and run context queries (each local member is checked as its own `POST /db/:db/query`); registering cards, working sets, imports and offline mode need a global principal.
-- Requires `barrel ~> 1.10`.
-
-### Fixed
-- MCP resource reads no longer depend on template registration order: a trailing `{db}` template also matched doc and live URIs and answered them as database info.
-
-## [1.9.0] - 2026-09-25
-
-### Added
-- A `vector_top_k` answer on the query route ends with `embedding: {fingerprint, distance, dimensions}` in its meta line, so a node merging answers from several databases can check that their scores compare.
-
-### Changed
-- Requires `barrel ~> 1.5`.
-
-## [1.8.0] - 2026-09-25
-
-### Added
-- `POST /db/:db/query` (and `GET ?q=`) accepts `max_rows` (capped at 1000) and `deadline_ms` (capped at 300000). The stream stops at the row cap, or answers an in-band `{"error":"deadline"}` line and no meta once the deadline passed.
-- The final meta line carries `bound` (`limit_reached` or `exhausted`) and the observed version (`instance_id`, `last_seq`, base64url), so a caller knows whether rows were cut and which state of the database answered.
-
-### Changed
-- Requires `barrel ~> 1.4`.
-
-## [1.7.3] - 2026-09-24
+- Requires `barrel ~> 1.10` (contexts) and `barrel_ngram ~> 0.11.1`. barrel_ngram 0.11 writes manifest version 3; this release rebuilds older corpora on open, 1.7.2 does not, so upgrade barrel_server and barrel_ngram together.
 
 ### Fixed
 - `ngram_search` rebuilds a corpus in any older on-disk format (it opens with `on_legacy => reindex`). Before, only a corpus without `corpus.meta` was rebuilt, and the barrel_ngram 0.11.0 manifest bump would have left search answering `corpus_not_open`.
+- MCP resource reads no longer depend on template registration order: a trailing `{db}` template also matched doc and live URIs and answered them as database info.
 
 ## [1.7.2] - 2026-09-14
 

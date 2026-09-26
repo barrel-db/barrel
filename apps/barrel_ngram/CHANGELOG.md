@@ -5,7 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.11.1] - 2026-09-26
+
+0.11.0 was never published: this is the first release with its changes.
+The manifest version 3 change of 0.11.0 applies when you upgrade from
+0.10.x. A corpus written by 0.10 fails open with
+`unsupported_manifest_version` and rebuilds once when opened with
+`on_legacy => reindex`. Deploy it with barrel_server 1.10.0 or later:
+barrel_server 1.7.2 pins `barrel_ngram ~> 0.10` and does not rebuild a
+version 2 corpus, so its search would answer `corpus_not_open`.
+
+### Changed
+
+- Requires `barrel_docdb ~> 1.3` (`db_instance_id/1`); the old `~> 1.1`
+  floor allowed a barrel_docdb without it.
 
 ### Fixed
 

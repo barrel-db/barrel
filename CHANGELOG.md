@@ -4,6 +4,29 @@ All notable changes to the Barrel umbrella are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and each app
 is versioned independently under [Semantic Versioning](https://semver.org/).
 
+## [2026-09-26] Contexts release
+
+The release of the contexts work: federated BQL over local, imported,
+sliced and remote databases, working sets, export and read-only import,
+the context catalog, and their REST routes and MCP tools. The entries
+below list each part; barrel 1.4.0 to 1.9.0, barrel_server 1.7.3 to 1.9.0
+and barrel_ngram 0.11.0 were never published, and their changes ship in
+the versions of this table. barrel_docdb 1.7.0, barrel_vectordb 2.5.0 and
+barrel_embed 2.5.0 are already on Hex.
+
+Deploy barrel_ngram 0.11.1 with barrel_server 1.10.0 or later. barrel_ngram
+0.11 writes manifest version 3; barrel_server 1.10.0 rebuilds an older
+corpus on open (`on_legacy => reindex`), barrel_server 1.7.2 pins
+`barrel_ngram ~> 0.10` and does not.
+
+Publish in this order: barrel_ngram, barrel, barrel_server.
+
+| App | Version | Change |
+|-----|---------|--------|
+| barrel_ngram | 0.11.1 | manifest v3, segment integrity and leases (from 0.11.0); `is_open/1` no longer raises during a registry restart; requires `barrel_docdb ~> 1.3` |
+| barrel | 1.10.0 | contexts (`barrel_ctx*`), read-only opens, `barrel_dbs` leases and holds, export and import, embedder fingerprint, observed version and row bound in query meta; requires barrel_docdb 1.7, barrel_vectordb 2.5, barrel_embed 2.5 |
+| barrel_server | 1.10.0 | `/contexts`, `/worksets`, MCP `context_*` tools, query route bounds and meta, `ngram_search` rebuilds any older corpus; requires `barrel ~> 1.10`, `barrel_ngram ~> 0.11.1` |
+
 ## [2026-09-25] Contexts demo, guide and benchmarks
 
 A user guide for contexts, a three-node demo that exercises it end to end
@@ -46,7 +69,7 @@ what can still answer offline and says so.
 
 | App | Version | Change |
 |-----|---------|--------|
-| barrel | 1.9.0 | `barrel_ctx_ws`, `barrel_ctx_slice`, `barrel_ctx_coverage` |
+| barrel | 1.10.0 | `barrel_ctx_ws`, `barrel_ctx_slice`, `barrel_ctx_coverage` |
 
 ## [2026-09-25] Context catalog and remote client
 
@@ -58,7 +81,7 @@ shape.
 
 | App | Version | Change |
 |-----|---------|--------|
-| barrel | 1.8.0 | `barrel_ctx_catalog`, `barrel_ctx_remote`, hackney declared |
+| barrel | 1.10.0 | `barrel_ctx_catalog`, `barrel_ctx_remote`, hackney declared |
 
 ## [2026-09-25] Export and read-only import of a database
 
@@ -72,7 +95,7 @@ exported.
 
 | App | Version | Change |
 |-----|---------|--------|
-| barrel | 1.7.0 | `barrel_ctx_export` (export, verified import), `barrel_ctx_manifest` |
+| barrel | 1.10.0 | `barrel_ctx_export` (export, verified import), `barrel_ctx_manifest` |
 
 ## [2026-09-25] Read-only barrel opens and database leases
 
@@ -84,7 +107,7 @@ create a database.
 
 | App | Version | Change |
 |-----|---------|--------|
-| barrel | 1.6.0 | `read_only` and `embedding => stored` opens; `barrel_dbs` leases, holds, `lookup/1`, `must_exist` |
+| barrel | 1.10.0 | `read_only` and `embedding => stored` opens; `barrel_dbs` leases, holds, `lookup/1`, `must_exist` |
 
 ## [2026-09-25] Embedding fingerprint
 
@@ -96,8 +119,8 @@ query route puts it in the meta of vector answers.
 | App | Version | Change |
 |-----|---------|--------|
 | barrel_embed | 2.5.0 | provider `model_info/1` |
-| barrel | 1.5.0 | embedder identity and fingerprint in `embedder_info/1` and `info/1` |
-| barrel_server | 1.9.0 | `embedding` in the meta of `vector_top_k` answers |
+| barrel | 1.10.0 | embedder identity and fingerprint in `embedder_info/1` and `info/1` |
+| barrel_server | 1.10.0 | `embedding` in the meta of `vector_top_k` answers |
 
 ## [2026-09-25] Bounded queries that report what answered
 
@@ -108,8 +131,8 @@ BQL result carries the observed version.
 
 | App | Version | Change |
 |-----|---------|--------|
-| barrel | 1.4.0 | observed version in query meta, `row_bound/1` |
-| barrel_server | 1.8.0 | `max_rows`, `deadline_ms`, `bound` and observed version on the query route |
+| barrel | 1.10.0 | observed version in query meta, `row_bound/1` |
+| barrel_server | 1.10.0 | `max_rows`, `deadline_ms`, `bound` and observed version on the query route |
 
 ## [2026-09-25] Read-only stores and imported copies
 
@@ -145,8 +168,8 @@ barrel_server's `ngram_search` now rebuilds any older format on its own.
 
 | App | Version | Change |
 |-----|---------|--------|
-| barrel_ngram | 0.11.0 | manifest v3 (sha256, size), fsync, `verify_segments`, read errors returned, segment leases |
-| barrel_server | 1.7.3 | `ngram_search` opens with `on_legacy => reindex` |
+| barrel_ngram | 0.11.1 | manifest v3 (sha256, size), fsync, `verify_segments`, read errors returned, segment leases |
+| barrel_server | 1.10.0 | `ngram_search` opens with `on_legacy => reindex` |
 
 ## [2026-09-24] BM25 survives store reopen
 
