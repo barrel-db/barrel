@@ -19,8 +19,8 @@ on:
     # 'barrel-v*' has no underscore, so 'barrel_*-v*' does not match it.
     tags: ['barrel-v*', 'barrel_*-v*', 'v*']
   pull_request:
-  # The e2e job builds a Docker image and runs two containers, so it is opt-in
-  # (manual dispatch) rather than on every push.
+  # The e2e jobs build a Docker image and run containers: replication is
+  # opt-in (manual dispatch); the S3 one also runs on every push to main.
   workflow_dispatch:
 
 env:
@@ -270,8 +270,11 @@ jobs:
 
   e2e-attachments-s3:
     name: E2E S3 attachment backend (RustFS + Garage + two peers)
-    # Opt-in: needs a Docker-capable runner and builds the server image.
-    if: github.event_name == 'workflow_dispatch'
+    # Runs on every push to main (it went unnoticed while manual-only) and on
+    # manual dispatch; skipped on pull requests to spare the image build.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
