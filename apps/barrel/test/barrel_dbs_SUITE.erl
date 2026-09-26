@@ -138,8 +138,7 @@ t_lease_released_on_exit(Config) ->
     receive leased -> ok end,
     ?assertEqual(#{Name => 1}, barrel_dbs:leases()),
     exit(Pid, kill),
-    timer:sleep(20),
-    ?assertEqual(#{}, barrel_dbs:leases()),
+    ok = wait_until(fun() -> barrel_dbs:leases() =:= #{} end, 100),
     ok.
 
 %% must_exist never creates a database.
