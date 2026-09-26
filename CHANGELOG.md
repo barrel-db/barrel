@@ -4,6 +4,18 @@ All notable changes to the Barrel umbrella are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and each app
 is versioned independently under [Semantic Versioning](https://semver.org/).
 
+## [2026-09-25] Working sets and slices
+
+An agent works with a few contexts at a time and must keep answering when
+the network goes away. A working set records those contexts and their
+budgets; a slice copies the documents a query returned into a local
+read-only database with their provenance; coverage decides, per member,
+what can still answer offline and says so.
+
+| App | Version | Change |
+|-----|---------|--------|
+| barrel | 1.9.0 | `barrel_ctx_ws`, `barrel_ctx_slice`, `barrel_ctx_coverage` |
+
 ## [2026-09-25] Context catalog and remote client
 
 Contexts need names and a way to reach the ones that live on other nodes. A

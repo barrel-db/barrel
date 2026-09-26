@@ -3,6 +3,13 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.9.0] - 2026-09-25
+
+### Added
+- `barrel_ctx_ws`: working sets, the contexts an agent works with, stored one document each in `_barrel_worksets`, with byte and member budgets. Attach and detach are logical (nothing opens or downloads); `members/1` resolves each member's mode, local copy, generation and coverage for an executor; `open_member/1` opens a local copy; `import_snapshot/3` imports an exported generation into the set.
+- `barrel_ctx_slice`: a retrieved-set slice, the documents (and their vectors) a query returned from a local or remote context, copied into a local read-only database with its provenance (source, observed version, ids hash). Remote documents come through `_bulk_get` under the remote client's limits; the slice counts against the working set's byte budget. A slice keeps a memory BM25 index rebuilt at open.
+- `barrel_ctx_coverage`: what a member can answer offline (`live`, `complete_generation`, `retrieved_set`, `skipped_offline`) and how a query's sources summarize.
+
 ## [1.8.0] - 2026-09-25
 
 ### Added
