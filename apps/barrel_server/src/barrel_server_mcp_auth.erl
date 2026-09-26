@@ -25,7 +25,7 @@
 -export([init/1, authenticate/2, challenge/2, auth_headers/1]).
 
 %% Tool-side helpers
--export([allow/3, prov/2, actor/1]).
+-export([allow/3, global/1, prov/2, actor/1]).
 
 %%====================================================================
 %% barrel_mcp_auth callbacks
@@ -82,6 +82,15 @@ allow(Ctx, Db, Right) ->
                 _ ->
                     ok
             end
+    end.
+
+%% @doc Gate a tool that is not scoped to one database (working sets):
+%% capability principals are refused.
+-spec global(map()) -> ok | {error, forbidden}.
+global(Ctx) ->
+    case maps:get(auth_info, Ctx, undefined) of
+        #{claims := #{<<"space">> := _}} -> {error, forbidden};
+        _ -> ok
     end.
 
 %% @doc The provenance of an MCP write: the authenticated subject as

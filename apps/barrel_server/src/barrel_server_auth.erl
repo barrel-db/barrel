@@ -25,7 +25,7 @@
 -module(barrel_server_auth).
 -behaviour(livery_middleware).
 
--export([state_from_env/0, hashes/0]).
+-export([state_from_env/0, hashes/0, member_authorizer/1, is_global/1]).
 -export([call/3]).
 
 %% @doc Middleware state from the app env; undefined = no auth.
@@ -226,6 +226,39 @@ capability(Req, Next, Token, Path) ->
             forbidden()
     end.
 
+%% @doc Authorizer for the local members of a federated query: each
+%% member db is checked as if the caller had sent `POST /db/:db/query'.
+%% Global principals (and open servers) pass; capability tokens need the
+%% db to be their space.
+-spec member_authorizer(term()) -> fun((binary()) -> ok | {error, term()}).
+member_authorizer(Req) ->
+    case livery_ext:bearer_token(Req) of
+        <<"bsp_", _/binary>> = Token ->
+            fun(Db) -> capability_member(Token, Db) end;
+        _ ->
+            fun(_Db) -> ok end
+    end.
+
+%% @doc Whether the caller is a global principal (not a capability
+%% token). Requests reaching a handler are already authenticated.
+-spec is_global(term()) -> boolean().
+is_global(Req) ->
+    case livery_ext:bearer_token(Req) of
+        <<"bsp_", _/binary>> -> false;
+        _ -> true
+    end.
+
+capability_member(Token, Db) ->
+    case capability_scope(<<"/db/", Db/binary, "/query">>, <<"POST">>) of
+        {db, ScopedDb, Right} ->
+            case barrel_caps:verify(Token, ScopedDb, Right) of
+                {ok, _} -> ok;
+                {error, Reason} -> {error, Reason}
+            end;
+        _ ->
+            {error, forbidden}
+    end.
+
 %% Method+path to required right. FAIL CLOSED: any /db tail not
 %% classified here answers 403 for capability principals, so every
 %% route added to barrel_server_http:routes/0 needs a conscious entry.
@@ -235,6 +268,20 @@ capability_scope(<<"/spaces", _/binary>>, _Method) ->
     agent;
 capability_scope(<<"/handoffs", _/binary>>, _Method) ->
     agent;
+%% Contexts: reading cards and federated queries need a live token (each
+%% local member is then checked as its own /db query); registering does
+%% not accept capability tokens.
+capability_scope(<<"/contexts">>, <<"GET">>) ->
+    agent;
+capability_scope(<<"/contexts/_query">>, <<"POST">>) ->
+    agent;
+capability_scope(<<"/contexts/", _Id/binary>>, <<"GET">>) ->
+    agent;
+capability_scope(<<"/contexts", _/binary>>, _Method) ->
+    forbidden;
+%% Working sets hold local copies and use node credentials: global only.
+capability_scope(<<"/worksets", _/binary>>, _Method) ->
+    forbidden;
 capability_scope(<<"/db/", Rest/binary>>, Method) ->
     {DbSeg, Tail} =
         case binary:split(Rest, <<"/">>) of
