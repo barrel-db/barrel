@@ -73,17 +73,24 @@ t_create_get_touch(Config) ->
 
 t_sliding_ttl(Config) ->
     Space = ?config(space, Config),
-    %% sub-second ttl: every touch slides the window
-    {ok, Sid} = barrel_session:create(Space, #{ttl => 1}),
-    timer:sleep(600),
-    {ok, _} = barrel_session:touch(Space, Sid),
-    timer:sleep(600),
-    %% 1.2s after create but only 0.6s after the touch: still alive
-    {ok, _} = barrel_session:get(Space, Sid),
-    timer:sleep(1100),
-    %% idle past the ttl: lazily gone
-    ?assertEqual({error, not_found}, barrel_session:get(Space, Sid)),
-    ?assertEqual({error, not_found}, barrel_session:touch(Space, Sid)),
+    %% every touch moves expires_at to touch time + ttl
+    {ok, Sid} = barrel_session:create(Space, #{ttl => 60}),
+    {ok, #{<<"updated_at">> := Created}} = barrel_session:get(Space, Sid),
+    ok = wait_clock_past(Created),
+    Before = barrel_spaces:now_ms(),
+    {ok, ExpiresAt} = barrel_session:touch(Space, Sid),
+    After = barrel_spaces:now_ms(),
+    ?assert(ExpiresAt >= Before + 60000),
+    ?assert(ExpiresAt =< After + 60000),
+    ?assert(ExpiresAt > Created + 60000),
+    {ok, #{<<"updated_at">> := Touched}} = barrel_session:get(Space, Sid),
+    ?assert(Touched >= Before andalso Touched =< After),
+    %% once the clock passes expires_at, the idle session is lazily gone
+    {ok, Short} = barrel_session:create(Space, #{ttl => 1}),
+    {ok, ShortExpiresAt} = barrel_session:touch(Space, Short),
+    ok = wait_clock_past(ShortExpiresAt),
+    ?assertEqual({error, not_found}, barrel_session:get(Space, Short)),
+    ?assertEqual({error, not_found}, barrel_session:touch(Space, Short)),
     ok.
 
 t_messages_chronological(Config) ->
@@ -304,3 +311,10 @@ t_caller_pin_and_message_ids(Config) ->
     ?assertEqual(<<"hello">>, maps:get(<<"content">>, M1)),
     ?assertEqual(<<"later">>, maps:get(<<"content">>, M2)),
     ok.
+
+%% Sleep until the clock is past T (unix ms).
+wait_clock_past(T) ->
+    case barrel_spaces:now_ms() of
+        Now when Now > T -> ok;
+        Now -> timer:sleep(T - Now + 1), wait_clock_past(T)
+    end.
