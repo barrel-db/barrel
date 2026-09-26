@@ -2,7 +2,7 @@
 %%% @doc barrel_att_s3 as a replication participant: proves the feed's
 %%% LWW guard is correctly wired end-to-end through barrel_rep/
 %%% barrel_rep_transport_local when an S3-backed database is a
-%%% replication source or target, against real MinIO and Garage.
+%%% replication source or target, against real RustFS and Garage.
 %%%
 %%% Lives here (not in apps/barrel_docdb/test) so barrel_docdb's test
 %%% suite never references barrel_att_s3/livery_s3 -- barrel_att_s3
@@ -18,14 +18,14 @@
          init_per_testcase/2, end_per_testcase/2]).
 
 -export([s3_target_receives_puts_and_deletes/1,
-         s3_target_rejects_stale_replicated_write_minio/1,
+         s3_target_rejects_stale_replicated_write_rustfs/1,
          s3_target_rejects_stale_replicated_write_garage/1,
          bidirectional_lww_convergence_rocksdb_and_s3/1,
          bidirectional_lww_convergence_s3_to_s3/1]).
 
 all() ->
     [s3_target_receives_puts_and_deletes,
-     s3_target_rejects_stale_replicated_write_minio,
+     s3_target_rejects_stale_replicated_write_rustfs,
      s3_target_rejects_stale_replicated_write_garage,
      bidirectional_lww_convergence_rocksdb_and_s3,
      bidirectional_lww_convergence_s3_to_s3].
@@ -60,14 +60,14 @@ att_stats(Result) ->
 %%====================================================================
 
 s3_target_receives_puts_and_deletes(Config) ->
-    with_minio(fun(S3Opts) ->
+    with_rustfs(fun(S3Opts) ->
         run_s3_target_receives_puts_and_deletes(Config, S3Opts)
     end).
 
 run_s3_target_receives_puts_and_deletes(Config, S3Opts) ->
     Dir = ?config(dir, Config),
     Src = <<"s3_basic_src">>,
-    Tgt = <<"s3_basic_tgt_minio">>,
+    Tgt = <<"s3_basic_tgt_rustfs">>,
     {ok, _} = barrel_docdb:create_db(Src, #{data_dir => Dir}),
     {ok, _} = barrel_docdb:create_db(Tgt, #{
         data_dir => Dir,
@@ -99,11 +99,11 @@ run_s3_target_receives_puts_and_deletes(Config, S3Opts) ->
         _ = barrel_docdb:delete_db(Tgt)
     end.
 
-s3_target_rejects_stale_replicated_write_minio(Config) ->
-    with_minio(fun(S3Opts) ->
+s3_target_rejects_stale_replicated_write_rustfs(Config) ->
+    with_rustfs(fun(S3Opts) ->
         run_s3_target_rejects_stale_replicated_write(Config, S3Opts,
-                                                     <<"s3_lww_src_minio">>,
-                                                     <<"s3_lww_tgt_minio">>)
+                                                     <<"s3_lww_src_rustfs">>,
+                                                     <<"s3_lww_tgt_rustfs">>)
     end).
 
 s3_target_rejects_stale_replicated_write_garage(Config) ->
@@ -145,19 +145,19 @@ run_s3_target_rejects_stale_replicated_write(Config, S3Opts, SrcName, TgtName) -
 %% round moving nothing -- the property that only holds if the S3 side's
 %% own feed is correctly guarding against oscillation.
 bidirectional_lww_convergence_rocksdb_and_s3(Config) ->
-    with_minio(fun(S3Opts) ->
+    with_rustfs(fun(S3Opts) ->
         run_bidirectional_lww_convergence(Config, undefined, S3Opts,
-                                          <<"s3_conv_a">>, <<"s3_conv_b_minio">>)
+                                          <<"s3_conv_a">>, <<"s3_conv_b_rustfs">>)
     end).
 
 %% The genuine "S3 to S3" case: both peers are real, but different,
-%% S3-compatible stores (MinIO and Garage) -- proves convergence doesn't
+%% S3-compatible stores (RustFS and Garage) -- proves convergence doesn't
 %% depend on anything specific to one implementation.
 bidirectional_lww_convergence_s3_to_s3(Config) ->
-    with_minio(fun(MinioOpts) ->
+    with_rustfs(fun(RustfsOpts) ->
         with_garage(fun(GarageOpts) ->
-            run_bidirectional_lww_convergence(Config, MinioOpts, GarageOpts,
-                                              <<"s3_conv_minio">>, <<"s3_conv_garage">>)
+            run_bidirectional_lww_convergence(Config, RustfsOpts, GarageOpts,
+                                              <<"s3_conv_rustfs">>, <<"s3_conv_garage">>)
         end)
     end).
 
@@ -193,34 +193,17 @@ run_bidirectional_lww_convergence(Config, AOpts, BOpts, AName, BName) ->
     end.
 
 %%====================================================================
-%% S3 fixture helpers (real MinIO/Garage, same conventions and defaults
-%% as barrel_att_s3_SUITE.erl -- see test/e2e/attachments-s3-setup.sh)
+%% S3 fixture helpers (see barrel_att_s3_test_support)
 %%====================================================================
 
-with_minio(Fun) ->
-    S3Opts = barrel_att_s3_test_support:minio_opts(),
-    case barrel_att_s3_test_support:reachable(S3Opts) of
-        true ->
-            Client = livery_s3:new(maps:without([bucket], S3Opts)),
-            Bucket = maps:get(bucket, S3Opts),
-            case livery_s3:create_bucket(Client, Bucket) of
-                ok -> ok;
-                {error, {s3, <<"BucketAlreadyOwnedByYou">>, _, _}} -> ok;
-                {error, {s3, <<"BucketAlreadyExists">>, _, _}} -> ok;
-                {error, Reason} -> ct:fail({minio_bucket_setup_failed, Reason})
-            end,
-            Fun(S3Opts);
-        false ->
-            {skip, {minio_not_reachable, maps:get(endpoint, S3Opts)}}
-    end.
+with_rustfs(Fun) ->
+    with_store(rustfs, Fun).
 
 with_garage(Fun) ->
-    case barrel_att_s3_test_support:garage_opts() of
-        undefined ->
-            {skip, garage_credentials_not_configured};
-        S3Opts ->
-            case barrel_att_s3_test_support:reachable(S3Opts) of
-                true -> Fun(S3Opts);
-                false -> {skip, {garage_not_reachable, maps:get(endpoint, S3Opts)}}
-            end
+    with_store(garage, Fun).
+
+with_store(Store, Fun) ->
+    case barrel_att_s3_test_support:store_opts(Store) of
+        {ok, S3Opts} -> Fun(S3Opts);
+        {unavailable, Reason} -> barrel_att_s3_test_support:unavailable(Reason)
     end.

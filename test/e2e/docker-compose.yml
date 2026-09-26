@@ -3,6 +3,9 @@
 # registered singleton), these are genuinely separate OS processes replicating
 # over a real network.
 
+# Own project, so `down --remove-orphans` never touches the S3 stack.
+name: barrel-e2e
+
 services:
   peer-a:
     build:

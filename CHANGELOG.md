@@ -4,6 +4,15 @@ All notable changes to the Barrel umbrella are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and each app
 is versioned independently under [Semantic Versioning](https://semver.org/).
 
+## [2026-09-26] S3 backend tested again in CI
+
+The `minio/minio` image is gone from Docker Hub, so the `s3` CI leg had been
+skipping every S3 test (MinIO and Garage) while staying green. The S3
+attachment suites now
+run against RustFS and Garage (pinned images), and fail instead of skipping
+when CI expects the stores (`BARREL_S3_REQUIRED=1`) or when provisioning
+fails. No application changes.
+
 ## [2026-09-26] Contexts release
 
 The release of the contexts work: federated BQL over local, imported,

@@ -7,30 +7,25 @@
 %%% decision).
 %%%
 %%% Multipart tests use a 5 MiB part_size, not a tiny synthetic value:
-%%% real S3 (and MinIO) reject non-final parts under 5 MiB with
+%%% real S3 (and RustFS, MinIO) reject non-final parts under 5 MiB with
 %%% EntityTooSmall regardless of what part_size the *client* chooses to
 %%% buffer to, so a genuine multipart round trip needs real S3-sized data.
 %%% Garage is more lenient (a separate test below uses a 1 MiB part
 %%% against Garage only, to exercise that the part_size knob genuinely
 %%% changes behavior on a store that allows it).
 %%%
-%%% Runs against both MinIO and Garage (same test bodies, one per group),
-%%% since the two stores have deliberately different capability profiles
-%%% (see the plan) -- what's covered here is the part that must behave
-%%% identically everywhere. Connection details come from OS env vars; a
-%%% group skips cleanly if its store isn't configured/reachable, so this
-%%% suite is safe to run without either service present.
+%%% Runs against RustFS and Garage (same test bodies, one group each),
+%%% whose capability profiles differ: RustFS enforces conditional writes,
+%%% Garage cannot. `garage_conditional' reruns the conflict cases on Garage
+%%% behind an emulation of them (see barrel_att_s3_test_support). A group
+%%% skips if its store is not configured or reachable, unless
+%%% BARREL_S3_REQUIRED=1, where it fails instead (CI sets it).
 %%%
-%%% Local setup this suite was developed against:
-%%%   MinIO:  docker run -p 19000:9000 -e MINIO_ROOT_USER=minioadmin \
-%%%           -e MINIO_ROOT_PASSWORD=minioadmin minio/minio server /data
-%%%   Garage: see apps/barrel_att_s3/test/README.md (bucket + key must be
-%%%           pre-provisioned; Garage keys can't create buckets themselves).
+%%% Setup: test/e2e/attachments-s3-setup.sh starts and provisions both;
+%%% see apps/barrel_att_s3/test/README.md.
 %%%
-%%% Env vars (all optional for MinIO, defaults match the setup above;
-%%% GARAGE_S3_TEST_ACCESS_KEY/_SECRET_KEY have no default -- the garage
-%%% group skips without them):
-%%%   MINIO_S3_TEST_ENDPOINT/_ACCESS_KEY/_SECRET_KEY/_REGION/_BUCKET
+%%% Env vars (GARAGE_S3_TEST_ACCESS_KEY/_SECRET_KEY have no default):
+%%%   RUSTFS_S3_TEST_ENDPOINT/_ACCESS_KEY/_SECRET_KEY/_REGION/_BUCKET
 %%%   GARAGE_S3_TEST_ENDPOINT/_ACCESS_KEY/_SECRET_KEY/_REGION/_BUCKET
 %%% @end
 %%%-------------------------------------------------------------------
@@ -108,7 +103,8 @@
     multipart_gc_sweeps_multiple_targets_in_one_pass/1,
     multipart_gc_survives_bad_target/1,
     multipart_gc_bad_interval_does_not_crash_app/1,
-    multipart_gc_periodic_timer_fires/1
+    multipart_gc_periodic_timer_fires/1,
+    multipart_gc_ignores_list_uploads_prefix/1
 ]).
 
 -define(CASES, [
@@ -167,13 +163,13 @@
     multipart_gc_sweeps_multiple_targets_in_one_pass,
     multipart_gc_survives_bad_target,
     multipart_gc_bad_interval_does_not_crash_app,
-    multipart_gc_periodic_timer_fires
+    multipart_gc_periodic_timer_fires,
+    multipart_gc_ignores_list_uploads_prefix
 ]).
 
-%% MinIO has verifiably enforced If-Match/If-None-Match since 2023; Garage
-%% cannot at all, by its own documented design. Run the actual
-%% conflict-detection assertions only where they mean something.
--define(MINIO_ONLY_CASES, [
+%% Need a store enforcing If-Match/If-None-Match: RustFS, or Garage behind
+%% the emulation in barrel_att_s3_test_support (Garage cannot, by design).
+-define(CONFLICT_CASES, [
     create_only_succeeds_on_fresh_key,
     create_only_conflicts_on_existing_key,
     expected_etag_match_succeeds,
@@ -188,7 +184,7 @@
     garage_expected_etag_fails_fast
 ]).
 
-%% 5 MiB: the real S3/MinIO minimum for a non-final multipart part,
+%% 5 MiB: the real S3 minimum for a non-final multipart part,
 %% independent of whatever part_size the client buffers to.
 -define(PART_SIZE, 5 * 1024 * 1024).
 
@@ -197,12 +193,16 @@
 %%====================================================================
 
 all() ->
-    [{group, minio}, {group, garage}].
+    [{group, rustfs}, {group, garage}, {group, garage_conditional}].
 
 groups() ->
     [
-        {minio, [sequence], ?CASES ++ ?MINIO_ONLY_CASES},
-        {garage, [sequence], ?CASES ++ ?GARAGE_ONLY_CASES}
+        {rustfs, [sequence], ?CASES ++ ?CONFLICT_CASES},
+        {garage, [sequence], ?CASES ++ ?GARAGE_ONLY_CASES},
+        %% Covers the probe's supported branch without depending on RustFS.
+        {garage_conditional, [sequence],
+         [conditional_writes_capability_reflects_store,
+          default_put_stays_unconditional | ?CONFLICT_CASES]}
     ].
 
 init_per_suite(Config) ->
@@ -218,41 +218,31 @@ init_per_suite(Config) ->
 end_per_suite(_Config) ->
     ok.
 
-init_per_group(minio, Config) ->
-    S3Opts = barrel_att_s3_test_support:minio_opts(),
-    case barrel_att_s3_test_support:reachable(S3Opts) of
-        true ->
-            Client = livery_s3:new(maps:without([bucket], S3Opts)),
-            Bucket = maps:get(bucket, S3Opts),
-            case livery_s3:create_bucket(Client, Bucket) of
-                ok -> ok;
-                {error, {s3, <<"BucketAlreadyOwnedByYou">>, _, _}} -> ok;
-                {error, {s3, <<"BucketAlreadyExists">>, _, _}} -> ok;
-                {error, Reason} -> ct:fail({minio_bucket_setup_failed, Reason})
-            end,
-            [{store, minio}, {s3_opts, S3Opts} | Config];
-        false ->
-            {skip, {minio_not_reachable, maps:get(endpoint, S3Opts)}}
-    end;
-init_per_group(garage, Config) ->
-    case barrel_att_s3_test_support:garage_opts() of
-        undefined ->
-            {skip, garage_credentials_not_configured};
-        S3Opts ->
-            case barrel_att_s3_test_support:reachable(S3Opts) of
-                true -> [{store, garage}, {s3_opts, S3Opts} | Config];
-                false -> {skip, {garage_not_reachable, maps:get(endpoint, S3Opts)}}
-            end
+init_per_group(Group, Config) ->
+    case barrel_att_s3_test_support:store_opts(group_store(Group)) of
+        {ok, S3Opts} ->
+            ok = setup_group(Group),
+            [{store, Group}, {s3_opts, S3Opts} | Config];
+        {unavailable, Reason} ->
+            barrel_att_s3_test_support:unavailable(Reason)
     end.
 
+end_per_group(garage_conditional, _Config) ->
+    barrel_att_s3_test_support:unmock_conditional_writes();
 end_per_group(_Group, _Config) ->
     ok.
+
+group_store(garage_conditional) -> garage;
+group_store(Store) -> Store.
+
+setup_group(garage_conditional) -> barrel_att_s3_test_support:mock_conditional_writes();
+setup_group(_Store) -> ok.
 
 init_per_testcase(TestCase, Config) ->
     S3Opts = ?config(s3_opts, Config),
     %% priv_dir is shared across the whole suite run, not per-group, and
-    %% both groups run the same-named test cases -- without the store
-    %% prefix, minio.foo and garage.foo would open the same local feed.db
+    %% groups run the same-named test cases -- without the group
+    %% prefix, rustfs.foo and garage.foo would open the same local feed.db
     %% path and silently see each other's feed state (a real bug this
     %% caught: att_floor_and_sweep saw a floor already set, left over from
     %% the other group's earlier run of the same-named test).
@@ -971,6 +961,30 @@ multipart_gc_sweep_now_zero_aborts_orphaned_upload(Config) ->
     {ok, _} = barrel_att_s3_multipart_gc:sweep_now(0),
     ?assertNot(upload_listed(Client, Bucket, Key, UploadId)).
 
+%% MinIO's ListMultipartUploads returns nothing for a non-empty prefix; the
+%% GC must list unfiltered. Emulates that bug, since MinIO is not in CI.
+multipart_gc_ignores_list_uploads_prefix(Config) ->
+    AttRef = ?config(att_ref, Config),
+    DbName = ?config(db_name, Config),
+    #{client := Client, bucket := Bucket} = AttRef,
+    {ok, S1} = barrel_att_s3_store:put_stream(AttRef, DbName, <<"doc1">>,
+                                              <<"crashed.bin">>, <<"application/octet-stream">>),
+    {ok, S2} = barrel_att_s3_store:write_chunk(S1, binary:copy(<<"x">>, ?PART_SIZE)),
+    #{key := Key, multipart := #{upload_id := UploadId}} = S2,
+    ok = meck:new(livery_s3, [passthrough]),
+    try
+        ok = meck:expect(livery_s3, list_multipart_uploads,
+            fun(_C, _B, #{prefix := P}) when P =/= <<>> ->
+                    {ok, #{uploads => [], is_truncated => false}};
+               (C, B, Opts) ->
+                    meck:passthrough([C, B, Opts])
+            end),
+        {ok, _} = barrel_att_s3_multipart_gc:sweep_now(0)
+    after
+        meck:unload(livery_s3)
+    end,
+    ?assertNot(upload_listed(Client, Bucket, Key, UploadId)).
+
 %% Same crash simulation, but a plain sweep_now/0 (24h default max age)
 %% must leave a just-created upload alone.
 multipart_gc_sweep_now_default_skips_fresh_upload(Config) ->
@@ -1376,7 +1390,7 @@ stream_read_not_found(Config) ->
     ?assertEqual({error, not_found},
                  barrel_att_s3_store:get_stream(AttRef, DbName, <<"doc1">>, <<"nope">>)).
 
-%% Garage-only: unlike AWS/MinIO's strict 5 MiB minimum for a non-final
+%% Garage-only: unlike AWS/MinIO/RustFS's strict 5 MiB minimum for a non-final
 %% part, Garage accepts a much smaller one (confirmed empirically at 1 MiB
 %% this session) -- exercises that the part_size config knob genuinely
 %% changes upload behavior on a store lenient enough to allow it, rather
@@ -1421,11 +1435,12 @@ drain(Stream, Acc) ->
 
 conditional_writes_capability_reflects_store(Config) ->
     AttRef = ?config(att_ref, Config),
-    Expected = case ?config(store, Config) of
-        minio -> supported;
-        garage -> unsupported
-    end,
-    ?assertEqual(Expected, maps:get(conditional_writes, AttRef)).
+    ?assertEqual(expected_conditional_writes(?config(store, Config)),
+                 maps:get(conditional_writes, AttRef)).
+
+expected_conditional_writes(garage) -> unsupported;
+expected_conditional_writes(rustfs) -> supported;
+expected_conditional_writes(garage_conditional) -> supported.
 
 default_put_stays_unconditional(Config) ->
     AttRef = ?config(att_ref, Config),
