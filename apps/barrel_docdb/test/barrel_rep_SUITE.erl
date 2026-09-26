@@ -756,11 +756,7 @@ direction_push(_Config) ->
     }),
 
     %% Wait for completion
-    timer:sleep(500),
-
-    %% Verify task completed
-    {ok, Task} = barrel_rep_tasks:get_task(TaskId),
-    ?assertEqual(completed, maps:get(status, Task)),
+    ok = wait_until(task_status(TaskId, completed), 50, 600),
 
     %% Verify document was replicated to target
     {ok, TargetDoc} = barrel_docdb:get_doc(Target, DocId),
@@ -795,11 +791,7 @@ direction_pull(_Config) ->
     }),
 
     %% Wait for completion
-    timer:sleep(500),
-
-    %% Verify task completed
-    {ok, Task} = barrel_rep_tasks:get_task(TaskId),
-    ?assertEqual(completed, maps:get(status, Task)),
+    ok = wait_until(task_status(TaskId, completed), 50, 600),
 
     %% Verify document was pulled to source
     {ok, SourceDoc} = barrel_docdb:get_doc(Source, DocId),
@@ -833,11 +825,7 @@ direction_both(_Config) ->
     }),
 
     %% Wait for completion
-    timer:sleep(1000),
-
-    %% Verify task completed
-    {ok, Task} = barrel_rep_tasks:get_task(TaskId),
-    ?assertEqual(completed, maps:get(status, Task)),
+    ok = wait_until(task_status(TaskId, completed), 50, 600),
 
     %% Verify source doc is now in target
     {ok, TargetSourceDoc} = barrel_docdb:get_doc(Target, SourceDocId),
@@ -888,11 +876,7 @@ chain_replication_wait_for(_Config) ->
 
     %% Wait for task A->B to complete
     %% Since wait_for is set, it should only complete after doc reaches C
-    timer:sleep(6000),
-
-    %% Verify task completed
-    {ok, Task} = barrel_rep_tasks:get_task(TaskAB),
-    ?assertEqual(completed, maps:get(status, Task)),
+    ok = wait_until(task_status(TaskAB, completed), 50, 600),
 
     %% Verify document is in C (the final destination)
     {ok, DocC} = barrel_docdb:get_doc(<<"chain_c">>, DocId),
@@ -971,6 +955,14 @@ wait_until(Fun, IntervalMs, Tries) ->
             wait_until(Fun, IntervalMs, Tries - 1)
     end.
 
+task_status(TaskId, Status) ->
+    fun() ->
+        case barrel_rep_tasks:get_task(TaskId) of
+            {ok, #{status := Status}} -> true;
+            _ -> false
+        end
+    end.
+
 doc_in(Db, DocId) ->
     fun() ->
         case barrel_docdb:get_doc(Db, DocId) of
@@ -1035,8 +1027,7 @@ task_restore_after_manager_restart(_Config) ->
             NewPid -> NewPid =/= OldPid
         end
     end, 50, 100),
-    timer:sleep(300),
-    {ok, #{status := running}} = barrel_rep_tasks:get_task(TaskId),
+    ok = wait_until(task_status(TaskId, running), 50, 600),
     {ok, _} = barrel_docdb:put_doc(<<"test_source">>,
                                    #{<<"id">> => <<"restored">>}),
     ok = wait_until(doc_in(<<"test_target">>, <<"restored">>), 50, 100),
