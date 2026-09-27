@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 - Requires hackney `~> 4.8.2`, where a direct connection is owned by the process that opened it. `barrel_ctx_remote` no longer hands its connection over with `hackney_conn:set_owner/2`.
+- A remote member whose stream is cut after its 200 fails with `missing_meta` (status `error`), as before hackney 4.8, which reports the cut as `closed`.
 
 ## [1.10.0] - 2026-09-26
 

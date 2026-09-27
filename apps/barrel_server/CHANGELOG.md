@@ -3,6 +3,14 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.10.1] - 2026-09-27
+
+### Changed
+- livery 0.10.3 and barrel_mcp 4.1.1, for quic 2 and hackney 4.8, where a direct connection is owned by the process that opened it.
+
+### Fixed
+- The `http3` listener reads `certfile` and `keyfile` and hands quic the DER certificate and decoded key. quic 2 checks them at start, so a path no longer boots.
+
 ## [1.10.0] - 2026-09-26
 
 The first release since 1.7.2: versions 1.7.3 to 1.9.0 were never published and their changes are listed here.
