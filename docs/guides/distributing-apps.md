@@ -131,7 +131,7 @@ Notes:
 - The `{files, [...]}` list in each `.app.src` controls what ships in the
   tarball. Keep it current when you add `priv/` assets or includes.
 - Every dependency resolves from Hex, including `barrel_server`'s `livery`
-  (0.9.2) and `barrel_mcp` (3.0.1). Hex rejects git deps, so keep it that way:
+  (0.10.3) and `barrel_mcp` (4.1.1). Hex rejects git deps, so keep it that way:
   do not reintroduce a `{git, ...}` dep in an app you intend to publish.
 - `barrel_faiss` ships an NIF that needs the FAISS C++ library at build time.
   The package builds only where that toolchain is present.

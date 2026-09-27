@@ -155,7 +155,6 @@ request(Mode, Method, Url, Accept, Body, Loc, Opts) ->
                 {pool, false}],
     try hackney:request(Method, Url, Headers, Body, HttpOpts) of
         {ok, Conn} ->
-            own(Conn),
             loop(#st{conn = Conn, mode = Mode,
                      deadline = Deadline, timeout = Timeout,
                      max_bytes = maps:get(max_bytes, Opts,
@@ -166,11 +165,6 @@ request(Mode, Method, Url, Accept, Body, Loc, Opts) ->
         Class:Reason ->
             {error, failure(error, {Class, Reason}, 0, 0)}
     end.
-
-%% hackney ties a connection to its supervisor, not to the caller: make
-%% the caller the owner so the connection closes if the caller dies.
-own(Conn) ->
-    try hackney_conn:set_owner(Conn, self()) catch exit:_ -> ok end.
 
 with_slot(Fun) ->
     case acquire_slot() of
@@ -196,7 +190,7 @@ loop(#st{conn = Conn, deadline = Deadline} = St) ->
             {error, (failure(timeout, deadline, St))#{after_ms => St#st.timeout}};
         {hackney_response, Conn, {error, Reason}} ->
             close(Conn),
-            {error, failure(transport_status(Reason), Reason, St)};
+            transport_error(Reason, St);
         {hackney_response, Conn, Chunk} when is_binary(Chunk) ->
             chunk(Chunk, St)
     after Remaining ->
@@ -251,6 +245,13 @@ lines([Line | Rest], St) ->
     catch
         _:_ -> {error, bad_line, St}
     end.
+
+%% hackney 4.8 reports a stream cut after its 200 as `closed': the meta
+%% line, not the transport, tells whether the answer is whole.
+transport_error(closed, #st{status = 200, mode = ndjson} = St) ->
+    finish(St);
+transport_error(Reason, St) ->
+    {error, failure(transport_status(Reason), Reason, St)}.
 
 finish(#st{status = 200, mode = body, body = Body}) ->
     {ok, iolist_to_binary(Body)};

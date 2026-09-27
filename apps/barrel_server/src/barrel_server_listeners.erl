@@ -77,9 +77,27 @@ add_tls(Base, #{certfile := Cert, keyfile := Key} = Tls) ->
 
 %% H3/QUIC: serve TLS. A real client-cert gate (fail_if_no_peer_cert +
 %% chain validation) is deferred to the companion livery/quic change, so
-%% we only wire cert/key here.
-add_h3_tls(Base, #{certfile := Cert, keyfile := Key}) ->
-    Base#{cert => Cert, key => Key}.
+%% we only wire cert/key here. quic takes a DER cert and a decoded key.
+add_h3_tls(Base, #{certfile := CertFile, keyfile := KeyFile}) ->
+    Base#{cert => pem_cert(CertFile), key => pem_key(KeyFile)}.
+
+pem_cert(File) ->
+    case [Der || {'Certificate', Der, not_encrypted} <- pem_entries(File)] of
+        [Der | _] -> Der;
+        [] -> error({barrel_server, {no_certificate, File}})
+    end.
+
+pem_key(File) ->
+    case [E || {Type, _, _} = E <- pem_entries(File), Type =/= 'Certificate'] of
+        [Entry | _] -> public_key:pem_entry_decode(Entry);
+        [] -> error({barrel_server, {no_private_key, File}})
+    end.
+
+pem_entries(File) ->
+    case file:read_file(File) of
+        {ok, Pem} -> public_key:pem_decode(Pem);
+        {error, Reason} -> error({barrel_server, {tls_file, File, Reason}})
+    end.
 
 %% verify_peer => a mutual-TLS gate: OTP ssl refuses a client that offers
 %% no cert (fail_if_no_peer_cert) or one that does not chain to cacertfile.
