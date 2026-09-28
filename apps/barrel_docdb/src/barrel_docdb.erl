@@ -1802,13 +1802,17 @@ subscribe_changes(Db, Since) ->
 subscribe_changes(Db, Since, Opts) ->
     case reader_store(Db) of
         {ok, StoreRef} ->
-            barrel_changes_stream:start_link(StoreRef, Db, Opts#{since => Since});
+            %% the stream ends when the database process does
+            with_db(Db, fun(Pid) ->
+                barrel_changes_stream:start_link(
+                  StoreRef, Db, Opts#{since => Since, db => Pid})
+            end);
         undefined ->
             with_db(Db, fun(Pid) ->
                 {ok, StoreRef} = barrel_db_server:get_store_ref(Pid),
                 {ok, Info} = barrel_db_server:info(Pid),
                 DbName = maps:get(name, Info),
-                StreamOpts = Opts#{since => Since},
+                StreamOpts = Opts#{since => Since, db => Pid},
                 barrel_changes_stream:start_link(StoreRef, DbName, StreamOpts)
             end)
     end.

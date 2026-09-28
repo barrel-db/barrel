@@ -43,12 +43,23 @@
     push_mode_idle_no_stall/1
 ]).
 
+%% Test cases - a stream whose database closes
+-export([
+    stream_push_db_closed/1,
+    stream_wait_pending_db_closed/1,
+    stream_iterate_db_closed/1,
+    stream_fold_race_closed/1
+]).
+
+%% logger handler: forwards the stream's reports to the test process
+-export([log/2]).
+
 %%====================================================================
 %% CT Callbacks
 %%====================================================================
 
 all() ->
-    [{group, changes}, {group, stream}].
+    [{group, changes}, {group, stream}, {group, closed_db}].
 
 groups() ->
     [
@@ -75,6 +86,12 @@ groups() ->
             stream_iterate_mode,
             stream_push_mode,
             push_mode_idle_no_stall
+        ]},
+        {closed_db, [sequence], [
+            stream_push_db_closed,
+            stream_wait_pending_db_closed,
+            stream_iterate_db_closed,
+            stream_fold_race_closed
         ]}
     ].
 
@@ -95,10 +112,35 @@ end_per_group(_Group, Config) ->
     os:cmd("rm -rf " ++ TestDir),
     Config.
 
-init_per_testcase(_TestCase, Config) ->
-    Config.
+init_per_testcase(TestCase, Config) ->
+    closed_db_init(TestCase, Config).
 
-end_per_testcase(_TestCase, _Config) ->
+end_per_testcase(_TestCase, Config) ->
+    case proplists:get_value(log_handler, Config) of
+        undefined -> ok;
+        Id -> logger:remove_handler(Id)
+    end,
+    ok.
+
+closed_db_init(TestCase, Config) ->
+    case lists:member(TestCase, [stream_push_db_closed,
+                                 stream_wait_pending_db_closed,
+                                 stream_iterate_db_closed,
+                                 stream_fold_race_closed]) of
+        true ->
+            process_flag(trap_exit, true),
+            Id = TestCase,
+            ok = logger:add_handler(Id, ?MODULE,
+                                    #{level => error,
+                                      config => #{pid => self()}}),
+            [{log_handler, Id} | Config];
+        false ->
+            Config
+    end.
+
+log(#{meta := #{pid := Pid}} = Event, #{config := #{pid := Test}}) ->
+    Test ! {logged, Pid, Event};
+log(_Event, _Config) ->
     ok.
 
 %%====================================================================
@@ -959,3 +1001,69 @@ push_mode_idle_no_stall(Config) ->
     barrel_changes_stream:stop(StreamPid),
     barrel_store_rocksdb:close(StoreRef),
     ok.
+
+%%====================================================================
+%% Test Cases - a stream whose database closes
+%%====================================================================
+
+stream_push_db_closed(Config) ->
+    Db = open_db(Config, <<"closed_push">>),
+    {ok, Stream} = barrel_docdb:subscribe_changes(
+                     Db, first, #{mode => push, owner => self()}),
+    ok = barrel_docdb:close_db(Db),
+    ok = await_db_closed(Stream).
+
+%% The stream sent MAX_PENDING unacked batches and waits for acks.
+stream_wait_pending_db_closed(Config) ->
+    Db = open_db(Config, <<"closed_pending">>),
+    [{ok, _} = barrel_docdb:put_doc(Db, #{<<"id">> => integer_to_binary(N)})
+     || N <- lists:seq(1, 6)],
+    {ok, Stream} = barrel_docdb:subscribe_changes(
+                     Db, first, #{mode => push, owner => self(),
+                                  batch_size => 1, interval => 10}),
+    [{_, [_]} = barrel_changes_stream:await(Stream, 5000)
+     || _ <- lists:seq(1, 5)],
+    ok = barrel_docdb:close_db(Db),
+    ok = await_db_closed(Stream).
+
+stream_iterate_db_closed(Config) ->
+    Db = open_db(Config, <<"closed_iterate">>),
+    {ok, Stream} = barrel_docdb:subscribe_changes(Db, first,
+                                                  #{mode => iterate}),
+    ok = barrel_docdb:close_db(Db),
+    ok = await_db_closed(Stream).
+
+%% The store closes while the database process is still up (no 'DOWN'):
+%% the fold's badarg on an unregistered store ends the stream the same way.
+stream_fold_race_closed(Config) ->
+    TestDir = proplists:get_value(test_dir, Config),
+    {ok, StoreRef} = barrel_store_rocksdb:open(TestDir ++ "/fold_race", #{}),
+    Owner = spawn_link(fun() -> receive stop -> ok end end),
+    {ok, Stream} = barrel_changes_stream:start_link(
+                     StoreRef, <<"fold_race">>,
+                     #{mode => push, owner => self(), interval => 10,
+                       db => Owner}),
+    ok = barrel_store_rocksdb:close(StoreRef),
+    ok = await_db_closed(Stream),
+    Owner ! stop,
+    ok.
+
+open_db(Config, Name) ->
+    TestDir = proplists:get_value(test_dir, Config),
+    {ok, _} = barrel_docdb:create_db(Name, #{data_dir => TestDir}),
+    Name.
+
+%% The stream ends with {shutdown, db_closed}; the handler runs in the
+%% stream, so any report it logged is already in the mailbox.
+await_db_closed(Stream) ->
+    receive
+        {'EXIT', Stream, Reason} ->
+            ?assertEqual({shutdown, db_closed}, Reason),
+            receive
+                {logged, Stream, Event} -> ct:fail({logged, Event})
+            after 0 ->
+                ok
+            end
+    after 5000 ->
+        ct:fail(stream_still_running)
+    end.

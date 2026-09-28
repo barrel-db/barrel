@@ -22,7 +22,8 @@
          compaction_crash_safety/1, post_compaction_oracle/1,
          compaction_worker_prompt_close/1, compaction_worker_killed_via_link/1,
          refresh_error_propagation/1,
-         db_recreated_same_name_resubscribe/1]).
+         db_recreated_same_name_resubscribe/1,
+         db_closed_resubscribe/1]).
 
 %% A hang guard: the worker cases block a merge until it is killed.
 suite() ->
@@ -35,7 +36,8 @@ all() ->
      compaction_crash_safety, post_compaction_oracle,
      compaction_worker_prompt_close, compaction_worker_killed_via_link,
      refresh_error_propagation,
-     db_recreated_same_name_resubscribe].
+     db_recreated_same_name_resubscribe,
+     db_closed_resubscribe].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(barrel_docdb),
@@ -323,6 +325,36 @@ db_recreated_same_name_resubscribe(Config) ->
     %% fail-closed, not silently reattached: a query surfaces the shard's
     %% absence cleanly rather than a noproc crash or a stale/wrong hit
     ?assertEqual({error, corpus_not_open}, barrel_ngram:search(C, <<"original">>)).
+
+%% Closing the database ends the shard's stream with {shutdown, db_closed};
+%% the shard stays up and subscribes again once the database is reopened.
+db_closed_resubscribe(Config) ->
+    Db = ?config(db, Config), C = ?config(corpus, Config),
+    _ = put_doc(Db, <<"a">>, <<"before close">>),
+    refresh(C),
+    ShardPid = barrel_ngram_registry:whereis_name({shard, C}),
+    SupPid = whereis(barrel_ngram_shard_sup),
+    StreamPid = stream_pid_of(ShardPid, SupPid),
+    StreamMon = monitor(process, StreamPid),
+    ok = barrel_docdb:close_db(Db),
+    receive
+        {'DOWN', StreamMon, process, StreamPid, Reason} ->
+            ?assertEqual({shutdown, db_closed}, Reason)
+    after 5000 ->
+        ct:fail(stream_still_running)
+    end,
+    ?assert(is_process_alive(ShardPid)),
+    %% create_db on existing files reopens the same instance
+    {ok, _} = barrel_docdb:create_db(Db),
+    ok = wait_until(fun() -> linked_stream(ShardPid, SupPid) end, 100),
+    ?assertNotEqual(StreamPid, stream_pid_of(ShardPid, SupPid)),
+    _ = put_doc(Db, <<"b">>, <<"after reopen">>),
+    refresh(C),
+    ?assertEqual([<<"b">>], search(C, <<"reopen">>)).
+
+linked_stream(ShardPid, SupPid) ->
+    {links, Links} = process_info(ShardPid, links),
+    [P || P <- Links, is_pid(P), P =/= SupPid] =/= [].
 
 %% The shard's only two links right after a normal subscribe are its own
 %% supervisor and the changes-feed stream process -- identify the stream
