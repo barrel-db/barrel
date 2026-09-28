@@ -317,6 +317,12 @@ handle_info({'DOWN', Lease, process, _Pid, _Reason}, #state{leases = Leases} = S
         when is_map_key(Lease, Leases) ->
     {noreply, end_lease(Lease, State)};
 
+%% The database closed: resubscribe once it is open again.
+handle_info({'EXIT', Pid, {shutdown, db_closed}},
+            #state{stream_pid = Pid} = State) ->
+    erlang:send_after(?SUBSCRIBE_RETRY_MS, self(), subscribe_retry),
+    {noreply, State#state{stream_pid = undefined}};
+
 handle_info({'EXIT', Pid, _Reason}, #state{stream_pid = Pid} = State) ->
     case subscribe(State#state{stream_pid = undefined}) of
         {ok, State1} -> {noreply, State1};

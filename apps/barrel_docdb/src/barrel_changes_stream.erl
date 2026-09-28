@@ -56,7 +56,9 @@
     include_docs => boolean(),
     interval => pos_integer(),
     batch_size => pos_integer(),
-    owner => pid()
+    owner => pid(),
+    %% the database process owning the store; the stream ends with it
+    db => pid()
 }.
 
 -export_type([stream_mode/0, stream_opts/0]).
@@ -72,7 +74,8 @@ start_link(StoreRef, DbName, Opts) ->
     gen_statem:start_link(?MODULE, [StoreRef, DbName, Opts], []).
 
 %% @doc Get the next change (iterate mode)
--spec next(pid()) -> {ok, barrel_changes:change()} | done | {error, term()}.
+-spec next(pid()) ->
+    {ok, barrel_changes:change()} | done | {error, db_closed | term()}.
 next(Pid) ->
     Tag = make_ref(),
     gen_statem:cast(Pid, {next, {self(), Tag}}),
@@ -131,7 +134,8 @@ init([StoreRef, DbName, Opts]) ->
         store_ref => StoreRef,
         db_name => DbName,
         since => Since,
-        include_docs => IncludeDocs
+        include_docs => IncludeDocs,
+        db_mon => monitor_db(maps:get(db, Opts, undefined))
     },
 
     case Mode of
@@ -157,21 +161,25 @@ terminate(_Reason, _State, _Data) ->
 %% State: iterate (pull mode)
 %%====================================================================
 
-iterate(cast, {next, {From, Tag}}, #{store_ref := StoreRef,
-                                     db_name := DbName,
-                                     since := Since} = State) ->
+iterate(cast, {next, {From, Tag}}, State) ->
     FoldFun = fun(Change, _Acc) -> {stop, {found, Change}} end,
-    case barrel_changes:fold_changes(StoreRef, DbName, Since, FoldFun, not_found) of
+    case fold(State, FoldFun, not_found) of
         {ok, {found, Change}, NewSeq} ->
             From ! {Tag, {ok, Change}},
             {keep_state, State#{since => NewSeq}};
         {ok, not_found, _} ->
             From ! {Tag, done},
-            {stop, normal, State}
+            {stop, normal, State};
+        closed ->
+            From ! {Tag, {error, db_closed}},
+            {stop, {shutdown, db_closed}, State}
     end;
 
 iterate(cast, stop, State) ->
     {stop, normal, State};
+
+iterate(info, {'DOWN', Mon, process, _, _}, #{db_mon := Mon} = State) ->
+    {stop, {shutdown, db_closed}, State};
 
 iterate(_EventType, _Event, State) ->
     {keep_state, State}.
@@ -180,23 +188,34 @@ iterate(_EventType, _Event, State) ->
 %% State: push (push mode)
 %%====================================================================
 
-push(info, send_changes, #{store_ref := StoreRef,
-                           db_name := DbName,
-                           since := Since,
-                           batch_size := BatchSize,
-                           interval := Interval,
-                           owner := Owner,
-                           pending := Pending} = State) ->
-    FoldFun = fun(Change, Acc) ->
+push(info, send_changes, State) ->
+    case fold(State, batch_fun(State), []) of
+        {ok, RevChanges, NewSeq} ->
+            send_batch(lists:reverse(RevChanges), NewSeq, State);
+        closed ->
+            {stop, {shutdown, db_closed}, State}
+    end;
+
+push(cast, stop, State) ->
+    {stop, normal, State};
+
+push(info, {'DOWN', Mon, process, _, _}, #{db_mon := Mon} = State) ->
+    {stop, {shutdown, db_closed}, State};
+
+push(_EventType, _Event, State) ->
+    {keep_state, State}.
+
+batch_fun(#{batch_size := BatchSize}) ->
+    fun(Change, Acc) ->
         NewAcc = [Change | Acc],
         case length(NewAcc) >= BatchSize of
             true -> {stop, NewAcc};
             false -> {ok, NewAcc}
         end
-    end,
-    {ok, RevChanges, NewSeq} = barrel_changes:fold_changes(StoreRef, DbName, Since, FoldFun, []),
-    Changes = lists:reverse(RevChanges),
+    end.
 
+send_batch(Changes, NewSeq, #{interval := Interval, owner := Owner,
+                              pending := Pending} = State) ->
     %% Only track non-empty batches to prevent stall during idle periods
     case Changes of
         [] ->
@@ -221,14 +240,7 @@ push(info, send_changes, #{store_ref := StoreRef,
                 false ->
                     {next_state, wait_pending, NewState}
             end
-    end;
-
-push(cast, stop, State) ->
-    {stop, normal, State};
-
-push(_EventType, _Event, State) ->
-    {keep_state, State}.
-
+    end.
 
 
 %%====================================================================
@@ -250,5 +262,30 @@ wait_pending(cast, {ack, ReqId}, #{pending := Pending, interval := Interval} = S
 wait_pending(cast, stop, State) ->
     {stop, normal, State};
 
+wait_pending(info, {'DOWN', Mon, process, _, _}, #{db_mon := Mon} = State) ->
+    {stop, {shutdown, db_closed}, State};
+
 wait_pending(_EventType, _Event, State) ->
     {keep_state, State}.
+
+%%====================================================================
+%% Internal
+%%====================================================================
+
+monitor_db(undefined) -> undefined;
+monitor_db(Pid) when is_pid(Pid) -> monitor(process, Pid).
+
+%% A store closed under the fold raises badarg from the NIF. The database
+%% unregisters its store before closing it, so an unregistered store is
+%% closed; any other badarg is a bug and propagates.
+fold(#{store_ref := StoreRef, db_name := DbName, since := Since,
+       db_mon := Mon}, Fun, Acc) ->
+    try
+        barrel_changes:fold_changes(StoreRef, DbName, Since, Fun, Acc)
+    catch
+        error:badarg:Stack when Mon =/= undefined ->
+            case persistent_term:get({barrel_store, DbName}, undefined) of
+                StoreRef -> erlang:raise(error, badarg, Stack);
+                _ -> closed
+            end
+    end.

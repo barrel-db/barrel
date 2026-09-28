@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.2] - 2026-09-28
+
+### Fixed
+- A shard whose database closes waits for its subscribe retry instead of resubscribing at once, and follows the database again once it is reopened. Needs barrel_docdb 1.7.1 for the `{shutdown, db_closed}` exit; with an older barrel_docdb the shard behaves as before.
+
 ## [0.11.1] - 2026-09-26
 
 0.11.0 was never published: this is the first release with its changes.
