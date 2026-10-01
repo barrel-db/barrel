@@ -45,6 +45,7 @@
 %% Internal exports for testing
 -export([encode_varint/1, decode_varint/1]).
 -export([encode_cbor/1, decode_cbor/1]).
+-export([encode_wire/1]).
 -export([encode_bytes/1]).  %% For byte string encoding
 
 %%====================================================================
@@ -200,6 +201,26 @@ encode_cbor(M) when is_map(M) ->
 encode_cbor(A) when is_atom(A) ->
     %% Atoms other than true/false/null encoded as text
     encode_text(atom_to_binary(A, utf8)).
+
+%% @doc Encode a term for the wire: as `encode_cbor/1', except that a
+%% binary that is not valid UTF-8 is a byte string (major type 2).
+%% `decode_cbor/1' reads both back to the same binary.
+-spec encode_wire(term()) -> binary().
+encode_wire(B) when is_binary(B) ->
+    case unicode:characters_to_binary(B, utf8, utf8) of
+        B -> encode_text(B);
+        _ -> encode_bytes(B)
+    end;
+encode_wire(L) when is_list(L) ->
+    Elements = << <<(encode_wire(E))/binary>> || E <- L >>,
+    <<(encode_uint(?CBOR_ARRAY, length(L)))/binary, Elements/binary>>;
+encode_wire(M) when is_map(M) ->
+    Pairs = lists:sort([{encode_wire(K), encode_wire(V)}
+                        || {K, V} <- maps:to_list(M)]),
+    Elements = << <<K/binary, V/binary>> || {K, V} <- Pairs >>,
+    <<(encode_uint(?CBOR_MAP, length(Pairs)))/binary, Elements/binary>>;
+encode_wire(T) ->
+    encode_cbor(T).
 
 %% Encode unsigned integer with major type
 encode_uint(Major, N) when N < 24 ->

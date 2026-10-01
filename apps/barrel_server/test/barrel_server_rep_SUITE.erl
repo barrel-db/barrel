@@ -21,7 +21,9 @@
     t_checkpoint_reuse/1,
     t_att_sync_rides_along/1,
     t_continuous_push_over_http/1,
-    t_continuous_pull_over_http/1
+    t_continuous_pull_over_http/1,
+    t_registry_grants_over_http/1,
+    t_binary_field_round_trip/1
 ]).
 
 -include_lib("common_test/include/ct.hrl").
@@ -30,7 +32,8 @@
 all() ->
     [t_push_over_http, t_pull_over_http, t_bidirectional_convergence,
      t_filtered_pull, t_checkpoint_reuse, t_att_sync_rides_along,
-     t_continuous_push_over_http, t_continuous_pull_over_http].
+     t_continuous_push_over_http, t_continuous_pull_over_http,
+     t_registry_grants_over_http, t_binary_field_round_trip].
 
 init_per_suite(Config) ->
     application:load(barrel_server),
@@ -61,6 +64,7 @@ init_per_testcase(TC, Config) ->
      {endpoint, Endpoint} | Config].
 
 end_per_testcase(_TC, Config) ->
+    _ = meck:unload(),
     try barrel_docdb:delete_db(?config(local, Config)) catch _:_ -> ok end,
     ok.
 
@@ -244,3 +248,83 @@ doc_in(Db, DocId) ->
             _ -> false
         end
     end.
+
+%% The spaces registry replicates both ways once a token exists, its
+%% revocation included, and so does a grant minted before 1.3.0 (raw hash).
+t_registry_grants_over_http(Config) ->
+    Endpoint = ?config(endpoint, Config),
+    Served = ?config(served, Config),
+    Local = ?config(local, Config),
+    Registry = barrel_spaces:registry_db(),
+    {ok, Token, #{<<"token_id">> := Id}} =
+        barrel_caps:grant(<<"sp_registry_case">>, #{rights => [read]}),
+    {ok, Legacy, #{<<"token_id">> := LegacyId}} =
+        barrel_caps:grant(<<"sp_registry_case">>, #{rights => [read]}),
+    LegacyKey = <<"grant:", LegacyId/binary>>,
+    {ok, LegacyDoc} = barrel_docdb:get_doc(Registry, LegacyKey),
+    {ok, _} = barrel_docdb:put_doc(Registry, LegacyDoc#{
+        <<"token_hash">> => crypto:hash(sha256, Legacy)}),
+    {ok, _} = barrel_rep:replicate(Registry, Endpoint, push_opts()),
+    Key = <<"grant:", Id/binary>>,
+    {ok, Grant} = barrel_docdb:get_doc(Registry, Key),
+    {ok, Pushed} = barrel_docdb:get_doc(Served, Key),
+    ?assertEqual(maps:get(<<"token_hash">>, Grant),
+                 maps:get(<<"token_hash">>, Pushed)),
+    {ok, #{<<"token_hash">> := LegacyHash}} =
+        barrel_docdb:get_doc(Served, LegacyKey),
+    ?assertEqual(crypto:hash(sha256, Legacy), LegacyHash),
+    ok = barrel_caps:revoke(Token),
+    {ok, _} = barrel_rep:replicate(Registry, Endpoint, push_opts()),
+    {ok, #{<<"revoked_at">> := Revoked}} = barrel_docdb:get_doc(Served, Key),
+    ?assert(Revoked > 0),
+    {ok, _} = barrel_rep:replicate(Endpoint, Local, pull_opts()),
+    {ok, #{<<"revoked_at">> := Revoked}} = barrel_docdb:get_doc(Local, Key),
+    {ok, #{<<"token_hash">> := LegacyHash}} =
+        barrel_docdb:get_doc(Local, LegacyKey),
+    ok.
+
+%% A field JSON cannot carry crosses as CBOR, both ways; a JSON-safe
+%% document still travels as JSON.
+t_binary_field_round_trip(Config) ->
+    Local = ?config(local, Config),
+    Served = ?config(served, Config),
+    Endpoint = ?config(endpoint, Config),
+    Raw = <<255, 0, 254, 1>>,
+    {ok, _} = barrel_docdb:put_doc(Local, #{<<"id">> => <<"bin">>,
+                                            <<"raw">> => Raw,
+                                            <<"nested">> => [#{<<"k">> => Raw}]}),
+    {ok, _} = barrel_docdb:put_doc(Local, #{<<"id">> => <<"text">>,
+                                            <<"v">> => <<"plain">>}),
+    ok = meck:new(hackney, [passthrough, no_link]),
+    {ok, _} = barrel_rep:replicate(Local, Endpoint, push_opts()),
+    ?assertEqual(<<"application/cbor">>, put_content_type(<<"bin">>)),
+    ?assertEqual(<<"application/json">>, put_content_type(<<"text">>)),
+    ok = meck:unload(hackney),
+    {ok, #{<<"raw">> := Raw, <<"nested">> := [#{<<"k">> := Raw}]}} =
+        barrel_docdb:get_doc(Served, <<"bin">>),
+    {ok, _} = barrel_docdb:put_doc(Served, #{<<"id">> => <<"served_bin">>,
+                                             <<"raw">> => Raw}),
+    Pulled = <<Local/binary, "_pulled">>,
+    {ok, _} = barrel_docdb:create_db(Pulled, #{
+        data_dir => filename:join(?config(priv_dir, Config), "local")}),
+    try
+        {ok, _} = barrel_rep:replicate(Endpoint, Pulled, pull_opts()),
+        {ok, #{<<"raw">> := Raw}} = barrel_docdb:get_doc(Pulled, <<"bin">>),
+        {ok, #{<<"raw">> := Raw}} =
+            barrel_docdb:get_doc(Pulled, <<"served_bin">>),
+        {ok, #{<<"v">> := <<"plain">>}} =
+            barrel_docdb:get_doc(Pulled, <<"text">>)
+    after
+        barrel_docdb:delete_db(Pulled)
+    end,
+    ok.
+
+%% Content type of the PUT that carried a document, from hackney's history.
+put_content_type(DocId) ->
+    Suffix = <<"/_sync/doc/", DocId/binary>>,
+    [CT] = [proplists:get_value(<<"content-type">>, Headers)
+            || {_, {hackney, request, [put, Url, Headers | _]}, _}
+                   <- meck:history(hackney),
+               binary:longest_common_suffix([Url, Suffix])
+                   =:= byte_size(Suffix)],
+    CT.

@@ -3,6 +3,11 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.11.0] - 2026-10-01
+
+### Changed
+- The `/db/:db/_sync/*` routes read a request body as CBOR when its content type is `application/cbor`, and answer in CBOR when the request accepts it. Replication from barrel_docdb 1.8.0 uses it for documents JSON cannot carry. JSON requests and answers are unchanged. Requires barrel_docdb `~> 1.8`.
+
 ## [1.10.1] - 2026-09-27
 
 ### Changed

@@ -70,6 +70,12 @@ slash). The normalized URL is the replication identity: changing its text
 starts a fresh checkpoint, credentials and tuning do not. The endpoint map
 also takes `pool`, `connect_timeout`, `recv_timeout`, and `headers`.
 
+Documents travel as JSON when JSON can carry them. A document holding a binary
+that is not valid UTF-8 (a raw hash, say) travels as `application/cbor`, with
+the binary as a CBOR byte string. Both ends need barrel_docdb 1.8.0 and
+barrel_server 1.11.0 for that; JSON-safe documents replicate with older peers
+as before.
+
 ## How (auth)
 
 Protect a server with static bearer tokens; a list accepts old and new during

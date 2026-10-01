@@ -569,7 +569,7 @@ read_json(Req) ->
     case read_raw(Req) of
         {ok, Bin} ->
             case content_hash_ok(Req, Bin) of
-                ok -> decode_json(Bin);
+                ok -> decode_body(content_type(Req), Bin);
                 {error, _} = Err -> Err
             end;
         {error, _} = Err ->
@@ -603,16 +603,38 @@ content_hash_ok(Req, Bin) ->
             end
     end.
 
-decode_json(<<>>) -> {ok, #{}};
-decode_json(Bin) ->
+%% A replication client from barrel_docdb 1.8 sends CBOR when a document
+%% holds a binary JSON cannot carry; anything else is JSON.
+decode_body(_ContentType, <<>>) -> {ok, #{}};
+decode_body(<<"application/cbor", _/binary>>, Bin) ->
+    try barrel_docdb_codec_cbor:decode_cbor(Bin) of
+        #{} = Body -> {ok, Body};
+        _ -> {error, bad_cbor}
+    catch _:_ -> {error, bad_cbor}
+    end;
+decode_body(_ContentType, Bin) ->
     try {ok, json:decode(Bin)}
     catch _:_ -> {error, bad_json}
     end.
 
-json_resp(_Req, Status, Term) ->
-    Headers = [?JSON_CT,
+content_type(Req) ->
+    string:lowercase(livery_req:header(<<"content-type">>, Req, <<>>)).
+
+%% CBOR to a client that accepts it, JSON otherwise.
+json_resp(Req, Status, Term) ->
+    {ContentType, Body} = encode_resp(accepts_cbor(Req), Term),
+    Headers = [{<<"content-type">>, ContentType},
                {?HLC_HEADER, hlc_to_wire(barrel_hlc:get_hlc())}],
-    livery_resp:new(Status, Headers, {full, json:encode(Term)}).
+    livery_resp:new(Status, Headers, {full, Body}).
+
+encode_resp(true, Term) ->
+    {<<"application/cbor">>, barrel_docdb_codec_cbor:encode_wire(Term)};
+encode_resp(false, Term) ->
+    {<<"application/json">>, json:encode(Term)}.
+
+accepts_cbor(Req) ->
+    Accept = string:lowercase(livery_req:header(<<"accept">>, Req, <<>>)),
+    binary:match(Accept, <<"application/cbor">>) =/= nomatch.
 
 error_resp(Req, {error, Reason}) -> error_resp(Req, Reason);
 error_resp(Req, not_found) ->

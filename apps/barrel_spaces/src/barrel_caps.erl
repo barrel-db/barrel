@@ -63,7 +63,9 @@ grant(SpaceId, Opts) when is_binary(SpaceId), is_map(Opts) ->
                 <<"id">> => <<"grant:", TokenId/binary>>,
                 <<"type">> => <<"grant">>,
                 <<"token_id">> => TokenId,
-                <<"token_hash">> => crypto:hash(sha256, Token),
+                %% hex: the registry replicates as JSON
+                <<"token_hash">> => binary:encode_hex(crypto:hash(sha256, Token),
+                                                      lowercase),
                 <<"space">> => SpaceId,
                 <<"rights">> => [atom_to_binary(R, utf8) || R <- Rights],
                 <<"subject">> => maps:get(subject, Opts, <<>>),
@@ -182,7 +184,7 @@ check(Token) ->
             case barrel_docdb:get_doc(Registry,
                                       <<"grant:", TokenId/binary>>) of
                 {ok, Grant} ->
-                    Stored = maps:get(<<"token_hash">>, Grant),
+                    Stored = stored_hash(maps:get(<<"token_hash">>, Grant)),
                     case crypto:hash_equals(crypto:hash(sha256, Token),
                                             Stored) of
                         true -> check_liveness(Grant);
@@ -194,6 +196,10 @@ check(Token) ->
         _ ->
             {error, invalid_token}
     end.
+
+%% Hex since 1.3.0; grants minted before hold the raw 32 bytes.
+stored_hash(<<Hex:64/binary>>) -> binary:decode_hex(Hex);
+stored_hash(<<Raw:32/binary>>) -> Raw.
 
 check_liveness(#{<<"revoked_at">> := R}) when R > 0 ->
     {error, revoked};

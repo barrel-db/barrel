@@ -122,8 +122,11 @@ rep_id_term(#{url := Url}) -> Url.
 %% Transport callbacks
 %%====================================================================
 
+%% A server from 1.11 answers in CBOR, which carries any binary; an
+%% older one ignores the accept header and answers JSON.
 get_doc(Endpoint, DocId, _Opts) ->
-    case req(Endpoint, get, [<<"/doc/">>, quote(DocId)], undefined) of
+    case req(Endpoint, get, [<<"/doc/">>, quote(DocId)], undefined,
+             [{<<"accept">>, <<"application/cbor, application/json">>}]) of
         {ok, 200, #{<<"doc">> := Doc, <<"version">> := Token,
                     <<"vv">> := VVB64} = Body} ->
             {ok, Doc, #{version => Token,
@@ -293,10 +296,12 @@ get_attachment_stream(Endpoint, DocId, Name) ->
                                  header_value(?DIGEST_HEADER,
                                               RespHeaders)},
                     {ok, Info, att_read_fun(ConnPid2)};
-                {ok, Status, _RespHeaders, ConnPid2} ->
+                {ok, Status, RespHeaders, ConnPid2} ->
                     %% drain so the pooled connection is reusable
                     Body = case hackney:body(ConnPid2) of
-                        {ok, B} -> decode_body(B);
+                        {ok, B} -> decode_body(
+                              header_value(<<"content-type">>, RespHeaders),
+                              B);
                         _ -> #{}
                     end,
                     error_of({ok, Status, Body});
@@ -379,7 +384,9 @@ att_put_response(ClientRef) ->
             ok = barrel_hlc:maybe_sync_from_header(
                 header_value(?HLC_HEADER, RespHeaders)),
             Body = case hackney:body(ClientRef2) of
-                {ok, B} -> decode_body(B);
+                {ok, B} -> decode_body(
+                              header_value(<<"content-type">>, RespHeaders),
+                              B);
                 _ -> #{}
             end,
             case {Status, Body} of
@@ -436,12 +443,9 @@ req(Endpoint, Method, PathSuffix, BodyTerm) ->
 req(#{url := BaseUrl} = Endpoint, Method, PathSuffix, BodyTerm,
     ExtraHeaders) ->
     Url = iolist_to_binary([BaseUrl, <<"/_sync">>, PathSuffix]),
-    Body = case BodyTerm of
-        undefined -> <<>>;
-        _ -> iolist_to_binary(json:encode(BodyTerm))
-    end,
+    {ContentType, Body} = encode_body(BodyTerm),
     ContentHash = barrel_sync_sig:content_sha256(Body),
-    Headers = [{<<"content-type">>, <<"application/json">>}
+    Headers = [{<<"content-type">>, ContentType}
                | ExtraHeaders]
               ++ base_headers(Endpoint, method_bin(Method), url_target(Url),
                               ContentHash),
@@ -451,7 +455,9 @@ req(#{url := BaseUrl} = Endpoint, Method, PathSuffix, BodyTerm,
         {ok, Status, RespHeaders, RespBody} ->
             ok = barrel_hlc:maybe_sync_from_header(
                 header_value(?HLC_HEADER, RespHeaders)),
-            {ok, Status, decode_body(RespBody)};
+            {ok, Status, decode_body(
+                           header_value(<<"content-type">>, RespHeaders),
+                           RespBody)};
         {error, Reason} ->
             {error, {transport, Reason}}
     end.
@@ -554,8 +560,25 @@ header_value(Name, Headers) ->
         false -> undefined
     end.
 
-decode_body(<<>>) -> #{};
-decode_body(Bin) ->
+%% JSON when it can carry the body, else CBOR, whose byte strings carry
+%% a binary that is not UTF-8 (a raw hash). The fields are the same.
+encode_body(undefined) ->
+    {<<"application/json">>, <<>>};
+encode_body(Term) ->
+    try json:encode(Term) of
+        Json -> {<<"application/json">>, iolist_to_binary(Json)}
+    catch
+        error:_ ->
+            {<<"application/cbor">>,
+             barrel_docdb_codec_cbor:encode_wire(Term)}
+    end.
+
+decode_body(_ContentType, <<>>) -> #{};
+decode_body(<<"application/cbor", _/binary>>, Bin) ->
+    try barrel_docdb_codec_cbor:decode_cbor(Bin)
+    catch _:_ -> Bin
+    end;
+decode_body(_ContentType, Bin) ->
     try json:decode(Bin)
     catch _:_ -> Bin
     end.
