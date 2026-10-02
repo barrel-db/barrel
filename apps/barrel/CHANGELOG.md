@@ -3,6 +3,14 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.11.0] - 2026-10-02
+
+### Added
+- `embedding_fingerprint/3`: the fingerprint `embedder_info/1` would report for a record-mode database opened with a policy, a dimension and a distance, computed without starting the embedder. barrel_spaces checks it before reopening a space.
+
+### Changed
+- Requires barrel_embed `~> 2.6`.
+
 ## [1.10.1] - 2026-09-26
 
 ### Changed

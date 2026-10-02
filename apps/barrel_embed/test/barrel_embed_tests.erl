@@ -241,3 +241,9 @@ collect_messages(Acc) ->
     after 0 ->
         lists:reverse(Acc)
     end.
+
+%% describe/2 reports what info/1 does, without starting the provider.
+describe_matches_info_test() ->
+    Embedder = {openai, #{api_key => <<"k">>, model => <<"text-embedding-3-small">>}},
+    {ok, State} = barrel_embed:init(#{embedder => Embedder, dimensions => 3}),
+    ?assertEqual(barrel_embed:info(State), barrel_embed:describe(Embedder, 3)).

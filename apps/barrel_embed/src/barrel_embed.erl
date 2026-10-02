@@ -66,7 +66,8 @@
     embed_batch/2,
     embed_batch/3,
     dimension/1,
-    info/1
+    info/1,
+    describe/2
 ]).
 
 %% Venv management
@@ -191,6 +192,21 @@ info(#{providers := Providers, dimension := Dimension}) ->
         providers => ProviderInfo,
         dimension => Dimension
     }.
+
+%% @doc What info/1 would report for `EmbedderConfig', without starting
+%% any provider: the identity comes from each provider's config.
+-spec describe(provider_chain(), pos_integer() | undefined) -> map().
+describe(EmbedderConfig, Dimension) ->
+    ProviderInfo = [
+        begin
+            Module = provider_module(Name),
+            _ = code:ensure_loaded(Module),
+            maps:merge(#{module => Module, name => Module:name()},
+                       barrel_embed_provider:model_info(Module, Config))
+        end
+        || {Name, Config} <- normalize_providers(EmbedderConfig)
+    ],
+    #{configured => true, providers => ProviderInfo, dimension => Dimension}.
 
 %%====================================================================
 %% Internal Functions

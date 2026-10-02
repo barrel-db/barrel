@@ -16,7 +16,8 @@
     t_wrong_space_403/1,
     t_bsp_outside_agent_layer/1,
     t_sessions_http/1,
-    t_handoff_flow_http/1
+    t_handoff_flow_http/1,
+    t_space_opens_in_its_mode/1
 ]).
 
 -include_lib("common_test/include/ct.hrl").
@@ -27,7 +28,7 @@
 all() ->
     [t_space_crud_global, t_read_token_scope, t_revoked_401,
      t_wrong_space_403, t_bsp_outside_agent_layer, t_sessions_http,
-     t_handoff_flow_http].
+     t_handoff_flow_http, t_space_opens_in_its_mode].
 
 init_per_suite(Config) ->
     application:load(barrel_server),
@@ -252,3 +253,25 @@ req(Method, Url, JsonTerm, Headers) ->
 decode(<<>>) -> #{};
 decode(Bin) ->
     try json:decode(Bin) catch _:_ -> Bin end.
+
+%% A record-mode space reached first through the server (the sync and
+%% /db routes) opens in record mode, not with the server's options.
+t_space_opens_in_its_mode(_Config) ->
+    Embedder = {openai, #{api_key => <<"k">>, model => <<"model-a">>}},
+    ok = meck:new(barrel_embed, [passthrough, no_link]),
+    meck:expect(barrel_embed, embed, fun(_T, _S) -> {ok, [0.1, 0.2, 0.3]} end),
+    meck:expect(barrel_embed, embed_batch,
+                fun(Ts, _S) -> {ok, [[0.1, 0.2, 0.3] || _ <- Ts]} end),
+    application:set_env(barrel_spaces, embedder, Embedder),
+    try
+        {ok, #{id := Id}} = barrel_spaces:create_space(#{
+            embedding => #{fields => [<<"text">>], embedder => Embedder},
+            vectordb => #{dimension => 3}}),
+        ok = barrel_spaces:close_space(Id),
+        {ok, Db} = barrel_server_dbs:ensure(Id, #{must_exist => true}),
+        {ok, #{embedder := #{model := <<"model-a">>}}} = barrel:info(Db),
+        ok = barrel_spaces:drop_space(Id)
+    after
+        application:unset_env(barrel_spaces, embedder),
+        meck:unload(barrel_embed)
+    end.

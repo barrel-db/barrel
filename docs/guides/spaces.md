@@ -45,7 +45,35 @@ ok = barrel_spaces:drop_space(SpaceId).
 
 `open_space/2` reopens an existing space; runtime options (an `encryption`
 spec, extra store config) must be passed again on every open, exactly as for
-any barrel database. Per-space encryption keys are the isolation story: see
+any barrel database.
+
+### A space in record mode
+
+Give `create_space/1` an `embedding` policy and the space indexes the fields
+you name, like any record-mode database (see [embedding](embedding.md)):
+
+```erlang
+Embedder = {ollama, #{model => <<"nomic-embed-text">>}},
+{ok, #{id := SpaceId}} = barrel_spaces:create_space(#{
+    embedding => #{fields => [<<"text">>], mode => sync,
+                   embedder => Embedder}}).
+```
+
+The space document records the policy's fields and the embedder's identity
+(provider, model, dimensions, distance, fingerprint), not the embedder config:
+the registry replicates, and a config can hold paths and API keys. Each node
+that opens the space supplies its own config for the same model:
+
+```erlang
+application:set_env(barrel_spaces, embedder, Embedder),
+{ok, #{db := Db}} = barrel_spaces:open_space(SpaceId).
+```
+
+The open checks the fingerprint first. Another model answers
+`{error, {embedder_mismatch, _}}`; no `embedder` env answers
+`{error, {embedder_required, Fingerprint}}`. A space reached through
+barrel_server (its `/db` and sync routes) opens the same way, so the first
+route to touch it does not decide its mode. Per-space encryption keys are the isolation story: see
 [encryption](encryption.md).
 
 ## Sessions

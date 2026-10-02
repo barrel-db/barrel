@@ -113,7 +113,8 @@
 -export([
     embed/2,
     embed_batch/2,
-    embedder_info/1
+    embedder_info/1,
+    embedding_fingerprint/3
 ]).
 
 -export_type([db/0, db_name/0]).
@@ -997,6 +998,25 @@ embedder_info(#{vstore := Store}) ->
     {Dim, Distance} = vector_space(Store),
     {ok, maps:merge(Info, barrel_embed_fingerprint:identity(Info, Dim,
                                                             Distance, none))}.
+
+%% @doc The fingerprint `embedder_info/1' would report for a database
+%% opened in record mode with `Policy', vectors of `Dim' dimensions and
+%% `Distance', computed without starting the embedder. `undefined' when
+%% the policy has no embedder or its model is unknown.
+-spec embedding_fingerprint(map(), pos_integer(), atom() | binary()) ->
+    {ok, binary() | undefined} | {error, term()}.
+embedding_fingerprint(Policy0, Dim, Distance) ->
+    case barrel_embedding_policy:validate(Policy0) of
+        {ok, Policy} -> {ok, policy_fingerprint(Policy, Dim, Distance)};
+        {error, _} = Err -> Err
+    end.
+
+policy_fingerprint(#{embedder := Embedder} = Policy, Dim, Distance) ->
+    Info = barrel_embed:describe(Embedder, Dim),
+    Ident = barrel_embed_fingerprint:identity(Info, Dim, Distance, Policy),
+    maps:get(fingerprint, Ident, undefined);
+policy_fingerprint(_Policy, _Dim, _Distance) ->
+    undefined.
 
 %% @doc Vector store statistics.
 -spec vector_stats(db()) -> term().
