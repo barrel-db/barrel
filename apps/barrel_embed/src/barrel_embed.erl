@@ -67,7 +67,8 @@
     embed_batch/3,
     dimension/1,
     info/1,
-    describe/2
+    describe/2,
+    release/1
 ]).
 
 %% Venv management
@@ -192,6 +193,21 @@ info(#{providers := Providers, dimension := Dimension}) ->
         providers => ProviderInfo,
         dimension => Dimension
     }.
+
+%% @doc Release the model processes `init/1' acquired: a local model
+%% process is shared by every state of the same model and stops with
+%% the last release. Call it once per init, when the state is done.
+-spec release(embed_state() | undefined) -> ok.
+release(undefined) ->
+    ok;
+release(#{providers := Providers}) ->
+    lists:foreach(fun({_Module, Config}) -> release_provider(Config) end,
+                  Providers).
+
+release_provider(#{server := Server}) when is_pid(Server) ->
+    barrel_embed_pool:release(Server);
+release_provider(_Config) ->
+    ok.
 
 %% @doc What info/1 would report for `EmbedderConfig', without starting
 %% any provider: the identity comes from each provider's config.

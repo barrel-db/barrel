@@ -48,7 +48,7 @@ jobs:
       - run: rebar3 as test eunit --app barrel,barrel_crypto,barrel_docdb,barrel_ngram,barrel_vectordb,barrel_rerank
       # barrel_embed's venv/ollama tests need an external backend; run only the
       # backend-free modules (mocked provider dispatch + request building).
-      - run: rebar3 as test eunit --module=barrel_embed_tests,barrel_embed_provider_tests,barrel_embed_request_tests
+      - run: rebar3 as test eunit --module=barrel_embed_tests,barrel_embed_provider_tests,barrel_embed_request_tests,barrel_embed_pool_tests
       - run: rebar3 as test ct
 
   leaf:

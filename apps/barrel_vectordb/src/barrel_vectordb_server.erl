@@ -1016,7 +1016,8 @@ prepare_batch_embeddings(Docs, State) ->
 
 terminate(_Reason, #state{db = Db, index = Index, index_module = Mod, cf_hnsw = CfHnsw,
                           bm25_index = BM25, bm25_backend = BM25Backend,
-                          docstore = Docstore, config = Config} = State) ->
+                          docstore = Docstore, config = Config,
+                          embed_state = EmbedState} = State) ->
     %% Persist index metadata and graph before closing (best effort;
     %% a kill mid-persist just means a rebuild on the next open). A
     %% read-only store leaves its files untouched.
@@ -1038,6 +1039,9 @@ terminate(_Reason, #state{db = Db, index = Index, index_module = Mod, cf_hnsw = 
     end,
     _ = rocksdb:close(Db),
     _ = docstore_terminate(Docstore),
+    %% a shared local model stops with its last store (the pool may be
+    %% gone already when the node stops)
+    _ = try barrel_embed:release(EmbedState) catch exit:_ -> ok end,
     ok.
 
 %% Close index if the backend module supports close/1

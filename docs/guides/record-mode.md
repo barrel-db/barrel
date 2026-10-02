@@ -163,6 +163,10 @@ client `_embedding` carried in the document, then the policy's fields.
   document is parked (logged, its indexing entry stays pending and visible)
   and the rest of the queue keeps moving.
 - `barrel:info/1` reports the active policy and dimension.
+- Databases on the same local model (`local`, `fastembed`, `clip`, `splade`,
+  `colbert`: same model, Python and virtualenv) share one model process; it
+  stops when the last of them closes. The process handles requests from all
+  of them concurrently.
 - On `barrel_server`, set the `open_opts` app env of `barrel_server` to open
   every database with a policy, for example
   `{barrel_server, [{open_opts, #{embedding => ...}}]}` in `sys.config`.

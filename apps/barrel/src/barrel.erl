@@ -347,10 +347,12 @@ do_open_record_stores(DbBin, Policy, Dim, VecConfig0, VecConfig1,
                                                    EncSpec))};
                         {error, _} = IErr ->
                             _ = barrel_vectordb:stop(DbBin),
+                            ok = barrel_embed:release(EmbedState),
                             _ = barrel_docdb:close_db(DbBin),
                             IErr
                     end;
                 {error, _} = VErr ->
+                    ok = barrel_embed:release(EmbedState),
                     _ = barrel_docdb:close_db(DbBin),
                     VErr
             end;
@@ -363,10 +365,7 @@ do_open_record_stores(DbBin, Policy, Dim, VecConfig0, VecConfig1,
 %% then document database).
 -spec close(db()) -> ok | {error, term()}.
 close(#{name := Name, docdb := DbBin, vstore := Store} = Db) ->
-    _ = case Db of
-        #{embedding := _} -> barrel_record_sup:stop_indexer(Name);
-        _ -> ok
-    end,
+    ok = stop_record(Name, Db),
     _ = barrel_vectordb:stop(Store),
     barrel_docdb:close_db(DbBin);
 close(#{docdb := DbBin}) ->
@@ -476,14 +475,19 @@ merge(#{docdb := BranchBin}, Opts) ->
 %% the document database's files.
 -spec delete(db()) -> ok | {error, term()}.
 delete(#{name := Name, docdb := DbBin, vstore := Store} = Db) ->
-    _ = case Db of
-        #{embedding := _} -> barrel_record_sup:stop_indexer(Name);
-        _ -> ok
-    end,
+    ok = stop_record(Name, Db),
     _ = barrel_vectordb:destroy(Store),
     barrel_docdb:delete_db(DbBin);
 delete(#{docdb := DbBin}) ->
     barrel_docdb:delete_db(DbBin).
+
+%% Record mode: stop the indexer, then release the embedder (a local
+%% model process is shared and stops with its last database).
+stop_record(Name, #{embedding := _, embed := Embed}) ->
+    _ = barrel_record_sup:stop_indexer(Name),
+    barrel_embed:release(Embed);
+stop_record(_Name, _PlainDb) ->
+    ok.
 
 %% @doc Database metadata.
 -spec info(db()) -> {ok, map()} | {error, term()}.

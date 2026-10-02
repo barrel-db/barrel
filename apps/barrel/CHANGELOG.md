@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `embedding_fingerprint/3`: the fingerprint `embedder_info/1` would report for a record-mode database opened with a policy, a dimension and a distance, computed without starting the embedder. barrel_spaces checks it before reopening a space.
 
 ### Changed
+- Record mode releases its embedder on `close/1`, `delete/1` and a failed open, so a local model process shared by several databases stops with the last of them.
 - Requires barrel_embed `~> 2.6`.
 
 ## [1.10.1] - 2026-09-26
