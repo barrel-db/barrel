@@ -286,6 +286,11 @@ Continuous behavior:
 - Transient errors do not kill a continuous task: it backs off (1 s to 60 s,
   with jitter), records `last_error` on the task doc, and stays `running`.
   One-shot tasks fail fast.
+- A local database of the task that closes (idle close, `close_db/1`), source
+  or target, pauses the task: status `paused`, `paused_reason =>
+  <<"db_closed">>`. Within 5 s of its local databases being open again, the
+  task resumes from its checkpoint. A task you paused with `pause_task/1` or
+  `stop_task/1` stays paused.
 - Task docs store endpoints as URLs only; tokens come from `sync_auth`.
 
 ## Clocks

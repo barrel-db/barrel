@@ -848,21 +848,22 @@ terminate(_Reason, #state{name = Name, store_ref = StoreRef, att_ref = AttRef,
               catch _:_ -> ok
               end
       end,
+    %% Unregister BEFORE closing either store so caller-side readers
+    %% (barrel_docdb_reader, barrel_doc_body_store) stop picking up a ref
+    %% that is about to be closed, and a read that fails on a closed store
+    %% finds the database already gone. In-flight readers that already
+    %% hold the ref are handled by the reader's badarg guard.
+    persistent_term:erase({barrel_db, Name}),
+    persistent_term:erase({barrel_store, Name}),
+    persistent_term:erase({barrel_source, Name}),
+    ok = barrel_keyspace:uninstall(Name),
+    ok = barrel_channel:uninstall(Name),
     %% Close attachment store
     _ = 
       case AttRef of
           undefined -> ok;
           _ -> barrel_att_store:close(AttRef)
       end,
-    %% Unregister BEFORE closing the store so caller-side readers
-    %% (barrel_docdb_reader, barrel_doc_body_store) stop picking up a ref
-    %% that is about to be closed. In-flight readers that already hold the
-    %% ref are handled by the reader's badarg guard.
-    persistent_term:erase({barrel_db, Name}),
-    persistent_term:erase({barrel_store, Name}),
-    persistent_term:erase({barrel_source, Name}),
-    ok = barrel_keyspace:uninstall(Name),
-    ok = barrel_channel:uninstall(Name),
     %% Close document store (includes body CF)
     _ =
       case StoreRef of

@@ -654,14 +654,24 @@ sync_attachments(#{task_id := TaskId, from := From, to := To,
 %% Continuous tasks ride out transient errors: record last_error on
 %% the task doc (status stays running) and back off exponentially
 %% with jitter. One-shot keeps fail-fast.
-handle_loop_error(#{mode := continuous} = Ctx, Since, Reason) ->
-    #{parent := Parent, task_id := TaskId, backoff := Backoff} = Ctx,
-    gen_server:cast(Parent, {task_last_error, TaskId, Reason}),
-    timer:sleep(with_jitter(Backoff)),
-    run_task_loop(Ctx#{backoff := min(Backoff * 2, ?BACKOFF_MAX)}, Since);
+%% A continuous task whose local database closed stops as the stream
+%% does, so the manager pauses it until the database reopens; a polling
+%% task would otherwise retry a closed database forever.
+handle_loop_error(#{mode := continuous, from := From, to := To} = Ctx,
+                  Since, Reason) ->
+    case locals_open_config(#{source => From, target => To}) of
+        true -> backoff(Ctx, Since, Reason);
+        false -> exit({shutdown, db_closed})
+    end;
 handle_loop_error(#{parent := Parent, task_id := TaskId}, _Since,
                   Reason) ->
     gen_server:cast(Parent, {task_error, TaskId, Reason}).
+
+backoff(Ctx, Since, Reason) ->
+    #{parent := Parent, task_id := TaskId, backoff := Backoff} = Ctx,
+    gen_server:cast(Parent, {task_last_error, TaskId, Reason}),
+    timer:sleep(with_jitter(Backoff)),
+    run_task_loop(Ctx#{backoff := min(Backoff * 2, ?BACKOFF_MAX)}, Since).
 
 with_jitter(Ms) ->
     Ms + rand:uniform(max(Ms div 4, 1)).
@@ -756,19 +766,41 @@ handle_task_down(Pid, Reason, State) ->
     %% Find task by pid
     case find_task_by_pid(Pid, State) of
         {ok, TaskId} ->
-            %% Update status based on reason
-            Status = case Reason of
-                normal -> completed;
-                shutdown -> paused;
-                _ -> failed
-            end,
-            _ = update_task_status(TaskId, Status,
-                                   #{<<"error">> => format_reason(Reason)}),
+            {Status, Extra} = down_status(Reason, TaskId),
+            _ = update_task_status(
+                  TaskId, Status,
+                  Extra#{<<"error">> => format_reason(Reason)}),
             NewRunning = maps:remove(TaskId, State#state.running),
             State#state{running = NewRunning};
         error ->
             State
     end.
+
+%% A local database that closed pauses the task until it reopens. The
+%% close can also surface as a crash (a read on the closed store), so
+%% any other exit counts as a close when a local database is gone: a
+%% database unregisters before it closes its store.
+down_status(normal, _TaskId) -> {completed, #{}};
+down_status(shutdown, _TaskId) -> {paused, #{}};
+down_status({shutdown, db_closed}, _TaskId) -> db_closed();
+down_status(_Reason, TaskId) ->
+    case locals_open(TaskId) of
+        true -> {failed, #{}};
+        false -> db_closed()
+    end.
+
+db_closed() ->
+    {paused, #{<<"paused_reason">> => <<"db_closed">>}}.
+
+locals_open(TaskId) ->
+    case do_get_task(TaskId) of
+        {ok, #{config := Config}} -> locals_open_config(Config);
+        {error, _} -> true
+    end.
+
+locals_open_config(Config) ->
+    lists:all(fun local_open/1, [maps:get(source, Config),
+                                 maps:get(target, Config)]).
 
 find_task_by_pid(Pid, #state{running = Running}) ->
     case lists:keyfind(Pid, 2, maps:to_list(Running)) of
@@ -776,7 +808,8 @@ find_task_by_pid(Pid, #state{running = Running}) ->
         false -> error
     end.
 
-check_running_tasks(State) ->
+check_running_tasks(State0) ->
+    State = resume_reopened(State0),
     %% Check if any tasks that should be running are not
     case do_list_tasks(#{status => running}, State) of
         {ok, Tasks} ->
@@ -796,6 +829,36 @@ check_running_tasks(State) ->
             );
         {error, _} ->
             State
+    end.
+
+%% Resume the tasks paused by a database close once their local
+%% databases are open again.
+resume_reopened(State) ->
+    case do_list_tasks(#{status => paused}, State) of
+        {ok, Tasks} ->
+            lists:foldl(fun resume_reopened/2, State, Tasks);
+        {error, _} ->
+            State
+    end.
+
+resume_reopened(#{id := TaskId, paused_reason := <<"db_closed">>,
+                  config := Config}, State) ->
+    case locals_open_config(Config) of
+        true ->
+            case do_resume_task(TaskId, State) of
+                {ok, NewState} -> NewState;
+                {error, _} -> State
+            end;
+        false ->
+            State
+    end;
+resume_reopened(_Task, State) ->
+    State.
+
+local_open(Endpoint) ->
+    case is_remote(Endpoint) of
+        true -> true;
+        false -> barrel_docdb:db_pid(Endpoint) =/= {error, not_found}
     end.
 
 %%====================================================================
@@ -838,9 +901,11 @@ save_task(#{id := TaskId} = Task) ->
 update_task_status(TaskId, Status) ->
     update_task_status(TaskId, Status, #{}).
 
+%% A status change drops the pause reason unless Extra sets it again.
 update_task_status(TaskId, Status, Extra) ->
     update_task_doc(TaskId, fun(Doc) ->
-        maps:merge(Doc#{<<"status">> => atom_to_binary(Status)}, Extra)
+        Doc1 = maps:remove(<<"paused_reason">>, Doc),
+        maps:merge(Doc1#{<<"status">> => atom_to_binary(Status)}, Extra)
     end).
 
 update_task_seq(TaskId, Seq) ->
@@ -912,6 +977,7 @@ doc_to_task(Doc) ->
     maps:fold(
         fun(<<"error">>, V, Acc) -> Acc#{error => V};
            (<<"last_error">>, V, Acc) -> Acc#{last_error => V};
+           (<<"paused_reason">>, V, Acc) -> Acc#{paused_reason => V};
            (_, _, Acc) -> Acc
         end,
         Task,

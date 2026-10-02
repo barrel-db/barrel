@@ -75,7 +75,9 @@ groups() ->
             task_continuous_survives_error,
             task_one_shot_replicates_attachment,
             task_continuous_replicates_attachment_only_change,
-            task_attachments_disabled_survives_restart
+            task_attachments_disabled_survives_restart,
+            task_resumes_after_source_reopen,
+            task_user_pause_not_resumed
         ]}
     ].
 
@@ -967,6 +969,64 @@ doc_in(Db, DocId) ->
     fun() ->
         case barrel_docdb:get_doc(Db, DocId) of
             {ok, _} -> true;
+            _ -> false
+        end
+    end.
+
+%% The source of a continuous task closes: the task pauses with the
+%% reason, then resumes on the 5 s check once the source is open again.
+task_resumes_after_source_reopen(Config) ->
+    Src = <<"resume_src">>,
+    Open = open_source(Config, Src),
+    {ok, TaskId} = continuous_push(Src),
+    {ok, _} = barrel_docdb:put_doc(Src, #{<<"id">> => <<"before">>}),
+    ok = wait_until(doc_in(<<"test_target">>, <<"before">>), 50, 600),
+    ok = barrel_docdb:close_db(Src),
+    ok = wait_until(paused_for(TaskId, <<"db_closed">>), 50, 600),
+    Open(),
+    ok = wait_until(task_status(TaskId, running), 100, 300),
+    {ok, _} = barrel_docdb:put_doc(Src, #{<<"id">> => <<"after">>}),
+    ok = wait_until(doc_in(<<"test_target">>, <<"after">>), 50, 600),
+    {ok, Task} = barrel_rep_tasks:get_task(TaskId),
+    ?assertNot(maps:is_key(paused_reason, Task)),
+    ok = barrel_rep_tasks:delete_task(TaskId),
+    ok = barrel_docdb:delete_db(Src).
+
+%% A pause asked for is kept across a close and reopen. The second task
+%% on the same source resumes on the check, so the check has run.
+task_user_pause_not_resumed(Config) ->
+    Src = <<"pause_src">>,
+    Open = open_source(Config, Src),
+    {ok, Paused} = continuous_push(Src),
+    {ok, Witness} = continuous_push(Src),
+    ok = barrel_rep_tasks:pause_task(Paused),
+    ok = barrel_docdb:close_db(Src),
+    ok = wait_until(paused_for(Witness, <<"db_closed">>), 50, 600),
+    Open(),
+    ok = wait_until(task_status(Witness, running), 100, 300),
+    {ok, #{status := paused} = Task} = barrel_rep_tasks:get_task(Paused),
+    ?assertNot(maps:is_key(paused_reason, Task)),
+    ok = barrel_rep_tasks:delete_task(Paused),
+    ok = barrel_rep_tasks:delete_task(Witness),
+    ok = barrel_docdb:delete_db(Src).
+
+%% Creates the source; the returned fun reopens it after a close.
+open_source(Config, Name) ->
+    Dir = ?config(data_dir, Config) ++ "_" ++ binary_to_list(Name),
+    Open = fun() -> {ok, _} = barrel_docdb:create_db(Name, #{data_dir => Dir}) end,
+    Open(),
+    Open.
+
+continuous_push(Src) ->
+    barrel_rep_tasks:start_task(#{source => Src,
+                                  target => <<"test_target">>,
+                                  mode => continuous,
+                                  direction => push}).
+
+paused_for(TaskId, Reason) ->
+    fun() ->
+        case barrel_rep_tasks:get_task(TaskId) of
+            {ok, #{status := paused, paused_reason := Reason}} -> true;
             _ -> false
         end
     end.
