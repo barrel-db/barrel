@@ -3,6 +3,11 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.6.0] - 2026-10-02
+
+### Added
+- `describe/2`: what `info/1` reports for an embedder config, computed from the config without starting any provider. barrel uses it to check an embedder's fingerprint before opening a database.
+
 ## [2.5.0] - 2026-09-25
 
 ### Added

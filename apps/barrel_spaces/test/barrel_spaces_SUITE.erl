@@ -18,7 +18,10 @@
     t_vec_path_replica/1,
     t_vec_path_legacy_foreign/1,
     t_vec_path_legacy_local/1,
-    t_vec_path_custom/1
+    t_vec_path_custom/1,
+    t_record_mode_reopen/1,
+    t_record_mode_mismatch/1,
+    t_record_mode_needs_embedder/1
 ]).
 
 -include_lib("common_test/include/ct.hrl").
@@ -28,7 +31,9 @@ all() ->
     [t_lifecycle, t_registry_doc, t_dropped_space_refuses_open,
      t_list_spaces, t_encrypted_space, t_space_is_a_barrel_db,
      t_vec_path_relative, t_vec_path_replica, t_vec_path_legacy_foreign,
-     t_vec_path_legacy_local, t_vec_path_custom].
+     t_vec_path_legacy_local, t_vec_path_custom,
+     t_record_mode_reopen, t_record_mode_mismatch,
+     t_record_mode_needs_embedder].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(barrel_spaces),
@@ -251,3 +256,88 @@ legacy_vec_path(Id, Path) ->
     {ok, _} = barrel_docdb:put_doc(
                 Registry, Info#{<<"vec_path">> => list_to_binary(Path)}),
     ok.
+
+%%====================================================================
+%% Record mode
+%%====================================================================
+
+%% Reopened without options, the space is in record mode again, with
+%% this node's embedder config for the recorded model; the space
+%% document holds the identity, not the config.
+t_record_mode_reopen(Config) ->
+    with_mock_embed(fun() ->
+        {ok, #{id := Id}} = barrel_spaces:create_space(#{
+            embedding => policy(<<"model-a">>, <<"key-of-node-a">>),
+            vectordb => vec_opts(Config, "rec_vec")}),
+        {ok, #{<<"embedding">> := Rec}} = barrel_spaces:space_info(Id),
+        ?assertMatch(#{<<"model">> := <<"model-a">>,
+                       <<"fingerprint">> := <<"sha256:", _/binary>>,
+                       <<"dimensions">> := 3,
+                       <<"fields">> := [[<<"text">>]],
+                       <<"mode">> := <<"sync">>}, Rec),
+        ?assertEqual(nomatch, binary:match(term_to_binary(Rec),
+                                           <<"key-of-node-a">>)),
+        ok = barrel_spaces:close_space(Id),
+        with_node_embedder(embedder(<<"model-a">>, <<"key-of-node-b">>),
+                           fun() ->
+            {ok, #{db := Db}} = barrel_spaces:open_space(Id),
+            {ok, #{embedder := #{fingerprint := Fp}}} = barrel:info(Db),
+            ?assertEqual(maps:get(<<"fingerprint">>, Rec), Fp),
+            {ok, _} = barrel:put_doc(Db, #{<<"id">> => <<"m1">>,
+                                           <<"text">> => <<"blue whale">>}),
+            {ok, [#{key := <<"m1">>} | _]} =
+                barrel:search(Db, <<"blue whale">>, #{k => 1})
+        end),
+        ok = barrel_spaces:drop_space(Id)
+    end).
+
+t_record_mode_mismatch(Config) ->
+    with_mock_embed(fun() ->
+        {ok, #{id := Id}} = barrel_spaces:create_space(#{
+            embedding => policy(<<"model-a">>, <<"k">>),
+            vectordb => vec_opts(Config, "mis_vec")}),
+        ok = barrel_spaces:close_space(Id),
+        with_node_embedder(embedder(<<"model-b">>, <<"k">>), fun() ->
+            ?assertMatch({error, {embedder_mismatch, #{}}},
+                         barrel_spaces:open_space(Id))
+        end),
+        ?assertMatch({error, {embedder_mismatch, #{}}},
+                     barrel_spaces:open_space(Id, #{
+                         embedding => policy(<<"model-b">>, <<"k">>)})),
+        ok = barrel_spaces:drop_space(Id)
+    end).
+
+t_record_mode_needs_embedder(Config) ->
+    with_mock_embed(fun() ->
+        {ok, #{id := Id}} = barrel_spaces:create_space(#{
+            embedding => policy(<<"model-a">>, <<"k">>),
+            vectordb => vec_opts(Config, "need_vec")}),
+        {ok, #{<<"embedding">> := #{<<"fingerprint">> := Fp}}} =
+            barrel_spaces:space_info(Id),
+        ok = barrel_spaces:close_space(Id),
+        ?assertEqual({error, {embedder_required, Fp}},
+                     barrel_spaces:open_space(Id)),
+        ok = barrel_spaces:drop_space(Id)
+    end).
+
+policy(Model, Key) ->
+    #{fields => [<<"text">>], mode => sync, embedder => embedder(Model, Key)}.
+
+embedder(Model, Key) ->
+    {openai, #{api_key => Key, model => Model}}.
+
+with_node_embedder(Embedder, Fun) ->
+    application:set_env(barrel_spaces, embedder, Embedder),
+    try Fun() after application:unset_env(barrel_spaces, embedder) end.
+
+%% Deterministic 3-dim vectors; the provider is never called.
+with_mock_embed(Fun) ->
+    ok = meck:new(barrel_embed, [passthrough, no_link]),
+    Vec = fun(T) ->
+        H = erlang:phash2(T, 1000000),
+        [H / 1000000.0, (H rem 1000) / 1000.0, (H rem 100) / 100.0]
+    end,
+    meck:expect(barrel_embed, embed, fun(T, _S) -> {ok, Vec(T)} end),
+    meck:expect(barrel_embed, embed_batch,
+                fun(Ts, _S) -> {ok, [Vec(T) || T <- Ts]} end),
+    try Fun() after meck:unload(barrel_embed) end.

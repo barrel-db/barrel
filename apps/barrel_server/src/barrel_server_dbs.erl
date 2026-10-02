@@ -30,8 +30,25 @@ ensure(Name) when is_binary(Name) ->
 -spec ensure(binary(), map()) -> {ok, barrel:db()} | {error, term()}.
 ensure(Name, Opts) when is_binary(Name), is_map(Opts) ->
     case valid_name(Name) of
-        true -> barrel_dbs:ensure(Name, merge_opts(Opts));
+        true -> open(Name, Opts);
         false -> {error, invalid_name}
+    end.
+
+%% A space opens through barrel_spaces, with its recorded mode and vector
+%% path, whatever route reaches it first; the server's options do not
+%% apply to it.
+open(<<"sp_", _/binary>> = Name, Opts) ->
+    case barrel_spaces:space_info(Name) of
+        {ok, #{<<"status">> := <<"active">>}} -> space_db(Name);
+        _ -> barrel_dbs:ensure(Name, merge_opts(Opts))
+    end;
+open(Name, Opts) ->
+    barrel_dbs:ensure(Name, merge_opts(Opts)).
+
+space_db(Name) ->
+    case barrel_spaces:open_space(Name) of
+        {ok, #{db := Db}} -> {ok, Db};
+        {error, _} = Err -> Err
     end.
 
 %% @private `barrel:open/2' reads `docdb'/`vectordb' as nested sub-maps
