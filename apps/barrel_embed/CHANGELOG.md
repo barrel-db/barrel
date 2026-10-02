@@ -6,6 +6,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [2.6.0] - 2026-10-02
 
 ### Added
+- One model process per model: the Python providers (`local`, `fastembed`, `clip`, `splade`, `colbert`) acquire their port server from `barrel_embed_pool`, keyed by Python, arguments and virtualenv, instead of starting one per `init/1`. The pool supervises it, counts references, stops it at the last release and starts a new one after a crash. `release/1` drops what `init/1` acquired; until now the process outlived its database.
 - `describe/2`: what `info/1` reports for an embedder config, computed from the config without starting any provider. barrel uses it to check an embedder's fingerprint before opening a database.
 
 ## [2.5.0] - 2026-09-25

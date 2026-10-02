@@ -114,7 +114,7 @@ init(Config) ->
         {venv, Venv}
     ],
 
-    case barrel_embed_port_server:start_link(Python, Args, Opts) of
+    case barrel_embed_pool:port_server(Python, Args, Opts) of
         {ok, Server} ->
             case barrel_embed_port_server:info(Server, Timeout) of
                 {ok, #{dimensions := Dims}} ->
@@ -131,7 +131,7 @@ init(Config) ->
                         timeout => Timeout
                     }};
                 {error, Reason} ->
-                    barrel_embed_port_server:stop(Server),
+                    barrel_embed_pool:release(Server),
                     {error, Reason}
             end;
         {error, Reason} ->

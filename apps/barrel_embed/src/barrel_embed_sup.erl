@@ -24,10 +24,16 @@ start_link() ->
 
 init([]) ->
     SupFlags = #{
-        strategy => one_for_one,
+        strategy => rest_for_one,
         intensity => 10,
         period => 10
     },
-    %% No child processes - just ETS tables managed by python_queue
-    ChildSpecs = [],
+    %% the model processes, then the pool that shares them
+    ChildSpecs = [
+        #{id => barrel_embed_pool_sup,
+          start => {barrel_embed_pool_sup, start_link, []},
+          type => supervisor},
+        #{id => barrel_embed_pool,
+          start => {barrel_embed_pool, start_link, []}}
+    ],
     {ok, {SupFlags, ChildSpecs}}.

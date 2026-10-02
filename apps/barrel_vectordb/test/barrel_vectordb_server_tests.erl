@@ -131,6 +131,7 @@ mock_embed() ->
     (catch meck:unload(barrel_embed)),
     timer:sleep(10),
     meck:new(barrel_embed, [non_strict, no_link]),
+    meck:expect(barrel_embed, release, fun(_State) -> ok end),
     meck:expect(barrel_embed, init, fun(_Config) ->
         {ok, #{providers => [], dimension => 3, batch_size => 32}}
     end),
