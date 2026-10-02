@@ -24,7 +24,8 @@
     t_continuous_pull_over_http/1,
     t_registry_grants_over_http/1,
     t_binary_field_round_trip/1,
-    t_json_only_client/1
+    t_json_only_client/1,
+    t_unknown_db/1
 ]).
 
 -include_lib("common_test/include/ct.hrl").
@@ -35,7 +36,7 @@ all() ->
      t_filtered_pull, t_checkpoint_reuse, t_att_sync_rides_along,
      t_continuous_push_over_http, t_continuous_pull_over_http,
      t_registry_grants_over_http, t_binary_field_round_trip,
-     t_json_only_client].
+     t_json_only_client, t_unknown_db].
 
 init_per_suite(Config) ->
     application:load(barrel_server),
@@ -60,6 +61,8 @@ init_per_testcase(TC, Config) ->
     {ok, _} = barrel_docdb:create_db(Local, #{
         data_dir => filename:join(?config(priv_dir, Config), "local")
     }),
+    %% replication never creates the served database
+    {ok, _} = barrel_server_dbs:ensure(list_to_binary(Served)),
     Endpoint = barrel_rep_transport_http:endpoint(
         list_to_binary(?config(base, Config) ++ "/db/" ++ Served)),
     [{local, Local}, {served, list_to_binary(Served)},
@@ -327,7 +330,6 @@ t_json_only_client(Config) ->
     Served = ?config(served, Config),
     #{url := Base} = ?config(endpoint, Config),
     Raw = <<255, 0, 254, 1>>,
-    {ok, _} = barrel_server_dbs:ensure(Served),
     {ok, _} = barrel_docdb:put_doc(Served, #{<<"id">> => <<"raw">>,
                                              <<"raw">> => Raw}),
     {ok, _} = barrel_docdb:put_doc(Served, #{<<"id">> => <<"text">>,
@@ -352,6 +354,24 @@ t_json_only_client(Config) ->
     {ok, #{vv := VVRaw}} =
         barrel_docdb:get_doc_for_replication(Served, <<"raw">>),
     ?assertEqual(VVRaw, VV),
+    ok.
+
+%% The sync routes answer 404 for a database that does not exist and
+%% create nothing; a replication to it fails instead.
+t_unknown_db(Config) ->
+    Local = ?config(local, Config),
+    Name = <<"t_unknown_db_nowhere">>,
+    Url = list_to_binary(?config(base, Config) ++ "/db/" ++ binary_to_list(Name)),
+    {ok, 404, _, Body} =
+        hackney:request(post, <<Url/binary, "/_sync/changes">>,
+                        [{<<"content-type">>, <<"application/json">>}],
+                        <<"{}">>, [with_body]),
+    ?assertEqual(#{<<"error">> => <<"not_found">>}, json:decode(Body)),
+    {ok, _} = barrel_docdb:put_doc(Local, #{<<"id">> => <<"a">>}),
+    Endpoint = barrel_rep_transport_http:endpoint(Url),
+    {error, _} = barrel_rep:replicate(Local, Endpoint, push_opts()),
+    ?assertNot(barrel_docdb:db_exists(Name, #{})),
+    ?assertEqual({error, not_found}, barrel_docdb:db_pid(Name)),
     ok.
 
 %% Content type of the PUT that carried a document, from hackney's history.

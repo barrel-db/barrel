@@ -49,8 +49,10 @@ Run it again later to pick up new changes; it resumes from the checkpoint.
 
 ## How (over HTTP)
 
-The remote side is a URL under a running `barrel_server`. Build an endpoint,
-then pass the matching transport:
+The remote side is a URL under a running `barrel_server`. The database must
+exist there: replication does not create it, and an unknown database answers
+404. Create it first (`PUT /db/inventory`). Build an endpoint, then pass the
+matching transport:
 
 ```erlang
 Endpoint = barrel_rep_transport_http:endpoint(

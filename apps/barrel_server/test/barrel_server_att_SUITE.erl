@@ -62,6 +62,8 @@ init_per_testcase(TC, Config) ->
     {ok, _} = barrel_docdb:create_db(Local, #{
         data_dir => filename:join(?config(priv_dir, Config), "local")
     }),
+    %% replication never creates the served database
+    {ok, _} = barrel_server_dbs:ensure(list_to_binary(Served)),
     Endpoint = barrel_rep_transport_http:endpoint(
         list_to_binary(?config(base, Config) ++ "/db/" ++ Served)),
     [{local, Local}, {served, list_to_binary(Served)},

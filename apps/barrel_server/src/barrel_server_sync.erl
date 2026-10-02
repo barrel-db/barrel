@@ -246,7 +246,7 @@ get_att(Req) ->
 get_att_decision(Req) ->
     ok = barrel_hlc:maybe_sync_from_header(
         livery_req:header(?HLC_HEADER, Req, undefined)),
-    case barrel_server_dbs:ensure(livery_req:binding(<<"db">>, Req)) of
+    case ensure_existing(livery_req:binding(<<"db">>, Req)) of
         {ok, Handle} ->
             DbBin = maps:get(docdb, Handle),
             DocId = binding(<<"id">>, Req),
@@ -555,13 +555,17 @@ with_sync_db(Req, Fun) ->
     ok = barrel_hlc:maybe_sync_from_header(
         livery_req:header(?HLC_HEADER, Req, undefined)),
     Name = livery_req:binding(<<"db">>, Req),
-    case barrel_server_dbs:ensure(Name) of
+    case ensure_existing(Name) of
         {ok, Handle} -> Fun(maps:get(docdb, Handle));
         {error, invalid_name} ->
             json_resp(Req, 400, #{error => <<"invalid_name">>});
         {error, Reason} ->
             error_resp(Req, Reason)
     end.
+
+%% Replication never creates a database: an unknown one answers 404.
+ensure_existing(Name) ->
+    barrel_server_dbs:ensure(Name, #{must_exist => true}).
 
 binding(Name, Req) ->
     uri_string:percent_decode(livery_req:binding(Name, Req)).

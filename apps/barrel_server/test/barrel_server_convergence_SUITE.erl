@@ -51,7 +51,8 @@ init_per_testcase(TC, Config) ->
     }),
     Endpoint = barrel_rep_transport_http:endpoint(
         list_to_binary(?config(base, Config) ++ "/db/" ++ Served)),
-    %% lazy-create the served db so both sides exist up front
+    %% replication never creates the served database
+    {ok, _} = barrel_server_dbs:ensure(list_to_binary(Served)),
     {ok, _} = barrel_rep_transport_http:db_info(Endpoint),
     [{local, Local}, {served, list_to_binary(Served)},
      {endpoint, Endpoint} | Config].
