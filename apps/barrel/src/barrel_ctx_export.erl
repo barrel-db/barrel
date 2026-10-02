@@ -105,7 +105,7 @@ export_held(DbName, Dest, Opts, #{was_open := WasOpen, opts := HeldOpts}) ->
         {ok, Db} ->
             Checked = try
                           case policy_secret(DbName) of
-                              none -> {ok, facts(Db, OpenOpts)};
+                              none -> checked_facts(Db, OpenOpts);
                               Key -> {error, {policy_holds_secret, Key}}
                           end
                       after barrel:close(Db)
@@ -147,6 +147,10 @@ upgrade_needed({read_only_upgrade_needed, _}) -> true;
 upgrade_needed(T) when is_tuple(T) ->
     lists:any(fun upgrade_needed/1, tuple_to_list(T));
 upgrade_needed(_) -> false.
+
+%% An export carries the vector store; a database without one has none.
+checked_facts(#{vstore := _} = Db, OpenOpts) -> {ok, facts(Db, OpenOpts)};
+checked_facts(_DocsOnly, _OpenOpts) -> {error, no_vector_store}.
 
 facts(#{docdb := DbBin, vstore := VStore} = Db, OpenOpts) ->
     {ok, Info} = barrel_docdb:db_info(DbBin),

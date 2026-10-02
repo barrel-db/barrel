@@ -130,7 +130,8 @@
 -type db() :: #{
     name := binary(),
     docdb := binary(),
-    vstore := binary(),
+    %% absent on a plain database opened with `vectordb => none'
+    vstore => binary(),
     read_only => true,
     embedding => barrel_embedding_policy:policy(),
     embed => term(),
@@ -191,19 +192,38 @@ open(Name, Opts0) when (is_atom(Name) orelse is_binary(Name)),
                        is_map(Opts0) ->
     DbBin = to_name(Name),
     Opts = read_only_opts(Opts0),
-    case maps:get(embedding, Opts, undefined) of
-        undefined -> open_plain(DbBin, Opts);
-        stored -> open_stored(DbBin, Opts);
-        PolicyMap -> open_record(DbBin, Opts, PolicyMap)
+    case {maps:get(embedding, Opts, undefined), maps:get(vectordb, Opts, #{})} of
+        {undefined, none} -> open_docs_only(DbBin, Opts);
+        {undefined, _} -> open_plain(DbBin, Opts);
+        {_, none} -> {error, {invalid_option, vectordb}};
+        {stored, _} -> open_stored(DbBin, Opts);
+        {PolicyMap, _} -> open_record(DbBin, Opts, PolicyMap)
     end.
 
 %% `read_only => true' reaches both stores: docdb and vectordb refuse
 %% writes, record mode persists no policy and runs no indexer.
 read_only_opts(#{read_only := true} = Opts) ->
     Opts#{docdb => (maps:get(docdb, Opts, #{}))#{read_only => true},
-          vectordb => (maps:get(vectordb, Opts, #{}))#{read_only => true}};
+          vectordb => read_only_vec(maps:get(vectordb, Opts, #{}))};
 read_only_opts(Opts) ->
     maps:remove(read_only, Opts).
+
+read_only_vec(none) -> none;
+read_only_vec(VecConfig) -> VecConfig#{read_only => true}.
+
+%% `vectordb => none': the document store only. Vector calls answer
+%% `{error, no_vector_store}'.
+open_docs_only(DbBin, Opts) ->
+    EncSpec = maps:get(encryption, Opts, disabled),
+    DocOpts = put_encryption(maps:get(docdb, Opts, #{}), EncSpec),
+    case ensure_docdb(DbBin, DocOpts) of
+        {ok, _DbPid} ->
+            {ok, with_read_only(Opts, with_encryption(#{name => DbBin,
+                                                        docdb => DbBin},
+                                                      EncSpec))};
+        {error, _} = Err ->
+            Err
+    end.
 
 %% `embedding => stored' opens record mode with the policy persisted in
 %% the database (an imported copy carries its source's policy).
@@ -348,6 +368,8 @@ close(#{name := Name, docdb := DbBin, vstore := Store} = Db) ->
         _ -> ok
     end,
     _ = barrel_vectordb:stop(Store),
+    barrel_docdb:close_db(DbBin);
+close(#{docdb := DbBin}) ->
     barrel_docdb:close_db(DbBin).
 
 %% @doc Fork a composed database into a branch (timeline). The docdb
@@ -417,9 +439,14 @@ open_branch(#{embedding := Policy} = Db, BranchBin, Opts) ->
     end;
 open_branch(Db, BranchBin, Opts) ->
     open(BranchBin,
-         with_encryption(#{vectordb => maps:get(vectordb, Opts, #{}),
+         with_encryption(#{vectordb => maps:get(vectordb, Opts,
+                                                branch_vec(Db)),
                            docdb => maps:get(docdb, Opts, #{})},
                          maps:get(encryption, Db, disabled))).
+
+%% A branch of a database without a vector store has none either.
+branch_vec(#{vstore := _}) -> #{};
+branch_vec(_DocsOnly) -> none.
 
 %% @doc Merge a branch's edits back into its parent (see
 %% barrel_docdb:merge_branch/2). When the parent is a record-mode
@@ -454,6 +481,8 @@ delete(#{name := Name, docdb := DbBin, vstore := Store} = Db) ->
         _ -> ok
     end,
     _ = barrel_vectordb:destroy(Store),
+    barrel_docdb:delete_db(DbBin);
+delete(#{docdb := DbBin}) ->
     barrel_docdb:delete_db(DbBin).
 
 %% @doc Database metadata.
@@ -472,11 +501,14 @@ info(#{docdb := DbBin} = Db) ->
             Err
     end.
 
-%% @private The embedder identity under `embedder' in info/1.
-with_embedder(Db, Info) ->
+%% @private The embedder identity under `embedder' in info/1; none
+%% without a vector store.
+with_embedder(#{vstore := _} = Db, Info) ->
     {ok, Emb} = embedder_info(Db),
     Info#{embedder => maps:with([provider, model, revision, dimensions,
-                                 distance, preprocessing, fingerprint], Emb)}.
+                                 distance, preprocessing, fingerprint], Emb)};
+with_embedder(_DocsOnly, Info) ->
+    Info.
 
 %% @private Dimension and distance metric of the vector index.
 vector_space(Store) ->
@@ -894,14 +926,18 @@ vector_add(#{embedding := _}, _Id, _Text, _Metadata) ->
     %% explicit vectors via the `vector' put option).
     {error, record_mode};
 vector_add(#{vstore := Store}, Id, Text, Metadata) ->
-    barrel_vectordb:add(Store, Id, Text, Metadata).
+    barrel_vectordb:add(Store, Id, Text, Metadata);
+vector_add(_DocsOnly, _Id, _Text, _Metadata) ->
+    {error, no_vector_store}.
 
 %% @doc Add a document to the vector store with an explicit vector.
 -spec vector_add(db(), binary(), binary(), map(), [float()]) -> term().
 vector_add(#{embedding := _}, _Id, _Text, _Metadata, _Vector) ->
     {error, record_mode};
 vector_add(#{vstore := Store}, Id, Text, Metadata, Vector) ->
-    barrel_vectordb:add(Store, Id, Text, Metadata, Vector).
+    barrel_vectordb:add(Store, Id, Text, Metadata, Vector);
+vector_add(_DocsOnly, _Id, _Text, _Metadata, _Vector) ->
+    {error, no_vector_store}.
 
 %% @doc Add many documents to the vector store in one atomic batch.
 %%
@@ -917,17 +953,23 @@ vector_add_batch(#{vstore := Store}, Docs) ->
         explicit -> barrel_vectordb:add_vector_batch(Store, Docs);
         auto -> barrel_vectordb:add_batch(Store, Docs);
         mixed -> {error, mixed_batch}
-    end.
+    end;
+vector_add_batch(_DocsOnly, _Docs) ->
+    {error, no_vector_store}.
 
 %% @doc Get a stored vector entry by id.
 -spec vector_get(db(), binary()) -> term().
 vector_get(#{vstore := Store}, Id) ->
-    barrel_vectordb:get(Store, Id).
+    barrel_vectordb:get(Store, Id);
+vector_get(_DocsOnly, _Id) ->
+    {error, no_vector_store}.
 
 %% @doc Delete a vector entry by id.
 -spec vector_delete(db(), binary()) -> term().
 vector_delete(#{vstore := Store}, Id) ->
-    barrel_vectordb:delete(Store, Id).
+    barrel_vectordb:delete(Store, Id);
+vector_delete(_DocsOnly, _Id) ->
+    {error, no_vector_store}.
 
 %% @doc Semantic search over the vector store.
 -spec search(db(), binary(), map()) -> term().
@@ -938,17 +980,23 @@ search(#{embedding := _, embed := Embed, vstore := Store}, Query, Opts) ->
         {error, Reason} -> {error, {embed_failed, Reason}}
     end;
 search(#{vstore := Store}, Query, Opts) ->
-    barrel_vectordb:search(Store, Query, Opts).
+    barrel_vectordb:search(Store, Query, Opts);
+search(_DocsOnly, _Query, _Opts) ->
+    {error, no_vector_store}.
 
 %% @doc Vector search with an explicit query vector.
 -spec search_vector(db(), [float()], map()) -> term().
 search_vector(#{vstore := Store}, Vector, Opts) ->
-    barrel_vectordb:search_vector(Store, Vector, Opts).
+    barrel_vectordb:search_vector(Store, Vector, Opts);
+search_vector(_DocsOnly, _Vector, _Opts) ->
+    {error, no_vector_store}.
 
 %% @doc BM25 keyword search.
 -spec search_bm25(db(), binary(), map()) -> term().
 search_bm25(#{vstore := Store}, Query, Opts) ->
-    barrel_vectordb:search_bm25(Store, Query, Opts).
+    barrel_vectordb:search_bm25(Store, Query, Opts);
+search_bm25(_DocsOnly, _Query, _Opts) ->
+    {error, no_vector_store}.
 
 %% @doc Hybrid (vector + BM25) search.
 %% On record-mode databases barrel embeds the query itself and
@@ -963,7 +1011,9 @@ search_hybrid(#{embedding := _, embed := Embed, vstore := Store}, Query, Opts) -
             {error, {embed_failed, Reason}}
     end;
 search_hybrid(#{vstore := Store}, Query, Opts) ->
-    barrel_vectordb:search_hybrid(Store, Query, Opts).
+    barrel_vectordb:search_hybrid(Store, Query, Opts);
+search_hybrid(_DocsOnly, _Query, _Opts) ->
+    {error, no_vector_store}.
 
 %% @doc Embed a text with the database's own embedder: the one the
 %% embedding policy configured on a record-mode database, the vector
@@ -973,20 +1023,24 @@ search_hybrid(#{vstore := Store}, Query, Opts) ->
 embed(#{embedding := _, embed := Embed}, Text) ->
     embed_one(Text, Embed);
 embed(#{vstore := Store}, Text) ->
-    barrel_vectordb:embed(Store, Text).
+    barrel_vectordb:embed(Store, Text);
+embed(_DocsOnly, _Text) ->
+    {error, no_vector_store}.
 
 %% @doc Embed several texts in one provider call (see {@link embed/2}).
 -spec embed_batch(db(), [binary()]) -> {ok, [[float()]]} | {error, term()}.
 embed_batch(#{embedding := _, embed := Embed}, Texts) ->
     embed_many(Texts, Embed);
 embed_batch(#{vstore := Store}, Texts) ->
-    barrel_vectordb:embed_batch(Store, Texts).
+    barrel_vectordb:embed_batch(Store, Texts);
+embed_batch(_DocsOnly, _Texts) ->
+    {error, no_vector_store}.
 
 %% @doc Describe the database's embedder: `configured', `providers' and
 %% `dimension' (see `barrel_embed:info/1'), plus its identity: provider,
 %% model, revision, dimensions, distance, preprocessing and fingerprint
 %% (see {@link barrel_embed_fingerprint}).
--spec embedder_info(db()) -> {ok, map()}.
+-spec embedder_info(db()) -> {ok, map()} | {error, no_vector_store}.
 embedder_info(#{embedding := Policy, embed := Embed, vstore := Store,
                 dimensions := Dim}) ->
     Info = barrel_embed:info(Embed),
@@ -997,7 +1051,9 @@ embedder_info(#{vstore := Store}) ->
     {ok, Info} = barrel_vectordb:embedder_info(Store),
     {Dim, Distance} = vector_space(Store),
     {ok, maps:merge(Info, barrel_embed_fingerprint:identity(Info, Dim,
-                                                            Distance, none))}.
+                                                            Distance, none))};
+embedder_info(_DocsOnly) ->
+    {error, no_vector_store}.
 
 %% @doc The fingerprint `embedder_info/1' would report for a database
 %% opened in record mode with `Policy', vectors of `Dim' dimensions and
@@ -1021,7 +1077,9 @@ policy_fingerprint(_Policy, _Dim, _Distance) ->
 %% @doc Vector store statistics.
 -spec vector_stats(db()) -> term().
 vector_stats(#{vstore := Store}) ->
-    barrel_vectordb:stats(Store).
+    barrel_vectordb:stats(Store);
+vector_stats(_DocsOnly) ->
+    {error, no_vector_store}.
 
 %%====================================================================
 %% Internal

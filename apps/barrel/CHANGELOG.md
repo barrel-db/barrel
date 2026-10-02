@@ -6,6 +6,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [1.11.0] - 2026-10-02
 
 ### Added
+- `open/2` takes `vectordb => none`: a plain database with the document store only, no vector store and no RocksDB for it. Vector calls and the `vector_top_k`, `bm25_top_k` and `hybrid_top_k` table functions answer `{error, no_vector_store}`; `info/1` reports no embedder; a branch has no vector store either; a context export refuses such a database and a slice of it holds documents only. Record mode with `vectordb => none` answers `{error, {invalid_option, vectordb}}`. barrel_dbs keeps such a handle open like any other.
 - `embedding_fingerprint/3`: the fingerprint `embedder_info/1` would report for a record-mode database opened with a policy, a dimension and a distance, computed without starting the embedder. barrel_spaces checks it before reopening a space.
 
 ### Changed

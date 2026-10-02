@@ -79,7 +79,8 @@ configured_registry() ->
 %% <li>`session_ttl' - default session TTL in seconds (3600)</li>
 %% <li>`ttl_sweep_interval' - doc TTL sweep of the space db in ms
 %%     (60000; sessions rely on it)</li>
-%% <li>`docdb', `vectordb' - extra store config</li>
+%% <li>`docdb', `vectordb' - extra store config; `vectordb => none' for a
+%%     space without a vector store (documents and queries only)</li>
 %% <li>`embedding' - a record-mode policy (see barrel:open/2). The space
 %%     document records its fields and the embedder's identity, never the
 %%     embedder config, so any node can reopen the space in record mode
@@ -305,6 +306,8 @@ verified(Policy, #{<<"fingerprint">> := Fp, <<"dimensions">> := Dim,
 verified(Policy, _NoFingerprint) ->
     {ok, Policy}.
 
+vec_opts(_Id, none) ->
+    none;
 vec_opts(_Id, #{db_path := _} = VecOpts) ->
     VecOpts;
 vec_opts(Id, VecOpts) ->
@@ -312,6 +315,8 @@ vec_opts(Id, VecOpts) ->
 
 %% The vector store is not replicated: record the default layout
 %% relative to data_dir so each node resolves it locally.
+recorded_vec_path(_Id, none) ->
+    #{<<"vectordb">> => <<"none">>};
 recorded_vec_path(Id, #{db_path := Path}) ->
     Abs = filename:absname(iolist_to_binary(Path)),
     case Abs =:= filename:absname(iolist_to_binary(default_vec_path(Id))) of
@@ -319,6 +324,8 @@ recorded_vec_path(Id, #{db_path := Path}) ->
         false -> #{<<"vec_path">> => Abs, <<"vec_custom">> => true}
     end.
 
+vec_opts_from(_Id, #{<<"vectordb">> := <<"none">>}, _VecOpts) ->
+    none;
 vec_opts_from(_Id, _Info, #{db_path := _} = VecOpts) ->
     VecOpts;
 vec_opts_from(Id, Info, VecOpts) ->

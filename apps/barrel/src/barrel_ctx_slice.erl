@@ -147,7 +147,9 @@ plain_vectors(Db, Found, true) ->
 dimensions(#{dimensions := D}) -> D;
 dimensions(#{vstore := VStore}) ->
     {ok, #{dimension := D}} = barrel_vectordb:stats(VStore),
-    D.
+    D;
+dimensions(_DocsOnly) ->
+    undefined.
 
 remote_policy(#{embedding := P}) when is_map(P) ->
     {ok, Policy} = barrel_embedding_policy:validate(P),

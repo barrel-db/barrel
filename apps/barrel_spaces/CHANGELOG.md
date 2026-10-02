@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `create_space/1` and `open_space/2` take `embedding`, a record-mode policy. The space document records the policy's fields and the embedder's identity (provider, model, dimensions, distance, fingerprint), never the embedder config, which can hold paths and API keys while the registry replicates.
 - A space created in record mode reopens in record mode: `open_space/2` without `embedding` rebuilds the policy from the recorded fields and the embedder of the `embedder` application env, on any node. The embedder must carry the recorded fingerprint: `{error, {embedder_mismatch, _}}` otherwise, `{error, {embedder_required, Fingerprint}}` when the node has none.
 
+- `create_space/1` takes `vectordb => none` for a space without a vector store; the space document records it and the space reopens without one on every node.
+
 ### Changed
 - `drop_space/1,2` opens the space as a plain database before deleting it, so dropping needs no embedder.
 - Requires barrel `~> 1.11`.
