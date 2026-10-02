@@ -1,0 +1,127 @@
+%% BM25 Test Corpus - 100 Technical Documents
+%% Format: [{DocId, Text}]
+%% Topics: Erlang/OTP (1-20), Python/Data Science (21-40),
+%%         Java/Enterprise (41-60), Distributed Systems (61-80),
+%%         General Programming (81-100)
+
+[
+%% ============================================================
+%% ERLANG/OTP (docs 1-20)
+%% ============================================================
+{<<"doc1">>, <<"Erlang is a functional programming language designed for building concurrent and fault-tolerant systems with high availability">>},
+{<<"doc2">>, <<"The OTP framework provides behaviors like gen_server and supervisor for building robust Erlang applications">>},
+{<<"doc3">>, <<"Erlang processes are lightweight and communicate through asynchronous message passing without shared memory">>},
+{<<"doc4">>, <<"Pattern matching in Erlang allows elegant handling of different message types and data structures">>},
+{<<"doc5">>, <<"Hot code swapping in Erlang enables updating running systems without stopping them or losing state">>},
+{<<"doc6">>, <<"Erlang supervision trees provide fault tolerance by monitoring child processes and restarting failed ones">>},
+{<<"doc7">>, <<"The BEAM virtual machine executes Erlang bytecode and provides soft real-time garbage collection">>},
+{<<"doc8">>, <<"ETS tables in Erlang provide concurrent in-memory storage with constant time lookups">>},
+{<<"doc9">>, <<"GenServer is a behavior module that implements a generic server process in the OTP framework">>},
+{<<"doc10">>, <<"Erlang binary syntax makes parsing network protocols and file formats straightforward">>},
+{<<"doc11">>, <<"Mnesia is a distributed database management system written in Erlang with transactions">>},
+{<<"doc12">>, <<"Erlang ports allow communication with external programs through standard input output">>},
+{<<"doc13">>, <<"The Erlang scheduler distributes processes across available CPU cores automatically">>},
+{<<"doc14">>, <<"Erlang NIFs native implemented functions allow calling C code for performance critical operations">>},
+{<<"doc15">>, <<"Dialyzer performs static analysis on Erlang code to find type errors and unreachable code">>},
+{<<"doc16">>, <<"Rebar3 is the standard build tool for Erlang projects managing dependencies and releases">>},
+{<<"doc17">>, <<"Erlang records provide syntactic sugar for working with tuples as named fields">>},
+{<<"doc18">>, <<"The gen_statem behavior implements finite state machines in Erlang OTP applications">>},
+{<<"doc19">>, <<"Erlang distributed nodes can communicate transparently across network boundaries">>},
+{<<"doc20">>, <<"Common Test is the testing framework included in OTP for unit and integration tests">>},
+
+%% ============================================================
+%% PYTHON/DATA SCIENCE (docs 21-40)
+%% ============================================================
+{<<"doc21">>, <<"Python is a versatile programming language widely used in data science and machine learning applications">>},
+{<<"doc22">>, <<"NumPy provides efficient numerical computing with multi-dimensional arrays and mathematical functions">>},
+{<<"doc23">>, <<"Pandas offers powerful data structures like DataFrame for data manipulation and analysis">>},
+{<<"doc24">>, <<"Scikit-learn implements machine learning algorithms for classification regression and clustering">>},
+{<<"doc25">>, <<"TensorFlow is an open source platform for building and deploying machine learning models">>},
+{<<"doc26">>, <<"Jupyter notebooks combine code documentation and visualizations in interactive documents">>},
+{<<"doc27">>, <<"Matplotlib creates static animated and interactive visualizations in Python">>},
+{<<"doc28">>, <<"PyTorch provides dynamic computational graphs for deep learning research">>},
+{<<"doc29">>, <<"Python virtual environments isolate project dependencies avoiding version conflicts">>},
+{<<"doc30">>, <<"List comprehensions in Python provide concise syntax for creating lists from iterables">>},
+{<<"doc31">>, <<"Python decorators modify function behavior without changing function code directly">>},
+{<<"doc32">>, <<"The Python GIL global interpreter lock limits true parallelism in CPU bound code">>},
+{<<"doc33">>, <<"Asyncio enables asynchronous programming in Python for concurrent IO operations">>},
+{<<"doc34">>, <<"Python type hints improve code readability and enable static analysis tools">>},
+{<<"doc35">>, <<"Keras provides a high-level API for building neural networks on top of TensorFlow">>},
+{<<"doc36">>, <<"Python generators produce values lazily saving memory for large datasets">>},
+{<<"doc37">>, <<"Flask is a lightweight web framework for building REST APIs in Python">>},
+{<<"doc38">>, <<"Natural language processing with spaCy enables text analysis and entity extraction">>},
+{<<"doc39">>, <<"Python context managers handle resource cleanup using the with statement">>},
+{<<"doc40">>, <<"XGBoost implements gradient boosting for high performance machine learning">>},
+
+%% ============================================================
+%% JAVA/ENTERPRISE (docs 41-60)
+%% ============================================================
+{<<"doc41">>, <<"Java is a statically typed object-oriented programming language for enterprise applications">>},
+{<<"doc42">>, <<"Spring Framework provides dependency injection and aspect-oriented programming for Java">>},
+{<<"doc43">>, <<"Java streams enable functional-style operations on collections with lazy evaluation">>},
+{<<"doc44">>, <<"Hibernate maps Java objects to database tables implementing object-relational mapping">>},
+{<<"doc45">>, <<"Java garbage collection automatically reclaims memory from unreachable objects">>},
+{<<"doc46">>, <<"Maven manages project builds dependencies and documentation in Java projects">>},
+{<<"doc47">>, <<"Java annotations provide metadata that can be processed at compile or runtime">>},
+{<<"doc48">>, <<"The Java Virtual Machine executes bytecode and provides memory management">>},
+{<<"doc49">>, <<"JUnit is the standard unit testing framework for Java applications">>},
+{<<"doc50">>, <<"Java threads and the concurrent utilities package support multithreaded programming">>},
+{<<"doc51">>, <<"Spring Boot simplifies creating production-ready Spring applications with minimal configuration">>},
+{<<"doc52">>, <<"Java interfaces define contracts that classes must implement enabling polymorphism">>},
+{<<"doc53">>, <<"Microservices architecture decomposes applications into independently deployable services">>},
+{<<"doc54">>, <<"Java generics provide type safety for collections and eliminate casting">>},
+{<<"doc55">>, <<"JDBC provides a standard API for connecting Java applications to databases">>},
+{<<"doc56">>, <<"Java lambda expressions enable functional programming patterns since version 8">>},
+{<<"doc57">>, <<"Servlet containers like Tomcat handle HTTP requests for Java web applications">>},
+{<<"doc58">>, <<"Java optional type helps avoid null pointer exceptions in code">>},
+{<<"doc59">>, <<"RESTful web services use HTTP methods to create scalable APIs in Java">>},
+{<<"doc60">>, <<"Java reflection allows inspecting and modifying class structure at runtime">>},
+
+%% ============================================================
+%% DISTRIBUTED SYSTEMS (docs 61-80)
+%% ============================================================
+{<<"doc61">>, <<"Distributed systems coordinate multiple computers to appear as a single coherent system">>},
+{<<"doc62">>, <<"The CAP theorem states that distributed systems cannot have consistency availability and partition tolerance simultaneously">>},
+{<<"doc63">>, <<"Consensus algorithms like Raft and Paxos ensure agreement in distributed systems despite failures">>},
+{<<"doc64">>, <<"Vector clocks track causality and ordering of events in distributed systems">>},
+{<<"doc65">>, <<"Load balancers distribute incoming requests across multiple servers for scalability">>},
+{<<"doc66">>, <<"Eventual consistency allows replicas to diverge temporarily then converge over time">>},
+{<<"doc67">>, <<"Distributed hash tables partition data across nodes using consistent hashing">>},
+{<<"doc68">>, <<"Two-phase commit coordinates distributed transactions across multiple databases">>},
+{<<"doc69">>, <<"Replication provides fault tolerance by maintaining copies of data on multiple nodes">>},
+{<<"doc70">>, <<"Sharding partitions data horizontally across nodes to handle large datasets">>},
+{<<"doc71">>, <<"Message queues decouple components enabling asynchronous communication between services">>},
+{<<"doc72">>, <<"Service discovery allows services to find each other in dynamic environments">>},
+{<<"doc73">>, <<"Circuit breakers prevent cascading failures in distributed systems">>},
+{<<"doc74">>, <<"Leader election algorithms choose a coordinator among distributed processes">>},
+{<<"doc75">>, <<"Gossip protocols propagate information across nodes in a decentralized manner">>},
+{<<"doc76">>, <<"CRDTs conflict-free replicated data types enable automatic conflict resolution">>},
+{<<"doc77">>, <<"Distributed tracing tracks requests as they flow through microservices">>},
+{<<"doc78">>, <<"Byzantine fault tolerance handles malicious or arbitrary failures in distributed systems">>},
+{<<"doc79">>, <<"Saga patterns manage distributed transactions through compensating operations">>},
+{<<"doc80">>, <<"Idempotency ensures operations can be safely retried without unintended effects">>},
+
+%% ============================================================
+%% GENERAL PROGRAMMING (docs 81-100)
+%% ============================================================
+{<<"doc81">>, <<"Functional programming emphasizes immutability pure functions and declarative code">>},
+{<<"doc82">>, <<"Object-oriented programming organizes code into classes with encapsulated data and behavior">>},
+{<<"doc83">>, <<"Version control systems like Git track changes and enable collaboration on code">>},
+{<<"doc84">>, <<"Continuous integration automatically builds and tests code changes frequently">>},
+{<<"doc85">>, <<"Design patterns provide reusable solutions to common software design problems">>},
+{<<"doc86">>, <<"Test-driven development writes tests before implementation to guide design">>},
+{<<"doc87">>, <<"Code review improves quality by having peers examine changes before merging">>},
+{<<"doc88">>, <<"Refactoring improves code structure without changing external behavior">>},
+{<<"doc89">>, <<"Technical debt accumulates when shortcuts are taken in code quality">>},
+{<<"doc90">>, <<"API design defines interfaces that are easy to use correctly and hard to misuse">>},
+{<<"doc91">>, <<"Debugging systematically identifies and removes defects from software">>},
+{<<"doc92">>, <<"Algorithms analyze and solve computational problems efficiently">>},
+{<<"doc93">>, <<"Data structures organize information for efficient access and modification">>},
+{<<"doc94">>, <<"Recursion solves problems by breaking them into smaller identical subproblems">>},
+{<<"doc95">>, <<"Memory management allocates and deallocates storage for program data">>},
+{<<"doc96">>, <<"Concurrency executes multiple computations during overlapping time periods">>},
+{<<"doc97">>, <<"Parallelism executes multiple computations simultaneously on multiple processors">>},
+{<<"doc98">>, <<"Asynchronous programming handles operations without blocking the main thread">>},
+{<<"doc99">>, <<"Error handling manages exceptional conditions gracefully in programs">>},
+{<<"doc100">>, <<"Performance optimization improves program speed and resource efficiency">>}
+].

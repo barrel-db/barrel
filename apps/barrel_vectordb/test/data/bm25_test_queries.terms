@@ -1,0 +1,149 @@
+%% BM25 Test Queries with Relevance Judgments
+%% Format: [{Query, #{relevant => [DocNums], partial => [DocNums]}}]
+%%
+%% relevant: Documents that are highly relevant (should appear in top-K)
+%% partial: Documents that are somewhat relevant (acceptable in results)
+%%
+%% DocNums refer to doc1, doc2, etc. (as integers 1-100)
+
+[
+%% ============================================================
+%% SINGLE-TERM QUERIES
+%% ============================================================
+
+%% Q1: Erlang - should match Erlang/OTP cluster
+{<<"erlang">>, #{
+    relevant => [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20],
+    partial => [61]  %% distributed systems mentions Erlang concepts
+}},
+
+%% Q2: Python - should match Python/Data Science cluster
+{<<"python">>, #{
+    relevant => [21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40],
+    partial => []
+}},
+
+%% Q3: Java - should match Java/Enterprise cluster
+{<<"java">>, #{
+    relevant => [41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60],
+    partial => []
+}},
+
+%% Q4: Distributed - should match distributed systems cluster
+{<<"distributed">>, #{
+    relevant => [11, 19, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80],
+    partial => [53]  %% microservices are distributed
+}},
+
+%% ============================================================
+%% MULTI-TERM QUERIES (both terms needed for top rank)
+%% ============================================================
+
+%% Q5: Erlang concurrency - specific to Erlang's concurrency model
+{<<"erlang concurrency">>, #{
+    relevant => [1, 3, 13],  %% concurrent, message passing, scheduler
+    partial => [6, 7, 8, 9, 19]  %% other Erlang docs
+}},
+
+%% Q6: Python machine learning
+{<<"python machine learning">>, #{
+    relevant => [21, 24, 25, 28, 35, 40],  %% ML-related Python docs
+    partial => [22, 23, 26, 27]  %% data science Python docs
+}},
+
+%% Q7: Java spring framework
+{<<"java spring framework">>, #{
+    relevant => [42, 51],  %% Spring and Spring Boot
+    partial => [41, 44, 46, 49, 53, 57, 59]  %% other Java enterprise docs
+}},
+
+%% Q8: Distributed consensus
+{<<"distributed consensus">>, #{
+    relevant => [63, 74],  %% Raft/Paxos, leader election
+    partial => [62, 64, 66, 68, 69, 78]  %% CAP, vector clocks, eventual consistency
+}},
+
+%% ============================================================
+%% CROSS-TOPIC QUERIES
+%% ============================================================
+
+%% Q9: Fault tolerant systems - crosses Erlang and distributed systems
+{<<"fault tolerant">>, #{
+    relevant => [1, 6, 69, 73, 78],  %% Erlang fault tolerance + distributed fault tolerance
+    partial => [2, 9, 18, 61, 63, 74]
+}},
+
+%% Q10: Functional programming - crosses Erlang, Python, Java, General
+{<<"functional programming">>, #{
+    relevant => [1, 4, 43, 56, 81],  %% functional in each domain
+    partial => [30, 31, 36]  %% Python functional features
+}},
+
+%% Q11: Memory management - crosses Java, Erlang, General
+{<<"memory management">>, #{
+    relevant => [7, 45, 48, 95],  %% BEAM GC, Java GC, JVM, general
+    partial => [8, 36]  %% ETS, generators
+}},
+
+%% Q12: Testing framework
+{<<"testing framework">>, #{
+    relevant => [20, 49, 86],  %% Common Test, JUnit, TDD
+    partial => [84, 87]  %% CI, code review
+}},
+
+%% ============================================================
+%% RARE TERM QUERIES (high IDF)
+%% ============================================================
+
+%% Q13: Supervisor behavior - very Erlang-specific
+{<<"supervisor behavior">>, #{
+    relevant => [2, 6, 9, 18],  %% OTP behaviors, supervision
+    partial => []
+}},
+
+%% Q14: DataFrame pandas - very Python-specific
+{<<"dataframe pandas">>, #{
+    relevant => [23],  %% Pandas DataFrame doc
+    partial => [22, 26, 27]  %% related data science docs
+}},
+
+%% Q15: Hibernate mapping - very Java-specific
+{<<"hibernate mapping">>, #{
+    relevant => [44],  %% Hibernate ORM
+    partial => [55]  %% JDBC related
+}},
+
+%% Q16: Byzantine fault
+{<<"byzantine fault">>, #{
+    relevant => [78],  %% BFT doc
+    partial => [63, 73, 74]  %% related distributed concepts
+}},
+
+%% ============================================================
+%% COMMON TERM QUERIES (low IDF)
+%% ============================================================
+
+%% Q17: Programming language - appears in many docs
+{<<"programming language">>, #{
+    relevant => [1, 4, 21, 41, 81, 82],  %% explicitly mention "programming language"
+    partial => [30, 43, 52, 56]  %% programming concepts
+}},
+
+%% Q18: System - very common term
+{<<"system">>, #{
+    relevant => [1, 6, 11, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80],
+    partial => [19, 53, 83]
+}},
+
+%% Q19: Code - generic term
+{<<"code">>, #{
+    relevant => [5, 14, 15, 34, 47, 56, 81, 83, 84, 86, 87, 88, 89],
+    partial => [31, 60]
+}},
+
+%% Q20: Data - very common across all topics
+{<<"data">>, #{
+    relevant => [8, 21, 22, 23, 36, 44, 67, 70, 76, 82, 93],
+    partial => [24, 25, 26, 27, 55]
+}}
+].

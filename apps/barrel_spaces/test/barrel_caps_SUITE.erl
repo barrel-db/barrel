@@ -19,13 +19,15 @@
 ]).
 
 -export([t_logical_scope_custom_registry/1]).
+-export([t_hash_stored_as_hex/1, t_raw_hash_still_verifies/1]).
 
 -include_lib("common_test/include/ct.hrl").
 -include_lib("stdlib/include/assert.hrl").
 
 all() ->
     [t_grant_and_verify, t_rights_ladder, t_verify_matrix, t_revoke,
-     t_auth_context, t_drop_space_revokes, t_list_strips_hashes, t_logical_scope_custom_registry].
+     t_auth_context, t_drop_space_revokes, t_list_strips_hashes, t_logical_scope_custom_registry,
+     t_hash_stored_as_hex, t_raw_hash_still_verifies].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(barrel_spaces),
@@ -191,4 +193,28 @@ t_logical_scope_custom_registry(_Config) ->
     after
         application:unset_env(barrel_spaces, registry_db)
     end,
+    ok.
+
+%% The registry replicates as JSON: the stored hash is lowercase hex.
+t_hash_stored_as_hex(Config) ->
+    Space = ?config(space, Config),
+    {ok, Token, #{<<"token_id">> := Id}} =
+        barrel_caps:grant(Space, #{rights => [read]}),
+    {ok, Doc} = barrel_docdb:get_doc(barrel_spaces:registry_db(),
+                                     <<"grant:", Id/binary>>),
+    ?assertEqual(binary:encode_hex(crypto:hash(sha256, Token), lowercase),
+                 maps:get(<<"token_hash">>, Doc)),
+    ?assertMatch(<<_/binary>>, iolist_to_binary(json:encode(Doc))),
+    ok.
+
+%% A grant minted before 1.3.0 holds the raw 32-byte hash.
+t_raw_hash_still_verifies(Config) ->
+    Space = ?config(space, Config),
+    {ok, Token, #{<<"token_id">> := Id}} =
+        barrel_caps:grant(Space, #{rights => [read]}),
+    Registry = barrel_spaces:registry_db(),
+    {ok, Doc} = barrel_docdb:get_doc(Registry, <<"grant:", Id/binary>>),
+    {ok, _} = barrel_docdb:put_doc(
+                Registry, Doc#{<<"token_hash">> => crypto:hash(sha256, Token)}),
+    {ok, _} = barrel_caps:verify(Token, Space, read),
     ok.

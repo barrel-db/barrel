@@ -3,6 +3,11 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.3.0] - 2026-10-01
+
+### Changed
+- `barrel_caps:grant/2` stores `token_hash` as lowercase hex, so a grant document is valid JSON and the spaces registry replicates over HTTP. `verify/3` also accepts the raw 32-byte hash of grants minted before 1.3.0; they keep that form until reminted, and replicate over HTTP only between peers running barrel_docdb 1.8.0 and barrel_server 1.11.0.
+
 ## [1.2.2] - 2026-09-24
 
 ### Fixed

@@ -25,6 +25,8 @@ priv/*.dylib
 
 # Runtime data
 **/data/
+# test fixtures
+!apps/barrel_vectordb/test/data/
 **/log/
 
 # Python (embed / rerank venvs)

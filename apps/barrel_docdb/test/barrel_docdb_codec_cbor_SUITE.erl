@@ -14,6 +14,8 @@
 -export([all/0, groups/0, init_per_suite/1, end_per_suite/1]).
 -export([init_per_group/2, end_per_group/2]).
 -export([init_per_testcase/2, end_per_testcase/2]).
+-export([wire_text_stays_text/1, wire_bytes_for_non_utf8/1,
+         wire_roundtrip_nested/1]).
 
 %% Test cases - varint
 -export([
@@ -89,7 +91,7 @@
 
 all() ->
     [{group, varint}, {group, cbor_primitives}, {group, cbor_containers},
-     {group, record}, {group, json}, {group, iterator}].
+     {group, record}, {group, json}, {group, iterator}, {group, wire}].
 
 groups() ->
     [
@@ -148,6 +150,11 @@ groups() ->
             find_path_array,
             decode_value_primitive,
             decode_value_nested
+        ]},
+        {wire, [sequence], [
+            wire_text_stays_text,
+            wire_bytes_for_non_utf8,
+            wire_roundtrip_nested
         ]}
     ].
 
@@ -514,3 +521,29 @@ decode_value_nested(_Config) ->
         {error, not_implemented} ->
             ok
     end.
+
+%%====================================================================
+%% Wire encoding
+%%====================================================================
+
+%% Valid UTF-8 encodes exactly as the storage encoding does.
+wire_text_stays_text(_Config) ->
+    Doc = #{<<"id">> => <<"a">>, <<"t">> => <<"caf\303\251">>,
+            <<"n">> => [1, 2.5, true, null]},
+    ?assertEqual(barrel_docdb_codec_cbor:encode_cbor(Doc),
+                 barrel_docdb_codec_cbor:encode_wire(Doc)).
+
+%% A binary that is not UTF-8 is a byte string (major type 2).
+wire_bytes_for_non_utf8(_Config) ->
+    ?assertEqual(<<16#44, 255, 0, 254, 1>>,
+                 barrel_docdb_codec_cbor:encode_wire(<<255, 0, 254, 1>>)),
+    ?assertEqual(<<16#62, "ok">>,
+                 barrel_docdb_codec_cbor:encode_wire(<<"ok">>)).
+
+wire_roundtrip_nested(_Config) ->
+    Raw = crypto:hash(sha256, <<"token">>),
+    Doc = #{<<"id">> => <<"g">>, <<"h">> => Raw,
+            <<"l">> => [Raw, #{<<"k">> => Raw, <<"s">> => <<"text">>}],
+            <<"f">> => false},
+    ?assertEqual(Doc, barrel_docdb_codec_cbor:decode_cbor(
+                        barrel_docdb_codec_cbor:encode_wire(Doc))).

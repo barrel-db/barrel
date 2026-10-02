@@ -131,7 +131,7 @@ get_doc(Req) ->
                 json_resp(Req, 200, #{
                     doc => Doc,
                     version => Token,
-                    vv => base64:encode(VVBin),
+                    vv => vv_to_wire(accepts_cbor(Req), VVBin),
                     deleted => Deleted
                 });
             {error, Reason} ->
@@ -143,7 +143,7 @@ put_version(Req) ->
     with_sync_db(Req, fun(DbBin) ->
         DocId = binding(<<"id">>, Req),
         with_json(Req, fun(Body) ->
-            case put_version_fields(Body) of
+            case put_version_fields(request_cbor(Req), Body) of
                 {ok, Doc0, Token, VVBin, Deleted} ->
                     Doc = Doc0#{<<"id">> => DocId},
                     case barrel_docdb:put_version(DbBin, Doc, Token,
@@ -479,17 +479,24 @@ changes_opts(Body) ->
             {error, <<"bad_since">>}
     end.
 
-put_version_fields(#{<<"doc">> := Doc, <<"version">> := Token,
-                     <<"vv">> := VVB64} = Body)
-        when is_map(Doc), is_binary(Token), is_binary(VVB64) ->
+put_version_fields(Cbor, #{<<"doc">> := Doc, <<"version">> := Token,
+                           <<"vv">> := VV} = Body)
+        when is_map(Doc), is_binary(Token), is_binary(VV) ->
     try
-        {ok, Doc, Token, base64:decode(VVB64),
+        {ok, Doc, Token, vv_from_wire(Cbor, VV),
          maps:get(<<"deleted">>, Body, false) =:= true}
     catch
         _:_ -> error
     end;
-put_version_fields(_) ->
+put_version_fields(_Cbor, _) ->
     error.
+
+%% The version vector is a byte string in CBOR, base64 in JSON.
+vv_to_wire(true, VV) -> VV;
+vv_to_wire(false, VV) -> base64:encode(VV).
+
+vv_from_wire(true, VV) -> VV;
+vv_from_wire(false, VV) -> base64:decode(VV).
 
 att_entry_to_wire(#{seq := Seq, origin := Origin, op := Op, id := Id,
                     name := Name, digest := Digest, length := Length,
@@ -569,7 +576,7 @@ read_json(Req) ->
     case read_raw(Req) of
         {ok, Bin} ->
             case content_hash_ok(Req, Bin) of
-                ok -> decode_json(Bin);
+                ok -> decode_body(content_type(Req), Bin);
                 {error, _} = Err -> Err
             end;
         {error, _} = Err ->
@@ -603,16 +610,57 @@ content_hash_ok(Req, Bin) ->
             end
     end.
 
-decode_json(<<>>) -> {ok, #{}};
-decode_json(Bin) ->
+%% A replication client from barrel_docdb 1.8 sends CBOR when a document
+%% holds a binary JSON cannot carry; anything else is JSON.
+decode_body(_ContentType, <<>>) -> {ok, #{}};
+decode_body(<<"application/cbor", _/binary>>, Bin) ->
+    try barrel_docdb_codec_cbor:decode_cbor(Bin) of
+        #{} = Body -> {ok, Body};
+        _ -> {error, bad_cbor}
+    catch _:_ -> {error, bad_cbor}
+    end;
+decode_body(_ContentType, Bin) ->
     try {ok, json:decode(Bin)}
     catch _:_ -> {error, bad_json}
     end.
 
-json_resp(_Req, Status, Term) ->
-    Headers = [?JSON_CT,
+content_type(Req) ->
+    string:lowercase(livery_req:header(<<"content-type">>, Req, <<>>)).
+
+request_cbor(Req) ->
+    case content_type(Req) of
+        <<"application/cbor", _/binary>> -> true;
+        _ -> false
+    end.
+
+%% CBOR to a client that accepts it, JSON otherwise; a body JSON cannot
+%% carry (a binary that is not UTF-8) to a JSON-only client is a 406.
+json_resp(Req, Status, Term) ->
+    case encode_resp(accepts_cbor(Req), Term) of
+        {ContentType, Body} ->
+            resp(Status, ContentType, Body);
+        not_acceptable ->
+            resp(406, <<"application/json">>,
+                 json:encode(#{error => <<"not_acceptable">>}))
+    end.
+
+resp(Status, ContentType, Body) ->
+    Headers = [{<<"content-type">>, ContentType},
                {?HLC_HEADER, hlc_to_wire(barrel_hlc:get_hlc())}],
-    livery_resp:new(Status, Headers, {full, json:encode(Term)}).
+    livery_resp:new(Status, Headers, {full, Body}).
+
+encode_resp(true, Term) ->
+    {<<"application/cbor">>, barrel_docdb_codec_cbor:encode_wire(Term)};
+encode_resp(false, Term) ->
+    try json:encode(Term) of
+        Json -> {<<"application/json">>, Json}
+    catch
+        error:_ -> not_acceptable
+    end.
+
+accepts_cbor(Req) ->
+    Accept = string:lowercase(livery_req:header(<<"accept">>, Req, <<>>)),
+    binary:match(Accept, <<"application/cbor">>) =/= nomatch.
 
 error_resp(Req, {error, Reason}) -> error_resp(Req, Reason);
 error_resp(Req, not_found) ->
