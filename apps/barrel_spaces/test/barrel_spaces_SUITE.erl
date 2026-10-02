@@ -21,7 +21,8 @@
     t_vec_path_custom/1,
     t_record_mode_reopen/1,
     t_record_mode_mismatch/1,
-    t_record_mode_needs_embedder/1
+    t_record_mode_needs_embedder/1,
+    t_docs_only_space/1
 ]).
 
 -include_lib("common_test/include/ct.hrl").
@@ -33,7 +34,7 @@ all() ->
      t_vec_path_relative, t_vec_path_replica, t_vec_path_legacy_foreign,
      t_vec_path_legacy_local, t_vec_path_custom,
      t_record_mode_reopen, t_record_mode_mismatch,
-     t_record_mode_needs_embedder].
+     t_record_mode_needs_embedder, t_docs_only_space].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(barrel_spaces),
@@ -341,3 +342,15 @@ with_mock_embed(Fun) ->
     meck:expect(barrel_embed, embed_batch,
                 fun(Ts, _S) -> {ok, [Vec(T) || T <- Ts]} end),
     try Fun() after meck:unload(barrel_embed) end.
+
+%% A space without a vector store reopens without one.
+t_docs_only_space(_Config) ->
+    {ok, #{id := Id, db := Db}} = barrel_spaces:create_space(#{vectordb => none}),
+    ?assertNot(maps:is_key(vstore, Db)),
+    {ok, _} = barrel:put_doc(Db, #{<<"id">> => <<"a">>}),
+    {ok, #{<<"vectordb">> := <<"none">>}} = barrel_spaces:space_info(Id),
+    ok = barrel_spaces:close_space(Id),
+    {ok, #{db := Db2}} = barrel_spaces:open_space(Id),
+    ?assertNot(maps:is_key(vstore, Db2)),
+    {ok, _} = barrel:get_doc(Db2, <<"a">>),
+    ok = barrel_spaces:drop_space(Id).

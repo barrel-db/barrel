@@ -28,6 +28,29 @@ ok = barrel:close(Db).
 A database links its vector store to the process that opened it. Open it from a
 long-lived process (a gen_server or supervisor), not a transient one.
 
+## Open without a vector store
+
+A database that only holds documents does not need the vector store and its
+RocksDB. Pass `vectordb => none`:
+
+```erlang
+{ok, Db} = barrel:open(notes, #{vectordb => none}),
+{ok, _} = barrel:put_doc(Db, #{<<"id">> => <<"a">>, <<"lang">> => <<"en">>}),
+{ok, _Rows, _Meta} = barrel:query(Db, "SELECT * FROM db WHERE lang = 'en'"),
+{error, no_vector_store} = barrel:search(Db, <<"anything">>, #{}).
+```
+
+- Documents, attachments, queries, changes and replication work as usual.
+- Vector calls (`vector_*`, `search*`, `embed*`, `embedder_info/1`,
+  `vector_stats/1`) and the `vector_top_k`, `bm25_top_k` and `hybrid_top_k`
+  table functions answer `{error, no_vector_store}`.
+- Record mode needs a vector store: `embedding` with `vectordb => none` answers
+  `{error, {invalid_option, vectordb}}`.
+- A branch of such a database has no vector store either. A context export
+  refuses it (`{error, no_vector_store}`); a slice of it holds documents only.
+- `barrel_spaces:create_space(#{vectordb => none})` creates a space without one;
+  the space reopens without one on every node.
+
 ## Open read only
 
 Open with `read_only => true` to serve a database without writing any file,

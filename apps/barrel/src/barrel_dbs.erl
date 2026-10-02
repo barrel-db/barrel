@@ -586,7 +586,9 @@ docdb_alive(DbBin) ->
     end.
 
 vstore_alive(#{vstore := VBin}) ->
-    barrel_vectordb_registry:whereis_name({vstore, VBin}) =/= undefined.
+    barrel_vectordb_registry:whereis_name({vstore, VBin}) =/= undefined;
+vstore_alive(_DocsOnly) ->
+    true.
 
 %% Enforce dbs_max_open before an open: evict the least recently used
 %% unpinned entry idle for at least the guard, else refuse.
