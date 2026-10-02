@@ -70,11 +70,31 @@ slash). The normalized URL is the replication identity: changing its text
 starts a fresh checkpoint, credentials and tuning do not. The endpoint map
 also takes `pool`, `connect_timeout`, `recv_timeout`, and `headers`.
 
-Documents travel as JSON when JSON can carry them. A document holding a binary
-that is not valid UTF-8 (a raw hash, say) travels as `application/cbor`, with
-the binary and the version vector as CBOR byte strings. Both ends need barrel_docdb 1.8.0 and
-barrel_server 1.11.0 for that; JSON-safe documents replicate with older peers
-as before. A client that accepts only JSON gets a 406 for such a document.
+### JSON and CBOR on the sync routes
+
+JSON stays the default. CBOR is used only for documents JSON cannot carry: a
+document holding a binary that is not valid UTF-8 (a raw hash, say). barrel
+replication picks the encoding per request; a JSON client needs no change.
+
+What the server does with each encoding:
+
+| You send or ask for | The server |
+|---|---|
+| a body without `content-type: application/cbor` | reads it as JSON, as before; `vv` is base64 |
+| a body with `content-type: application/cbor` | reads it as CBOR; `vv` is a byte string |
+| no `accept`, `*/*` or `application/json` | answers JSON, as before |
+| `accept` naming `application/cbor` | answers CBOR, errors included |
+| a document JSON cannot carry, without CBOR in `accept` | answers 406 `not_acceptable` |
+
+A malformed body answers 400 (`bad_json` or `bad_cbor`). Attachment routes
+stream raw bytes and answer errors in JSON whatever you accept.
+
+barrel replication sends JSON whenever JSON can carry the document and asks
+for CBOR when it fetches one. Both peers need barrel_docdb 1.8.0 and
+barrel_server 1.11.0 to move a document JSON cannot carry; everything else
+replicates with older peers as before. A JSON-only client, such as
+barrel-lite, never produces such a document; it gets a 406 only when it pulls
+one that a CBOR peer pushed.
 
 ## How (auth)
 
