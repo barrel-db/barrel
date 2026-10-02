@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - The HTTP replication transport sends a request body as JSON when JSON can carry it, else as `application/cbor` with the same fields and the version vector as a byte string (base64 in JSON). A document holding a non-UTF-8 binary (a raw hash) now replicates instead of failing the task with `{invalid_byte, _}`. `get_doc` asks for CBOR and reads either answer, so an older server still works for JSON-safe documents.
 
+### Fixed
+- A continuous replication task whose local database closed was recorded as `failed` and never restarted, or, when it polled, retried the closed database forever. It is now `paused` with `paused_reason => <<"db_closed">>` (whether the close ends its changes stream, fails a read, or answers `not_found` to a poll), and the task manager resumes it from its checkpoint within 5 s of its local databases opening again. A task paused by `pause_task/1` or `stop_task/1` is never resumed this way; any status change clears the reason.
+- A database unregisters before closing its attachment store too, not only its document store, so a read that fails on a closed store always finds the database gone.
+
 ## [1.7.1] - 2026-09-28
 
 ### Fixed
