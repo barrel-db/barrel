@@ -125,22 +125,32 @@ rep_id_term(#{url := Url}) -> Url.
 %% A server from 1.11 answers in CBOR, which carries any binary; an
 %% older one ignores the accept header and answers JSON.
 get_doc(Endpoint, DocId, _Opts) ->
-    case req(Endpoint, get, [<<"/doc/">>, quote(DocId)], undefined,
-             [{<<"accept">>, <<"application/cbor, application/json">>}]) of
-        {ok, 200, #{<<"doc">> := Doc, <<"version">> := Token,
-                    <<"vv">> := VVB64} = Body} ->
+    case req_typed(Endpoint, get, [<<"/doc/">>, quote(DocId)], undefined,
+                   [{<<"accept">>, <<"application/cbor, application/json">>}]) of
+        {ok, 200, Encoding, #{<<"doc">> := Doc, <<"version">> := Token,
+                              <<"vv">> := VV} = Body} ->
             {ok, Doc, #{version => Token,
-                        vv => base64:decode(VVB64),
+                        vv => vv_from_wire(Encoding, VV),
                         deleted => maps:get(<<"deleted">>, Body, false)
                                        =:= true}};
+        {ok, Status, _Encoding, Body} ->
+            error_of({ok, Status, Body});
         Other ->
             error_of(Other)
     end.
 
+%% JSON when it can carry the document (vv in base64), else CBOR with
+%% the version vector as a byte string.
 put_version(Endpoint, Doc, Token, VVBin, Deleted) ->
     DocId = maps:get(<<"id">>, Doc),
-    Body = #{doc => Doc, version => Token,
-             vv => base64:encode(VVBin), deleted => Deleted},
+    Fields = #{doc => Doc, version => Token, deleted => Deleted},
+    Body = try json:encode(Fields#{vv => base64:encode(VVBin)}) of
+        Json -> {encoded, <<"application/json">>, iolist_to_binary(Json)}
+    catch
+        error:_ ->
+            {encoded, <<"application/cbor">>,
+             barrel_docdb_codec_cbor:encode_wire(Fields#{vv => VVBin})}
+    end,
     case req(Endpoint, put, [<<"/doc/">>, quote(DocId)], Body) of
         {ok, 200, #{<<"id">> := Id, <<"winner">> := Winner}} ->
             {ok, Id, Winner};
@@ -440,8 +450,15 @@ hlc_from_wire(B64) ->
 req(Endpoint, Method, PathSuffix, BodyTerm) ->
     req(Endpoint, Method, PathSuffix, BodyTerm, []).
 
-req(#{url := BaseUrl} = Endpoint, Method, PathSuffix, BodyTerm,
-    ExtraHeaders) ->
+req(Endpoint, Method, PathSuffix, BodyTerm, ExtraHeaders) ->
+    case req_typed(Endpoint, Method, PathSuffix, BodyTerm, ExtraHeaders) of
+        {ok, Status, _Encoding, Body} -> {ok, Status, Body};
+        {error, _} = Err -> Err
+    end.
+
+%% Like req/5, with the response encoding (cbor | json).
+req_typed(#{url := BaseUrl} = Endpoint, Method, PathSuffix, BodyTerm,
+          ExtraHeaders) ->
     Url = iolist_to_binary([BaseUrl, <<"/_sync">>, PathSuffix]),
     {ContentType, Body} = encode_body(BodyTerm),
     ContentHash = barrel_sync_sig:content_sha256(Body),
@@ -455,9 +472,8 @@ req(#{url := BaseUrl} = Endpoint, Method, PathSuffix, BodyTerm,
         {ok, Status, RespHeaders, RespBody} ->
             ok = barrel_hlc:maybe_sync_from_header(
                 header_value(?HLC_HEADER, RespHeaders)),
-            {ok, Status, decode_body(
-                           header_value(<<"content-type">>, RespHeaders),
-                           RespBody)};
+            RespType = header_value(<<"content-type">>, RespHeaders),
+            {ok, Status, encoding(RespType), decode_body(RespType, RespBody)};
         {error, Reason} ->
             {error, {transport, Reason}}
     end.
@@ -564,6 +580,8 @@ header_value(Name, Headers) ->
 %% a binary that is not UTF-8 (a raw hash). The fields are the same.
 encode_body(undefined) ->
     {<<"application/json">>, <<>>};
+encode_body({encoded, ContentType, Bin}) ->
+    {ContentType, Bin};
 encode_body(Term) ->
     try json:encode(Term) of
         Json -> {<<"application/json">>, iolist_to_binary(Json)}
@@ -572,6 +590,12 @@ encode_body(Term) ->
             {<<"application/cbor">>,
              barrel_docdb_codec_cbor:encode_wire(Term)}
     end.
+
+encoding(<<"application/cbor", _/binary>>) -> cbor;
+encoding(_ContentType) -> json.
+
+vv_from_wire(cbor, VV) -> VV;
+vv_from_wire(json, VV) -> base64:decode(VV).
 
 decode_body(_ContentType, <<>>) -> #{};
 decode_body(<<"application/cbor", _/binary>>, Bin) ->

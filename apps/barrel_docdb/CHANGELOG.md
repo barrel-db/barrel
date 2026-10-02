@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `barrel_docdb_codec_cbor:encode_wire/1`: CBOR for the wire. A binary that is not valid UTF-8 is a byte string; everything else encodes as `encode_cbor/1` does. `decode_cbor/1` reads both back to the same binary.
 
 ### Changed
-- The HTTP replication transport sends a request body as JSON when JSON can carry it, else as `application/cbor` with the same fields. A document holding a non-UTF-8 binary (a raw hash) now replicates instead of failing the task with `{invalid_byte, _}`. `get_doc` asks for CBOR and reads either answer, so an older server still works for JSON-safe documents.
+- The HTTP replication transport sends a request body as JSON when JSON can carry it, else as `application/cbor` with the same fields and the version vector as a byte string (base64 in JSON). A document holding a non-UTF-8 binary (a raw hash) now replicates instead of failing the task with `{invalid_byte, _}`. `get_doc` asks for CBOR and reads either answer, so an older server still works for JSON-safe documents.
 
 ## [1.7.1] - 2026-09-28
 

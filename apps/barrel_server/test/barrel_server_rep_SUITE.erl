@@ -23,7 +23,8 @@
     t_continuous_push_over_http/1,
     t_continuous_pull_over_http/1,
     t_registry_grants_over_http/1,
-    t_binary_field_round_trip/1
+    t_binary_field_round_trip/1,
+    t_json_only_client/1
 ]).
 
 -include_lib("common_test/include/ct.hrl").
@@ -33,7 +34,8 @@ all() ->
     [t_push_over_http, t_pull_over_http, t_bidirectional_convergence,
      t_filtered_pull, t_checkpoint_reuse, t_att_sync_rides_along,
      t_continuous_push_over_http, t_continuous_pull_over_http,
-     t_registry_grants_over_http, t_binary_field_round_trip].
+     t_registry_grants_over_http, t_binary_field_round_trip,
+     t_json_only_client].
 
 init_per_suite(Config) ->
     application:load(barrel_server),
@@ -317,6 +319,39 @@ t_binary_field_round_trip(Config) ->
     after
         barrel_docdb:delete_db(Pulled)
     end,
+    ok.
+
+%% A client that only takes JSON gets a 406 for a document JSON cannot
+%% carry; a CBOR client gets it, the version vector as a byte string.
+t_json_only_client(Config) ->
+    Served = ?config(served, Config),
+    #{url := Base} = ?config(endpoint, Config),
+    Raw = <<255, 0, 254, 1>>,
+    {ok, _} = barrel_server_dbs:ensure(Served),
+    {ok, _} = barrel_docdb:put_doc(Served, #{<<"id">> => <<"raw">>,
+                                             <<"raw">> => Raw}),
+    {ok, _} = barrel_docdb:put_doc(Served, #{<<"id">> => <<"text">>,
+                                             <<"v">> => <<"plain">>}),
+    Get = fun(Id, Accept) ->
+        {ok, Status, Headers, Body} =
+            hackney:request(get, <<Base/binary, "/_sync/doc/", Id/binary>>,
+                            [{<<"accept">>, Accept}], <<>>, [with_body]),
+        {Status, proplists:get_value(<<"content-type">>, Headers), Body}
+    end,
+    {406, <<"application/json">>, _} = Get(<<"raw">>, <<"application/json">>),
+    {200, <<"application/cbor">>, Cbor} =
+        Get(<<"raw">>, <<"application/cbor">>),
+    #{<<"doc">> := #{<<"raw">> := Raw}, <<"vv">> := VV} =
+        barrel_docdb_codec_cbor:decode_cbor(Cbor),
+    {200, <<"application/json">>, Json} =
+        Get(<<"text">>, <<"application/json">>),
+    #{<<"vv">> := VVB64} = json:decode(Json),
+    {ok, #{vv := VVText}} =
+        barrel_docdb:get_doc_for_replication(Served, <<"text">>),
+    ?assertEqual(VVText, base64:decode(VVB64)),
+    {ok, #{vv := VVRaw}} =
+        barrel_docdb:get_doc_for_replication(Served, <<"raw">>),
+    ?assertEqual(VVRaw, VV),
     ok.
 
 %% Content type of the PUT that carried a document, from hackney's history.

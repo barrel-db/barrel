@@ -72,9 +72,9 @@ also takes `pool`, `connect_timeout`, `recv_timeout`, and `headers`.
 
 Documents travel as JSON when JSON can carry them. A document holding a binary
 that is not valid UTF-8 (a raw hash, say) travels as `application/cbor`, with
-the binary as a CBOR byte string. Both ends need barrel_docdb 1.8.0 and
+the binary and the version vector as CBOR byte strings. Both ends need barrel_docdb 1.8.0 and
 barrel_server 1.11.0 for that; JSON-safe documents replicate with older peers
-as before.
+as before. A client that accepts only JSON gets a 406 for such a document.
 
 ## How (auth)
 
