@@ -103,6 +103,8 @@ t_transport_endpoint_auth(Config) ->
         data_dir => filename:join(?config(priv_dir, Config), "l1")}),
     try
         {ok, _} = barrel_docdb:put_doc(Local, #{<<"id">> => <<"a">>}),
+        %% replication never creates the target
+        {ok, _} = barrel_server_dbs:ensure(<<"auth_tgt">>),
         %% without credentials the transport surfaces unauthorized
         Bare = barrel_rep_transport_http:endpoint(
             list_to_binary(B ++ "/db/auth_tgt")),
@@ -229,6 +231,7 @@ t_transport_env_auth(Config) ->
         data_dir => filename:join(?config(priv_dir, Config), "l2")}),
     try
         {ok, _} = barrel_docdb:put_doc(Local, #{<<"id">> => <<"b">>}),
+        {ok, _} = barrel_server_dbs:ensure(<<"auth_tgt2">>),
         Endpoint = barrel_rep_transport_http:endpoint(
             list_to_binary(B ++ "/db/auth_tgt2")),
         %% token resolved from the sync_auth env, keyed by origin
