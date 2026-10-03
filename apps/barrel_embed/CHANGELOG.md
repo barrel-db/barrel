@@ -3,6 +3,11 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.6.1] - 2026-10-03
+
+### Fixed
+- `barrel_embed_pool` matches a `'DOWN'` against its own monitor reference (a reused `_MRef` variable raised a compiler warning).
+
 ## [2.6.0] - 2026-10-02
 
 ### Added

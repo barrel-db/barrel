@@ -48,7 +48,8 @@
     stream_push_db_closed/1,
     stream_wait_pending_db_closed/1,
     stream_iterate_db_closed/1,
-    stream_fold_race_closed/1
+    stream_fold_race_closed/1,
+    stream_owner_down_stops/1
 ]).
 
 %% logger handler: forwards the stream's reports to the test process
@@ -91,7 +92,8 @@ groups() ->
             stream_push_db_closed,
             stream_wait_pending_db_closed,
             stream_iterate_db_closed,
-            stream_fold_race_closed
+            stream_fold_race_closed,
+            stream_owner_down_stops
         ]}
     ].
 
@@ -126,7 +128,8 @@ closed_db_init(TestCase, Config) ->
     case lists:member(TestCase, [stream_push_db_closed,
                                  stream_wait_pending_db_closed,
                                  stream_iterate_db_closed,
-                                 stream_fold_race_closed]) of
+                                 stream_fold_race_closed,
+                                 stream_owner_down_stops]) of
         true ->
             process_flag(trap_exit, true),
             Id = TestCase,
@@ -1067,3 +1070,18 @@ await_db_closed(Stream) ->
     after 5000 ->
         ct:fail(stream_still_running)
     end.
+
+%% A push stream ends with its owner: nothing else would stop it once
+%% the owner is gone.
+stream_owner_down_stops(Config) ->
+    Db = open_db(Config, <<"owner_down">>),
+    Owner = spawn(fun() -> receive stop -> ok end end),
+    {ok, Stream} = barrel_docdb:subscribe_changes(
+                     Db, first, #{mode => push, owner => Owner}),
+    exit(Owner, kill),
+    receive
+        {'EXIT', Stream, Reason} -> ?assertEqual(normal, Reason)
+    after 5000 ->
+        ct:fail(stream_still_running)
+    end,
+    ok = barrel_docdb:delete_db(Db).

@@ -2516,7 +2516,7 @@ with_att(Db, Fun) ->
         {ok, AttRef} = barrel_db_server:get_att_ref(Pid),
         {ok, Info} = barrel_db_server:info(Pid),
         DbName = maps:get(name, Info),
-        Fun(AttRef, DbName)
+        att_call(Fun, AttRef, DbName)
     end).
 
 %% @private Like with_att/2 for attachment writes: a read-only database
@@ -2528,9 +2528,25 @@ with_att_write(Db, Fun) ->
             {ok, #{read_only := true}} ->
                 {error, read_only};
             {ok, #{name := DbName}} ->
-                Fun(AttRef, DbName)
+                att_call(Fun, AttRef, DbName)
         end
     end).
+
+%% The call runs in the caller with the store the database handed out; a
+%% close in between leaves it a closed handle, and RocksDB raises badarg.
+%% The database unregisters before closing its stores, so a badarg once
+%% it is gone is the close: the missing-database error, as for document
+%% reads (barrel_docdb_reader). Any other badarg is a bug and propagates.
+att_call(Fun, AttRef, DbName) ->
+    try
+        Fun(AttRef, DbName)
+    catch
+        error:badarg:Stack ->
+            case get_db(DbName) of
+                {error, not_found} -> {error, not_found};
+                {ok, _Pid} -> erlang:raise(error, badarg, Stack)
+            end
+    end.
 
 %% @private Resolve the store ref for caller-side reads when Db is a name.
 %%

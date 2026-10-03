@@ -62,10 +62,11 @@ handle_call({release, Pid}, _From, #state{by_pid = ByPid} = State) ->
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
-handle_info({'DOWN', _MRef, process, Pid, _Reason},
+%% Only the pool's own monitor of that process counts.
+handle_info({'DOWN', MRef, process, Pid, _Reason},
             #state{by_pid = ByPid} = State) ->
     case ByPid of
-        #{Pid := {Key, _N, _MRef}} -> {noreply, forget(Pid, Key, State)};
+        #{Pid := {Key, _N, MRef}} -> {noreply, forget(Pid, Key, State)};
         _ -> {noreply, State}
     end;
 handle_info(_Info, State) ->
