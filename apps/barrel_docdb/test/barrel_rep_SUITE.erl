@@ -77,7 +77,9 @@ groups() ->
             task_continuous_replicates_attachment_only_change,
             task_attachments_disabled_survives_restart,
             task_resumes_after_source_reopen,
-            task_user_pause_not_resumed
+            task_user_pause_not_resumed,
+            task_survives_stream_end,
+            task_stop_ends_stream
         ]}
     ].
 
@@ -1009,6 +1011,56 @@ task_user_pause_not_resumed(Config) ->
     ok = barrel_rep_tasks:delete_task(Paused),
     ok = barrel_rep_tasks:delete_task(Witness),
     ok = barrel_docdb:delete_db(Src).
+
+%% The task's changes stream dies: the task keeps running and falls back
+%% to polling, so a document written afterwards still replicates.
+task_survives_stream_end(Config) ->
+    Src = <<"stream_end_src">>,
+    _ = open_source(Config, Src),
+    {ok, TaskId} = continuous_push(Src),
+    ok = wait_until(fun() -> stream_of(Src) =/= [] end, 50, 600),
+    [Stream] = stream_of(Src),
+    MRef = monitor(process, Stream),
+    exit(Stream, kill),
+    receive {'DOWN', MRef, process, Stream, _} -> ok end,
+    {ok, _} = barrel_docdb:put_doc(Src, #{<<"id">> => <<"polled">>}),
+    ok = wait_until(doc_in(<<"test_target">>, <<"polled">>), 50, 600),
+    {ok, #{status := running}} = barrel_rep_tasks:get_task(TaskId),
+    ok = barrel_rep_tasks:delete_task(TaskId),
+    ok = barrel_docdb:delete_db(Src).
+
+%% Stopping a task ends its stream: the stream follows its owner.
+task_stop_ends_stream(Config) ->
+    Src = <<"stop_stream_src">>,
+    _ = open_source(Config, Src),
+    {ok, TaskId} = continuous_push(Src),
+    ok = wait_until(fun() -> stream_of(Src) =/= [] end, 50, 600),
+    [Stream] = stream_of(Src),
+    MRef = monitor(process, Stream),
+    ok = barrel_rep_tasks:stop_task(TaskId),
+    receive {'DOWN', MRef, process, Stream, _} -> ok
+    after 5000 -> ct:fail(stream_still_running)
+    end,
+    ok = barrel_rep_tasks:delete_task(TaskId),
+    ok = barrel_docdb:delete_db(Src).
+
+%% Live changes streams on database Db.
+stream_of(Db) ->
+    [P || P <- erlang:processes(),
+          {barrel_changes_stream, init, 1} =:= initial_call(P),
+          stream_db(P) =:= Db].
+
+initial_call(P) ->
+    case process_info(P, dictionary) of
+        {dictionary, D} -> proplists:get_value('$initial_call', D);
+        undefined -> undefined
+    end.
+
+stream_db(P) ->
+    try sys:get_state(P, 1000) of
+        {_StateName, #{db_name := Name}} -> Name
+    catch exit:_ -> undefined
+    end.
 
 %% Creates the source; the returned fun reopens it after a close.
 open_source(Config, Name) ->

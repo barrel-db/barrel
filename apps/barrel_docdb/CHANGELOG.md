@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.1] - 2026-10-03
+
+### Fixed
+- An attachment call that races its database closing answers `{error, not_found}` instead of crashing with `badarg` on the closed store (the read runs in the caller with the store handle the database gave out). A replication task in its attachment phase no longer logs a crash report when its source closes. A `badarg` on an open database still propagates.
+- A changes stream ends with its owner (`normal`), linked or not. A continuous replication task unlinks its stream, so a stream that ends leaves the task polling instead of killing it; a closed source still pauses the task.
+
 ## [1.8.0] - 2026-10-01
 
 ### Added

@@ -528,12 +528,18 @@ run_direction(Ctx, From, To, FromTransport, ToTransport, Since) ->
 %% Continuous local sources wake on the changes stream, subscribed
 %% BEFORE the first drain so no write slips between drain and
 %% subscribe. Remote (and streamless) sources poll adaptively.
+%% The stream is unlinked: it ends with the task through its owner
+%% monitor, and a stream that ends leaves the task polling (see
+%% wait_for_wake/1) instead of taking it down.
 init_wake(#{mode := continuous}, From, Since) when is_binary(From) ->
     case barrel_docdb:subscribe_changes(From, Since,
                                         #{mode => push,
                                           owner => self()}) of
-        {ok, Stream} -> {stream, Stream};
-        {error, _} -> poll
+        {ok, Stream} ->
+            true = unlink(Stream),
+            {stream, Stream};
+        {error, _} ->
+            poll
     end;
 init_wake(_Ctx, _From, _Since) ->
     poll.

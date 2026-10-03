@@ -283,6 +283,7 @@ Continuous behavior:
 
 - Local sources are event driven: the task wakes on the changes stream and
   drains through its filter, so local convergence is tens of milliseconds.
+  If the stream ends, the task keeps running and polls instead.
 - Remote sources poll adaptively, 500 ms after data and backing off to 15 s
   while idle.
 - Transient errors do not kill a continuous task: it backs off (1 s to 60 s,

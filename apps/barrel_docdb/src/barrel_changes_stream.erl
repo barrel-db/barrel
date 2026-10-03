@@ -56,6 +56,7 @@
     include_docs => boolean(),
     interval => pos_integer(),
     batch_size => pos_integer(),
+    %% receives the batches; the stream ends when it does
     owner => pid(),
     %% the database process owning the store; the stream ends with it
     db => pid()
@@ -135,7 +136,9 @@ init([StoreRef, DbName, Opts]) ->
         db_name => DbName,
         since => Since,
         include_docs => IncludeDocs,
-        db_mon => monitor_db(maps:get(db, Opts, undefined))
+        db_mon => watch(maps:get(db, Opts, undefined)),
+        %% the stream ends with its owner, linked or not
+        owner_mon => watch(maps:get(owner, Opts, undefined))
     },
 
     case Mode of
@@ -181,6 +184,9 @@ iterate(cast, stop, State) ->
 iterate(info, {'DOWN', Mon, process, _, _}, #{db_mon := Mon} = State) ->
     {stop, {shutdown, db_closed}, State};
 
+iterate(info, {'DOWN', Mon, process, _, _}, #{owner_mon := Mon} = State) ->
+    {stop, normal, State};
+
 iterate(_EventType, _Event, State) ->
     {keep_state, State}.
 
@@ -201,6 +207,9 @@ push(cast, stop, State) ->
 
 push(info, {'DOWN', Mon, process, _, _}, #{db_mon := Mon} = State) ->
     {stop, {shutdown, db_closed}, State};
+
+push(info, {'DOWN', Mon, process, _, _}, #{owner_mon := Mon} = State) ->
+    {stop, normal, State};
 
 push(_EventType, _Event, State) ->
     {keep_state, State}.
@@ -265,6 +274,9 @@ wait_pending(cast, stop, State) ->
 wait_pending(info, {'DOWN', Mon, process, _, _}, #{db_mon := Mon} = State) ->
     {stop, {shutdown, db_closed}, State};
 
+wait_pending(info, {'DOWN', Mon, process, _, _}, #{owner_mon := Mon} = State) ->
+    {stop, normal, State};
+
 wait_pending(_EventType, _Event, State) ->
     {keep_state, State}.
 
@@ -272,8 +284,8 @@ wait_pending(_EventType, _Event, State) ->
 %% Internal
 %%====================================================================
 
-monitor_db(undefined) -> undefined;
-monitor_db(Pid) when is_pid(Pid) -> monitor(process, Pid).
+watch(undefined) -> undefined;
+watch(Pid) when is_pid(Pid) -> monitor(process, Pid).
 
 %% A store closed under the fold raises badarg from the NIF. The database
 %% unregisters its store before closing it, so an unregistered store is
