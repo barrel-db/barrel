@@ -136,6 +136,13 @@ jobs:
           key: rebar3-windows-barrel_ngram-${{ hashFiles('apps/barrel_ngram/rebar.config') }}
       - name: Compile
         run: rebar3 compile
+        env:
+          DEBUG: '1'
+      - name: Debug arch
+        if: always()
+        run: |
+          erl -noshell -eval "io:format(\"~s~n\", [erlang:system_info(system_architecture)]), halt()."
+          Get-ChildItem -Recurse -ErrorAction SilentlyContinue priv, _build/default/lib/rocksdb/priv, _build/cmake | Select-Object -First 40 FullName
       - name: Check the NIF DLLs
         shell: pwsh
         run: |
