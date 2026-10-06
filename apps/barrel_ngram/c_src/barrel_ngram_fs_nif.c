@@ -2,9 +2,13 @@
  * directory, so the rename that commits a file is made durable here. */
 #include <erl_nif.h>
 #include <errno.h>
-#include <fcntl.h>
 #include <string.h>
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <fcntl.h>
 #include <unistd.h>
+#endif
 
 #define PATH_BUF 4096
 
@@ -31,13 +35,27 @@ static ERL_NIF_TERM fsync_dir_nif(ErlNifEnv *env, int argc, const ERL_NIF_TERM a
 {
     ErlNifBinary bin;
     char path[PATH_BUF];
-    int fd, flags = O_RDONLY;
     (void)argc;
     if (!enif_inspect_iolist_as_binary(env, argv[0], &bin) || bin.size == 0 ||
         bin.size >= PATH_BUF || memchr(bin.data, 0, bin.size) != NULL)
         return enif_make_badarg(env);
     memcpy(path, bin.data, bin.size);
     path[bin.size] = '\0';
+#ifdef _WIN32
+    /* No flush: NTFS journals rename metadata, and an unprivileged process
+     * cannot flush a directory (FlushFileBuffers needs write access to the
+     * directory handle). Only check that the directory exists. */
+    wchar_t wpath[PATH_BUF];
+    DWORD attrs;
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wpath, PATH_BUF) == 0)
+        return enif_make_badarg(env);
+    attrs = GetFileAttributesW(wpath);
+    if (attrs == INVALID_FILE_ATTRIBUTES)
+        return mk_error(env, ENOENT);
+    if (!(attrs & FILE_ATTRIBUTE_DIRECTORY))
+        return mk_error(env, ENOTDIR);
+#else
+    int fd, flags = O_RDONLY;
 #ifdef O_DIRECTORY
     flags |= O_DIRECTORY;
 #endif
@@ -50,6 +68,7 @@ static ERL_NIF_TERM fsync_dir_nif(ErlNifEnv *env, int argc, const ERL_NIF_TERM a
         return mk_error(env, err);
     }
     close(fd);
+#endif
     return enif_make_atom(env, "ok");
 }
 
