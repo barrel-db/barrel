@@ -41,7 +41,10 @@
     chunked_get_info/1,
     streaming_read/1,
     streaming_write/1,
-    streaming_roundtrip/1
+    streaming_roundtrip/1,
+    range_read/1,
+    range_read_small/1,
+    range_read_no_seek/1
 ]).
 
 %%====================================================================
@@ -75,7 +78,10 @@ groups() ->
             chunked_get_info,
             streaming_read,
             streaming_write,
-            streaming_roundtrip
+            streaming_roundtrip,
+            range_read,
+            range_read_small,
+            range_read_no_seek
         ]}
     ].
 
@@ -591,6 +597,72 @@ streaming_roundtrip(_Config) ->
     ?assertEqual(OriginalData, DirectData),
 
     %% Cleanup
+    barrel_docdb:delete_db(DbName),
+    ok.
+
+range_read(_Config) ->
+    DbName = <<"range_read_db">>,
+    barrel_docdb:create_db(DbName),
+    DocId = <<"doc1">>,
+    AttName = <<"range.bin">>,
+    %% Spans several 64 KB chunks with a partial last chunk.
+    Data = crypto:strong_rand_bytes(300001),
+    {ok, Writer0} = barrel_docdb:open_attachment_writer(
+                      DbName, DocId, AttName, <<"application/octet-stream">>),
+    Writer = write_in_chunks(Writer0, Data, 50000),
+    {ok, _} = barrel_docdb:finish_attachment_writer(Writer),
+
+    Check = fun(Offset, Len) ->
+        Expected = binary:part(Data, Offset,
+                               max(0, min(Len, byte_size(Data) - Offset))),
+        ?assertEqual({ok, Expected},
+                     barrel_docdb:read_attachment_range(DbName, DocId, AttName,
+                                                        Offset, Len))
+    end,
+    Check(0, 10),
+    Check(65535, 2),          %% crosses a chunk boundary
+    Check(65536, 65536),      %% exactly one chunk
+    Check(100000, 150000),    %% spans three chunks
+    Check(299990, 100),       %% runs past the end
+    ?assertEqual({ok, <<>>},
+                 barrel_docdb:read_attachment_range(DbName, DocId, AttName,
+                                                    400000, 10)),
+
+    %% Open-ended stream from an offset.
+    {ok, Stream} = barrel_docdb:open_attachment_stream(DbName, DocId, AttName,
+                                                       #{offset => 200000}),
+    ?assertEqual(binary:part(Data, 200000, 100001), read_stream_data(Stream, [])),
+
+    ?assertEqual({error, not_found},
+                 barrel_docdb:read_attachment_range(DbName, DocId, <<"nope">>, 0, 1)),
+    barrel_docdb:delete_db(DbName),
+    ok.
+
+range_read_small(_Config) ->
+    DbName = <<"range_read_small_db">>,
+    barrel_docdb:create_db(DbName),
+    {ok, _} = barrel_docdb:put_doc(DbName, #{<<"id">> => <<"doc1">>}),
+    {ok, _} = barrel_docdb:put_attachment(DbName, <<"doc1">>, <<"a.txt">>,
+                                          <<"hello world">>),
+    ?assertEqual({ok, <<"world">>},
+                 barrel_docdb:read_attachment_range(DbName, <<"doc1">>, <<"a.txt">>,
+                                                    6, 100)),
+    barrel_docdb:delete_db(DbName),
+    ok.
+
+%% A backend without seek_stream/2 still serves ranges, by skipping.
+range_read_no_seek(_Config) ->
+    DbName = <<"range_read_no_seek_db">>,
+    {ok, _} = barrel_docdb:create_db(DbName, #{
+        att_opts => #{backend => barrel_docdb_test_att_backend_minimal}}),
+    Data = crypto:strong_rand_bytes(200000),
+    {ok, Writer0} = barrel_docdb:open_attachment_writer(
+                      DbName, <<"doc1">>, <<"r.bin">>, <<"application/octet-stream">>),
+    {ok, _} = barrel_docdb:finish_attachment_writer(
+                write_in_chunks(Writer0, Data, 50000)),
+    ?assertEqual({ok, binary:part(Data, 130000, 1000)},
+                 barrel_docdb:read_attachment_range(DbName, <<"doc1">>, <<"r.bin">>,
+                                                    130000, 1000)),
     barrel_docdb:delete_db(DbName),
     ok.
 

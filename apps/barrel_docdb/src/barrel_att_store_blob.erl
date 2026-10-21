@@ -33,7 +33,7 @@
 %% Streaming API
 -export([put_stream/5, put_stream/6]).
 -export([write_chunk/2, finish_stream/1, abort_stream/1]).
--export([get_stream/4, read_chunk/1, close_stream/1]).
+-export([get_stream/4, seek_stream/2, read_chunk/1, close_stream/1]).
 -export([get_info/4]).
 
 %%====================================================================
@@ -939,6 +939,17 @@ get_stream(AttRef, DbName, DocId, AttName) ->
         {error, _} = Error ->
             Error
     end.
+
+%% @doc Move a fresh read stream to the chunk holding byte Offset.
+%% Returns the bytes to drop from that chunk.
+-spec seek_stream(att_stream(), non_neg_integer()) ->
+    {ok, att_stream(), non_neg_integer()}.
+seek_stream(#{single_value := true} = Stream, Offset) ->
+    {ok, Stream, Offset};
+seek_stream(#{info := #{chunk_size := ChunkSize}, chunk_count := Count} = Stream,
+            Offset) ->
+    Index = min(Offset div ChunkSize, Count),
+    {ok, Stream#{chunk_index => Index}, Offset - Index * ChunkSize}.
 
 %% @doc Read the next chunk from a stream
 -spec read_chunk(att_stream()) -> {ok, binary(), att_stream()} | eof | {error, term()}.

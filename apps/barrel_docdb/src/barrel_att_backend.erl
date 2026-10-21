@@ -72,6 +72,12 @@
 
 -callback close_stream(Stream :: map()) -> ok.
 
+%% Position a fresh read stream at byte Offset. Returns the stream moved
+%% to the chunk holding Offset and the bytes still to drop from that
+%% chunk. Backends without it are read from the start and skipped.
+-callback seek_stream(Stream :: map(), Offset :: non_neg_integer()) ->
+    {ok, map(), Skip :: non_neg_integer()}.
+
 %%====================================================================
 %% Optional: sync support (the attachment change feed)
 %%====================================================================
@@ -109,4 +115,4 @@
 
 -optional_callbacks([delete/5, att_changes/4, att_floor/2,
                      sweep_att_feed/3, rebuild_feed/2, checkpoint/2,
-                     destroy/2]).
+                     destroy/2, seek_stream/2]).
