@@ -132,6 +132,8 @@
 %% Attachment Streaming API
 -export([
     open_attachment_stream/3,
+    open_attachment_stream/4,
+    read_attachment_range/5,
     att_changes/2,
     att_changes/3,
     att_floor/1,
@@ -1388,6 +1390,48 @@ open_attachment_stream(Db, DocId, AttName) ->
         DbName = maps:get(name, Info),
         barrel_att_store:get_stream(AttRef, DbName, DocId, AttName)
     end).
+
+%% @doc Open a stream over a byte range of an attachment.
+%%
+%% `Opts' takes `offset' (default 0) and `length' (default `infinity').
+%% The stream yields only bytes inside the range and ends with `eof'
+%% once `length' bytes have been returned. The default blob backend
+%% seeks to the chunk holding `offset' without reading earlier chunks.
+-spec open_attachment_stream(binary() | pid(), binary(), binary(), map()) ->
+    {ok, map()} | {error, term()}.
+open_attachment_stream(Db, DocId, AttName, Opts) ->
+    with_db(Db, fun(Pid) ->
+        {ok, AttRef} = barrel_db_server:get_att_ref(Pid),
+        {ok, Info} = barrel_db_server:info(Pid),
+        DbName = maps:get(name, Info),
+        barrel_att_store:get_stream(AttRef, DbName, DocId, AttName, Opts)
+    end).
+
+%% @doc Read `Length' bytes of an attachment starting at `Offset'.
+%%
+%% Returns fewer bytes when the range runs past the end of the
+%% attachment, and `<<>>' when `Offset' is at or beyond it.
+-spec read_attachment_range(binary() | pid(), binary(), binary(),
+                            non_neg_integer(), non_neg_integer()) ->
+    {ok, binary()} | {error, term()}.
+read_attachment_range(Db, DocId, AttName, Offset, Length) ->
+    case open_attachment_stream(Db, DocId, AttName,
+                                #{offset => Offset, length => Length}) of
+        {ok, Stream} -> collect_range(Stream, []);
+        {error, _} = Error -> Error
+    end.
+
+collect_range(Stream, Acc) ->
+    case read_attachment_chunk(Stream) of
+        {ok, Chunk, Stream2} ->
+            collect_range(Stream2, [Chunk | Acc]);
+        eof ->
+            close_attachment_stream(Stream),
+            {ok, iolist_to_binary(lists:reverse(Acc))};
+        {error, _} = Error ->
+            close_attachment_stream(Stream),
+            Error
+    end.
 
 %% @doc Read the next chunk from an attachment stream.
 %%

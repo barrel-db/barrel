@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.0] - 2026-10-23
+
+### Added
+- `open_attachment_stream/4` takes `#{offset, length}` and streams only that byte range; `read_attachment_range/5` returns it as a binary. A range past the end returns what exists, or `<<>>`.
+- Optional `barrel_att_backend` callback `seek_stream/2`. The blob backend jumps to the chunk holding the offset; backends without it (S3, custom) read from the start and drop the leading bytes.
+
 ## [1.8.1] - 2026-10-03
 
 ### Fixed

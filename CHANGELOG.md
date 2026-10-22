@@ -4,6 +4,25 @@ All notable changes to the Barrel umbrella are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and each app
 is versioned independently under [Semantic Versioning](https://semver.org/).
 
+## [2026-10-23] Attachment reads by byte range
+
+barrel_docdb can read part of an attachment without reading what comes
+before it, so a client can fetch one window of a large log or blob.
+
+### Added
+
+- `barrel_docdb:open_attachment_stream/4` takes `#{offset, length}` and
+  streams only that byte range; `read_attachment_range/5` returns it as a
+  binary. A range past the end returns what exists, or `<<>>`.
+- Optional `barrel_att_backend` callback `seek_stream/2`. The blob
+  backend implements it by jumping to the chunk holding the offset.
+  Backends without it (S3, custom) still serve ranges: the stream is read
+  from the start and the leading bytes dropped.
+
+| App | Version | Change |
+|-----|---------|--------|
+| barrel_docdb | 1.9.0 | `open_attachment_stream/4`, `read_attachment_range/5`, optional `seek_stream/2` backend callback |
+
 ## [2026-09-26] S3 backend tested again in CI
 
 The `minio/minio` image is gone from Docker Hub, so the `s3` CI leg had been

@@ -35,7 +35,7 @@
 %% Streaming API
 -export([put_stream/5, put_stream/6]).
 -export([write_chunk/2, finish_stream/1, abort_stream/1]).
--export([get_stream/4, read_chunk/1, close_stream/1]).
+-export([get_stream/4, get_stream/5, read_chunk/1, close_stream/1]).
 -export([get_info/4]).
 
 %% Sync support (optional backend callbacks; see barrel_att_backend)
@@ -207,10 +207,57 @@ get_stream(AttRef, DbName, DocId, AttName) ->
     B:get_stream(AttRef, barrel_keyspace:resolve(DbName), DocId,
                  AttName).
 
+%% @doc Open a read stream over a byte range of an attachment.
+%% `offset' (default 0) is where reading starts and `length' (default
+%% `infinity') caps the bytes returned. Backends exporting
+%% `seek_stream/2' jump straight to the right chunk; others are read
+%% from the start and the leading bytes dropped.
+-spec get_stream(att_ref(), binary(), binary(), binary(), map()) ->
+    {ok, att_stream()} | {error, term()}.
+get_stream(AttRef, DbName, DocId, AttName, Opts) ->
+    Offset = maps:get(offset, Opts, 0),
+    Length = maps:get(length, Opts, infinity),
+    case get_stream(AttRef, DbName, DocId, AttName) of
+        {ok, Stream} ->
+            B = stream_backend(Stream),
+            _ = code:ensure_loaded(B),
+            {ok, Stream1, Skip} =
+                case Offset > 0 andalso erlang:function_exported(B, seek_stream, 2) of
+                    true -> B:seek_stream(Stream, Offset);
+                    false -> {ok, Stream, Offset}
+                end,
+            {ok, Stream1#{range => #{skip => Skip, left => Length}}};
+        {error, _} = Error ->
+            Error
+    end.
+
 -spec read_chunk(att_stream()) -> {ok, binary(), att_stream()} | eof | {error, term()}.
+read_chunk(#{range := #{left := 0}}) ->
+    eof;
+read_chunk(#{range := #{skip := Skip, left := Left}} = Stream) ->
+    B = stream_backend(Stream),
+    case B:read_chunk(Stream) of
+        {ok, Chunk, Stream2} when byte_size(Chunk) =< Skip ->
+            read_chunk(Stream2#{range => #{skip => Skip - byte_size(Chunk),
+                                           left => Left}});
+        {ok, Chunk, Stream2} ->
+            <<_:Skip/binary, Rest/binary>> = Chunk,
+            {Out, Left2} = take_range(Rest, Left),
+            {ok, Out, Stream2#{range => #{skip => 0, left => Left2}}};
+        Other ->
+            Other
+    end;
 read_chunk(Stream) ->
     B = stream_backend(Stream),
     B:read_chunk(Stream).
+
+take_range(Bin, infinity) ->
+    {Bin, infinity};
+take_range(Bin, Left) when byte_size(Bin) =< Left ->
+    {Bin, Left - byte_size(Bin)};
+take_range(Bin, Left) ->
+    <<Out:Left/binary, _/binary>> = Bin,
+    {Out, 0}.
 
 -spec close_stream(att_stream()) -> ok.
 close_stream(Stream) ->
