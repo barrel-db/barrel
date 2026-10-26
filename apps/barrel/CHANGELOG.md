@@ -3,6 +3,11 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.11.1] - 2026-10-26
+
+### Changed
+- Requires hackney `~> 4.9`. The previous `~> 4.8.2` excluded 4.9, so barrel could not be built next to livery 0.10.7 or barrel_mcp 4.4.1.
+
 ## [1.11.0] - 2026-10-02
 
 ### Added
