@@ -4,6 +4,18 @@ All notable changes to the Barrel umbrella are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and each app
 is versioned independently under [Semantic Versioning](https://semver.org/).
 
+## [2026-10-26] Dependency refresh
+
+Dependencies move to their latest Hex releases. barrel accepts hackney 4.9,
+barrel_server runs on the latest livery and barrel_mcp, and barrel_att_s3 no
+longer asks for a livery version that conflicts with livery_s3.
+
+| App | Version | Change |
+|-----|---------|--------|
+| barrel | 1.11.1 | requires hackney `~> 4.9` |
+| barrel_server | 1.11.1 | livery 0.10.7, barrel_mcp 4.4.1 |
+| barrel_att_s3 | 0.1.2 | requires livery `~> 0.10.7`, livery_s3 `~> 0.2.1` |
+
 ## [2026-10-23] Attachment reads by byte range
 
 barrel_docdb can read part of an attachment without reading what comes

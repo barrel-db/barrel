@@ -3,6 +3,11 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.1.2] - 2026-10-26
+
+### Changed
+- Requires livery `~> 0.10.7` and livery_s3 `~> 0.2.1`. The old livery `~> 0.4.4` requirement could not be met together with livery_s3 0.2.1, so the backend could not be installed from Hex next to current livery.
+
 ## [0.1.1] - 2026-08-23
 
 ### Fixed
