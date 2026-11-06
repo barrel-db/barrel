@@ -1,0 +1,121 @@
+#lang ivy1.7
+
+# barrel_live with the per-writer high-water marks made explicit, for
+# any number of replicas, writers and versions. Proves:
+#   closure  (T2): a writer's mark covers only versions the state handled
+#   T5: a version leaves a replica's live set only by being replaced
+#   T7: a replaced version is never live again where its replacement is known
+
+type replica
+type writer
+type token
+type time
+
+relation le(X:time, Y:time)
+axiom le(X,X)
+axiom le(X,Y) & le(Y,Z) -> le(X,Z)
+axiom le(X,Y) & le(Y,X) -> X = Y
+axiom le(X,Y) | le(Y,X)
+
+function w(T:token) : writer
+function h(T:token) : time
+
+relation authored(T:token)          # written by a current (upgraded) writer
+relation legacy_w(W:writer)         # an older peer's writer: exact tokens only
+relation owner(W:writer, R:replica) # the replica a writer id belongs to
+function cur(R:replica) : writer    # the writer id of this open
+function hmax(W:writer) : time      # ghost: newest HLC authored by W
+
+relation live(R:replica, T:token)
+relation cloud(R:replica, T:token)        # exact tokens seen
+relation mark(R:replica, W:writer, H:time) # obs[R][W] >= H
+relation gone(R:replica, T:token)          # ghost: replaced, known at R
+
+relation repl(T:token)              # scratch: what a write replaces
+
+after init {
+    live(R,T) := false;
+    cloud(R,T) := false;
+    mark(R,W,H) := false;
+    gone(R,T) := false;
+    authored(T) := false;
+    owner(W,R) := false;
+}
+
+# seen(R,T) == cloud(R,T) | mark(R, w(T), h(T))
+
+# A write by r's current writer, above everything that writer wrote;
+# it replaces any subset of r's live versions.
+action write(r:replica, t:token) = {
+    require ~authored(t) & ~legacy_w(w(t));
+    require w(t) = cur(r) & owner(cur(r), r);
+    require ~le(h(t), hmax(w(t)));
+    require forall R. ~live(R,t) & ~cloud(R,t) & ~gone(R,t);
+    repl(T) := *;
+    gone(r,T) := gone(r,T) | (live(r,T) & repl(T));
+    live(r,T) := live(r,T) & ~repl(T);
+    live(r,t) := true;
+    authored(t) := true;
+    hmax(w(t)) := h(t);
+    mark(r, w(t), H) := mark(r, w(t), H) | le(H, h(t));
+}
+
+# r merges s's state (any order, any delay, any duplicate).
+action merge(r:replica, s:replica) = {
+    live(r,T) := (live(r,T) & live(s,T))
+               | (live(r,T) & ~(cloud(s,T) | mark(s, w(T), h(T))))
+               | (live(s,T) & ~(cloud(r,T) | mark(r, w(T), h(T))));
+    cloud(r,T) := cloud(r,T) | cloud(s,T);
+    mark(r,W,H) := mark(r,W,H) | mark(s,W,H);
+    gone(r,T) := gone(r,T) | gone(s,T);
+}
+
+# A version from an older peer: kept unless already seen, as an exact
+# token; never removes anything, never raises a mark.
+action legacy(r:replica, t:token) = {
+    require legacy_w(w(t)) & ~authored(t);
+    if ~(cloud(r,t) | mark(r, w(t), h(t))) {
+        live(r,t) := true;
+        cloud(r,t) := true;
+    }
+}
+
+# A reopen: a new writer id, never used before.
+action reopen(r:replica, nw:writer) = {
+    require ~legacy_w(nw) & forall R. ~owner(nw, R);
+    require forall T. ~authored(T) | w(T) ~= nw;
+    require forall R, H. ~mark(R, nw, H);
+    owner(nw, r) := true;
+    cur(r) := nw;
+}
+
+export write
+export merge
+export legacy
+export reopen
+
+# --- invariants -----------------------------------------------------
+
+invariant [live_seen] live(R,T) -> cloud(R,T) | mark(R, w(T), h(T))
+invariant [gone_seen] gone(R,T) -> cloud(R,T) | mark(R, w(T), h(T))
+
+# T7
+invariant [no_resurrection] ~(live(R,T) & gone(R,T))
+
+# T5: a seen version that is not live was replaced
+invariant [only_replaced_leave]
+    (cloud(R,T) | mark(R, w(T), h(T))) & (authored(T) | legacy_w(w(T)))
+        & ~live(R,T) -> gone(R,T)
+
+# T2 closure: a mark covers only versions this state has handled
+invariant [closure] mark(R, W, H) & w(T) = W & le(h(T), H) & authored(T)
+        -> live(R,T) | gone(R,T)
+
+# supporting facts
+invariant [marks_bounded] mark(R, W, H) -> le(H, hmax(W)) & ~legacy_w(W)
+invariant [own_handled] authored(T) & owner(w(T), R) -> live(R,T) | gone(R,T)
+invariant [authored_owned] authored(T) -> exists R. owner(w(T), R)
+invariant [owner_unique] owner(W,R1) & owner(W,R2) -> R1 = R2
+invariant [authored_bounded] authored(T) -> le(h(T), hmax(w(T)))
+invariant [authored_not_old] authored(T) -> ~legacy_w(w(T))
+invariant [cloud_legacy] cloud(R,T) -> legacy_w(w(T)) & ~authored(T)

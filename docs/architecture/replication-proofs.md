@@ -120,4 +120,4 @@ Not covered here:
 - filters, stubs and purge, which land later;
 - clock skew and liveness under continuous writes.
 
-Independent Python models built during the design review covered several of these; they are not part of the repository. Mechanized proofs (TLA+, Ivy) are not part of this commit.
+Mechanized checks live in `proofs/` (see its README): TLC explores every reachable state of three replicas, including crashes with rollback and automatic resolution; Ivy proves closure (T2), T5 and T7 as inductive invariants for any number of replicas and writers; Lean proves the join laws (T1), T7 at one merge and T6. Each has negative controls that must fail.
