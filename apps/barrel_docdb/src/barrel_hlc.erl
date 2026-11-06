@@ -57,6 +57,7 @@
 %% Constants
 -export([
     min/0,
+    add_logical/2,
     max/0
 ]).
 
@@ -277,6 +278,11 @@ min() ->
     #timestamp{wall_time = 0, logical = 0}.
 
 %% @doc Maximum timestamp value (for range scans).
+%% @doc `TS' moved `N' logical steps later.
+-spec add_logical(timestamp(), non_neg_integer()) -> timestamp().
+add_logical(#timestamp{logical = L} = TS, N) when is_integer(N), N >= 0 ->
+    TS#timestamp{logical = L + N}.
+
 -spec max() -> timestamp().
 max() ->
     %% Use maximum values that fit in our encoding format
