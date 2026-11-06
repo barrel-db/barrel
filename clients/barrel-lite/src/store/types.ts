@@ -32,6 +32,18 @@ export interface DocRecord {
   vv: string;
   deleted: boolean;
   dirty: boolean;
+  /** The document's replicated state (barrel_live binary form, standard
+   * base64): every live version and every version seen. Absent on
+   * records written before it existed. */
+  state?: string;
+  /** The other live versions (conflicts), with their bodies. */
+  conflicts?: ConflictVersion[];
+}
+
+export interface ConflictVersion {
+  version: string;
+  deleted: boolean;
+  body: JsonObject | null;
 }
 
 /** Per-database metadata, persisted alongside the documents. */

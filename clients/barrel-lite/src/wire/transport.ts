@@ -36,6 +36,8 @@ export interface TransportOptions {
 
 export interface SyncInfo {
   db: string;
+  /** The server merges whole document states (/state/:id). */
+  fullState?: boolean;
   historyFloor?: string; // opaque standard-base64 cursor
   attFloor?: string;
 }
@@ -73,6 +75,20 @@ export interface PutVersionResult {
   winner: string; // token
 }
 
+/** A document's whole state: barrel_live binary form and live bodies. */
+export interface DocState {
+  state: Uint8Array;
+  /** Body of each live version, keyed by version token. */
+  bodies: Record<string, JsonObject>;
+}
+
+export interface PutStateResult {
+  id: string;
+  winner: string;
+  /** false when the server already held the merged state. */
+  written: boolean;
+}
+
 export interface ChangesQuery {
   limit?: number;
   filter?: SyncFilter;
@@ -92,6 +108,7 @@ export class SyncTransport {
   private readonly token?: string;
   private readonly clock: HlcClock;
   private readonly fetchImpl: FetchLike;
+  private fullStateCached: boolean | undefined;
 
   constructor(opts: TransportOptions) {
     const root = opts.url.replace(/\/+$/, "");
@@ -112,7 +129,38 @@ export class SyncTransport {
     if (typeof obj["att_floor"] === "string") {
       info.attFloor = obj["att_floor"];
     }
+    if (obj["full_state"] === true) info.fullState = true;
     return info;
+  }
+
+  /** Whether the server merges whole document states; asked once. */
+  async fullState(): Promise<boolean> {
+    if (this.fullStateCached === undefined) {
+      this.fullStateCached = (await this.info()).fullState === true;
+    }
+    return this.fullStateCached;
+  }
+
+  async getState(id: string): Promise<DocState> {
+    const { json } = await this.request("GET", `/state/${encodeURIComponent(id)}`);
+    const obj = asObject(json);
+    const bodies: Record<string, JsonObject> = {};
+    for (const [t, b] of Object.entries(asObject(obj["bodies"]))) bodies[t] = asObject(b);
+    return { state: base64Decode(String(obj["state"])), bodies };
+  }
+
+  async putState(id: string, input: DocState): Promise<PutStateResult> {
+    const body: JsonObject = {
+      state: base64Encode(input.state, "standard"),
+      bodies: input.bodies,
+    };
+    const { json } = await this.request("PUT", `/state/${encodeURIComponent(id)}`, body);
+    const obj = asObject(json);
+    return {
+      id: String(obj["id"]),
+      winner: String(obj["winner"]),
+      written: obj["written"] === true,
+    };
   }
 
   /** Handshake the clock; throws SyncError("clock_skew") on a 409. */

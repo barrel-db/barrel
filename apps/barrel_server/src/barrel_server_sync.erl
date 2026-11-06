@@ -164,15 +164,18 @@ put_version(Req) ->
         end)
     end).
 
-%% A document's full replication state, in CBOR: the encoded state is
-%% a byte string.
+%% A document's full replication state: the encoded state and digest are
+%% byte strings in CBOR, standard base64 in JSON (as version vectors).
 get_state(Req) ->
     with_sync_db(Req, fun(DbBin) ->
         DocId = binding(<<"id">>, Req),
+        Cbor = accepts_cbor(Req),
         case barrel_docdb:get_doc_state(DbBin, DocId) of
             {ok, #{state := State, digest := Digest, bodies := Bodies}} ->
-                json_resp(Req, 200, #{id => DocId, state => State,
-                                      digest => Digest, bodies => Bodies});
+                json_resp(Req, 200, #{id => DocId,
+                                      state => vv_to_wire(Cbor, State),
+                                      digest => vv_to_wire(Cbor, Digest),
+                                      bodies => Bodies});
             {error, Reason} ->
                 error_resp(Req, Reason)
         end
@@ -182,8 +185,9 @@ put_state(Req) ->
     with_sync_db(Req, fun(DbBin) ->
         DocId = binding(<<"id">>, Req),
         with_json(Req, fun
-            (#{<<"state">> := State, <<"bodies">> := Bodies})
-                    when is_binary(State), is_map(Bodies) ->
+            (#{<<"state">> := StateWire, <<"bodies">> := Bodies})
+                    when is_binary(StateWire), is_map(Bodies) ->
+                State = vv_from_wire(request_cbor(Req), StateWire),
                 case barrel_docdb:put_doc_state(DbBin, DocId, State, Bodies) of
                     {Written, Id, Winner} when Written =:= ok;
                                                Written =:= unchanged ->

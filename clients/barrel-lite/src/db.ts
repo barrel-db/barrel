@@ -17,7 +17,7 @@ import { MemoryAdapter } from "./store/memory.js";
 import { OpfsAdapter } from "./store/opfs.js";
 import { LocalStore } from "./store/localstore.js";
 import { MemoryBlobStore, OpfsBlobStore, type BlobStore } from "./store/blobstore.js";
-import type { DocRecord, StorageAdapter, StorageArea } from "./store/types.js";
+import type { ConflictVersion, DocRecord, StorageAdapter, StorageArea } from "./store/types.js";
 import {
   SyncTransport,
   type FetchLike,
@@ -252,6 +252,30 @@ export class Database {
     }
     const rec = this.store.remove(id);
     this.announce({ id, deleted: true, source: "local" });
+    this.afterMutation();
+    return { id, version: rec.version };
+  }
+
+  /** The document's conflicting versions (the winner excluded), each
+   * with its body; empty when there is no conflict. */
+  async conflicts(id: string): Promise<ConflictVersion[]> {
+    if (this.isFollower()) {
+      return (await this.callLeader("conflicts", [id])) as unknown as ConflictVersion[];
+    }
+    return this.store.get(id)?.conflicts ?? [];
+  }
+
+  /** Resolve a conflict: the body (or a delete when null) replaces the
+   * winner and every conflict, here and, after a push, everywhere. */
+  async resolve(id: string, body: JsonObject | null): Promise<{ id: string; version: string }> {
+    if (this.isFollower()) {
+      return (await this.callLeader("resolve", [id, body])) as unknown as {
+        id: string;
+        version: string;
+      };
+    }
+    const rec = this.store.resolve(id, body === null ? null : { ...body, id });
+    this.announce({ id, deleted: rec.deleted, source: "local" });
     this.afterMutation();
     return { id, version: rec.version };
   }
@@ -650,6 +674,11 @@ export class Database {
         return (await this.put(args[0] as JsonObject & { id: string })) as unknown as JsonValue;
       case "remove":
         return (await this.remove(args[0] as string)) as unknown as JsonValue;
+      case "conflicts":
+        return (await this.conflicts(args[0] as string)) as unknown as JsonValue;
+      case "resolve":
+        return (await this.resolve(args[0] as string,
+                                   args[1] as JsonObject | null)) as unknown as JsonValue;
       case "allDocs":
         return (await this.allDocs((args[0] as { includeDeleted?: boolean }) ?? {})) as unknown as JsonValue;
       case "push":
