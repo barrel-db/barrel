@@ -25,10 +25,15 @@ for cfg in DocState Resolver MixedFns Resolver_Sends4; do
     if tlc "$cfg" | grep -q "No error has been found"; then pass "tlc $cfg"
     else fail "tlc $cfg"; fi
 done
-# TLC negative controls: each must report a violation
-for cfg in NC_NaiveMerge NC_PlusOne NC_NoStop NC_OwnClock; do
-    if tlc "$cfg" | grep -q "is violated"; then pass "tlc $cfg (violation found)"
-    else fail "tlc $cfg (no violation: model too weak)"; fi
+# TLC negative controls: each must break the invariant it targets
+for pair in NC_NaiveMerge:NoResurrection NC_PlusOne:ResolutionAbove \
+            NC_NoStop:ResolutionAbove NC_OwnClock:OneVersion; do
+    cfg=${pair%%:*}; inv=${pair##*:}
+    if tlc "$cfg" | grep -q "Invariant $inv is violated"; then
+        pass "tlc $cfg ($inv violated)"
+    else
+        fail "tlc $cfg ($inv not violated: model too weak)"
+    fi
 done
 
 # Ivy: inductive invariants, any number of replicas, writers, versions
@@ -38,42 +43,66 @@ ivy() {
     docker run --rm --platform linux/amd64 -v "$PWD/ivy":/proofs "$IVY_IMAGE" "$1" 2>&1
 }
 if ivy live.ivy | grep -q "^OK"; then pass "ivy live"; else fail "ivy live"; fi
-nc_ivy() {
-    python3 -I - "$1" "$2" "$3" <<'PY'
+nc_ivy() {  # name, target invariant, text, replacement
+    local name=$1 target=$2
+    python3 -I - "$name" "$3" "$4" <<'PY'
 import sys
 name, a, b = sys.argv[1:]
 t = open("ivy/live.ivy").read()
 assert t.count(a) == 1, name
 open(f"ivy/nc_{name}.ivy", "w").write(t.replace(a, b))
 PY
-    if ivy "nc_$1.ivy" | grep -q "error: failed checks"; then pass "ivy nc_$1 (fails)"
-    else fail "ivy nc_$1 (proved: model too weak)"; fi
-    rm -f "ivy/nc_$1.ivy"
+    # it must break the invariant it targets
+    if ivy "nc_$name.ivy" | grep -q "$target ... FAIL"; then
+        pass "ivy nc_$name ($target fails)"
+    else
+        fail "ivy nc_$name ($target holds: model too weak)"
+    fi
+    rm -f "ivy/nc_$name.ivy"
 }
-nc_ivy legacy_raises_mark "        cloud(r,t) := true;
+nc_ivy legacy_raises_mark only_replaced_leave "        cloud(r,t) := true;
     }" "        cloud(r,t) := true;
         mark(r, w(t), H) := mark(r, w(t), H) | le(H, h(t));
     }"
-nc_ivy merge_ignores_seen "    live(r,T) := (live(r,T) & live(s,T))
+nc_ivy merge_ignores_seen no_resurrection "    live(r,T) := (live(r,T) & live(s,T))
                | (live(r,T) & ~(cloud(s,T) | mark(s, w(T), h(T))))
                | (live(s,T) & ~(cloud(r,T) | mark(r, w(T), h(T))));" \
     "    live(r,T) := live(r,T) | live(s,T);"
-nc_ivy writer_reused "    require ~legacy_w(nw) & forall R. ~owner(nw, R);
+nc_ivy writer_reused own_handled "    require ~legacy_w(nw) & forall R. ~owner(nw, R);
     require forall T. ~authored(T) | w(T) ~= nw;
     require forall R, H. ~mark(R, nw, H);" "    require ~legacy_w(nw);"
 
 # Lean: the join is a semilattice and drops what the other side replaced
 if "$LEAN" lean/Live.lean >/dev/null 2>&1; then pass "lean Live"; else fail "lean Live"; fi
-# negative control: a union merge (ignoring what was seen) must not
-# satisfy the drop theorem
-NC="$META/NcUnion.lean"
-cat > "$NC" <<'LEAN'
-def unionJoin (la _sa lb _sb : Bool) : Bool := la || lb
-theorem nc_union_drops : ∀ la sa lb sb : Bool,
-    sb = true → lb = false → unionJoin la sa lb sb = false := by decide
+# negative controls: each one-rule change to the merge must fail the
+# property named after it
+lean_nc() {  # name, live join body, seen join body, theorem
+    local f="$META/Nc_$1.lean"
+    cat > "$f" <<LEAN
+def lj (la sa lb sb : Bool) : Bool := $2
+def sj (sa sb : Bool) : Bool := $3
+theorem nc : $4 := by decide
 LEAN
-if "$LEAN" "$NC" >/dev/null 2>&1; then fail "lean nc_union_drops (proved)"
-else pass "lean nc_union_drops (rejected)"; fi
+    # it must fail because decide refutes the property, not on a typo
+    if "$LEAN" "$f" 2>&1 | grep -q "proved that the proposition"; then
+        pass "lean nc_$1 (refuted)"
+    else
+        fail "lean nc_$1 (not refuted)"
+    fi
+}
+LIVE='(la && lb) || (la && !sb) || (lb && !sa)'
+COMM='∀ la sa lb sb : Bool, lj la sa lb sb = lj lb sb la sa'
+ASSOC='∀ la sa lb sb lc sc : Bool, lj (lj la sa lb sb) (sj sa sb) lc sc = lj la sa (lj lb sb lc sc) (sj sb sc)'
+DROPS='∀ la sa lb sb : Bool, sb = true → lb = false → lj la sa lb sb = false'
+KEEPS='∀ la sa lb sb : Bool, la = true → sb = false → lj la sa lb sb = true'
+GROWS='∀ sa sb : Bool, sa = true → sj sa sb = true'
+lean_nc one_side_term '(la && lb) || (la && !sb)' 'sa || sb' "$COMM"
+lean_nc union_keeps_replaced 'la || lb' 'sa || sb' "$DROPS"
+lean_nc keeps_own_dropped '(la && lb) || la || (lb && !sa)' 'sa || sb' "$DROPS"
+lean_nc intersection_loses_write 'la && lb' 'sa || sb' "$KEEPS"
+lean_nc seen_shrinks "$LIVE" 'sa && sb' "$GROWS"
+lean_nc seen_shrinks_assoc "$LIVE" 'sa && sb' "$ASSOC"
+lean_nc seen_ignored_by_right '(la && lb) || la || (lb && !sa)' 'sa || sb' "$COMM"
 
 rm -rf "$META"
 [ "$status" -eq 0 ] && echo "PROOFS PASS" || echo "PROOFS FAIL"

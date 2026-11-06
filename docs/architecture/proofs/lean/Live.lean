@@ -36,6 +36,11 @@ holds is not kept. -/
 theorem liveJoin_drops_replaced : ∀ la sa lb sb : Bool,
     sb = true → lb = false → liveJoin la sa lb sb = false := by decide
 
+/-- A version one side holds and the other side never saw is kept
+(no concurrent write is lost). -/
+theorem liveJoin_keeps_unseen : ∀ la sa lb sb : Bool,
+    la = true → sb = false → liveJoin la sa lb sb = true := by decide
+
 theorem liveJoin_seen : ∀ la sa lb sb : Bool,
     (la = true → sa = true) → (lb = true → sb = true) →
     liveJoin la sa lb sb = true → (sa || sb) = true := by decide
@@ -73,5 +78,14 @@ def stub {α : Type} (a : State α) : State α := ⟨a.live, a.seen⟩
 theorem join_drops_replaced {α : Type} (a b : State α) (x : α)
     (hs : b.seen x = true) (hl : b.live x = false) : (join a b).live x = false :=
   liveJoin_drops_replaced _ _ _ _ hs hl
+
+theorem join_keeps_unseen {α : Type} (a b : State α) (x : α)
+    (hl : a.live x = true) (hs : b.seen x = false) : (join a b).live x = true :=
+  liveJoin_keeps_unseen _ _ _ _ hl hs
+
+/-- What a state has seen only grows through a merge. -/
+theorem join_seen_grows {α : Type} (a b : State α) (x : α)
+    (h : a.seen x = true) : (join a b).seen x = true := by
+  simp [join, h]
 
 theorem stub_join {α : Type} (a b : State α) : join (stub a) b = join a b := rfl
