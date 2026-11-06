@@ -39,7 +39,8 @@
 -export([get_info/4]).
 
 %% Sync support (optional backend callbacks; see barrel_att_backend)
--export([delete/5, att_changes/4, att_floor/2, sweep_att_feed/3,
+-export([delete/5, att_changes/4, att_floor/2, att_last_hlc/2,
+         sweep_att_feed/3,
          rebuild_feed/2, supports_sync/1]).
 -export([checkpoint/2]).
 -export([destroy/2]).
@@ -287,6 +288,16 @@ att_changes(AttRef, DbName, Since, Opts) ->
 att_floor(AttRef, DbName) ->
     B = backend(AttRef),
     B:att_floor(AttRef, barrel_keyspace:resolve(DbName)).
+
+%% @doc HLC of the newest attachment feed row, or min() for a backend
+%% without a local feed.
+-spec att_last_hlc(att_ref(), binary()) -> barrel_hlc:timestamp().
+att_last_hlc(AttRef, DbName) ->
+    B = backend(AttRef),
+    case exported(B, att_last_hlc, 2) of
+        true -> B:att_last_hlc(AttRef, barrel_keyspace:resolve(DbName));
+        false -> barrel_hlc:min()
+    end.
 
 -spec sweep_att_feed(att_ref(), binary(), term()) ->
     {ok, map()} | {error, term()}.

@@ -18,7 +18,7 @@
 -export([info/1, stop/1]).
 -export([get_store_ref/1, get_att_ref/1]).
 -export([sweep_ttl/1]).
--export([source_id/1]).
+-export([source_id/1, writer_id/1, alloc_hlc/1]).
 
 %% Document API
 -export([
@@ -486,6 +486,7 @@ init(Name, Config, CompiledChannels, DbPath, Keyspace, Parent, ForkHlc, Env) ->
                     persistent_term:put({barrel_source, Name},
                                         source_id(ReadOnly, StoreRef, Name,
                                                   DbPath)),
+                    ok = init_writer(ReadOnly, StoreRef, AttRef, Name, Keyspace),
                     ok = barrel_channel:install(Name, CompiledChannels),
 
                     %% Compaction settings from config (or defaults)
@@ -623,7 +624,7 @@ handle_call_rw(info, _From, #state{name = Name, keyspace = Keyspace,
 
 handle_call_rw({checkpoint_to, DocsPath, AttPath}, _From,
                #state{store_ref = StoreRef, att_ref = AttRef} = State) ->
-    ForkHlc = barrel_hlc:new_hlc(),
+    ForkHlc = alloc_hlc(State#state.name),
     Result = case barrel_store_rocksdb:checkpoint(StoreRef, DocsPath) of
         ok ->
             case barrel_att_store:checkpoint(AttRef, AttPath) of
@@ -711,7 +712,11 @@ handle_call_rw({get_conflicts, DocId}, _From,
 
 handle_call_rw({resolve_conflict, DocId, BaseRev, Resolution}, _From,
                #state{name = DbName, store_ref = StoreRef} = State) ->
-    Result = do_resolve_conflict(StoreRef, DbName, DocId, BaseRev, Resolution),
+    Result = try
+        do_resolve_conflict(StoreRef, DbName, DocId, BaseRev, Resolution)
+    catch
+        throw:{error, clock_skew} = Skew -> Skew
+    end,
     {reply, Result, State};
 
 %% Replication operations
@@ -723,6 +728,8 @@ handle_call_rw({put_version, Doc, VersionToken, VVBin, Deleted}, _From,
                        barrel_version:from_token(VersionToken),
                        barrel_vv:decode(VVBin), Deleted)
     catch
+        throw:{error, clock_skew} ->
+            {error, clock_skew};
         Class:Reason ->
             {error, {invalid_version, {Class, Reason}}}
     end,
@@ -790,6 +797,13 @@ handle_info(ttl_sweep, #state{name = DbName, store_ref = StoreRef,
     Fun = fun() -> do_ttl_sweep(StoreRef, DbName, Batch) end,
     {noreply, start_sweep(ttl, Fun, none, true, State)};
 
+handle_info({sweep_done, Kind, {writer_apply, Apply}}, State) ->
+    %% The worker only read; the writer applies, re-checking each item
+    %% against the current state. Long work comes back in chunks so
+    %% writes interleave.
+    {noreply, run_apply(Kind, Apply, detach_worker(Kind, State))};
+handle_info({sweep_continue, Kind, Apply}, State) ->
+    {noreply, run_apply(Kind, Apply, State)};
 handle_info({sweep_done, Kind, Result}, State) ->
     {noreply, finish_sweep(Kind, Result, State)};
 
@@ -826,7 +840,15 @@ terminate(Reason, #state{committer = Committer} = State) when is_pid(Committer) 
 terminate(_Reason, #state{name = Name, store_ref = StoreRef, att_ref = AttRef,
                           filter_pid = FilterPid,
                           compaction_timer = CompactionTimer,
-                          retention_timer = RetentionTimer}) ->
+                          retention_timer = RetentionTimer,
+                          ttl_timer = TtlTimer,
+                          sweep_workers = Workers}) ->
+    %% Workers only read; stop them before the stores close
+    ok = stop_workers(Workers),
+    _ = case TtlTimer of
+            undefined -> ok;
+            _ -> erlang:cancel_timer(TtlTimer)
+        end,
     %% Cancel compaction timer
     _ =
       case CompactionTimer of
@@ -856,6 +878,7 @@ terminate(_Reason, #state{name = Name, store_ref = StoreRef, att_ref = AttRef,
     persistent_term:erase({barrel_db, Name}),
     persistent_term:erase({barrel_store, Name}),
     persistent_term:erase({barrel_source, Name}),
+    persistent_term:erase({barrel_writer, Name}),
     ok = barrel_keyspace:uninstall(Name),
     ok = barrel_channel:uninstall(Name),
     %% Close attachment store
@@ -876,6 +899,19 @@ terminate(_Reason, #state{name = Name, store_ref = StoreRef, att_ref = AttRef,
 %%====================================================================
 %% Internal functions
 %%====================================================================
+
+stop_workers(Workers) ->
+    Pids = [Pid || {Pid, _, _} <- maps:values(Workers), is_pid(Pid)],
+    MRefs = [begin
+                 MRef = erlang:monitor(process, Pid),
+                 exit(Pid, kill),
+                 MRef
+             end || Pid <- Pids],
+    lists:foreach(fun(MRef) ->
+                      receive {'DOWN', MRef, process, _, _} -> ok
+                      after 5000 -> ok
+                      end
+                  end, MRefs).
 
 %% @private Resolve the encryption spec against the CRYPTO marker file
 %% (a cleartext key-check token next to TIMELINE) and build the
@@ -985,6 +1021,30 @@ finish_sweep(Kind, Result, #state{sweep_workers = Workers} = State) ->
             State
     end.
 
+%% The worker that reported is gone: keep the kind (and its waiters)
+%% busy while the writer applies, without a pid a DOWN could match.
+detach_worker(Kind, #state{sweep_workers = Workers} = State) ->
+    case maps:find(Kind, Workers) of
+        {ok, {_Pid, Waiters, Periodic}} ->
+            State#state{sweep_workers =
+                            Workers#{Kind => {undefined, Waiters, Periodic}}};
+        error ->
+            State
+    end.
+
+run_apply(Kind, Apply, State) ->
+    State1 = await_commit(State),
+    Step = try Apply()
+           catch C:E:St -> {done, {error, {sweep_failed, C, E, St}}}
+           end,
+    case Step of
+        {done, Result} ->
+            finish_sweep(Kind, Result, State1);
+        {more, Next} ->
+            self() ! {sweep_continue, Kind, Next},
+            State1
+    end.
+
 %% Re-arm the periodic timer for a kind. A full TTL batch comes back quickly
 %% to drain the backlog; everything else waits the configured interval.
 reschedule_sweep(compaction, _Result, #state{compaction_interval = I} = State) ->
@@ -1054,6 +1114,7 @@ release_stale_refs(Name) ->
             persistent_term:erase({barrel_store, Name}),
             persistent_term:erase({barrel_db, Name}),
             persistent_term:erase({barrel_source, Name}),
+            persistent_term:erase({barrel_writer, Name}),
             ok = barrel_keyspace:uninstall(Name),
             ok = barrel_channel:uninstall(Name),
             ok
@@ -1077,6 +1138,10 @@ release_stale_refs(Name) ->
 %% normal delete path (feed, channels, and replication all correct),
 %% and drop stale rows.
 do_ttl_sweep(StoreRef, DbName, Batch) ->
+    Keys = ttl_due_keys(StoreRef, DbName, Batch),
+    {writer_apply, fun() -> {done, ttl_apply(StoreRef, DbName, Keys)} end}.
+
+ttl_due_keys(StoreRef, DbName, Batch) ->
     Ks = barrel_keyspace:resolve(DbName),
     NowMs = erlang:system_time(millisecond),
     Start = barrel_store_keys:doc_expiry_prefix(Ks),
@@ -1087,8 +1152,12 @@ do_ttl_sweep(StoreRef, DbName, Batch) ->
             false -> {ok, [Key | Acc]}
         end
     end,
-    Keys = lists:reverse(
-        barrel_store_rocksdb:fold_range(StoreRef, Start, End, Fold, [])),
+    lists:reverse(
+        barrel_store_rocksdb:fold_range(StoreRef, Start, End, Fold, [])).
+
+%% In the writer: re-read each doc, delete the ones still due.
+ttl_apply(StoreRef, DbName, Keys) ->
+    Ks = barrel_keyspace:resolve(DbName),
     Swept = lists:foldl(
         fun(Key, N) ->
             {ExpiresMs, DocId} =
@@ -1134,23 +1203,47 @@ do_retention_sweep(StoreRef, AttRef, DbName, RetentionPeriod, NowMs) ->
     end,
     Zero = #{history_swept => 0, superseded_removed => 0,
              docs_forgotten => 0},
-    {Ops, Stats} = barrel_history:fold(
+    Entries = lists:reverse(barrel_history:fold(
         StoreRef, DbName,
-        fun(Entry, {OpsAcc, StatsAcc}) ->
-            {EntryOps, StatsAcc2} =
-                sweep_entry_ops(StoreRef, DbName, Entry, StatsAcc),
-            {ok, {EntryOps ++ OpsAcc, StatsAcc2}}
-        end,
-        {[], Zero},
-        #{to => Cutoff}),
+        fun(Entry, Acc) -> {ok, [Entry | Acc]} end,
+        [],
+        #{to => Cutoff})),
     %% Channel leave rows are events, not state: age them out
     {LeaveOps, LeavesSwept} = sweep_channel_leaves(StoreRef, DbName, Cutoff),
     FloorOp = {put, barrel_store_keys:db_meta(Ks, <<"history_floor">>),
                barrel_hlc:encode(Cutoff)},
-    ok = barrel_store_rocksdb:write_batch(
-        StoreRef, [FloorOp | Ops ++ LeaveOps], #{}),
-    {ok, Stats#{floor => Cutoff, channel_leaves_swept => LeavesSwept,
-                att_tombstones_swept => AttSwept}}.
+    Final = fun(Stats) ->
+        ok = barrel_store_rocksdb:write_batch(StoreRef, [FloorOp | LeaveOps],
+                                              #{}),
+        {ok, Stats#{floor => Cutoff, channel_leaves_swept => LeavesSwept,
+                    att_tombstones_swept => AttSwept}}
+    end,
+    {writer_apply,
+     fun() -> retention_apply(StoreRef, DbName, Entries, Zero, Final) end}.
+
+-define(RETENTION_CHUNK, 256).
+
+%% In the writer: build each entry's ops from the current state, one
+%% batch per chunk; the floor moves only after the last chunk.
+retention_apply(StoreRef, DbName, Entries, Stats, Final) ->
+    {Chunk, Rest} = lists:split(min(?RETENTION_CHUNK, length(Entries)),
+                                Entries),
+    {Ops, Stats1} = lists:foldl(
+        fun(Entry, {OpsAcc, StatsAcc}) ->
+            {EntryOps, StatsAcc2} =
+                sweep_entry_ops(StoreRef, DbName, Entry, StatsAcc),
+            {EntryOps ++ OpsAcc, StatsAcc2}
+        end,
+        {[], Stats}, Chunk),
+    ok = case Ops of
+        [] -> ok;
+        _ -> barrel_store_rocksdb:write_batch(StoreRef, Ops, #{})
+    end,
+    case Rest of
+        [] -> {done, Final(Stats1)};
+        _ -> {more, fun() -> retention_apply(StoreRef, DbName, Rest, Stats1,
+                                             Final) end}
+    end.
 
 %% @private Delete leave rows older than the cutoff in every configured
 %% channel (member rows are live state and are never age-swept).
@@ -1560,12 +1653,13 @@ build_item(#prep{rec = DocRecord} = P, {read, Old}, StoreRef, DbName, Opts) ->
         case cas_check(Old, maps:get(expected_version, DocRecord)) of
             ok ->
                 {Ops, Notify} = build_prepared_ops(StoreRef, DbName, P, Old,
-                                                   Opts, barrel_hlc:new_hlc()),
+                                                   Opts, alloc_hlc(DbName)),
                 {write_result(Notify, Opts), Ops, Notify};
             {error, conflict} = Conflict ->
                 {Conflict, [], none}
         end
     catch
+        throw:{error, _} = Err -> {Err, [], none};
         _:Reason -> {{error, Reason}, [], none}
     end;
 build_item({delete, DocId}, {read, Old}, StoreRef, DbName, Opts) ->
@@ -1894,6 +1988,84 @@ ensure_source_id(StoreRef, LogicalName) ->
             SourceId
     end.
 
+%% @doc The writer id authoring this database's versions. A new one is
+%% minted on every writable open, so a crash, a restored backup or a
+%% copied store can never reuse an id whose versions peers already hold.
+-spec writer_id(binary()) -> binary().
+writer_id(DbName) ->
+    persistent_term:get({barrel_writer, DbName}).
+
+%% @private Mint the writer id (synced, before any write) and load the
+%% feed clock floor. A read-only store never authors.
+init_writer(true, _StoreRef, _AttRef, _Name, _Keyspace) ->
+    ok;
+init_writer(false, StoreRef, AttRef, Name, Keyspace) ->
+    WriterId = <<"w", (binary:encode_hex(crypto:strong_rand_bytes(8),
+                                         lowercase))/binary>>,
+    ok = barrel_store_rocksdb:put(
+           StoreRef, barrel_store_keys:db_meta(Name, <<"writer_id">>),
+           WriterId, [{sync, true}]),
+    persistent_term:put({barrel_writer, Name}, WriterId),
+    High = max_hlc(stored_hlc(StoreRef, barrel_store_keys:db_meta(
+                                          Keyspace, <<"hlc_high">>)),
+                   stored_hlc(StoreRef,
+                              barrel_store_keys:db_last_hlc(Keyspace))),
+    %% the attachment feed is written by callers, not the writer: its
+    %% newest row only moves the clock, so it can't go back across a
+    %% restart either
+    _ = barrel_hlc:sync_hlc(max_hlc(High,
+                                    barrel_att_store:att_last_hlc(AttRef,
+                                                                  Name))),
+    put({?MODULE, hlc_high, Name}, High),
+    ok.
+
+stored_hlc(StoreRef, Key) ->
+    case barrel_store_rocksdb:get(StoreRef, Key) of
+        {ok, Enc} -> barrel_hlc:decode(Enc);
+        not_found -> barrel_hlc:min()
+    end.
+
+max_hlc(A, B) ->
+    case barrel_hlc:less(A, B) of
+        true -> B;
+        false -> A
+    end.
+
+%% @doc Allocate the HLC of a feed write. Only the writer allocates
+%% (anywhere else this fails), and every HLC is above every HLC this
+%% database ever wrote, so a clock that went back after a restart can't
+%% place a change behind a downstream checkpoint. Throws
+%% `{error, clock_skew}' when the clock can't get past that floor.
+-spec alloc_hlc(binary()) -> barrel_hlc:timestamp().
+alloc_hlc(DbName) ->
+    Key = {?MODULE, hlc_high, DbName},
+    case get(Key) of
+        undefined ->
+            erlang:error({hlc_alloc_outside_writer, DbName});
+        High ->
+            Hlc = above(High, barrel_hlc:new_hlc()),
+            put(Key, Hlc),
+            Hlc
+    end.
+
+above(High, Hlc) ->
+    case barrel_hlc:less(High, Hlc) of
+        true ->
+            Hlc;
+        false ->
+            _ = barrel_hlc:sync_hlc(High),
+            Hlc2 = barrel_hlc:new_hlc(),
+            case barrel_hlc:less(High, Hlc2) of
+                true -> Hlc2;
+                false -> throw({error, clock_skew})
+            end
+    end.
+
+catch_error(Fun) ->
+    try Fun()
+    catch throw:{error, _} = Err -> Err
+    end.
+
 %% @doc CAS check for local writes: the caller must supply the current
 %% winner's version token when updating a live document. Creating a new
 %% document, or recreating over a tombstone, needs no token.
@@ -1949,14 +2121,14 @@ channel_ops(DbName, NewHlc, DocInfo, DocBody, OldHlc, OldDocBody,
     end.
 
 build_write_ops(StoreRef, DbName, DocRecord, Old, Opts) ->
-    build_write_ops(StoreRef, DbName, DocRecord, Old, Opts, barrel_hlc:new_hlc()).
+    build_write_ops(StoreRef, DbName, DocRecord, Old, Opts, alloc_hlc(DbName)).
 
 build_write_ops(StoreRef, DbName, DocRecord, Old, Opts, NextHlc) ->
     Ks = barrel_keyspace:resolve(DbName),
     #{id := DocId, deleted := Deleted, doc := DocBody} = DocRecord,
     DocEntityKey = barrel_store_keys:doc_entity(Ks, DocId),
 
-    NewVersion = barrel_version:new(NextHlc, source_id(DbName)),
+    NewVersion = barrel_version:new(NextHlc, writer_id(DbName)),
     NewToken = barrel_version:to_token(NewVersion),
 
     {OldVersion, OldHlc, OldVV, OldDeleted, OldDocBody, OldDocBodyCbor,
@@ -2144,7 +2316,7 @@ build_prepared_ops(StoreRef, DbName, #prep{rec = DocRecord} = P, Old, Opts,
     #{id := DocId, deleted := Deleted, doc := DocBody} = DocRecord,
     DocEntityKey = barrel_store_keys:doc_entity(Ks, DocId),
 
-    NewVersion = barrel_version:new(NextHlc, source_id(DbName)),
+    NewVersion = barrel_version:new(NextHlc, writer_id(DbName)),
     NewToken = barrel_version:to_token(NewVersion),
 
     {OldVersion, OldHlc, OldVV, OldDeleted, OldDocBody, OldDocBodyCbor,
@@ -2308,7 +2480,7 @@ do_get_docs(StoreRef, DbName, DocIds, Opts) ->
 %%   - rev: binary() - expected version token (optional, for conflict detection)
 %%   - sync: boolean() - if true, sync to disk before returning (default: false)
 do_delete_doc(StoreRef, DbName, DocId, Opts) ->
-    case build_delete_ops(StoreRef, DbName, DocId, Opts) of
+    case catch_error(fun() -> build_delete_ops(StoreRef, DbName, DocId, Opts) end) of
         {ok, AllOps, Notify} ->
             WriteOpts = #{sync => maps:get(sync, Opts, false)},
             ok = barrel_store_rocksdb:write_batch(StoreRef, AllOps, WriteOpts),
@@ -2340,8 +2512,8 @@ build_delete_ops(StoreRef, DbName, DocId, Current, Opts) ->
                 _Other -> throw({error, {conflict, CurrentToken}})
             end,
 
-            NextHlc = barrel_hlc:new_hlc(),
-            NewVersion = barrel_version:new(NextHlc, source_id(DbName)),
+            NextHlc = alloc_hlc(DbName),
+            NewVersion = barrel_version:new(NextHlc, writer_id(DbName)),
             NewToken = barrel_version:to_token(NewVersion),
             NewVV = barrel_vv:bump(OldVV, NewVersion),
             DocEntityKey = barrel_store_keys:doc_entity(Ks, DocId),
@@ -2549,7 +2721,7 @@ apply_merged(StoreRef, DbName, DocId, MergedBody, RemoteBody, Version,
              RemoteVV, RemoteDeleted, Old, MergedVV, Tags) ->
     Ks = barrel_keyspace:resolve(DbName),
     %% The remote arrival: superseded chain row, archived body, history
-    RemoteChangeHlc = barrel_hlc:new_hlc(),
+    RemoteChangeHlc = alloc_hlc(DbName),
     VersionEnc = barrel_version:encode(Version),
     SiblingVV = barrel_vv:bump(RemoteVV, Version),
     RemoteOps = [
@@ -2615,7 +2787,7 @@ chain_op(DbName, DocId, Version, Flag, Old) ->
 apply_remote_current(StoreRef, DbName, DocId, DocBody, Version, VV, HistVV,
                      Deleted, Old, NConflicts, ChainOps, Tags) ->
     Ks = barrel_keyspace:resolve(DbName),
-    ChangeHlc = barrel_hlc:new_hlc(),
+    ChangeHlc = alloc_hlc(DbName),
     Token = barrel_version:to_token(Version),
     {OldHlc, OldDocBody, OldDocBodyCbor, CreatedAt, ExpiresAt, Tier} =
         case Old of
@@ -2712,7 +2884,7 @@ keep_local_add_conflict(StoreRef, DbName, DocId, RemoteBody, Version, RemoteVV,
     #{version := LocalV, hlc := OldHlc, deleted := LocalDeleted,
       body := LocalBody, created_at := CreatedAt, expires_at := ExpiresAt,
       tier := Tier} = Old,
-    ChangeHlc = barrel_hlc:new_hlc(),
+    ChangeHlc = alloc_hlc(DbName),
     LocalToken = barrel_version:to_token(LocalV),
     DocColumns = [
         {?COL_VERSION, barrel_version:encode(LocalV)},
