@@ -21,6 +21,9 @@
 -export([
     get_doc/3,
     put_version/5,
+    full_state/1,
+    get_doc_state/2,
+    put_doc_state/4,
     diff_versions/2,
     get_changes/3,
     get_local_doc/2,
@@ -154,6 +157,50 @@ put_version(Endpoint, Doc, Token, VVBin, Deleted) ->
     case req(Endpoint, put, [<<"/doc/">>, quote(DocId)], Body) of
         {ok, 200, #{<<"id">> := Id, <<"winner">> := Winner}} ->
             {ok, Id, Winner};
+        Other ->
+            error_of(Other)
+    end.
+
+%% @doc Whether the server replicates whole document states (it says
+%% so in /info). Asked once per endpoint per process.
+full_state(Endpoint) ->
+    Key = {?MODULE, full_state, maps:get(url, Endpoint)},
+    case get(Key) of
+        undefined ->
+            Answer = case req(Endpoint, get, <<"/info">>, undefined) of
+                {ok, 200, #{<<"full_state">> := true}} -> true;
+                _ -> false
+            end,
+            put(Key, Answer),
+            Answer;
+        Answer ->
+            Answer
+    end.
+
+get_doc_state(Endpoint, DocId) ->
+    case req_typed(Endpoint, get, [<<"/state/">>, quote(DocId)], undefined,
+                   [{<<"accept">>, <<"application/cbor">>}]) of
+        {ok, 200, _Encoding, #{<<"state">> := State, <<"bodies">> := Bodies}} ->
+            {ok, #{state => State, bodies => Bodies}};
+        {ok, Status, _Encoding, Body} ->
+            error_of({ok, Status, Body});
+        Other ->
+            error_of(Other)
+    end.
+
+put_doc_state(Endpoint, DocId, State, Bodies) ->
+    Body = {encoded, <<"application/cbor">>,
+            barrel_docdb_codec_cbor:encode_wire(#{state => State,
+                                                  bodies => Bodies})},
+    case req(Endpoint, put, [<<"/state/">>, quote(DocId)], Body,
+             [{<<"accept">>, <<"application/cbor">>}]) of
+        {ok, 200, #{<<"id">> := Id, <<"winner">> := Winner,
+                    <<"written">> := true}} ->
+            {ok, Id, Winner};
+        {ok, 200, #{<<"id">> := Id, <<"winner">> := Winner}} ->
+            {unchanged, Id, Winner};
+        {ok, 409, #{<<"error">> := <<"clock_skew">>}} ->
+            {error, clock_skew};
         Other ->
             error_of(Other)
     end.

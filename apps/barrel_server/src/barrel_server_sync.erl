@@ -20,6 +20,8 @@
     diff/1,
     get_doc/1,
     put_version/1,
+    get_state/1,
+    put_state/1,
     get_local/1,
     put_local/1,
     delete_local/1,
@@ -44,7 +46,9 @@ info(Req) ->
     with_sync_db(Req, fun(DbBin) ->
         case barrel_docdb:db_info(DbBin) of
             {ok, Info} ->
-                Base = #{db => DbBin},
+                %% full_state: this server replicates whole document
+                %% states (GET/PUT _sync/state/:id)
+                Base = #{db => DbBin, full_state => true},
                 WithHist = maybe_put(history_floor,
                                      maps:get(history_floor, Info,
                                               undefined), Base),
@@ -157,6 +161,41 @@ put_version(Req) ->
                 error ->
                     json_resp(Req, 400, #{error => <<"bad_json">>})
             end
+        end)
+    end).
+
+%% A document's full replication state, in CBOR: the encoded state is
+%% a byte string.
+get_state(Req) ->
+    with_sync_db(Req, fun(DbBin) ->
+        DocId = binding(<<"id">>, Req),
+        case barrel_docdb:get_doc_state(DbBin, DocId) of
+            {ok, #{state := State, digest := Digest, bodies := Bodies}} ->
+                json_resp(Req, 200, #{id => DocId, state => State,
+                                      digest => Digest, bodies => Bodies});
+            {error, Reason} ->
+                error_resp(Req, Reason)
+        end
+    end).
+
+put_state(Req) ->
+    with_sync_db(Req, fun(DbBin) ->
+        DocId = binding(<<"id">>, Req),
+        with_json(Req, fun
+            (#{<<"state">> := State, <<"bodies">> := Bodies})
+                    when is_binary(State), is_map(Bodies) ->
+                case barrel_docdb:put_doc_state(DbBin, DocId, State, Bodies) of
+                    {Written, Id, Winner} when Written =:= ok;
+                                               Written =:= unchanged ->
+                        json_resp(Req, 200, #{id => Id, winner => Winner,
+                                              written => Written =:= ok});
+                    {error, clock_skew} ->
+                        json_resp(Req, 409, #{error => <<"clock_skew">>});
+                    {error, Reason} ->
+                        error_resp(Req, Reason)
+                end;
+            (_) ->
+                json_resp(Req, 400, #{error => <<"bad_state">>})
         end)
     end).
 

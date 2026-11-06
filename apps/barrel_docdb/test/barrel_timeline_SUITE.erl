@@ -584,15 +584,14 @@ merge_after_branch_sweep(Config) ->
         {ok, _} = barrel_docdb:delete_doc(Branch, <<"doomed">>,
                                           #{rev => DR}),
         timer:sleep(1100),
-        %% the sweep forgets the expired tombstone but keeps live state
+        %% the sweep turns the expired delete into a stub
         {ok, _} = barrel_docdb:sweep_retention(Branch),
         {ok, Report} = barrel_docdb:merge_branch(Branch, #{}),
-        %% live branch edits still converge after the sweep
+        %% live branch edits converge after the sweep
         {ok, #{<<"v">> := 1}} = barrel_docdb:get_doc(Db0, <<"kept">>),
-        %% the forgotten delete never ships: the documented hazard
-        %% behind "merge at least once per retention window"
-        ?assertMatch(#{docs_written := 1}, Report),
-        {ok, _} = barrel_docdb:get_doc(Db0, <<"doomed">>)
+        %% and the delete still ships: the stub keeps its feed row
+        ?assertMatch(#{docs_written := 2}, Report),
+        {error, not_found} = barrel_docdb:get_doc(Db0, <<"doomed">>)
     after
         _ = barrel_docdb:delete_db(Branch)
     end,

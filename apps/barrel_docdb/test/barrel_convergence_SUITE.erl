@@ -36,6 +36,7 @@ groups() ->
             concurrent_edits_converge,
             deletes_converge,
             resolution_replicates,
+            concurrent_resolutions_conflict,
             random_workload_converges
         ]},
         {recovery, [sequence], [
@@ -168,6 +169,29 @@ deletes_converge(Config) ->
     assert_converged(A, B, DocIds),
     ok.
 
+%% Resolving the same conflict on two replicas at once: the original
+%% versions are gone everywhere and the two resolutions conflict.
+concurrent_resolutions_conflict(Config) ->
+    A = ?config(db_a, Config),
+    B = ?config(db_b, Config),
+    DocId = <<"twice">>,
+    ok = update_doc(A, DocId, <<"seed">>),
+    ok = sync_until_quiescent(A, B),
+    ok = update_doc(A, DocId, <<"from-a">>),
+    ok = update_doc(B, DocId, <<"from-b">>),
+    ok = sync_until_quiescent(A, B),
+    {ok, #{<<"_rev">> := Rev}} = barrel_docdb:get_doc(A, DocId),
+    {ok, [Loser]} = barrel_docdb:get_conflicts(A, DocId),
+    {ok, _} = barrel_docdb:resolve_conflict(A, DocId, Rev,
+                                            {merge, #{<<"v">> => <<"a">>}}),
+    {ok, _} = barrel_docdb:resolve_conflict(B, DocId, Rev,
+                                            {merge, #{<<"v">> => <<"b">>}}),
+    ok = sync_until_quiescent(A, B),
+    assert_converged(A, B, [DocId]),
+    {ok, [Other]} = barrel_docdb:get_conflicts(A, DocId),
+    ?assertNotEqual(Loser, Other),
+    ?assertNotEqual(Rev, Other).
+
 resolution_replicates(Config) ->
     A = ?config(db_a, Config),
     B = ?config(db_b, Config),
@@ -180,19 +204,11 @@ resolution_replicates(Config) ->
     ok = sync_until_quiescent(A, B),
     assert_converged(A, B, [DocId]),
 
-    %% Resolve wherever a conflict was recorded, then sync
-    lists:foreach(
-        fun(Db) ->
-            case barrel_docdb:get_conflicts(Db, DocId) of
-                {ok, []} ->
-                    ok;
-                {ok, _Some} ->
-                    {ok, #{<<"_rev">> := Rev}} = barrel_docdb:get_doc(Db, DocId),
-                    {ok, _} = barrel_docdb:resolve_conflict(
-                        Db, DocId, Rev, {merge, #{<<"v">> => <<"settled">>}})
-            end
-        end,
-        [A, B]),
+    %% Both replicas now hold the conflict; resolve it on A, then sync
+    {ok, [_]} = barrel_docdb:get_conflicts(B, DocId),
+    {ok, #{<<"_rev">> := Rev}} = barrel_docdb:get_doc(A, DocId),
+    {ok, _} = barrel_docdb:resolve_conflict(
+        A, DocId, Rev, {merge, #{<<"v">> => <<"settled">>}}),
     ok = sync_until_quiescent(A, B),
     assert_converged(A, B, [DocId]),
 

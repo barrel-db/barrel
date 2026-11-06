@@ -17,6 +17,7 @@
 -export([view/1, evict/3]).
 -export([auto_inputs/1, auto_step/3, auto_token/2, base/2]).
 -export([live/1, tokens/1, digest/1]).
+-export([encode_ctx/1, decode_ctx/2, encode_state/1, decode_state/1]).
 
 -export_type([state/0, token/0, info/0]).
 
@@ -31,6 +32,7 @@
 
 -define(AUTO, "auto:").
 -define(HASH_VSN, 1).
+-define(CTX_VSN, 1).
 
 %%====================================================================
 %% Join
@@ -263,6 +265,94 @@ digest(#{live := Live, obs := Obs, cloud := Cloud}) ->
                            lists:sort(maps:to_list(Obs)),
                            lists:sort(maps:keys(Cloud))},
                           [{minor_version, 2}, deterministic])).
+
+%%====================================================================
+%% Encoding
+%%====================================================================
+
+%% @doc The context, versioned binary: obs entries, cloud tokens, and
+%% the base and result of each live automatic resolution.
+-spec encode_ctx(state()) -> binary().
+encode_ctx(#{live := Live, obs := Obs, cloud := Cloud}) ->
+    Autos = lists:sort([{T, B, R} || {T, #{base := B, result := R}}
+                                         <- maps:to_list(Live)]),
+    <<?CTX_VSN,
+      (count_bin(maps:size(Obs)))/binary,
+      << <<(lp(W))/binary, (barrel_hlc:encode(H))/binary>>
+         || {W, H} <- lists:sort(maps:to_list(Obs)) >>/binary,
+      (count_bin(maps:size(Cloud)))/binary,
+      << <<(lp(barrel_version:encode(T)))/binary>>
+         || T <- lists:sort(maps:keys(Cloud)) >>/binary,
+      (count_bin(length(Autos)))/binary,
+      << <<(lp(barrel_version:encode(T)))/binary,
+           (count_bin(length(B)))/binary,
+           << <<(lp(barrel_version:encode(BT)))/binary>> || BT <- B >>/binary,
+           (lp(R))/binary>>
+         || {T, B, R} <- Autos >>/binary>>.
+
+%% @doc Rebuild a state from its live versions and encoded context.
+-spec decode_ctx(binary(), #{token() => info()}) -> state().
+decode_ctx(<<?CTX_VSN, Rest0/binary>>, Live) ->
+    {Obs, Rest1} = take_n(Rest0, fun(B) ->
+                                         {W, <<H:12/binary, R/binary>>} = take_lp(B),
+                                         {{W, barrel_hlc:decode(H)}, R}
+                                 end),
+    {Cloud, Rest2} = take_n(Rest1, fun take_token/1),
+    {Autos, <<>>} = take_n(Rest2, fun(B) ->
+                                          {T, R1} = take_token(B),
+                                          {Base, R2} = take_n(R1, fun take_token/1),
+                                          {Res, R3} = take_lp(R2),
+                                          {{T, Base, Res}, R3}
+                                  end),
+    Live1 = lists:foldl(
+              fun({T, Base, Res}, Acc) ->
+                  case Acc of
+                      #{T := I} -> Acc#{T := I#{base => Base, result => Res}};
+                      _ -> Acc
+                  end
+              end, Live, Autos),
+    #{live => Live1, obs => maps:from_list(Obs),
+      cloud => maps:from_keys(Cloud, true)}.
+
+%% @doc The whole state, for the wire: live versions with their deleted
+%% flag and vector, then the context.
+-spec encode_state(state()) -> binary().
+encode_state(#{live := Live} = State) ->
+    Ctx = encode_ctx(State),
+    <<?CTX_VSN, (count_bin(maps:size(Live)))/binary,
+      << <<(lp(barrel_version:encode(T)))/binary,
+           (case D of true -> 1; false -> 0 end):8,
+           (lp(barrel_vv:encode(VV)))/binary>>
+         || {T, #{deleted := D, vv := VV}} <- lists:sort(maps:to_list(Live)) >>/binary,
+      Ctx/binary>>.
+
+-spec decode_state(binary()) -> state().
+decode_state(<<?CTX_VSN, Rest0/binary>>) ->
+    {Entries, Ctx} = take_n(Rest0, fun(B) ->
+                                           {T, <<D:8, R1/binary>>} = take_token(B),
+                                           {VVBin, R2} = take_lp(R1),
+                                           {{T, #{deleted => D =:= 1,
+                                                  vv => barrel_vv:decode(VVBin)}},
+                                            R2}
+                                   end),
+    decode_ctx(Ctx, maps:from_list(Entries)).
+
+lp(Bin) -> <<(byte_size(Bin)):16, Bin/binary>>.
+count_bin(N) -> <<N:32>>.
+
+take_lp(<<N:16, Bin:N/binary, Rest/binary>>) -> {Bin, Rest}.
+
+take_token(Bin) ->
+    {Enc, Rest} = take_lp(Bin),
+    {barrel_version:decode(Enc), Rest}.
+
+take_n(<<N:32, Rest/binary>>, Fun) ->
+    take_n(N, Rest, Fun, []).
+
+take_n(0, Rest, _Fun, Acc) -> {lists:reverse(Acc), Rest};
+take_n(N, Bin, Fun, Acc) ->
+    {X, Rest} = Fun(Bin),
+    take_n(N - 1, Rest, Fun, [X | Acc]).
 
 %%====================================================================
 %% Internal

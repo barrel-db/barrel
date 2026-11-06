@@ -1017,6 +1017,7 @@ put_entity(#{ref := Ref}, Key, Columns, Opts) ->
 -define(COL_EMBEDDING, <<"emb">>).
 -define(COL_EMBEDDING_SRC, <<"embsrc">>).
 -define(COL_PROVENANCE, <<"prov">>).
+-define(COL_CTX, <<"ctx">>).
 
 %% @doc Encode entity columns to fixed binary format.
 %% Format v4 (version vectors; the rev-tree formats are gone, pre-1.0
@@ -1067,19 +1068,19 @@ encode_entity(Columns) ->
         _ -> 0
     end,
     Prov = proplists:get_value(?COL_PROVENANCE, Columns, <<>>),
-    Ext = case {Emb, Prov} of
-        {<<>>, <<>>} ->
+    %% tag 3 = replication context (barrel_live:encode_ctx/1)
+    Ctx = proplists:get_value(?COL_CTX, Columns, <<>>),
+    Ext = case {Emb, Prov, Ctx} of
+        {<<>>, <<>>, <<>>} ->
             <<>>;
-        {EmbBin, <<>>} ->
+        {EmbBin, <<>>, <<>>} ->
             <<(byte_size(EmbBin)):32, EmbBin/binary, SrcByte:8>>;
-        {<<>>, ProvBin} ->
+        _ ->
+            Tags = [{1, <<SrcByte:8, Emb/binary>>} || Emb =/= <<>>]
+                ++ [{2, Prov} || Prov =/= <<>>]
+                ++ [{3, Ctx} || Ctx =/= <<>>],
             <<16#FFFFFFFF:32,
-              2:8, (byte_size(ProvBin)):32, ProvBin/binary>>;
-        {EmbBin, ProvBin} ->
-            EmbVal = <<SrcByte:8, EmbBin/binary>>,
-            <<16#FFFFFFFF:32,
-              1:8, (byte_size(EmbVal)):32, EmbVal/binary,
-              2:8, (byte_size(ProvBin)):32, ProvBin/binary>>
+              << <<Tag:8, (byte_size(V)):32, V/binary>> || {Tag, V} <- Tags >>/binary>>
     end,
 
     <<(byte_size(Version)):16, Version/binary,
@@ -1132,6 +1133,8 @@ decode_entity_tags(<<1:8, Len:32, Val:Len/binary, Rest/binary>>, Columns) ->
                                          {?COL_EMBEDDING_SRC, Src}]);
 decode_entity_tags(<<2:8, Len:32, Val:Len/binary, Rest/binary>>, Columns) ->
     decode_entity_tags(Rest, Columns ++ [{?COL_PROVENANCE, Val}]);
+decode_entity_tags(<<3:8, Len:32, Val:Len/binary, Rest/binary>>, Columns) ->
+    decode_entity_tags(Rest, Columns ++ [{?COL_CTX, Val}]);
 decode_entity_tags(<<_Tag:8, Len:32, _Val:Len/binary, Rest/binary>>, Columns) ->
     %% unknown future tag: skip
     decode_entity_tags(Rest, Columns);

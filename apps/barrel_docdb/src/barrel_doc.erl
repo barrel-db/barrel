@@ -135,6 +135,9 @@ doc_without_meta(Doc) ->
 %% The document's version identity is issued by the writer
 %% (barrel_db_server); the record only carries the caller's expected
 %% current version (`_rev' token) for the CAS check.
+observed(L) when is_list(L) -> [T || T <- L, is_binary(T)];
+observed(_) -> undefined.
+
 -spec make_doc_record(doc()) -> map().
 make_doc_record(Doc0) ->
     Deleted = maps:get(<<"_deleted">>, Doc0, false),
@@ -152,6 +155,8 @@ make_doc_record(Doc0) ->
         id => Id,
         ref => erlang:make_ref(),
         expected_version => ExpectedVersion,
+        %% the versions the caller read (`_observed'), if it says
+        observed => observed(maps:get(<<"_observed">>, Doc0, undefined)),
         deleted => Deleted,
         attachments => Atts,
         doc => Doc1
