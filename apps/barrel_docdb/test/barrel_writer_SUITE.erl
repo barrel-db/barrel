@@ -19,7 +19,12 @@
          put_docs_doc_sync/1,
          put_docs_invalid_doc_opts/1,
          same_ids_many_writers/1,
-         reads_see_answered_writes/1]).
+         reads_see_answered_writes/1,
+         writer_id_new_per_open/1,
+         copied_store_new_writer/1,
+         feed_hlc_above_stored_floor/1,
+         alloc_outside_writer_fails/1,
+         close_during_sweeps/1]).
 
 -define(TAG, <<"hb.task">>).
 
@@ -32,7 +37,12 @@ all() ->
      put_docs_doc_sync,
      put_docs_invalid_doc_opts,
      same_ids_many_writers,
-     reads_see_answered_writes].
+     reads_see_answered_writes,
+     writer_id_new_per_open,
+     copied_store_new_writer,
+     feed_hlc_above_stored_floor,
+     alloc_outside_writer_fails,
+     close_during_sweeps].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(barrel_docdb),
@@ -360,3 +370,90 @@ pending(Db, Tag) ->
 recv(Tag, N) ->
     [receive {Tag, _Db, Change} -> Change after 5000 -> error({missing, Tag}) end
      || _ <- lists:seq(1, N)].
+
+%% Every open authors under a new writer id, so writes made after a
+%% crash or a restore can't reuse an id whose versions peers hold.
+writer_id_new_per_open(Config) ->
+    Db = ?config(db, Config),
+    W1 = barrel_db_server:writer_id(Db),
+    {ok, #{<<"rev">> := R1}} = barrel_docdb:put_doc(Db, #{<<"id">> => <<"a">>}),
+    ?assertMatch({_, _}, binary:match(R1, W1)),
+    ok = reopen(Db, Config),
+    W2 = barrel_db_server:writer_id(Db),
+    ?assertNotEqual(W1, W2),
+    {ok, #{<<"rev">> := R2}} = barrel_docdb:put_doc(
+                                 Db, #{<<"id">> => <<"a">>, <<"_rev">> => R1}),
+    ?assertMatch({_, _}, binary:match(R2, W2)).
+
+%% A copy of the files opened as another database authors under its own
+%% id: the same edit on both gives two distinct versions.
+copied_store_new_writer(Config) ->
+    Db = ?config(db, Config),
+    Dir = ?config(dir, Config),
+    Copy = <<Db/binary, "_copy">>,
+    {ok, #{<<"rev">> := R1}} = barrel_docdb:put_doc(Db, #{<<"id">> => <<"a">>}),
+    ok = barrel_docdb:close_db(Db),
+    os:cmd("cp -R " ++ filename:join(Dir, binary_to_list(Db)) ++ " "
+           ++ filename:join(Dir, binary_to_list(Copy))),
+    {ok, _} = barrel_docdb:create_db(Db, #{data_dir => Dir}),
+    {ok, _} = barrel_docdb:create_db(Copy, #{data_dir => Dir}),
+    try
+        ?assertNotEqual(barrel_db_server:writer_id(Db),
+                        barrel_db_server:writer_id(Copy)),
+        Edit = #{<<"id">> => <<"a">>, <<"_rev">> => R1, <<"v">> => 1},
+        {ok, #{<<"rev">> := A}} = barrel_docdb:put_doc(Db, Edit),
+        {ok, #{<<"rev">> := B}} = barrel_docdb:put_doc(Copy, Edit),
+        ?assertNotEqual(A, B)
+    after
+        _ = barrel_docdb:delete_db(Copy)
+    end.
+
+%% A stored feed floor ahead of the clock: after reopening, the next
+%% change still lands above it.
+feed_hlc_above_stored_floor(Config) ->
+    Db = ?config(db, Config),
+    {ok, _} = barrel_docdb:put_doc(Db, #{<<"id">> => <<"a">>}),
+    {ok, StoreRef} = barrel_db_server:get_store_ref(?config(pid, Config)),
+    Floor = barrel_hlc:from_wall_time(erlang:system_time(millisecond) + 2000),
+    ok = barrel_store_rocksdb:put(
+           StoreRef, barrel_store_keys:db_meta(Db, <<"hlc_high">>),
+           barrel_hlc:encode(Floor)),
+    ok = reopen(Db, Config),
+    {ok, _} = barrel_docdb:put_doc(Db, #{<<"id">> => <<"b">>}),
+    {ok, Changes, _} = barrel_docdb:get_changes(Db, first),
+    [Last] = [C || #{id := <<"b">>} = C <- Changes],
+    ?assert(barrel_hlc:less(Floor, maps:get(hlc, Last))).
+
+%% Only the writer process allocates feed HLCs.
+alloc_outside_writer_fails(Config) ->
+    Db = ?config(db, Config),
+    ?assertError({hlc_alloc_outside_writer, Db},
+                 barrel_db_server:alloc_hlc(Db)).
+
+%% Closing while retention and TTL sweeps run neither crashes nor loses
+%% writes; the database reopens clean.
+close_during_sweeps(Config) ->
+    Db = ?config(db, Config),
+    Dir = ?config(dir, Config),
+    ok = barrel_docdb:close_db(Db),
+    {ok, Pid} = barrel_docdb:create_db(Db, #{data_dir => Dir,
+                                             retention_period => 1,
+                                             ttl_sweep_interval => 1}),
+    [{ok, _} = barrel_docdb:put_doc(Db, #{<<"id">> => integer_to_binary(I)})
+     || I <- lists:seq(1, 200)],
+    Self = self(),
+    _ = spawn(fun() ->
+                  R = try barrel_db_server:sweep_retention(Pid)
+                      catch exit:Reason -> {exit, Reason}
+                      end,
+                  Self ! {swept, R}
+              end),
+    ok = barrel_docdb:close_db(Db),
+    receive {swept, _} -> ok after 5000 -> ok end,
+    {ok, _} = barrel_docdb:create_db(Db, #{data_dir => Dir}),
+    {ok, #{<<"id">> := <<"200">>}} = barrel_docdb:get_doc(Db, <<"200">>).
+
+reopen(Db, Config) ->
+    ok = barrel_docdb:close_db(Db),
+    {ok, _} = barrel_docdb:create_db(Db, #{data_dir => ?config(dir, Config)}),
+    ok.

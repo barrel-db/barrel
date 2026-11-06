@@ -302,8 +302,9 @@ fork_source_id_fresh(Config) ->
         {ok, _} = barrel_docdb:put_doc(Branch, #{<<"id">> => <<"b">>}),
         {ok, [#{version := Tok} | _]} =
             barrel_docdb:get_doc_versions(Branch, <<"b">>),
-        BranchSource = persistent_term:get({barrel_source, Branch}),
-        ?assertMatch({_, _}, binary:match(Tok, BranchSource))
+        BranchWriter = barrel_db_server:writer_id(Branch),
+        ?assertNotEqual(barrel_db_server:writer_id(Db), BranchWriter),
+        ?assertMatch({_, _}, binary:match(Tok, BranchWriter))
     after
         _ = barrel_docdb:delete_db(Branch)
     end,

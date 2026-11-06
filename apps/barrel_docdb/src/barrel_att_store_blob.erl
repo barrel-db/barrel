@@ -28,7 +28,8 @@
 -export([fold/5]).
 
 %% Attachment change feed (sync support; see barrel_att_feed)
--export([att_changes/4, att_floor/2, sweep_att_feed/3, rebuild_feed/2]).
+-export([att_changes/4, att_floor/2, att_last_hlc/2, sweep_att_feed/3,
+         rebuild_feed/2]).
 
 %% Streaming API
 -export([put_stream/5, put_stream/6]).
@@ -606,6 +607,10 @@ att_changes(#{ref := Ref}, DbName, Since, Opts) ->
     barrel_hlc:timestamp() | undefined.
 att_floor(#{ref := Ref}, DbName) ->
     barrel_att_feed:att_floor(Ref, DbName).
+
+-spec att_last_hlc(att_ref(), db_name()) -> barrel_hlc:timestamp().
+att_last_hlc(#{ref := Ref}, DbName) ->
+    barrel_att_feed:last_hlc(Ref, DbName).
 
 -spec sweep_att_feed(att_ref(), db_name(), barrel_hlc:timestamp()) ->
     {ok, #{tombstones_swept := non_neg_integer()}}.

@@ -31,6 +31,7 @@
     index_get/4,
     att_changes/4,
     att_floor/2,
+    last_hlc/2,
     sweep/3
 ]).
 
@@ -172,6 +173,19 @@ att_floor(Ref, DbName) ->
     case rocksdb:get(Ref, floor_key(DbName), []) of
         {ok, Bin} -> barrel_hlc:decode(Bin);
         _ -> undefined
+    end.
+
+%% @doc HLC of the newest feed row (min() for an empty feed).
+-spec last_hlc(rocksdb:db_handle(), db_name()) -> barrel_hlc:timestamp().
+last_hlc(Ref, DbName) ->
+    ReadOpts = [{iterate_lower_bound, feed_key(DbName, barrel_hlc:min())},
+                {iterate_upper_bound, feed_end(DbName)}],
+    {ok, Itr} = rocksdb:iterator(Ref, ReadOpts),
+    try rocksdb:iterator_move(Itr, last) of
+        {ok, Key, _Value} -> feed_key_hlc(DbName, Key);
+        {error, _} -> barrel_hlc:min()
+    after
+        rocksdb:iterator_close(Itr)
     end.
 
 %% @doc Sweep delete tombstones older than the cutoff and advance the

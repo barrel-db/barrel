@@ -945,7 +945,11 @@ write_value_ops(DbName0, Hlc, Value) ->
     %% Also update last_hlc metadata for O(1) get_last_seq
     LastHlcKey = barrel_store_keys:db_last_hlc(DbName),
     LastHlcValue = barrel_hlc:encode(Hlc),
-    [{put, Key, Value}, {put, LastHlcKey, LastHlcValue}].
+    %% hlc_high is the floor of the next feed HLC; unlike db_last_hlc a
+    %% rewind never lowers it
+    HighKey = barrel_store_keys:db_meta(DbName, <<"hlc_high">>),
+    [{put, Key, Value}, {put, LastHlcKey, LastHlcValue},
+     {put, HighKey, LastHlcValue}].
 
 %% @doc Return batch operation to update change bucket.
 %% Buckets store {MinHlc, MaxHlc, Count} in compact binary format.
