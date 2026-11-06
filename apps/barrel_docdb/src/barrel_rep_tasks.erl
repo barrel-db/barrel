@@ -574,7 +574,7 @@ run_task_loop(Ctx, Since) ->
       wait_for := WaitFor} = Ctx,
 
     %% Changes options carry the whole filter: paths, query, channel
-    ChangesOpts = maps:merge(#{limit => BatchSize},
+    ChangesOpts = maps:merge(#{limit => BatchSize, replication => true},
                              maps:with([paths, query, channel], Filter)),
 
     case FromTransport:get_changes(From, Since, ChangesOpts) of

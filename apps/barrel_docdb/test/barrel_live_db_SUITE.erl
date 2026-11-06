@@ -19,7 +19,10 @@
          converted_doc_keeps_history_seen/1,
          resolver_one_version_everywhere/1,
          resolver_three_writers/1,
-         different_resolvers_terminate/1]).
+         different_resolvers_terminate/1,
+         filtered_peer_gets_delete/1,
+         filtered_peer_gets_delete_by_query/1,
+         filter_matches_live_conflict/1]).
 
 all() ->
     [conflict_reaches_both_sides, loser_survives_many_edits,
@@ -27,7 +30,8 @@ all() ->
      read_returns_observed, old_peer_never_removes,
      relayed_version_keeps_sibling, converted_doc_keeps_history_seen,
      resolver_one_version_everywhere, resolver_three_writers,
-     different_resolvers_terminate].
+     different_resolvers_terminate, filtered_peer_gets_delete,
+     filtered_peer_gets_delete_by_query, filter_matches_live_conflict].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(barrel_docdb),
@@ -289,3 +293,43 @@ strip_ctx(Db, Id) ->
     {ok, Cols} = barrel_store_rocksdb:get_entity(Store, Key),
     ok = barrel_store_rocksdb:put_entity(Store, Key,
                                          lists:keydelete(<<"ctx">>, 1, Cols), []).
+
+%% A peer that syncs only blue documents gets the delete of one it holds.
+filtered_peer_gets_delete(Config) ->
+    [A, _, C] = ?config(dbs, Config),
+    Blue = #{paths => [<<"type/blue">>]},
+    {ok, #{<<"rev">> := R}} = barrel_docdb:put_doc(A, #{<<"id">> => <<"d">>,
+                                                        <<"type">> => <<"blue">>}),
+    {ok, _} = barrel_rep:replicate(A, C, #{filter => Blue, attachments => false}),
+    {ok, _} = barrel_docdb:get_doc(C, <<"d">>),
+    {ok, _} = barrel_docdb:delete_doc(A, <<"d">>, #{rev => R}),
+    {ok, _} = barrel_rep:replicate(A, C, #{filter => Blue, attachments => false}),
+    ?assertEqual({error, not_found}, barrel_docdb:get_doc(C, <<"d">>)).
+
+filtered_peer_gets_delete_by_query(Config) ->
+    [A, _, C] = ?config(dbs, Config),
+    Q = #{query => #{where => [{path, [<<"type">>], <<"blue">>}]}},
+    {ok, #{<<"rev">> := R}} = barrel_docdb:put_doc(A, #{<<"id">> => <<"d">>,
+                                                        <<"type">> => <<"blue">>}),
+    {ok, _} = barrel_rep:replicate(A, C, #{filter => Q, attachments => false}),
+    {ok, _} = barrel_docdb:get_doc(C, <<"d">>),
+    {ok, _} = barrel_docdb:delete_doc(A, <<"d">>, #{rev => R}),
+    {ok, _} = barrel_rep:replicate(A, C, #{filter => Q, attachments => false}),
+    ?assertEqual({error, not_found}, barrel_docdb:get_doc(C, <<"d">>)).
+
+%% The winner is red but a live conflict is blue: a blue-only peer gets
+%% the whole state.
+filter_matches_live_conflict(Config) ->
+    [A, B, C] = ?config(dbs, Config),
+    {ok, _} = barrel_docdb:put_doc(A, #{<<"id">> => <<"d">>, <<"type">> => <<"blue">>}),
+    sync(A, B),
+    {ok, _} = barrel_docdb:put_doc(A, #{<<"id">> => <<"d">>, <<"_rev">> => rev(A, <<"d">>),
+                                        <<"type">> => <<"blue">>, <<"v">> => 1}),
+    {ok, _} = barrel_docdb:put_doc(B, #{<<"id">> => <<"d">>, <<"_rev">> => rev(B, <<"d">>),
+                                        <<"type">> => <<"red">>}),
+    sync(A, B),
+    {ok, [_]} = barrel_docdb:get_conflicts(A, <<"d">>),
+    {ok, _} = barrel_rep:replicate(A, C, #{filter => #{paths => [<<"type/blue">>]},
+                                           attachments => false}),
+    ?assertEqual(barrel_docdb:get_conflicts(A, <<"d">>),
+                 barrel_docdb:get_conflicts(C, <<"d">>)).

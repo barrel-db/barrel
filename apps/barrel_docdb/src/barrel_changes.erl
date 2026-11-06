@@ -203,7 +203,15 @@ get_changes(StoreRef, DbName, Since, Opts) ->
     QuerySpec = maps:get(query, Opts, undefined),
     Channel = maps:get(channel, Opts, undefined),
 
+    Replication = maps:get(replication, Opts, false)
+        andalso (PathPatterns =/= undefined orelse QuerySpec =/= undefined),
     case Channel of
+        undefined when Replication ->
+            %% A replication filter is tested against every row of the
+            %% feed: a delete always passes (it has no body to match, and
+            %% a peer holding the document must get it), and a document
+            %% passes when any of its live versions matches.
+            get_changes_filtered(StoreRef, Ks, Since, Opts);
         undefined ->
             %% Determine if we can use path index for more efficient query
             %% We can use path index if:
@@ -534,7 +542,9 @@ get_changes_filtered(StoreRef, DbName, Since, Opts) ->
         true ->
             %% Chunked batch processing when docs are needed
             get_changes_filtered_chunked(StoreRef, DbName, Since, Opts,
-                                          DocIds, Style, PathMatcher, CompiledQuery);
+                                          DocIds, Style,
+                                          {PathMatcher, maps:get(replication, Opts, false)},
+                                          CompiledQuery);
         false ->
             %% Simple fold when no doc fetching needed (doc_ids filter only)
             get_changes_filtered_simple(StoreRef, DbName, Since, Opts,
@@ -543,7 +553,9 @@ get_changes_filtered(StoreRef, DbName, Since, Opts) ->
 
 %% @private Chunked processing with batch doc fetching
 get_changes_filtered_chunked(StoreRef, DbName, Since, Opts,
-                              DocIds, Style, PathMatcher, CompiledQuery) ->
+                              DocIds, Style, {PathMatcher, Replication},
+                              CompiledQuery) ->
+    Filter = {PathMatcher, Replication},
     Limit = maps:get(limit, Opts, infinity),
 
     %% Collect changes in chunks, batch fetch docs, apply filters
@@ -570,7 +582,7 @@ get_changes_filtered_chunked(StoreRef, DbName, Since, Opts,
                     true ->
                         {NewResults, NewResultCount, Done} =
                             process_change_chunk(StoreRef, DbName, lists:reverse(NewChunk),
-                                                  PathMatcher, CompiledQuery, Style,
+                                                  Filter, CompiledQuery, Style,
                                                   Results, ResultCount, Limit),
                         case Done of
                             true ->
@@ -601,7 +613,7 @@ get_changes_filtered_chunked(StoreRef, DbName, Since, Opts,
             {RevResults, FinalCount, false};
         _ ->
             process_change_chunk(StoreRef, DbName, lists:reverse(FinalChunk),
-                                  PathMatcher, CompiledQuery, Style,
+                                  Filter, CompiledQuery, Style,
                                   RevResults, FinalCount, Limit)
     end,
 
@@ -620,7 +632,7 @@ get_changes_filtered_chunked(StoreRef, DbName, Since, Opts,
 
 %% @private Process a chunk of changes with batch doc fetching
 process_change_chunk(StoreRef, DbName, DocChangePairs,
-                      PathMatcher, CompiledQuery, Style,
+                      {PathMatcher, Replication}, CompiledQuery, Style,
                       Results, ResultCount, Limit) ->
     %% Batch fetch doc bodies for all changes in chunk
     ChangesWithDocs = batch_fetch_doc_bodies(StoreRef, DbName, DocChangePairs),
@@ -632,27 +644,16 @@ process_change_chunk(StoreRef, DbName, DocChangePairs,
                 true ->
                     {Acc, Count, true};
                 false ->
-                    %% Check path patterns filter
-                    IncludeByPath = case PathMatcher of
-                        undefined ->
-                            true;
-                        MatchTrie ->
-                            case maps:get(doc, ChangeWithDoc, undefined) of
-                                undefined ->
-                                    false;
-                                DocBody when is_map(DocBody) ->
-                                    DocPaths = barrel_ars:analyze(DocBody),
-                                    Topics = barrel_ars:paths_to_topics(DocPaths),
-                                    matches_any_pattern(MatchTrie, Topics);
-                                _ ->
-                                    false
-                            end
+                    Include = case Replication of
+                        true ->
+                            replication_passes(StoreRef, DbName, ChangeWithDoc,
+                                               PathMatcher, CompiledQuery);
+                        false ->
+                            body_passes(PathMatcher, CompiledQuery,
+                                        maps:get(doc, ChangeWithDoc, undefined))
                     end,
 
-                    %% Check query filter
-                    IncludeByQuery = maybe_match_query(CompiledQuery, ChangeWithDoc),
-
-                    case IncludeByPath andalso IncludeByQuery of
+                    case Include of
                         false ->
                             {Acc, Count, false};
                         true ->
@@ -667,6 +668,46 @@ process_change_chunk(StoreRef, DbName, DocChangePairs,
         {Results, ResultCount, false},
         ChangesWithDocs
     ).
+
+%% @private A body matches the path patterns and the query.
+body_passes(PathMatcher, CompiledQuery, Body) ->
+    ByPath = case PathMatcher of
+        undefined -> true;
+        MatchTrie when is_map(Body) ->
+            matches_any_pattern(MatchTrie,
+                                barrel_ars:paths_to_topics(barrel_ars:analyze(Body)));
+        _ -> false
+    end,
+    ByPath andalso maybe_match_query(CompiledQuery, #{doc => Body}).
+
+%% @private Replication filter: a delete always passes; otherwise the
+%% winner's body or a live conflict's body must match.
+replication_passes(_StoreRef, _DbName, #{deleted := true}, _PM, _Q) ->
+    true;
+replication_passes(StoreRef, DbName, Change, PathMatcher, CompiledQuery) ->
+    body_passes(PathMatcher, CompiledQuery, maps:get(doc, Change, undefined))
+        orelse (maps:get(num_conflicts, Change, 0) > 0
+                andalso lists:any(
+                          fun(B) -> body_passes(PathMatcher, CompiledQuery, B) end,
+                          live_conflict_bodies(StoreRef, DbName,
+                                               maps:get(id, Change)))).
+
+%% @private Bodies of a document's live, non-deleted conflict versions.
+live_conflict_bodies(StoreRef, DbName, DocId) ->
+    barrel_store_rocksdb:fold_range(
+        StoreRef, barrel_store_keys:doc_version_prefix(DbName, DocId),
+        barrel_store_keys:doc_version_end(DbName, DocId),
+        fun(Key, <<1:8, 0:8, _/binary>>, Acc) ->
+               VEnc = barrel_store_keys:decode_doc_version_key(DbName, DocId, Key),
+               case barrel_store_rocksdb:body_get(
+                      StoreRef, barrel_store_keys:doc_body_rev(DbName, DocId, VEnc)) of
+                   {ok, Cbor} -> {ok, [barrel_docdb_codec_cbor:decode_any(Cbor) | Acc]};
+                   _ -> {ok, Acc}
+               end;
+           (_Key, _Value, Acc) ->
+               {ok, Acc}
+        end,
+        []).
 
 %% @private Simple filtered scan (doc_ids filter only, no doc fetching)
 get_changes_filtered_simple(StoreRef, DbName, Since, Opts, DocIds, Style) ->

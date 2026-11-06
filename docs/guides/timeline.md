@@ -17,11 +17,11 @@ database: reads, writes, queries, channels, changes, attachments, and the
 `/db/:db/_sync/*` replication wire all work on it unchanged, and its
 writes are authored under its own source id.
 
-Merging ships only what the branch did: its changes since the fork apply
-to the parent through `put_version`, so already-known versions are no-ops,
-edits land, and concurrent edits on both sides become regular conflicts
-(deterministic LWW, or the parent's `conflict_merger`). A merge checkpoint
-makes repeated merges incremental.
+Merging ships only what the branch did: the documents it changed since
+the fork are merged into the parent as whole states, so known versions
+change nothing, edits land, and concurrent edits on both sides become
+regular conflicts (or are resolved by the parent's `conflict_resolver`).
+A merge checkpoint makes repeated merges incremental.
 
 Lineage is linear in v1: branching a branch is rejected.
 
@@ -123,7 +123,7 @@ Branches ride the whole existing API, including replication under
 
 - Reopening a branch after a restart follows the normal contract: its
   identity (parent, fork instant) persists on disk, but runtime config
-  (channels, conflict_merger, retention) must be passed to `create_db`
+  (channels, conflict_resolver, retention) must be passed to `create_db`
   again, exactly as for any database. Channels are always inherited at
   fork time.
 - Deleting the parent is safe for its branches (hard links make them
@@ -135,13 +135,13 @@ Branches ride the whole existing API, including replication under
 - Attachments: a PITR branch keeps fork-time attachments (they are LWW
   state with no history, so their state at T is not reconstructable).
   Merges carry post-fork attachment work, digest-deduplicated.
-- Merge at least once per retention window: branch retention can forget
-  an expired tombstone, and a forgotten delete never ships.
+- A delete older than the retention window still merges: it is kept as a
+  stub with its change row. Only `tombstone_purge_after` removes it.
 - A PITR rewind itself is not merged (restored versions predate the
   fork); "revert the parent to T" is a different operation and not in v1.
 - Plain (non-record) `barrel` branches do not carry vectors: they live only
   in the vector store, which the branch gets fresh. Re-add them or use
   record mode.
-- The parent's conflict_merger is database-open-time config; there is no
+- The parent's conflict_resolver is database-open-time config; there is no
   per-merge override, and the merge report carries stats, not per-doc
   conflict detail.
