@@ -1,13 +1,14 @@
 # Replication Guide
 
-barrel_docdb replicates documents between databases using a version-vector protocol: each write is a version (`<hex(hlc)>@<author>`), each document carries a version vector, and the target decides what it is missing by vector containment. This guide covers:
+Replication copies documents between databases that all accept writes. Each document carries its whole replicated state: its current versions and every version it has seen. Replication sends that state and the target merges it, so concurrent writes are all kept, a version that was replaced never comes back, and replicas can leave, return or join empty at any time. This guide covers:
 
-- Basic replication between local databases
-- Continuous replication tasks
-- Filtered replication (by path pattern or query)
-- How the version-vector protocol works
-- HLC-based checkpoints and incremental sync
+- Basic and continuous replication
+- Filtered replication
+- How replication works
+- Checkpoints and incremental sync
 - Transports (local and HTTP)
+- Conflicts: how they appear and how to resolve them
+- Deletes and how long they are kept
 
 ## Basic Replication
 
@@ -185,64 +186,43 @@ When both `paths` and `query` are specified, documents must match **both** filte
 | `type/#` | Multi-segment wildcard: `type/user`, `type/user/profile` |
 | `org/+/users/#` | Mixed: `org/acme/users/alice`, `org/corp/users/bob/profile` |
 
+### What a filter lets through
+
+- A document passes when its winner's body, or the body of one of its live conflicts, matches. The whole state travels, conflicts included.
+- A delete passes every filter. It has no body to match, and a peer that holds the document must get it.
+- A document edited out of the filter's scope stays on the peer as its last matching version. A filter chooses what to copy; it does not take back what was copied.
+- Changing a filter is a new stream with its own checkpoint, replayed from the start for the new scope.
+- Filters are not access control: a matching document travels with all its live versions.
+
 ## How Replication Works
 
 ### The Replication Algorithm
 
-Replication makes one diff round-trip per batch of changes, then reads and applies each missing document. Conflict handling lives entirely in the target's `put_version`, so the algorithm needs no ancestor negotiation.
+1. **Read checkpoints** on both sides; start from the lower position and retry the documents left pending by the last run.
+2. **Fetch changes** from the source since that position (filtered if asked). Each row names a document whose state changed.
+3. **Read the full state** of each changed document from the source: its live versions with their bodies, and the versions it has seen.
+4. **Merge it into the target** (`put_doc_state/4`). The target keeps a version if both sides hold it or if it never saw it; a version one side saw and dropped stays dropped. A state the target already holds writes nothing.
+5. **Save the checkpoint** with the new position and any document that failed, which the next run retries.
 
-1. **Read checkpoint**: Find the last replicated HLC timestamp.
-2. **Fetch changes**: Get changes from source since that timestamp (optionally filtered). Each change carries the document's current version token.
-3. **Sync HLC**: Advance the target clock past the newest source change so the target's change sequence stays strictly increasing.
-4. **Diff versions**: Call `diff_versions` on the target with `#{DocId => Token}`. The target answers `have` (its version vector already covers the offered version) or `missing`.
-5. **Transfer documents**: For each missing document, read it from the source with its version, vector, and deleted flag.
-6. **Apply to target**: Call `put_version`. The target no-ops, fast-forwards, or records a conflict sibling (see below).
-7. **Save checkpoint**: Record progress with the HLC for incremental sync.
+A failed document never gets skipped: it stays pending until it replicates. A target that cannot move its clock past its last change (`clock_skew`) stops the batch without moving the position.
 
-### Versions and Version Vectors
+### Versions and seen sets
 
-barrel_docdb uses MVCC based on Hybrid Logical Clocks, not revision trees.
-
-- A **version** is `{HLC, Author}`. Its API token is `<hex(hlc)>@<author>`: the HLC gives causal last-write-wins ordering and the author is the id of the database that made the write (per-database, so two databases on one node detect each other's writes as concurrent). This is the value in the `<<"_rev">>` key.
-- A **version vector** maps each author to the highest HLC this replica has seen from it for the document. Comparing two vectors decides how a replicated write relates to the local one:
+- A **version** is `{HLC, Writer}`; its token `<hex(hlc)>@<writer>` is the `<<"_rev">>` value. A database gets a new writer id every time it opens, so a restored backup or a copied database can never reuse one.
+- A document's **live versions** are its winner (the highest token) and its conflicts.
+- Its **seen set** records every version it has seen. Merging two states keeps what neither side has replaced.
 
 ```erlang
-%% Create document
-{ok, #{<<"rev">> := V1}} = barrel_docdb:put_doc(Db, Doc),
-%% V1 = <<"0000018abc...@f1e0...">>
-
-%% Update produces a new version with a later HLC
-{ok, #{<<"rev">> := V2}} = barrel_docdb:put_doc(Db, UpdatedDoc#{<<"_rev">> => V1}).
-```
-
-### diff_versions - Finding Missing Versions
-
-`diff_versions` answers, per document, whether the target already covers an offered version:
-
-```erlang
-{ok, Diff} = barrel_docdb:diff_versions(<<"target">>, #{
-    <<"doc1">> => V1,
-    <<"doc2">> => V2
-}),
-%% Diff = #{<<"doc1">> => have, <<"doc2">> => missing}
-%% `have`    = the doc's version vector contains the offered version
-%% `missing` = the target needs it
-```
-
-### put_version - Applying a Version
-
-`put_version` applies a version read from the source. The source's token and vector are preserved; only the change-sequence HLC is issued locally. The outcome depends on how the vectors relate:
-
-- **Already covered** (`contains`): idempotent no-op.
-- **Remote dominates**: fast-forward. The old winner is retained as a superseded version.
-- **Concurrent**: an optional per-database `conflict_merger` hook may resolve it with a merged body; otherwise last-write-wins by version picks the winner and the loser stays live as a retained conflict sibling. The vectors merge either way.
-
-```erlang
-{ok, Doc, #{version := Token, vv := VVBin, deleted := Del}} =
-    barrel_docdb:get_doc_for_replication(<<"source">>, <<"doc1">>),
+%% Read and merge a whole document state by hand
+{ok, #{state := State, bodies := Bodies}} =
+    barrel_docdb:get_doc_state(<<"source">>, <<"doc1">>),
 {ok, _DocId, _Winner} =
-    barrel_docdb:put_version(<<"target">>, Doc, Token, VVBin, Del).
+    barrel_docdb:put_doc_state(<<"target">>, <<"doc1">>, State, Bodies).
 ```
+
+### Older peers
+
+A server or client from before whole-state replication sends one version at a time (`put_version/5`, `diff_versions/2`). Current replicators detect it (`_sync/info` has no `full_state`) and fall back. Such a version never removes anything: it is ignored if the document has seen it, otherwise kept as a conflict. Upgrade old peers to stop the extra conflicts.
 
 ## Checkpoints and Incremental Replication
 
@@ -254,7 +234,8 @@ Checkpoints are stored as local documents (not replicated) in both databases:
 %% Checkpoints are stored at:
 %% _local/replication-checkpoint-<rep_id>
 
-%% They contain the last replicated HLC and session history:
+%% They contain the last replicated HLC, the documents still to retry
+%% (pending), and session history:
 #{
     <<"history">> => [
         #{
@@ -369,49 +350,88 @@ Config = #{
 
 ## Conflict Handling
 
-### How Conflicts Occur
+### When there is a conflict
 
-A conflict happens when the same document is written concurrently in two databases (neither version's vector dominates the other) before replication:
+Two versions conflict when neither was written by someone who had seen the other, for example two replicas editing the same document before they sync. Both are kept, on every replica.
 
-```
-Source:  doc1: v1 -> v2a
-Target:  doc1: v1 -> v2b   (concurrent with v2a)
-```
-
-### How Conflicts Are Resolved
-
-Replication never fails on a conflict. `put_version` picks a deterministic last-write-wins winner (max by version: HLC first, author id as tie-break) and retains the loser as a live conflict sibling. Every replica that sees the same version set picks the same winner. A per-database `conflict_merger` hook, if configured, gets the first say and can supersede both sides with a merged body.
-
-### Surfacing and Resolving Conflicts
+### What a read shows
 
 ```erlang
-%% List the live sibling tokens that conflict with the winner
-{ok, Conflicts} = barrel_docdb:get_conflicts(Db, DocId),
-
-%% Or read them inline
 {ok, Doc} = barrel_docdb:get_doc(Db, DocId, #{conflicts => true}),
-Siblings = maps:get(<<"_conflicts">>, Doc, []).
+Winner    = maps:get(<<"_rev">>, Doc),            %% highest token
+Conflicts = maps:get(<<"_conflicts">>, Doc, []),  %% the other versions
+Observed  = maps:get(<<"_observed">>, Doc, [Winner]).
 ```
 
-Resolve by choosing an existing sibling or writing a merged body. `BaseRev` is the current winning token (optimistic lock):
+Every replica shows the same winner for the same versions. Showing a winner deletes nothing.
+
+### Editing a document in conflict
+
+Editing with `_rev` replaces only the winner; the conflicts stay. Editing with `_observed` replaces every version you read:
 
 ```erlang
-%% Keep one version, drop the others
-{ok, _} = barrel_docdb:resolve_conflict(Db, DocId, Winner, {choose, Sibling}),
+%% replaces the winner; the conflict stays listed
+{ok, _} = barrel_docdb:put_doc(Db, Doc#{<<"v">> => 2}),
 
-%% Or write a merged body that supersedes all siblings
-{ok, _} = barrel_docdb:resolve_conflict(Db, DocId, Winner, {merge, MergedDoc}).
+%% replaces every version you read
+{ok, _} = barrel_docdb:put_doc(Db, #{<<"id">> => DocId,
+                                    <<"_observed">> => Observed,
+                                    <<"v">> => 2}).
 ```
 
-A resolution is an ordinary write, so it replicates like any other.
+A `_rev` that is not the winner returns `{error, conflict}`. Writing over a deleted document replaces every delete, with or without a rev.
+
+### Resolving a conflict
+
+```erlang
+{ok, _} = barrel_docdb:resolve_conflict(Db, DocId, Observed, {choose, Token}),
+{ok, _} = barrel_docdb:resolve_conflict(Db, DocId, Observed, {merge, Body}),
+{ok, _} = barrel_docdb:resolve_conflict(Db, DocId, Observed, delete).
+```
+
+The resolution replaces the versions in `Observed` on every replica and stays resolved. A version that arrived after your read stays as a conflict, so nothing is lost. Passing the winner's `_rev` instead of a list replaces every current version, including one that arrived after your read. Two replicas resolving the same conflict at once leave their two resolutions in conflict; resolve once more.
+
+### Automatic resolution
+
+```erlang
+Resolver = fun(Versions) ->
+    %% Versions: [#{token, deleted, body}], sorted by token
+    Live = [B || #{deleted := false, body := B} <- Versions],
+    case Live of
+        [] -> delete;
+        _ -> {merge, lists:max(Live)}
+    end
+end,
+{ok, _} = barrel_docdb:create_db(<<"db">>, #{conflict_resolver => Resolver}).
+```
+
+The function runs whenever a write or a sync leaves more than one version, and returns `{choose, Token}`, `{merge, Body}`, `delete` or `keep` (leave the conflict). It must be pure and give the same result whatever order it sees the versions in ("highest price wins", "union of tags"). Every replica then writes the same resolution, so a conflict ends in one version everywhere. A crash or an error counts as `keep`. If replicas run different functions, nothing is lost and resolution still ends, but which result survives depends on sync order; `resolver_disagreement` is logged when it is detected.
+
+`conflict_merger` is no longer used; a database configured with it logs a warning.
+
+### Too many conflicts
+
+Above `max_conflict_versions` (default 8) conflicts, the oldest versions go first, older peers' versions before the rest. The winner always stays. An evicted version's body stays readable until retention.
+
+## Deletes and Retention
+
+A delete is a version. After `retention_period` (default 30 days), a deleted document becomes a **stub**: its bodies, history and index entries go, but its state and its change row stay. A peer that was offline, or joins empty, still gets the delete, and an old copy of the document arriving later is recognised as replaced.
+
+Stubs are kept for good unless you set `tombstone_purge_after` (seconds):
+
+```erlang
+{ok, _} = barrel_docdb:create_db(<<"db">>, #{tombstone_purge_after => 90 * 86400}).
+```
+
+A purged document can come back if anything older than that reaches the database: a replica offline longer, a backup, or a message read before the delete and delivered late. Purge only when you accept that risk.
 
 ## Best Practices
 
-1. **Use meaningful document IDs** - Makes debugging easier.
-2. **Handle failures gracefully** - Check `doc_read_failures` and `doc_write_failures`.
-3. **Monitor checkpoint progress** - Detect stalled replications.
-4. **Consider batch sizes** - Larger batches are faster but use more memory.
-5. **Resolve conflicts** - Do not ignore retained siblings; converge them with `resolve_conflict`.
+1. **Resolve conflicts** or set a `conflict_resolver`; conflicts stay until something resolves them.
+2. **Pass `_observed`** when a client resolves conflicts, so a version it did not see is never replaced.
+3. **Watch `pending`** in the replication result: documents that failed and will be retried.
+4. **Upgrade older peers**: their edits show as conflicts.
+5. **Leave purge off** unless you accept that a long-offline replica can bring a delete back.
 
 ## API Reference
 
@@ -420,6 +440,6 @@ See the [API reference](api-reference.html) for complete function documentation.
 - `barrel_rep` - Replication public API (`replicate/2,3`, `replicate_one_shot/1,2`)
 - `barrel_rep_tasks` - Continuous / persistent replication tasks
 - `barrel_rep_transport` - Transport behaviour
-- `barrel_docdb:put_version/5` - Apply a replicated version
-- `barrel_docdb:diff_versions/2` - Version diff by vector containment
-- `barrel_docdb:get_doc_for_replication/2` - Read a document with its version metadata
+- `barrel_docdb:get_doc_state/2`, `put_doc_state/4`, `diff_states/2` - Whole document states
+- `barrel_docdb:put_version/5`, `diff_versions/2` - One version at a time (older peers)
+- `barrel_docdb:resolve_conflict/4` - Resolve a conflict

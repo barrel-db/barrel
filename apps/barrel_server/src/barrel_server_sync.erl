@@ -500,7 +500,9 @@ decode_hlc_field(Body, Field) ->
 changes_opts(Body) ->
     case seq_from_wire(maps:get(<<"since">>, Body, <<"first">>)) of
         {ok, Since} ->
-            Opts0 = #{limit => maps:get(<<"limit">>, Body, 100)},
+            %% a replication feed: deletes pass every filter
+            Opts0 = #{limit => maps:get(<<"limit">>, Body, 100),
+                      replication => true},
             case maps:get(<<"filter">>, Body, undefined) of
                 undefined ->
                     {ok, Since, Opts0};

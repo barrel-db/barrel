@@ -241,7 +241,8 @@ The `COL_VERSION` / `COL_VV` / `COL_NCONFLICTS` columns replaced the old `COL_RE
 
 Two structures give the version model its durability and conflict retention:
 
-- **Version chain** (`DOC_VERSION`, 0x1D): per document, one row per non-winning version. Each entry is `<<Flag:8, Deleted:8, VV/binary>>` where flag 0 = superseded (covered by the current winner, e.g. an old winner after a fast-forward) and 1 = conflict (a live concurrent sibling). The version's body is archived under its version token so any retained version stays resolvable within the retention window.
+- **Version chain** (`DOC_VERSION`, 0x1D): per document, one row per non-winning version. Each entry is `<<Flag:8, Deleted:8, VV/binary>>` where flag 0 = superseded (replaced by a write that observed it) and 1 = conflict (a live concurrent version). The version's body is archived under its version token so any retained version stays resolvable within the retention window.
+- **Replication context** (entity tag 3, `barrel_live:encode_ctx/1`): every version the document has seen, as per-writer high-water marks for current writers and exact tokens for everything else, plus the base of automatic resolutions. The winner (entity), the conflict rows and this context form the document's `barrel_live` state; see `docs/architecture/replication-proofs.md`.
 - **Retained history log** (`HISTORY`, 0x1C): an append-only, HLC-ordered log of every write the database applies (local writes, replicated versions including losing siblings, and conflict resolutions). Entries carry identity only (doc id, version, deleted, cause, version vector), never bodies, and are written in the same atomic batch as the document. A retention sweep (`sweep_retention/1`) prunes both structures below the history floor.
 
 #### RocksDB Optimizations
@@ -488,45 +489,28 @@ prefix_changes/mydb/status/active/482345     → [<< hlc1, "doc1", ... >>]
 
 ### 9. Replication
 
-Replication is a version-vector protocol: one diff round-trip per batch of changes, then a read plus apply per missing document. All conflict handling lives in the target's `put_version`, so the algorithm needs no ancestor negotiation.
+Replication ships whole document states. For each changed document the replicator reads the source's `barrel_live` state with the bodies of its live versions (`get_doc_state/2`) and the target merges it (`put_doc_state/4`): a version both sides hold, or that the other side never saw, is kept; a version one side saw and dropped stays dropped. A state the target already holds writes nothing.
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
 │                    Replication Flow                           │
 ├──────────────────────────────────────────────────────────────┤
-│                                                               │
-│  1. Read checkpoint (last_hlc from local doc)                │
-│                     │                                         │
-│                     ▼                                         │
-│  2. Get changes from source since last_hlc                   │
-│     (optionally filtered by paths/query; each change          │
-│      carries the doc's current version token)                 │
-│                     │                                         │
-│                     ▼                                         │
-│  3. Sync target HLC past the newest source change            │
-│                     │                                         │
-│                     ▼                                         │
-│  4. diff_versions(target, #{DocId => Token})                 │
-│     → per doc: have (vv contains it) | missing               │
-│                     │                                         │
-│                     ▼                                         │
-│  5. For each missing doc:                                     │
-│     ├── get_doc_for_replication(source, docid)               │
-│     │     → {doc, version, vv, deleted}                       │
-│     └── put_version(target, doc, version, vv, deleted)       │
-│                     │                                         │
-│                     ▼                                         │
-│  6. Write checkpoint, repeat until no more changes           │
-│                                                               │
+│  1. Read both checkpoints: lower position, union of pending  │
+│  2. Retry pending documents by id                             │
+│  3. Get changes from source since the position               │
+│     (a replication filter lets deletes through)               │
+│  4. For each changed doc:                                     │
+│     ├── get_doc_state(source, docid)                          │
+│     │     → state (live versions, seen) + live bodies         │
+│     └── put_doc_state(target, docid, state, bodies)          │
+│           → merge, evict, resolve automatically, one batch    │
+│  5. Write the checkpoint (position + documents that failed)  │
 └──────────────────────────────────────────────────────────────┘
 ```
 
-**Applying a version (`do_put_version`):**
-- `contains` (already covered): idempotent no-op.
-- remote VV `dominates`: fast-forward; the old winner joins the version chain as superseded.
-- `concurrent`: an optional per-db `conflict_merger` may merge; otherwise last-write-wins by version keeps a winner and retains the loser as a live conflict sibling. Vectors merge either way.
+**Merging a state (`do_put_state`):** `barrel_live:merge/2`, then eviction above `max_conflict_versions` (older peers' versions first), then the `conflict_resolver` if set, then `write_state/8`, which moves the winner, the conflict rows, the context column and the feed row together.
 
-**Diffing (`do_diff_versions`):** batch `have`/`missing` by version-vector containment; no per-document ancestor negotiation.
+**Older peers (`do_put_version`, `do_diff_versions`):** a version from a peer that sends one version at a time is ignored when already seen, else kept as a conflict; it never removes anything.
 
 **Filtered Replication:**
 Replicate only documents matching filters (path AND query when combined):

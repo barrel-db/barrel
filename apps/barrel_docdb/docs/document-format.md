@@ -83,7 +83,7 @@ The token is opaque: treat it as a value to read and pass back, not to parse.
 
 ### Conflicts
 
-There is no revision tree. When two databases write the same document concurrently (neither version's vector dominates the other), replication keeps a deterministic last-write-wins winner and retains the losing version as a live conflict sibling. See the [Replication Guide](replication.md) for how conflicts are surfaced (`get_conflicts/2`) and resolved (`resolve_conflict/4`).
+There is no revision tree. When two databases write the same document concurrently, both versions are kept on every replica: the highest token is the winner shown by reads, the other is a conflict. A write replaces only the versions it observed (`_rev` for the winner, `_observed` for every version read). See the [Replication Guide](replication.md) for how conflicts are surfaced (`get_conflicts/2`, `_observed`) and resolved (`resolve_conflict/4`, `conflict_resolver`).
 
 ### Creating Versions
 
@@ -130,6 +130,8 @@ Deleting a document writes a tombstone: a new version with the deleted flag set.
 **Why tombstones?**
 - Enable proper replication (deletions must propagate as versions)
 - Prevent resurrection of deleted documents
+
+After `retention_period` a deleted document becomes a stub: its body and history go, its replicated state and change row stay, so the delete still reaches peers that were offline or join later. `tombstone_purge_after` (off by default) removes old stubs.
 
 ## Internal Storage Format
 

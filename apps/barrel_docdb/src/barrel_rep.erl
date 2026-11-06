@@ -505,7 +505,9 @@ merge_stats(Stats1, Stats2) ->
 %% @private Build changes options from batch size and filter
 %% Filter options are AND-ed: document must match both path pattern AND query
 build_changes_opts(BatchSize, Filter) ->
-    BaseOpts = #{limit => BatchSize},
+    %% replication: deletes pass every filter, a document passes when any
+    %% live version matches
+    BaseOpts = #{limit => BatchSize, replication => true},
     Opts1 = case maps:get(paths, Filter, undefined) of
         undefined -> BaseOpts;
         Paths when is_list(Paths) -> BaseOpts#{paths => Paths}

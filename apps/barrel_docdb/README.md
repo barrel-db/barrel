@@ -61,10 +61,9 @@ application:ensure_all_started(barrel_docdb).
 receive {barrel_change, _, Change} -> io:format("~p~n", [Change]) end.
 ```
 
-`_rev` is the concurrency token. It is HLC-backed (format `<hex(hlc)>@<author>`),
-not a revision tree: conflicts are resolved by HLC last-write-wins with the
-superseded version retained and an optional merge hook, tracked with version
-vectors (`barrel_version` / `barrel_vv`).
+`_rev` is the concurrency token. It is HLC-backed (format `<hex(hlc)>@<writer>`),
+not a revision tree. Concurrent writes are all kept as conflicts; reads show
+the highest token as the winner, and a write replaces only what it observed.
 
 ## Attachments
 
@@ -94,23 +93,25 @@ replication.
 }).
 ```
 
-Replication diffs by version-vector containment and applies each remote version
-as skip / fast-forward / last-write-wins, keeping the loser as a retained
-conflict sibling.
+Replication ships each changed document's whole state (its live versions
+and the versions it has seen) and the target merges it: concurrent writes
+are kept on every replica, and a replaced version never comes back. See the
+[Replication Guide](docs/replication.md).
 
 ## Conflict Resolution
 
-Conflicts are HLC last-write-wins with the superseded version retained, so a
-concurrent write leaves a live conflict you can inspect and resolve:
+A concurrent write leaves a conflict you can inspect and resolve, replacing
+exactly the versions you read:
 
 ```erlang
-case barrel_docdb:get_conflicts(<<"mydb">>, DocId) of
-    {ok, []} ->
-        ok;
-    {ok, Conflicts} ->
-        barrel_docdb:resolve_conflict(<<"mydb">>, DocId, WinningRev, choose)
-end.
+{ok, #{<<"_observed">> := Seen}} =
+    barrel_docdb:get_doc(<<"mydb">>, DocId, #{conflicts => true}),
+{ok, _} = barrel_docdb:resolve_conflict(<<"mydb">>, DocId, Seen,
+                                        {merge, #{<<"v">> => 42}}).
 ```
+
+Or let the database resolve it with `conflict_resolver` (see the
+[Replication Guide](docs/replication.md#automatic-resolution)).
 
 ## Timeline
 

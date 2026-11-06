@@ -3,6 +3,14 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- `GET` and `PUT /db/:db/_sync/state/:id` send and merge a document's whole state, so replication between servers keeps every conflict and never brings a replaced version back. `_sync/info` reports `full_state`; replicators fall back to one version at a time with older servers.
+
+### Changed
+- `_sync/changes` with a filter now includes deletes and documents whose conflicts match, so a filtered peer receives the delete of a document it holds.
+
 ## [1.11.1] - 2026-10-26
 
 ### Changed

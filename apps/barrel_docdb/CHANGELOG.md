@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- Replication lost conflicts. Only a document's winner was sent, so a concurrent version stayed on the replica that noticed the conflict, and after 8 later edits it was deleted from the only replica that held it. Replication now sends each document's whole state: every concurrent version reaches every replica and stays until someone resolves it, and a version that was replaced never comes back.
+- A document that failed to replicate was skipped for good: the checkpoint moved past it. Failed documents are now retried by id on the next run (and while a continuous task is idle). A run with more than 1000 failures stops with `too_many_failed_docs` without moving its checkpoint.
+- A checkpoint that could not be read made replication silently start over; the run now fails instead.
+- A delete older than the retention period was forgotten, so a replica that had been offline, or a peer joining later, never received it and could bring the document back. Deletes now stay as small stubs and keep reaching every peer.
+- A filtered replication did not send the delete of a document the peer held, and skipped a document whose winner did not match even when one of its conflicts did. Deletes now pass every filter, and any live version that matches sends the document.
+- A `both` replication task shared one position for both directions, which could skip changes, and reported itself done before its push side finished.
+- The TTL sweep deleted documents outside the database's writer, so it could race a concurrent edit.
+- A restored backup or copied database kept writing under its old id, which could make its new edits disappear. A database now gets a new writer id every time it opens.
+- After a restart with a clock that had gone back, new changes could sort before a peer's checkpoint and never replicate. They now always sort after every earlier change; a clock that cannot catch up fails the write with `clock_skew`.
+
+### Added
+- Reads with `conflicts => true` return `_observed`, the versions the read showed. A write or a `resolve_conflict` given that list replaces exactly those versions; a version that arrived after the read stays as a conflict.
+- `resolve_conflict/4` accepts the observed list, and a `delete` resolution.
+- `conflict_resolver`: a function the database runs whenever a document has conflicts. Given an order-independent function, every replica writes the same resolution, so a conflict ends in one version everywhere.
+- `tombstone_purge_after`: remove delete stubs older than this many seconds. Off by default; a replica offline longer can bring a purged document back.
+- `get_doc_state/2`, `put_doc_state/4` and `diff_states/2` to read and merge whole document states.
+
+### Changed
+- Breaking: `conflict_merger` is replaced by `conflict_resolver`. A database still configured with `conflict_merger` logs a warning and no longer merges.
+- Breaking: an edit with `_rev` replaces only the winner; the document's other conflicts stay listed until resolved. Writing over a deleted document replaces every delete.
+- Breaking: resolving the same conflict on two replicas at once leaves the two resolutions in conflict.
+- Peers that send one version at a time (servers and clients from before this release) never remove anything: their edits show as conflicts until resolved. Upgrade them to stop that.
+- Documents written by an earlier version are converted the first time they are touched; a version whose history was already pruned can show up once as a conflict.
+
 ## [1.9.0] - 2026-10-23
 
 ### Added
