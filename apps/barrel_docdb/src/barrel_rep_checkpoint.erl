@@ -16,6 +16,10 @@
     get_start_seq/1,
     get_last_seq/1,
     set_last_seq/2,
+    get_pending/1,
+    set_pending/2,
+    read_error/1,
+    max_pending/1,
     maybe_write_checkpoint/1,
     write_checkpoint/1,
     delete/1
@@ -42,6 +46,11 @@
     start_seq :: barrel_hlc:timestamp() | first,
     last_seq :: barrel_hlc:timestamp() | first,
     docs_processed = 0 :: non_neg_integer(),
+    %% ids that failed and are retried by id; saved with last_seq, so a
+    %% failure is never behind the saved position unless it is listed
+    pending = [] :: [binary()],
+    %% a side whose checkpoint could not be read: the run must not start
+    read_error :: undefined | {source | target, term()},
     options :: map()
 }).
 
@@ -69,7 +78,17 @@ new(RepConfig) ->
     Options = maps:get(options, RepConfig, #{}),
 
     %% Get start sequence from existing checkpoints
-    StartSeq = checkpoint_start_seq(Source, Target, SourceTransport, TargetTransport, RepId),
+    %% Start from the lower position of both sides and the union of
+    %% their pending ids: the two writes are not atomic, and reading
+    %% lower only ships again
+    {StartSeq, Pending, ReadError} =
+        case {read_entry(Source, SourceTransport, RepId),
+              read_entry(Target, TargetTransport, RepId)} of
+            {{error, R}, _} -> {first, [], {source, R}};
+            {_, {error, R}} -> {first, [], {target, R}};
+            {{S1, P1}, {S2, P2}} ->
+                {min_seq(S1, S2), lists:usort(P1 ++ P2), undefined}
+        end,
 
     #checkpoint{
         rep_id = RepId,
@@ -81,8 +100,28 @@ new(RepConfig) ->
         start_seq = StartSeq,
         last_seq = StartSeq,
         docs_processed = 0,
+        pending = Pending,
+        read_error = ReadError,
         options = Options
     }.
+
+-spec get_pending(checkpoint()) -> [binary()].
+get_pending(#checkpoint{pending = Pending}) ->
+    Pending.
+
+-spec set_pending([binary()], checkpoint()) -> checkpoint().
+set_pending(Pending, Checkpoint) ->
+    Checkpoint#checkpoint{pending = lists:usort(Pending)}.
+
+%% @doc How many failed ids a run may carry before it stops (default
+%% 1000, the `max_pending' option).
+-spec max_pending(checkpoint()) -> pos_integer().
+max_pending(#checkpoint{options = Options}) ->
+    maps:get(max_pending, Options, 1000).
+
+-spec read_error(checkpoint()) -> undefined | {source | target, term()}.
+read_error(#checkpoint{read_error = ReadError}) ->
+    ReadError.
 
 %% @doc Get the starting HLC for this replication session
 -spec get_start_seq(checkpoint()) -> barrel_hlc:timestamp() | first.
@@ -138,6 +177,7 @@ write_checkpoint(#checkpoint{
     target_transport = TargetTransport,
     start_seq = StartSeq,
     last_seq = LastSeq,
+    pending = Pending,
     options = Options
 }) ->
     HistorySize = maps:get(checkpoint_max_history, Options, ?MAX_CHECKPOINT_HISTORY),
@@ -145,6 +185,7 @@ write_checkpoint(#checkpoint{
     Checkpoint = #{
         <<"source_last_seq">> => encode_seq(LastSeq),
         <<"source_start_seq">> => encode_seq(StartSeq),
+        <<"pending">> => Pending,
         <<"session_id">> => SessionId,
         <<"end_time">> => timestamp(),
         <<"end_time_microsec">> => erlang:system_time(microsecond)
@@ -220,42 +261,31 @@ update_history(History, SessionId, HistorySize, Checkpoint) ->
             end
     end.
 
-%% @doc Compute replication starting sequence from checkpoints
-checkpoint_start_seq(Source, Target, SourceTransport, TargetTransport, RepId) ->
-    LastSeqSource = read_last_seq(Source, SourceTransport, RepId),
-    LastSeqTarget = read_last_seq(Target, TargetTransport, RepId),
-    min_seq(LastSeqSource, LastSeqTarget).
-
-%% @doc Read last sequence from checkpoint
-read_last_seq(Db, Transport, RepId) ->
+%% The newest entry of one side: {Seq, Pending}, or the read error.
+read_entry(Db, Transport, RepId) ->
     case read_checkpoint_doc(Db, Transport, RepId) of
         {ok, Doc} ->
-            History = maps:get(<<"history">>, Doc, []),
-            case History of
-                [] ->
-                    first;
-                _ ->
-                    %% Sort by end_time_microsec descending
-                    Sorted = lists:sort(
-                        fun(H1, H2) ->
-                            T1 = maps:get(<<"end_time_microsec">>, H1, 0),
-                            T2 = maps:get(<<"end_time_microsec">>, H2, 0),
-                            T1 > T2
-                        end,
-                        History
-                    ),
-                    LastHistory = hd(Sorted),
-                    decode_seq(maps:get(<<"source_last_seq">>, LastHistory))
+            case newest(maps:get(<<"history">>, Doc, [])) of
+                undefined ->
+                    {first, []};
+                Entry ->
+                    {decode_seq(maps:get(<<"source_last_seq">>, Entry)),
+                     [Id || Id <- maps:get(<<"pending">>, Entry, []),
+                            is_binary(Id)]}
             end;
         {error, not_found} ->
-            first;
-        {error, Reason} ->
-            %% an unreadable checkpoint (network/auth failure) must not
-            %% crash: start from first and let the replication surface
-            %% the real error on its first transport call
-            logger:warning("checkpoint ~s unreadable: ~p", [RepId, Reason]),
-            first
+            {first, []};
+        {error, _} = Err ->
+            Err
     end.
+
+newest([]) ->
+    undefined;
+newest(History) ->
+    hd(lists:sort(fun(H1, H2) ->
+                      maps:get(<<"end_time_microsec">>, H1, 0) >
+                          maps:get(<<"end_time_microsec">>, H2, 0)
+                  end, History)).
 
 %% @doc Read checkpoint document
 -spec read_checkpoint_doc(term(), module(), binary()) ->
