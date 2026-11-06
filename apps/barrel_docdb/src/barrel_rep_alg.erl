@@ -16,6 +16,8 @@
 %% API
 -export([
     replicate/5,
+    replicate_ids/5,
+    replicate_ids/6,
     replicate_batch/5
 ]).
 
@@ -45,18 +47,40 @@ replicate(Source, Target, SourceTransport, TargetTransport, Changes) ->
         case TargetTransport:diff_versions(Target, TokenMap) of
             {ok, DiffMap} ->
                 Missing = [DocId || {DocId, missing} <- maps:to_list(DiffMap)],
-                Stats = lists:foldl(
-                    fun(DocId, Acc) ->
-                        sync_doc(Source, Target, SourceTransport,
-                                 TargetTransport, DocId, Acc)
-                    end,
-                    new_stats(),
-                    Missing),
-                {ok, Stats};
+                replicate_ids(Source, Target, SourceTransport,
+                              TargetTransport, Missing);
             {error, _} = Error ->
                 Error
         end
     end).
+
+%% @doc Ship documents by id. A document that fails is listed in the
+%% stats' `failed' ids, to be retried; a failure that concerns the whole
+%% batch (the target clock can't get past its floor) aborts it.
+-spec replicate_ids(term(), term(), module(), module(), [binary()]) ->
+    {ok, map()} | {error, term()}.
+replicate_ids(Source, Target, SourceTransport, TargetTransport, DocIds) ->
+    replicate_ids(Source, Target, SourceTransport, TargetTransport, DocIds,
+                  #{}).
+
+%% @doc replicate_ids/5 with options. `retry => true': an id the source
+%% no longer has is dropped instead of listed again.
+-spec replicate_ids(term(), term(), module(), module(), [binary()], map()) ->
+    {ok, map()} | {error, term()}.
+replicate_ids(Source, Target, SourceTransport, TargetTransport, DocIds,
+              Opts) ->
+    Retry = maps:get(retry, Opts, false),
+    try
+        {ok, lists:foldl(
+               fun(DocId, Acc) ->
+                   sync_doc(Source, Target, SourceTransport,
+                            TargetTransport, DocId, Retry, Acc)
+               end,
+               new_stats(),
+               DocIds)}
+    catch
+        throw:{abort_batch, Reason} -> {error, Reason}
+    end.
 
 %% @doc Replicate changes in batches with checkpoint callback
 -spec replicate_batch(term(), term(), module(), module(), map()) ->
@@ -83,6 +107,10 @@ replicate_loop(Source, Target, SourceTransport, TargetTransport, Since, Limit, C
         {ok, Changes, LastSeq} ->
             %% Process this batch
             case replicate(Source, Target, SourceTransport, TargetTransport, Changes) of
+                {ok, #{failed := [_ | _] = Failed}} ->
+                    %% no pending set here: the caller's run fails
+                    %% without moving its checkpoint
+                    {error, {docs_failed, Failed}};
                 {ok, Stats2} ->
                     MergedStats = merge_stats(Stats, Stats2),
                     %% Call checkpoint function
@@ -99,7 +127,8 @@ replicate_loop(Source, Target, SourceTransport, TargetTransport, Since, Limit, C
 
 %% @doc Ship one missing document: read it with its version metadata
 %% from the source, apply it on the target.
-sync_doc(Source, Target, SourceTransport, TargetTransport, DocId, Stats) ->
+sync_doc(Source, Target, SourceTransport, TargetTransport, DocId, Retry,
+         Stats) ->
     ReadStart = erlang:monotonic_time(microsecond),
     case SourceTransport:get_doc(Source, DocId, #{}) of
         {ok, Doc, #{version := Token, vv := VVBin, deleted := Deleted}} ->
@@ -112,16 +141,24 @@ sync_doc(Source, Target, SourceTransport, TargetTransport, DocId, Stats) ->
                     WriteTime = erlang:monotonic_time(microsecond) - WriteStart,
                     update_time_stat(doc_write_time_us, WriteTime,
                                      inc_stat(docs_written, Stats2, 1));
+                {error, clock_skew} ->
+                    throw({abort_batch, clock_skew});
                 {error, Reason} ->
                     logger:error("replicate write error for ~p: ~p",
                                  [DocId, Reason]),
-                    inc_stat(doc_write_failures, Stats2, 1)
+                    add_failed(DocId, inc_stat(doc_write_failures, Stats2, 1))
             end;
+        {error, not_found} when Retry ->
+            logger:warning("replicate: ~p no longer on the source, dropped",
+                           [DocId]),
+            Stats;
         {error, Reason} ->
-            %% The doc may have been purged between changes and read
             logger:warning("replicate read error for ~p: ~p", [DocId, Reason]),
-            inc_stat(doc_read_failures, Stats, 1)
+            add_failed(DocId, inc_stat(doc_read_failures, Stats, 1))
     end.
+
+add_failed(DocId, #{failed := Failed} = Stats) ->
+    Stats#{failed => [DocId | Failed]}.
 
 %%====================================================================
 %% Stats management
@@ -134,7 +171,8 @@ new_stats() ->
         docs_written => 0,
         doc_write_failures => 0,
         doc_read_time_us => 0,
-        doc_write_time_us => 0
+        doc_write_time_us => 0,
+        failed => []
     }.
 
 inc_stat(Key, Stats, N) ->
@@ -144,7 +182,9 @@ update_time_stat(Key, Time, Stats) ->
     maps:update_with(Key, fun(V) -> V + Time end, Stats).
 
 merge_stats(Stats1, Stats2) ->
-    maps:merge_with(fun(_K, V1, V2) -> V1 + V2 end, Stats1, Stats2).
+    maps:merge_with(fun(failed, V1, V2) -> V2 ++ V1;
+                       (_K, V1, V2) -> V1 + V2
+                    end, Stats1, Stats2).
 
 %% @doc Get value from map, trying atom and binary keys
 get_value(Key, Map) ->

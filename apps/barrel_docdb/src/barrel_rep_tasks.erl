@@ -52,6 +52,7 @@
 -export([init/1, handle_call/3, handle_cast/2, handle_continue/2,
          handle_info/2, terminate/2]).
 
+-define(MAX_PENDING, 1000).
 -define(SERVER, ?MODULE).
 -define(TASKS_DB, <<"_replication_tasks">>).
 
@@ -436,20 +437,17 @@ do_list_tasks(Filter, State) ->
 %% Internal - Task execution
 %%====================================================================
 
-start_task_process(#{id := TaskId, config := Config} = Task, State) ->
+start_task_process(#{id := TaskId, config := Config}, State) ->
     %% Get transport modules
     SourceTransport = get_transport(source, Config),
     TargetTransport = get_transport(target, Config),
-
-    %% Get last sequence
-    LastSeq = maps:get(last_seq, Task, first),
 
     %% Link the task to the manager (which traps exits): the task dies
     %% with the manager, and a task crash arrives as {'EXIT',...} without
     %% taking the manager down.
     Self = self(),
     Pid = spawn_link(fun() ->
-        run_task(Self, TaskId, Config, SourceTransport, TargetTransport, LastSeq)
+        run_task(Self, TaskId, Config, SourceTransport, TargetTransport)
     end),
 
     %% Update status
@@ -458,7 +456,7 @@ start_task_process(#{id := TaskId, config := Config} = Task, State) ->
     NewRunning = maps:put(TaskId, Pid, State#state.running),
     {ok, State#state{running = NewRunning}}.
 
-run_task(Parent, TaskId, Config, SourceTransport, TargetTransport, StartSeq) ->
+run_task(Parent, TaskId, Config, SourceTransport, TargetTransport) ->
     %% Endpoints resolve once at task start (normalized URL, auth from
     %% the sync_auth env), so the same term flows everywhere.
     Source = resolve_endpoint(maps:get(source, Config)),
@@ -490,31 +488,38 @@ run_task(Parent, TaskId, Config, SourceTransport, TargetTransport, StartSeq) ->
         case Direction of
             push ->
                 %% Source -> Target (read from source, write to target)
-                run_direction(Ctx0, Source, Target, SourceTransport,
-                              TargetTransport, StartSeq);
+                run_direction(Ctx0#{key => <<>>}, Source, Target,
+                              SourceTransport, TargetTransport);
             pull ->
                 %% Target -> Source (read from target, write to source)
-                run_direction(Ctx0, Target, Source, TargetTransport,
-                              SourceTransport, StartSeq);
+                run_direction(Ctx0#{key => <<>>}, Target, Source,
+                              TargetTransport, SourceTransport);
             both ->
-                %% Bidirectional: run both push and pull concurrently.
-                %% Simplified (shared checkpoint). Both directions keep the
+                %% Bidirectional: push and pull run concurrently, each
+                %% with its own position and pending ids. Both keep the
                 %% manager as their parent (Ctx0) so their progress/error
-                %% casts are actually read, not sent to this task process
-                %% where nothing receives them.
+                %% casts are read.
+                ok = split_both_positions(TaskId),
+                %% The task completes (or fails) once both directions
+                %% have: the push side reports to this process.
+                Self = self(),
                 spawn_link(fun() ->
-                    run_direction(Ctx0, Source, Target,
-                                  SourceTransport, TargetTransport,
-                                  StartSeq)
+                    run_direction(Ctx0#{key => <<>>, done_to => Self},
+                                  Source, Target,
+                                  SourceTransport, TargetTransport)
                 end),
                 %% Run pull in this process
-                run_direction(Ctx0, Target, Source, TargetTransport,
-                              SourceTransport, StartSeq)
+                run_direction(Ctx0#{key => <<"pull_">>, await_peer => true},
+                              Target, Source,
+                              TargetTransport, SourceTransport)
         end
     end).
 
-run_direction(Ctx, From, To, FromTransport, ToTransport, Since) ->
+run_direction(#{task_id := TaskId, key := Key} = Ctx, From, To,
+              FromTransport, ToTransport) ->
+    {Since, Pending} = get_dir_state(TaskId, Key),
     Ctx2 = Ctx#{
+        pending => Pending,
         from => From,
         to => To,
         from_transport => FromTransport,
@@ -523,7 +528,24 @@ run_direction(Ctx, From, To, FromTransport, ToTransport, Since) ->
         poll => ?POLL_MIN,
         backoff => ?BACKOFF_MIN
     },
-    run_task_loop(Ctx2, Since).
+    run_task_loop(retry_pending(Ctx2, Since), Since).
+
+%% Retry the pending ids by id; a success leaves the set, and the set
+%% is saved with the current position.
+retry_pending(#{pending := []} = Ctx, _Since) ->
+    Ctx;
+retry_pending(#{pending := Pending, from := From, to := To,
+                from_transport := FromTransport,
+                to_transport := ToTransport} = Ctx, Since) ->
+    case barrel_rep_alg:replicate_ids(From, To, FromTransport, ToTransport,
+                                      Pending, #{retry => true}) of
+        {ok, #{failed := Failed}} ->
+            Ctx1 = Ctx#{pending := lists:usort(Failed)},
+            _ = save_dir_state(Ctx1, Since),
+            Ctx1;
+        {error, _} ->
+            Ctx
+    end.
 
 %% Continuous local sources wake on the changes stream, subscribed
 %% BEFORE the first drain so no write slips between drain and
@@ -561,12 +583,15 @@ run_task_loop(Ctx, Since) ->
             %% once (mirrors barrel_rep:replicate_one_shot/2's "doc phase to
             %% completion, then one attachment pass" shape) before reporting
             %% the task done.
-            case sync_attachments(Ctx) of
-                ok ->
-                    gen_server:cast(Parent, {task_complete, TaskId});
-                {error, Reason} ->
-                    gen_server:cast(Parent, {task_error, TaskId,
-                                             {att_sync_failed, Reason}})
+            case {sync_attachments(Ctx), maps:get(pending, Ctx)} of
+                {ok, [_ | _] = Pending} ->
+                    report_done(Ctx, {task_error, TaskId,
+                                      {docs_pending, Pending}});
+                {ok, []} ->
+                    report_done(Ctx, {task_complete, TaskId});
+                {{error, Reason}, _} ->
+                    report_done(Ctx, {task_error, TaskId,
+                                      {att_sync_failed, Reason}})
             end;
 
         {ok, [], _LastSeq} ->
@@ -582,7 +607,7 @@ run_task_loop(Ctx, Since) ->
                     gen_server:cast(Parent, {task_last_error, TaskId,
                                              {att_sync_failed, Reason}})
             end,
-            run_task_loop(wait_for_wake(Ctx), Since);
+            run_task_loop(wait_for_wake(retry_pending(Ctx, Since)), Since);
 
         {ok, Changes, LastSeq} ->
             case barrel_rep_checkpoint:seq_advanced(Since, LastSeq) of
@@ -593,11 +618,12 @@ run_task_loop(Ctx, Since) ->
                     handle_loop_error(Ctx, Since, no_progress);
                 true ->
                     case replicate_batch(From, To, FromTransport, ToTransport,
-                                         Changes, WaitFor) of
-                        ok ->
-                            %% Persist the checkpoint here in the task
-                            %% process, off the manager's message loop.
-                            _ = update_task_seq(TaskId, LastSeq),
+                                         Changes, WaitFor, Ctx) of
+                        {ok, Ctx1} ->
+                            %% Persist the position and pending ids here
+                            %% in the task process, off the manager loop.
+                            _ = save_dir_state(Ctx1, LastSeq),
+                            Ctx2 = Ctx1,
                             case Mode of
                                 continuous ->
                                     %% Attachments have no retry/backoff
@@ -608,15 +634,15 @@ run_task_loop(Ctx, Since) ->
                                     %% healthy doc replication behind it.
                                     case sync_attachments(Ctx) of
                                         ok ->
-                                            run_task_loop(reset_pacing(Ctx),
+                                            run_task_loop(reset_pacing(Ctx2),
                                                          LastSeq);
                                         {error, AttReason} ->
                                             handle_loop_error(
-                                                Ctx, LastSeq,
+                                                Ctx2, LastSeq,
                                                 {att_sync_failed, AttReason})
                                     end;
                                 one_shot ->
-                                    run_task_loop(reset_pacing(Ctx), LastSeq)
+                                    run_task_loop(reset_pacing(Ctx2), LastSeq)
                             end;
                         {error, Reason} ->
                             handle_loop_error(Ctx, Since, Reason)
@@ -626,12 +652,24 @@ run_task_loop(Ctx, Since) ->
             handle_loop_error(Ctx, Since, Reason)
     end.
 
-replicate_batch(From, To, FromTransport, ToTransport, Changes, WaitFor) ->
+replicate_batch(From, To, FromTransport, ToTransport, Changes, WaitFor,
+                #{pending := Pending0} = Ctx) ->
     case barrel_rep_alg:replicate(From, To, FromTransport, ToTransport,
                                   Changes) of
-        {ok, _Stats} ->
-            %% If wait_for is specified, verify docs reached downstream
-            wait_for_downstream(Changes, WaitFor);
+        {ok, #{failed := Failed}} ->
+            Pending = lists:usort(Pending0 ++ Failed),
+            case length(Pending) > ?MAX_PENDING of
+                true ->
+                    %% the saved position stands; nothing is skipped
+                    {error, too_many_failed_docs};
+                false ->
+                    %% If wait_for is specified, verify docs reached
+                    %% downstream
+                    case wait_for_downstream(Changes, WaitFor) of
+                        ok -> {ok, Ctx#{pending := Pending}};
+                        {error, _} = Error -> Error
+                    end
+            end;
         {error, _} = Error ->
             Error
     end.
@@ -669,9 +707,25 @@ handle_loop_error(#{mode := continuous, from := From, to := To} = Ctx,
         true -> backoff(Ctx, Since, Reason);
         false -> exit({shutdown, db_closed})
     end;
-handle_loop_error(#{parent := Parent, task_id := TaskId}, _Since,
-                  Reason) ->
-    gen_server:cast(Parent, {task_error, TaskId, Reason}).
+handle_loop_error(#{task_id := TaskId} = Ctx, _Since, Reason) ->
+    report_done(Ctx, {task_error, TaskId, Reason}).
+
+%% End of a one-shot direction. The push side of a `both' task reports
+%% to the pull side, which reports for the task once both are done (an
+%% error from either wins).
+report_done(#{done_to := Peer}, Outcome) ->
+    Peer ! {direction_done, Outcome},
+    ok;
+report_done(#{await_peer := true, parent := Parent}, Outcome) ->
+    receive
+        {direction_done, PeerOutcome} ->
+            gen_server:cast(Parent, worst(Outcome, PeerOutcome))
+    end;
+report_done(#{parent := Parent}, Outcome) ->
+    gen_server:cast(Parent, Outcome).
+
+worst({task_complete, _}, Other) -> Other;
+worst(Error, _) -> Error.
 
 backoff(Ctx, Since, Reason) ->
     #{parent := Parent, task_id := TaskId, backoff := Backoff} = Ctx,
@@ -914,10 +968,36 @@ update_task_status(TaskId, Status, Extra) ->
         maps:merge(Doc1#{<<"status">> => atom_to_binary(Status)}, Extra)
     end).
 
-update_task_seq(TaskId, Seq) ->
+%% A direction's position and pending ids, saved together. `Key' is
+%% <<>> for push (and single-direction tasks), <<"pull_">> for the pull
+%% side of a `both' task.
+save_dir_state(#{task_id := TaskId, key := Key, pending := Pending}, Seq) ->
     update_task_doc(TaskId, fun(Doc) ->
-        Doc#{<<"last_seq">> => format_seq(Seq)}
+        Doc#{<<Key/binary, "last_seq">> => format_seq(Seq),
+             <<Key/binary, "pending">> => Pending}
     end).
+
+get_dir_state(TaskId, Key) ->
+    case barrel_docdb:get_local_doc(?TASKS_DB, task_doc_id(TaskId)) of
+        {ok, Doc} ->
+            {parse_seq(maps:get(<<Key/binary, "last_seq">>, Doc,
+                                <<"first">>)),
+             [Id || Id <- maps:get(<<Key/binary, "pending">>, Doc, []),
+                    is_binary(Id)]};
+        {error, _} ->
+            {first, []}
+    end.
+
+%% A `both' task saved before positions were split shares one last_seq
+%% across both feeds, which can skip either side's rows: both
+%% directions restart from first once.
+split_both_positions(TaskId) ->
+    update_task_doc(TaskId, fun
+        (#{<<"pull_last_seq">> := _} = Doc) -> Doc;
+        (Doc) -> Doc#{<<"last_seq">> => format_seq(first),
+                      <<"pull_last_seq">> => format_seq(first)}
+    end),
+    ok.
 
 update_task_att_seq(TaskId, Seq) ->
     update_task_doc(TaskId, fun(Doc) ->
@@ -935,7 +1015,14 @@ update_task_last_error(TaskId, Reason) ->
         Doc#{<<"last_error">> => format_reason(Reason)}
     end).
 
+%% Read-modify-write of the task doc, serialized per task: the manager
+%% and a `both' task's two directions update it concurrently.
 update_task_doc(TaskId, Fun) ->
+    global:trans({{?MODULE, TaskId}, self()},
+                 fun() -> do_update_task_doc(TaskId, Fun) end,
+                 [node()]).
+
+do_update_task_doc(TaskId, Fun) ->
     case barrel_docdb:get_local_doc(?TASKS_DB, task_doc_id(TaskId)) of
         {ok, Doc} ->
             Doc2 = Fun(Doc),

@@ -214,12 +214,27 @@ replicate_one_shot(Config, Opts) ->
         id => RepId,
         options => Opts
     },
-    Checkpoint = barrel_rep_checkpoint:new(CheckpointConfig),
+    Checkpoint0 = barrel_rep_checkpoint:new(CheckpointConfig),
+    case barrel_rep_checkpoint:read_error(Checkpoint0) of
+        undefined ->
+            run_one_shot(Config, Opts, RepId, Checkpoint0);
+        {Side, Reason} ->
+            barrel_metrics:inc_rep_errors(RepId),
+            {error, {checkpoint_unreadable, Side, Reason}}
+    end.
+
+run_one_shot(Config, Opts, RepId, Checkpoint0) ->
+    #{
+        source := Source,
+        target := Target,
+        source_transport := SourceTransport,
+        target_transport := TargetTransport
+    } = Config,
 
     %% Get starting sequence. A checkpoint older than the source's
     %% history floor may predate forgotten tombstones: force a full
     %% resync so current state converges.
-    StartSeq0 = barrel_rep_checkpoint:get_start_seq(Checkpoint),
+    StartSeq0 = barrel_rep_checkpoint:get_start_seq(Checkpoint0),
     StartSeq = maybe_reset_on_floor(StartSeq0, Source, SourceTransport, RepId),
 
     %% Run replication
@@ -229,9 +244,22 @@ replicate_one_shot(Config, Opts) ->
 
     %% The final checkpoint write is part of the run: a failure ends it
     %% with an error (docs are committed; the next run resumes earlier).
-    Run = case do_replicate(Source, Target, SourceTransport, TargetTransport,
-                            StartSeq, BatchSize, CheckpointSize, Checkpoint,
-                            Filter) of
+    %% Pending ids are retried first, by id; a success leaves the set.
+    Run = case retry_pending(Source, Target, SourceTransport,
+                             TargetTransport, Checkpoint0) of
+        {ok, RetryStats, Checkpoint} ->
+            case do_replicate(Source, Target, SourceTransport,
+                              TargetTransport, StartSeq, BatchSize,
+                              CheckpointSize, Checkpoint, Filter) of
+                {ok, ScanStats, Cp} ->
+                    {ok, merge_stats(RetryStats, ScanStats), Cp};
+                ScanErr ->
+                    ScanErr
+            end;
+        RetryErr ->
+            RetryErr
+    end,
+    Run2 = case Run of
         {ok, Stats0, FinalCheckpoint0} ->
             case barrel_rep_checkpoint:write_checkpoint(FinalCheckpoint0) of
                 ok -> {ok, Stats0, FinalCheckpoint0};
@@ -240,7 +268,7 @@ replicate_one_shot(Config, Opts) ->
         NotOk ->
             NotOk
     end,
-    case Run of
+    case Run2 of
         {ok, Stats, FinalCheckpoint} ->
 
             %% Record replication metrics
@@ -268,8 +296,10 @@ replicate_one_shot(Config, Opts) ->
                     {error, {att_sync_failed, AttReason}};
                 _ ->
                     %% Build result
-                    Result = Stats#{
+                    Result = (maps:remove(failed, Stats))#{
                         ok => true,
+                        pending => barrel_rep_checkpoint:get_pending(
+                                     FinalCheckpoint),
                         start_seq => StartSeq,
                         last_seq => barrel_rep_checkpoint:get_last_seq(
                             FinalCheckpoint),
@@ -352,6 +382,25 @@ do_replicate_batch_done(Source, Target, SourceTransport, TargetTransport,
     %% Merge stats
     MergedStats = merge_stats(AccStats, BatchStats),
 
+    %% Failed docs join the pending set saved with the new position
+    Pending = barrel_rep_checkpoint:get_pending(Checkpoint)
+        ++ maps:get(failed, BatchStats, []),
+    case length(lists:usort(Pending))
+            > barrel_rep_checkpoint:max_pending(Checkpoint) of
+        true ->
+            %% the last saved entry stands; nothing is skipped
+            {error, too_many_failed_docs};
+        false ->
+            do_replicate_continue(
+                Source, Target, SourceTransport, TargetTransport, BatchSize,
+                CheckpointSize,
+                barrel_rep_checkpoint:set_pending(Pending, Checkpoint),
+                Filter, MergedStats, DocsProcessed, Changes, LastSeq)
+    end.
+
+do_replicate_continue(Source, Target, SourceTransport, TargetTransport,
+                      BatchSize, CheckpointSize, Checkpoint, Filter,
+                      MergedStats, DocsProcessed, Changes, LastSeq) ->
     %% Update checkpoint
     Checkpoint2 = barrel_rep_checkpoint:set_last_seq(LastSeq, Checkpoint),
     NewDocsProcessed = DocsProcessed + length(Changes),
@@ -372,6 +421,23 @@ do_replicate_batch_done(Source, Target, SourceTransport, TargetTransport,
                          LastSeq, BatchSize, CheckpointSize, Checkpoint3,
                          Filter, MergedStats,
                          NewDocsProcessed rem CheckpointSize)
+    end.
+
+%% @private Retry the pending ids by id, before the scan.
+retry_pending(Source, Target, SourceTransport, TargetTransport, Checkpoint) ->
+    case barrel_rep_checkpoint:get_pending(Checkpoint) of
+        [] ->
+            {ok, new_stats(), Checkpoint};
+        Pending ->
+            case barrel_rep_alg:replicate_ids(Source, Target, SourceTransport,
+                                              TargetTransport, Pending,
+                                              #{retry => true}) of
+                {ok, #{failed := Failed} = Stats} ->
+                    {ok, Stats#{failed => []},
+                     barrel_rep_checkpoint:set_pending(Failed, Checkpoint)};
+                {error, _} = Err ->
+                    Err
+            end
     end.
 
 %% @doc Deterministic replication ID. Each endpoint contributes its
@@ -426,12 +492,15 @@ new_stats() ->
         docs_read => 0,
         doc_read_failures => 0,
         docs_written => 0,
-        doc_write_failures => 0
+        doc_write_failures => 0,
+        failed => []
     }.
 
 %% @private Merge two stats maps
 merge_stats(Stats1, Stats2) ->
-    maps:merge_with(fun(_K, V1, V2) -> V1 + V2 end, Stats1, Stats2).
+    maps:merge_with(fun(failed, V1, V2) -> V2 ++ V1;
+                       (_K, V1, V2) -> V1 + V2
+                    end, Stats1, Stats2).
 
 %% @private Build changes options from batch size and filter
 %% Filter options are AND-ed: document must match both path pattern AND query
