@@ -302,8 +302,9 @@ t_binary_field_round_trip(Config) ->
                                             <<"v">> => <<"plain">>}),
     ok = meck:new(hackney, [passthrough, no_link]),
     {ok, _} = barrel_rep:replicate(Local, Endpoint, push_opts()),
+    %% current servers take whole document states, always as CBOR
     ?assertEqual(<<"application/cbor">>, put_content_type(<<"bin">>)),
-    ?assertEqual(<<"application/json">>, put_content_type(<<"text">>)),
+    ?assertEqual(<<"application/cbor">>, put_content_type(<<"text">>)),
     ok = meck:unload(hackney),
     {ok, #{<<"raw">> := Raw, <<"nested">> := [#{<<"k">> := Raw}]}} =
         barrel_docdb:get_doc(Served, <<"bin">>),
@@ -376,7 +377,7 @@ t_unknown_db(Config) ->
 
 %% Content type of the PUT that carried a document, from hackney's history.
 put_content_type(DocId) ->
-    Suffix = <<"/_sync/doc/", DocId/binary>>,
+    Suffix = <<"/_sync/state/", DocId/binary>>,
     [CT] = [proplists:get_value(<<"content-type">>, Headers)
             || {_, {hackney, request, [put, Url, Headers | _]}, _}
                    <- meck:history(hackney),

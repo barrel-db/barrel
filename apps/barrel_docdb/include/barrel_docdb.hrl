@@ -139,6 +139,10 @@
 -define(COL_HLC, <<"hlc">>).
 -define(COL_VV, <<"vv">>).
 -define(COL_NCONFLICTS, <<"nconf">>).
+%% Replication context (barrel_live:encode_ctx/1): every version this
+%% document has seen, and the base of its automatic resolutions. Absent
+%% on documents written before it existed (converted on first touch).
+-define(COL_CTX, <<"ctx">>).
 %% Reserved entity columns (default 0, preserved across writes). The built-in
 %% tiering engine was removed; these are kept as on-disk format-stable seams
 %% for an external tiering layer to use.

@@ -152,6 +152,8 @@ group_routes(sync) ->
         {<<"POST">>,   <<"/db/:db/_sync/diff">>,          {barrel_server_sync, diff}},
         {<<"GET">>,    <<"/db/:db/_sync/doc/:id">>,       {barrel_server_sync, get_doc}},
         {<<"PUT">>,    <<"/db/:db/_sync/doc/:id">>,       {barrel_server_sync, put_version}},
+        {<<"GET">>,    <<"/db/:db/_sync/state/:id">>,     {barrel_server_sync, get_state}},
+        {<<"PUT">>,    <<"/db/:db/_sync/state/:id">>,     {barrel_server_sync, put_state}},
         {<<"GET">>,    <<"/db/:db/_sync/local/:id">>,     {barrel_server_sync, get_local}},
         {<<"PUT">>,    <<"/db/:db/_sync/local/:id">>,     {barrel_server_sync, put_local}},
         {<<"DELETE">>, <<"/db/:db/_sync/local/:id">>,     {barrel_server_sync, delete_local}},

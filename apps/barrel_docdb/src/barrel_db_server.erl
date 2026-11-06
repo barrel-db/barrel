@@ -54,6 +54,9 @@
 %% Replication API
 -export([
     put_version/5,
+    get_doc_state/2,
+    put_doc_state/4,
+    diff_states/2,
     diff_versions/2
 ]).
 
@@ -343,6 +346,25 @@ sweep_ttl(Pid) ->
 put_version(Pid, Doc, VersionToken, VVBin, Deleted) ->
     gen_server:call(Pid, {put_version, Doc, VersionToken, VVBin, Deleted}).
 
+%% @doc A document's full replication state and live bodies.
+-spec get_doc_state(pid(), binary()) -> {ok, map()} | {error, term()}.
+get_doc_state(Pid, DocId) ->
+    gen_server:call(Pid, {get_doc_state, DocId}).
+
+%% @doc Merge a peer's full document state. `unchanged' when this
+%% database already held the merged state (nothing written).
+-spec put_doc_state(pid(), binary(), binary(), #{binary() => map()}) ->
+    {ok | unchanged, binary(), binary()} | {error, term()}.
+put_doc_state(Pid, DocId, StateBin, Bodies) ->
+    gen_server:call(Pid, {put_doc_state, DocId, StateBin, Bodies}).
+
+%% @doc Which offered states differ: #{DocId => Digest} in,
+%% #{DocId => missing | have} out.
+-spec diff_states(pid(), #{binary() => binary()}) ->
+    {ok, #{binary() => missing | have}} | {error, term()}.
+diff_states(Pid, DigestMap) ->
+    gen_server:call(Pid, {diff_states, DigestMap}).
+
 %% @doc Get revisions difference (for replication)
 %% Returns {ok, Missing, PossibleAncestors}
 -spec diff_versions(pid(), #{binary() => binary()}) ->
@@ -520,6 +542,14 @@ init(Name, Config, CompiledChannels, DbPath, Keyspace, Parent, ForkHlc, Env) ->
                         _ -> arm_unless(ReadOnly, TtlInterval, ttl_sweep)
                     end,
 
+                    case maps:is_key(conflict_merger, Config) of
+                        true ->
+                            logger:warning(
+                              "Database ~s: conflict_merger is no longer "
+                              "used; set conflict_resolver instead", [Name]);
+                        false ->
+                            ok
+                    end,
                     logger:info("Database ~s started at ~s", [Name, DbPath]),
                     {ok, #state{
                         name = Name,
@@ -590,6 +620,7 @@ write_request({sweep_retention, _}) -> true;
 write_request(ttl_sweep) -> true;
 write_request({resolve_conflict, _, _, _}) -> true;
 write_request({put_version, _, _, _, _}) -> true;
+write_request({put_doc_state, _, _, _}) -> true;
 write_request({put_local_doc, _, _}) -> true;
 write_request({delete_local_doc, _}) -> true;
 write_request(_) -> false.
@@ -694,7 +725,8 @@ handle_call_rw({sweep_retention, NowMs}, From,
                #state{name = DbName, store_ref = StoreRef, att_ref = AttRef,
                       retention_period = RetentionPeriod} = State) ->
     Fun = fun() -> do_retention_sweep(StoreRef, AttRef, DbName,
-                                      RetentionPeriod, NowMs) end,
+                                      RetentionPeriod, purge_after(State),
+                                      NowMs) end,
     {noreply, start_sweep(retention, Fun, From, false, State)};
 
 %% Doc TTL sweep (manual trigger; also runs on the timer).
@@ -734,6 +766,25 @@ handle_call_rw({put_version, Doc, VersionToken, VVBin, Deleted}, _From,
             {error, {invalid_version, {Class, Reason}}}
     end,
     {reply, Result, State};
+
+handle_call_rw({put_doc_state, DocId, StateBin, Bodies}, _From,
+               #state{name = DbName, store_ref = StoreRef,
+                      config = Config} = State) ->
+    Result = try
+        do_put_state(StoreRef, DbName, Config, DocId, StateBin, Bodies)
+    catch
+        throw:{error, clock_skew} -> {error, clock_skew};
+        Class:Reason -> {error, {invalid_state, {Class, Reason}}}
+    end,
+    {reply, Result, State};
+
+handle_call_rw({get_doc_state, DocId}, _From,
+               #state{name = DbName, store_ref = StoreRef} = State) ->
+    {reply, do_get_state(StoreRef, DbName, DocId), State};
+
+handle_call_rw({diff_states, DigestMap}, _From,
+               #state{name = DbName, store_ref = StoreRef} = State) ->
+    {reply, do_diff_states(StoreRef, DbName, DigestMap), State};
 
 handle_call_rw({diff_versions, TokenMap}, _From,
                #state{name = DbName, store_ref = StoreRef} = State) ->
@@ -788,7 +839,7 @@ handle_info(retention_sweep, #state{name = DbName, store_ref = StoreRef,
                                     retention_period = RetentionPeriod}
                              = State) ->
     Fun = fun() -> do_retention_sweep(StoreRef, AttRef, DbName,
-                                      RetentionPeriod,
+                                      RetentionPeriod, purge_after(State),
                                       erlang:system_time(millisecond)) end,
     {noreply, start_sweep(retention, Fun, none, true, State)};
 
@@ -1187,7 +1238,13 @@ drop_expiry_row(StoreRef, Key) ->
 
 %% All deletes and the floor advance commit in one batch; re-running a
 %% sweep is a no-op (deletes of missing keys do nothing).
-do_retention_sweep(StoreRef, AttRef, DbName, RetentionPeriod, NowMs) ->
+%% Seconds after which a delete's stub is purged; 0 (default) keeps
+%% stubs for good.
+purge_after(#state{config = Config}) ->
+    maps:get(tombstone_purge_after, Config, 0).
+
+do_retention_sweep(StoreRef, AttRef, DbName, RetentionPeriod, PurgeAfter,
+                   NowMs) ->
     Ks = barrel_keyspace:resolve(DbName),
     CutoffMs = NowMs - RetentionPeriod * 1000,
     Cutoff = barrel_hlc:from_wall_time(CutoffMs),
@@ -1202,7 +1259,8 @@ do_retention_sweep(StoreRef, AttRef, DbName, RetentionPeriod, NowMs) ->
             0
     end,
     Zero = #{history_swept => 0, superseded_removed => 0,
-             docs_forgotten => 0},
+             docs_stubbed => 0, docs_purged => 0},
+    Purge = purge_candidates(StoreRef, DbName, PurgeAfter, NowMs),
     Entries = lists:reverse(barrel_history:fold(
         StoreRef, DbName,
         fun(Entry, Acc) -> {ok, [Entry | Acc]} end,
@@ -1212,8 +1270,10 @@ do_retention_sweep(StoreRef, AttRef, DbName, RetentionPeriod, NowMs) ->
     {LeaveOps, LeavesSwept} = sweep_channel_leaves(StoreRef, DbName, Cutoff),
     FloorOp = {put, barrel_store_keys:db_meta(Ks, <<"history_floor">>),
                barrel_hlc:encode(Cutoff)},
-    Final = fun(Stats) ->
-        ok = barrel_store_rocksdb:write_batch(StoreRef, [FloorOp | LeaveOps],
+    Final = fun(Stats0) ->
+        {PurgeOps, Stats} = purge_ops(StoreRef, DbName, Purge, Stats0),
+        ok = barrel_store_rocksdb:write_batch(StoreRef,
+                                              [FloorOp | LeaveOps ++ PurgeOps],
                                               #{}),
         {ok, Stats#{floor => Cutoff, channel_leaves_swept => LeavesSwept,
                     att_tombstones_swept => AttSwept}}
@@ -1287,10 +1347,10 @@ sweep_entry_ops(StoreRef, DbName,
             NConflicts = proplists:get_value(?COL_NCONFLICTS, Columns, 0),
             case CurrentEnc of
                 VersionEnc when Deleted andalso NConflicts =:= 0 ->
-                    %% Expired tombstone: the database forgets the doc
-                    {forget_doc_ops(StoreRef, DbName, DocId, Columns)
-                         ++ [HistDel],
-                     inc_sweep(docs_forgotten, Stats)};
+                    %% Expired delete: keep a stub (its full replicated
+                    %% state and feed row), drop the bodies and history
+                    {stub_ops(StoreRef, DbName, DocId) ++ [HistDel],
+                     inc_sweep(docs_stubbed, Stats)};
                 VersionEnc ->
                     %% Still current (live doc, or tombstone with
                     %% unresolved conflicts): state is retained
@@ -1318,6 +1378,78 @@ sweep_old_version_ops(StoreRef, DbName, DocId, VersionEnc, HistDel, Stats) ->
         not_found ->
             {[HistDel], inc_sweep(history_swept, Stats)}
     end.
+
+%% @private A deleted document becomes a stub: the entity (with its
+%% context) and the feed row stay, so a peer pulling from the start gets
+%% the delete and an old copy is still recognised as replaced; the
+%% current body, the chain rows and archived bodies go.
+stub_ops(StoreRef, DbName, DocId) ->
+    Ks = barrel_keyspace:resolve(DbName),
+    [{body_delete, barrel_store_keys:doc_body(Ks, DocId)}
+     | chain_delete_ops(StoreRef, Ks, DocId)].
+
+chain_delete_ops(StoreRef, Ks, DocId) ->
+    barrel_store_rocksdb:fold_range(
+        StoreRef, barrel_store_keys:doc_version_prefix(Ks, DocId),
+        barrel_store_keys:doc_version_end(Ks, DocId),
+        fun(Key, _Value, Acc) ->
+            VEnc = barrel_store_keys:decode_doc_version_key(Ks, DocId, Key),
+            {ok, [{delete, Key},
+                  {body_delete, barrel_store_keys:doc_body_rev(Ks, DocId, VEnc)}
+                  | Acc]}
+        end,
+        []).
+
+%% @private Deleted documents whose feed row is older than the purge
+%% window (tombstone_purge_after seconds): read in the worker, re-checked
+%% in the writer.
+purge_candidates(_StoreRef, _DbName, 0, _NowMs) ->
+    [];
+purge_candidates(StoreRef, DbName, PurgeAfter, NowMs) ->
+    Cutoff = barrel_hlc:from_wall_time(NowMs - PurgeAfter * 1000),
+    {ok, Candidates, _} = barrel_changes:fold_changes_compact(
+        StoreRef, DbName, first,
+        fun({DocId, Hlc, _Rev, true, 0}, Acc) ->
+               case barrel_hlc:less(Hlc, Cutoff) of
+                   true -> {ok, [{DocId, Hlc} | Acc]};
+                   false -> {stop, Acc}
+               end;
+           ({_DocId, Hlc, _Rev, _Deleted, _N}, Acc) ->
+               case barrel_hlc:less(Hlc, Cutoff) of
+                   true -> {ok, Acc};
+                   false -> {stop, Acc}
+               end
+        end,
+        []),
+    lists:reverse(Candidates).
+
+%% In the writer: purge a stub only if it is still the same delete.
+purge_ops(StoreRef, DbName, Candidates, Stats) ->
+    Ks = barrel_keyspace:resolve(DbName),
+    lists:foldl(
+        fun({DocId, Hlc}, {OpsAcc, StatsAcc}) ->
+            case barrel_store_rocksdb:get_entity(
+                   StoreRef, barrel_store_keys:doc_entity(Ks, DocId)) of
+                {ok, Columns} ->
+                    Same = barrel_hlc:decode(proplists:get_value(?COL_HLC, Columns))
+                               =:= Hlc
+                        andalso proplists:get_value(?COL_DELETED, Columns)
+                               =:= <<"true">>
+                        andalso proplists:get_value(?COL_NCONFLICTS, Columns, 0)
+                               =:= 0,
+                    case Same of
+                        true ->
+                            {forget_doc_ops(StoreRef, DbName, DocId, Columns)
+                                 ++ OpsAcc,
+                             inc_sweep(docs_purged, StatsAcc)};
+                        false ->
+                            {OpsAcc, StatsAcc}
+                    end;
+                not_found ->
+                    {OpsAcc, StatsAcc}
+            end
+        end,
+        {[], Stats}, Candidates).
 
 %% @private Full forget of an expired tombstone: entity, current body,
 %% every chain row and archived body, and the live-feed row. The path
@@ -1648,16 +1780,11 @@ build_item(Item, unread, StoreRef, DbName, Opts) ->
     catch
         _:Reason -> {{error, Reason}, [], none}
     end;
-build_item(#prep{rec = DocRecord} = P, {read, Old}, StoreRef, DbName, Opts) ->
+build_item(#prep{} = P, {read, Old}, StoreRef, DbName, Opts) ->
     try
-        case cas_check(Old, maps:get(expected_version, DocRecord)) of
-            ok ->
-                {Ops, Notify} = build_prepared_ops(StoreRef, DbName, P, Old,
-                                                   Opts, alloc_hlc(DbName)),
-                {write_result(Notify, Opts), Ops, Notify};
-            {error, conflict} = Conflict ->
-                {Conflict, [], none}
-        end
+        {Ops, Notify} = build_prepared_ops(StoreRef, DbName, P, Old, Opts,
+                                           alloc_hlc(DbName)),
+        {write_result(Notify, Opts), Ops, Notify}
     catch
         throw:{error, _} = Err -> {Err, [], none};
         _:Reason -> {{error, Reason}, [], none}
@@ -1947,6 +2074,7 @@ current_state(Columns, BodyRead) ->
                 created_at => proplists:get_value(?COL_CREATED_AT, Columns, <<>>),
                 expires_at => proplists:get_value(?COL_EXPIRES_AT, Columns, 0),
                 tier => proplists:get_value(?COL_TIER, Columns, 0),
+                ctx => proplists:get_value(?COL_CTX, Columns, undefined),
                 body => Body,
                 body_cbor => BodyCbor
             }.
@@ -2066,20 +2194,96 @@ catch_error(Fun) ->
     catch throw:{error, _} = Err -> Err
     end.
 
-%% @doc CAS check for local writes: the caller must supply the current
-%% winner's version token when updating a live document. Creating a new
-%% document, or recreating over a tombstone, needs no token.
-cas_check(undefined, _Expected) ->
-    ok;
-cas_check(#{deleted := true}, undefined) ->
-    ok;
-cas_check(_Old, undefined) ->
-    {error, conflict};
-cas_check(#{version := Current}, ExpectedToken) ->
-    case barrel_version:to_token(Current) =:= ExpectedToken of
-        true -> ok;
-        false -> {error, conflict}
+%%--------------------------------------------------------------------
+%% Replicated document state (barrel_live) over the stored document:
+%% the entity holds the winner, conflict chain rows the other live
+%% versions, COL_CTX the versions seen.
+%%--------------------------------------------------------------------
+
+%% @doc The document's barrel_live state. A document written before
+%% COL_CTX existed is converted: only the exact versions it stores
+%% (current, conflicts, superseded ancestors) count as seen.
+load_live(_StoreRef, _DbName, _DocId, undefined) ->
+    barrel_live:new();
+load_live(StoreRef, DbName, DocId,
+          #{version := W, deleted := D, vv := VV, num_conflicts := N} = Old) ->
+    Siblings = case N of
+        0 -> [];
+        _ -> conflict_siblings(StoreRef, DbName, DocId)
+    end,
+    Live = maps:from_list(
+             [{W, #{deleted => D, vv => VV}}
+              | [{V, #{deleted => SD, vv => SVV}}
+                 || {V, #{deleted := SD, vv := SVV}} <- Siblings]]),
+    case maps:get(ctx, Old, undefined) of
+        undefined ->
+            barrel_live:convert(maps:to_list(Live),
+                                chain_versions(StoreRef, DbName, DocId));
+        CtxBin ->
+            barrel_live:decode_ctx(CtxBin, Live)
     end.
+
+%% Every version in the document's chain, superseded or conflict.
+chain_versions(StoreRef, DbName, DocId) ->
+    Ks = barrel_keyspace:resolve(DbName),
+    barrel_store_rocksdb:fold_range(
+      StoreRef, barrel_store_keys:doc_version_prefix(Ks, DocId),
+      barrel_store_keys:doc_version_end(Ks, DocId),
+      fun(Key, _Value, Acc) ->
+          {ok, [barrel_version:decode(
+                  barrel_store_keys:decode_doc_version_key(Ks, DocId, Key))
+                | Acc]}
+      end, []).
+
+%% @doc What a local write replaces, and the state it applies to.
+%% Throws {error, conflict} when the caller's rev or observed set does
+%% not allow the write.
+local_state(StoreRef, DbName, DocId, Old, RevToken, ObservedTokens) ->
+    Live = load_live(StoreRef, DbName, DocId, Old),
+    try
+        Rev = case RevToken of
+            undefined -> undefined;
+            _ -> barrel_version:from_token(RevToken)
+        end,
+        Observed = case ObservedTokens of
+            undefined -> undefined;
+            _ -> [barrel_version:from_token(T) || T <- ObservedTokens]
+        end,
+        barrel_live:replaces(Live, Rev, Observed)
+    of
+        {ok, Replaces} -> {Live, Replaces};
+        {error, conflict} -> throw({error, conflict})
+    catch
+        error:badarg -> throw({error, conflict})
+    end.
+
+%% @doc An HLC for a new local version: above every live version (an
+%% automatic resolution can sort a few logical steps above the clock).
+above_live(DbName, Live, Hlc) ->
+    case [H || {H, _} <- barrel_live:tokens(Live), not barrel_hlc:less(H, Hlc)] of
+        [] ->
+            Hlc;
+        Higher ->
+            _ = barrel_hlc:sync_hlc(lists:max(Higher)),
+            above_live(DbName, Live, alloc_hlc(DbName))
+    end.
+
+%% @doc A local write's new state, entity vector, conflict count,
+%% context column and chain rows: every previous live version becomes
+%% superseded if replaced, else stays a conflict.
+local_write_state(Ks, DocId, Live, Replaces, NewVersion, Deleted) ->
+    NewLive = barrel_live:author(Live, NewVersion, Deleted, Replaces),
+    #{vv := NewVV} = maps:get(NewVersion, barrel_live:live(NewLive)),
+    Chain = [{put, barrel_store_keys:doc_version(Ks, DocId,
+                                                 barrel_version:encode(T)),
+              sibling_entry(case lists:member(T, Replaces) of
+                                true -> superseded;
+                                false -> conflict
+                            end, D, VV)}
+             || {T, #{deleted := D, vv := VV}}
+                    <- maps:to_list(barrel_live:live(Live))],
+    {NewVV, map_size(barrel_live:live(NewLive)) - 1,
+     {?COL_CTX, barrel_live:encode_ctx(NewLive)}, Chain}.
 
 %% @doc Sibling entry stored in the per-doc version chain (0x1D):
 %% `<<Flag:8, Deleted:8, VV/binary>>' where Flag 0 = superseded (covered
@@ -2120,19 +2324,21 @@ channel_ops(DbName, NewHlc, DocInfo, DocBody, OldHlc, OldDocBody,
                                      OldHlc, OldTopics)
     end.
 
-build_write_ops(StoreRef, DbName, DocRecord, Old, Opts) ->
-    build_write_ops(StoreRef, DbName, DocRecord, Old, Opts, alloc_hlc(DbName)).
-
-build_write_ops(StoreRef, DbName, DocRecord, Old, Opts, NextHlc) ->
+build_write_ops(StoreRef, DbName, DocRecord, Old, Opts, NextHlc0) ->
     Ks = barrel_keyspace:resolve(DbName),
     #{id := DocId, deleted := Deleted, doc := DocBody} = DocRecord,
     DocEntityKey = barrel_store_keys:doc_entity(Ks, DocId),
 
+    {Live, Replaces} = local_state(StoreRef, DbName, DocId, Old,
+                                   maps:get(expected_version, DocRecord,
+                                            undefined),
+                                   maps:get(observed, DocRecord, undefined)),
+    NextHlc = above_live(DbName, Live, NextHlc0),
     NewVersion = barrel_version:new(NextHlc, writer_id(DbName)),
     NewToken = barrel_version:to_token(NewVersion),
 
-    {OldVersion, OldHlc, OldVV, OldDeleted, OldDocBody, OldDocBodyCbor,
-     NConflicts, CreatedAt, ExpiresAt, Tier} =
+    {OldVersion, OldHlc, _OldVV, OldDeleted, OldDocBody, OldDocBodyCbor,
+     _OldNConflicts, CreatedAt, ExpiresAt, Tier} =
         case Old of
             undefined ->
                 {undefined, undefined, barrel_vv:new(), false, undefined,
@@ -2143,7 +2349,8 @@ build_write_ops(StoreRef, DbName, DocRecord, Old, Opts, NextHlc) ->
                 {OV, OH, OVV, OD, OB, OBC, ONC, OCA, OEA, OT}
         end,
 
-    NewVV = barrel_vv:bump(OldVV, NewVersion),
+    {NewVV, NConflicts, CtxCol, LiveChainOps} =
+        local_write_state(Ks, DocId, Live, Replaces, NewVersion, Deleted),
 
     ProvEnc = maps:get(provenance_enc, Opts, undefined),
     %% Doc TTL: absent = preserve, 0 = clear, N = expire at N (unix ms)
@@ -2155,6 +2362,7 @@ build_write_ops(StoreRef, DbName, DocRecord, Old, Opts, NextHlc) ->
         {?COL_HLC, barrel_hlc:encode(NextHlc)},
         {?COL_VV, barrel_vv:encode(NewVV)},
         {?COL_NCONFLICTS, NConflicts},
+        CtxCol,
         {?COL_CREATED_AT, CreatedAt},
         {?COL_EXPIRES_AT, NewExpires},
         {?COL_TIER, Tier}
@@ -2228,10 +2436,7 @@ build_write_ops(StoreRef, DbName, DocRecord, Old, Opts, NextHlc) ->
                       barrel_store_keys:doc_body_rev(Ks, DocId, OldVersionEnc),
                       OldCbor}]
             end,
-            Chain = [{put,
-                      barrel_store_keys:doc_version(Ks, DocId, OldVersionEnc),
-                      sibling_entry(superseded, OldDeleted, OldVV)}],
-            {Archive, Chain}
+            {Archive, LiveChainOps}
     end,
 
     %% Tagged outbox entries (generic durable work queue; see barrel_outbox)
@@ -2309,18 +2514,23 @@ doc_write_ops(prepared, StoreRef, DbName, P, _Rec, Old, Opts, Hlc) ->
 %% @doc build_write_ops/6 from a prepared write: only what needs the
 %% current state or the HLC is computed here. Same ops, same order.
 build_prepared_ops(StoreRef, DbName, #prep{rec = DocRecord} = P, Old, Opts,
-                   NextHlc) ->
+                   NextHlc0) ->
     Ks = barrel_keyspace:resolve(DbName),
     #prep{cbor = CborBody, change_cbor = ChangeCbor, paths = NewPaths,
           topics = Topics, feed_heads = Heads, index_ops = FreshIndexOps} = P,
     #{id := DocId, deleted := Deleted, doc := DocBody} = DocRecord,
     DocEntityKey = barrel_store_keys:doc_entity(Ks, DocId),
 
+    {Live, Replaces} = local_state(StoreRef, DbName, DocId, Old,
+                                   maps:get(expected_version, DocRecord,
+                                            undefined),
+                                   maps:get(observed, DocRecord, undefined)),
+    NextHlc = above_live(DbName, Live, NextHlc0),
     NewVersion = barrel_version:new(NextHlc, writer_id(DbName)),
     NewToken = barrel_version:to_token(NewVersion),
 
-    {OldVersion, OldHlc, OldVV, OldDeleted, OldDocBody, OldDocBodyCbor,
-     NConflicts, CreatedAt, ExpiresAt, Tier} =
+    {OldVersion, OldHlc, _OldVV, OldDeleted, OldDocBody, OldDocBodyCbor,
+     _OldNConflicts, CreatedAt, ExpiresAt, Tier} =
         case Old of
             undefined ->
                 {undefined, undefined, barrel_vv:new(), false, undefined,
@@ -2331,7 +2541,8 @@ build_prepared_ops(StoreRef, DbName, #prep{rec = DocRecord} = P, Old, Opts,
                 {OV, OH, OVV, OD, OB, OBC, ONC, OCA, OEA, OT}
         end,
 
-    NewVV = barrel_vv:bump(OldVV, NewVersion),
+    {NewVV, NConflicts, CtxCol, LiveChainOps} =
+        local_write_state(Ks, DocId, Live, Replaces, NewVersion, Deleted),
 
     ProvEnc = maps:get(provenance_enc, Opts, undefined),
     NewExpires = maps:get(expires_at, Opts, ExpiresAt),
@@ -2342,6 +2553,7 @@ build_prepared_ops(StoreRef, DbName, #prep{rec = DocRecord} = P, Old, Opts,
         {?COL_HLC, barrel_hlc:encode(NextHlc)},
         {?COL_VV, barrel_vv:encode(NewVV)},
         {?COL_NCONFLICTS, NConflicts},
+        CtxCol,
         {?COL_CREATED_AT, CreatedAt},
         {?COL_EXPIRES_AT, NewExpires},
         {?COL_TIER, Tier}
@@ -2412,10 +2624,7 @@ build_prepared_ops(StoreRef, DbName, #prep{rec = DocRecord} = P, Old, Opts,
                       barrel_store_keys:doc_body_rev(Ks, DocId, OldVersionEnc),
                       OldCbor}]
             end,
-            Chain = [{put,
-                      barrel_store_keys:doc_version(Ks, DocId, OldVersionEnc),
-                      sibling_entry(superseded, OldDeleted, OldVV)}],
-            {Archive, Chain}
+            {Archive, LiveChainOps}
     end,
 
     OutboxOps = barrel_outbox:write_ops(DbName, maps:get(outbox, Opts, []),
@@ -2501,21 +2710,25 @@ build_delete_ops(StoreRef, DbName, DocId, Current, Opts) ->
     case Current of
         undefined ->
             {error, not_found};
-        #{version := OldVersion, hlc := OldHlc, vv := OldVV,
-          deleted := OldDeleted, num_conflicts := NConflicts,
+        #{version := OldVersion, hlc := OldHlc,
+          deleted := OldDeleted,
           created_at := CreatedAt, expires_at := ExpiresAt, tier := Tier,
           body := OldDocBody, body_cbor := OldDocBodyCbor} ->
             CurrentToken = barrel_version:to_token(OldVersion),
-            case maps:get(rev, Opts, undefined) of
-                undefined -> ok;
-                CurrentToken -> ok;
-                _Other -> throw({error, {conflict, CurrentToken}})
-            end,
+            %% a delete without a rev deletes the winner, as before
+            Rev = maps:get(rev, Opts, CurrentToken),
+            {Live, Replaces} =
+                try local_state(StoreRef, DbName, DocId, Current, Rev,
+                                maps:get(observed, Opts, undefined))
+                catch throw:{error, conflict} ->
+                    throw({error, {conflict, CurrentToken}})
+                end,
 
-            NextHlc = alloc_hlc(DbName),
+            NextHlc = above_live(DbName, Live, alloc_hlc(DbName)),
             NewVersion = barrel_version:new(NextHlc, writer_id(DbName)),
             NewToken = barrel_version:to_token(NewVersion),
-            NewVV = barrel_vv:bump(OldVV, NewVersion),
+            {NewVV, NConflicts, CtxCol, LiveChainOps} =
+                local_write_state(Ks, DocId, Live, Replaces, NewVersion, true),
             DocEntityKey = barrel_store_keys:doc_entity(Ks, DocId),
 
             ProvEnc = maps:get(provenance_enc, Opts, undefined),
@@ -2527,6 +2740,7 @@ build_delete_ops(StoreRef, DbName, DocId, Current, Opts) ->
                 {?COL_HLC, barrel_hlc:encode(NextHlc)},
                 {?COL_VV, barrel_vv:encode(NewVV)},
                 {?COL_NCONFLICTS, NConflicts},
+                CtxCol,
                 {?COL_CREATED_AT, CreatedAt},
                 {?COL_EXPIRES_AT, 0},
                 {?COL_TIER, Tier}
@@ -2567,9 +2781,7 @@ build_delete_ops(StoreRef, DbName, DocId, Current, Opts) ->
                       barrel_store_keys:doc_body_rev(Ks, DocId, OldVersionEnc),
                       OldCbor}]
             end,
-            ChainOps = [{put,
-                         barrel_store_keys:doc_version(Ks, DocId, OldVersionEnc),
-                         sibling_entry(superseded, OldDeleted, OldVV)}],
+            ChainOps = LiveChainOps,
 
             %% Tagged outbox entries (deletes replace the pending entry too)
             OutboxOps = barrel_outbox:write_ops(DbName, maps:get(outbox, Opts, []),
@@ -2594,349 +2806,339 @@ build_delete_ops(StoreRef, DbName, DocId, Current, Opts) ->
 %% Replication Operations
 %%====================================================================
 
-%% @doc Apply a replicated version (the VV protocol write).
-%% The remote version and its vector are preserved; only the change
-%% sequence HLC is issued locally. Outcomes:
-%% - already contained: idempotent no-op
-%% - remote VV dominates: fast-forward, old winner superseded
-%% - concurrent: the per-db conflict_merger may resolve it with a
-%%   merged body; otherwise LWW by version, the loser stays live as a
-%%   conflict sibling (bounded by max_conflict_versions) and the
-%%   vectors merge
+%% @doc Apply a version from a peer that sends one version at a time
+%% (put_version/5: old servers, old barrel-lite). It is ignored when this
+%% document has seen that exact version, otherwise kept as a conflict;
+%% it never removes anything (barrel_live:legacy_arrival/4).
 do_put_version(StoreRef, DbName, Config, Doc, Version, RemoteVV, Deleted) ->
     %% Advance the local clock past the remote write so subsequent local
     %% change HLCs stay strictly increasing
     _ = barrel_hlc:sync_hlc(barrel_version:hlc(Version)),
+    {DocId, DocBody} = id_and_body(Doc),
+    Old = read_current(StoreRef, DbName, DocId),
+    Live0 = load_live(StoreRef, DbName, DocId, Old),
+    Live1 = barrel_live:legacy_arrival(Live0, Version, Deleted, RemoteVV),
+    case commit_state(StoreRef, DbName, Config, DocId, Old, Live0, Live1,
+                      #{Version => DocBody}, replication_opts(Config)) of
+        {unchanged, DocId, Token} -> {ok, DocId, Token};
+        Written -> Written
+    end.
+
+%% @doc Merge a peer's full document state (put_version/6): the join of
+%% the two states, then eviction and automatic resolution.
+do_put_state(StoreRef, DbName, Config, DocId, StateBin, RemoteBodies) ->
+    Remote = barrel_live:decode_state(StateBin),
+    _ = [barrel_hlc:sync_hlc(H) || {H, _} <- barrel_live:tokens(Remote)],
+    Old = read_current(StoreRef, DbName, DocId),
+    Live0 = load_live(StoreRef, DbName, DocId, Old),
+    Live1 = barrel_live:merge(Live0, Remote),
+    Bodies = maps:from_list(
+               [{barrel_version:from_token(T), B}
+                || {T, B} <- maps:to_list(RemoteBodies)]),
+    commit_state(StoreRef, DbName, Config, DocId, Old, Live0, Live1, Bodies,
+                 replication_opts(Config)).
+
+%% @doc A document's full state for replication: its barrel_live state
+%% and the body of every live version, under one read in the writer.
+do_get_state(StoreRef, DbName, DocId) ->
+    case read_current(StoreRef, DbName, DocId) of
+        undefined ->
+            {error, not_found};
+        Old ->
+            Live = load_live(StoreRef, DbName, DocId, Old),
+            Bodies = maps:from_list(
+                       [{barrel_version:to_token(T), version_body(StoreRef, DbName,
+                                                                  DocId, Old, T)}
+                        || T <- barrel_live:tokens(Live)]),
+            {ok, #{id => DocId, state => barrel_live:encode_state(Live),
+                   digest => barrel_live:digest(Live), bodies => Bodies}}
+    end.
+
+replication_opts(Config) ->
+    #{cause => replicated,
+      outbox => maps:get(outbox_tags_on_replication, Config, [])}.
+
+id_and_body(Doc) ->
     DocMap = barrel_doc:to_map(Doc),
     DocId = case maps:find(<<"id">>, DocMap) of
         {ok, Id} -> Id;
         error -> erlang:error({missing_id, DocMap})
     end,
-    DocBody = barrel_doc:doc_without_meta(DocMap),
-    %% Generic tags appended to replication-applied writes (barrel
-    %% sets [<<"embed">>] on record-mode databases so replicated docs
-    %% reach the indexer; docdb stays ignorant of why).
-    Tags = maps:get(outbox_tags_on_replication, Config, []),
-    case read_current(StoreRef, DbName, DocId) of
-        undefined ->
-            CreateVV = barrel_vv:bump(RemoteVV, Version),
-            apply_remote_current(StoreRef, DbName, DocId, DocBody, Version,
-                                 CreateVV, CreateVV, Deleted,
-                                 undefined, 0, [], Tags);
-        #{version := LocalV, vv := LocalVV} = Old ->
-            case barrel_vv:contains(LocalVV, Version) of
-                true ->
-                    %% Idempotent redelivery: we already cover it
-                    {ok, DocId, barrel_version:to_token(LocalV)};
-                false ->
-                    MergedVV = barrel_vv:merge(LocalVV,
-                                               barrel_vv:bump(RemoteVV, Version)),
-                    case barrel_vv:compare(RemoteVV, LocalVV) of
-                        dominates ->
-                            %% Fast-forward: old winner superseded
-                            %% (dominating bump == merged vector)
-                            Chain = [chain_op(DbName, DocId, LocalV,
-                                              superseded, Old)],
-                            apply_remote_current(StoreRef, DbName, DocId,
-                                                 DocBody, Version, MergedVV,
-                                                 MergedVV, Deleted, Old,
-                                                 maps:get(num_conflicts, Old),
-                                                 Chain, Tags);
-                        _Concurrent ->
-                            handle_concurrent(StoreRef, DbName, Config, DocId,
-                                              DocBody, Version, RemoteVV,
-                                              Deleted, Old, MergedVV)
+    {DocId, barrel_doc:doc_without_meta(DocMap)}.
+
+%% @doc Bound the live versions, resolve automatically when configured,
+%% then write the document's new state.
+commit_state(StoreRef, DbName, Config, DocId, Old, Live0, Live1, Bodies, Opts) ->
+    Max = maps:get(max_conflict_versions, Config, ?DEFAULT_MAX_CONFLICT_VERSIONS),
+    Live2 = barrel_live:evict(Live1, Max + 1, fun old_peer_version/1),
+    BodyOf = fun(T) ->
+        case Bodies of
+            #{T := B} -> B;
+            _ -> version_body(StoreRef, DbName, DocId, Old, T)
+        end
+    end,
+    {Live3, AutoBodies} = auto_resolve(Config, DocId, Live2, BodyOf),
+    BodyOf2 = fun(T) ->
+        case AutoBodies of
+            #{T := B} -> B;
+            _ -> BodyOf(T)
+        end
+    end,
+    write_state(StoreRef, DbName, DocId, Old, Live0, Live3, BodyOf2, Opts).
+
+%% A version written by a peer older than barrel_live: neither a writer
+%% id (w + 16 hex) nor an automatic resolution. Evicted first.
+old_peer_version({_Hlc, <<"w", Hex:16/binary>>}) ->
+    not is_hex(Hex);
+old_peer_version({_Hlc, <<"auto:", _/binary>>}) ->
+    false;
+old_peer_version(_) ->
+    true.
+
+is_hex(Bin) ->
+    lists:all(fun(C) -> (C >= $0 andalso C =< $9) orelse (C >= $a andalso C =< $f) end,
+              binary_to_list(Bin)).
+
+%% @doc The configured resolver over the live versions, when there is a
+%% conflict. Returns the new state and the body of the resolution.
+auto_resolve(Config, DocId, Live, BodyOf) ->
+    case {maps:get(conflict_resolver, Config, undefined),
+          barrel_live:auto_inputs(Live)} of
+        {undefined, _} ->
+            {Live, #{}};
+        {_, []} ->
+            {Live, #{}};
+        {Fun, Inputs} ->
+            LiveInfo = barrel_live:live(Live),
+            Versions = [#{token => barrel_version:to_token(T),
+                          deleted => maps:get(deleted, maps:get(T, LiveInfo)),
+                          body => BodyOf(T)} || T <- Inputs],
+            case resolver_result(Fun, DocId, Versions, LiveInfo) of
+                keep ->
+                    {Live, #{}};
+                {Deleted, Body} ->
+                    Hash = crypto:hash(sha256, canonical({Deleted, Body})),
+                    case barrel_live:auto_step(Live, Deleted, Hash) of
+                        {ok, Live1, Token} -> {Live1, #{Token => Body}};
+                        {noop, Live1} -> {Live1, #{}};
+                        {stop, disagreement} ->
+                            logger:warning("resolver_disagreement on ~p: replicas "
+                                           "run different conflict_resolver "
+                                           "functions", [DocId]),
+                            {Live, #{}}
                     end
             end
     end.
 
-%% @private A concurrent remote version: the merger hook gets the first
-%% say; without one (or when it declines, crashes, or a side is a
-%% tombstone) the deterministic LWW conflict path applies.
-handle_concurrent(StoreRef, DbName, Config, DocId, DocBody, Version, RemoteVV,
-                  Deleted, #{version := LocalV} = Old, MergedVV) ->
-    Tags = maps:get(outbox_tags_on_replication, Config, []),
-    case try_merge(Config, DocId, Old, DocBody, Deleted) of
-        {merge, MergedBody} ->
-            apply_merged(StoreRef, DbName, DocId, MergedBody, DocBody,
-                         Version, RemoteVV, Deleted, Old, MergedVV, Tags);
-        conflict ->
-            NConflicts0 = maps:get(num_conflicts, Old) + 1,
-            Max = maps:get(max_conflict_versions, Config,
-                           ?DEFAULT_MAX_CONFLICT_VERSIONS),
-            case barrel_version:max(LocalV, Version) of
-                Version ->
-                    %% Remote wins; local winner stays live as a
-                    %% conflict sibling
-                    {DropOps, NConflicts} = enforce_conflict_bound(
-                        StoreRef, DbName, DocId, LocalV, NConflicts0, Max),
-                    Chain = [chain_op(DbName, DocId, LocalV, conflict, Old)],
-                    apply_remote_current(StoreRef, DbName, DocId, DocBody,
-                                         Version, MergedVV,
-                                         barrel_vv:bump(RemoteVV, Version),
-                                         Deleted, Old,
-                                         NConflicts, Chain ++ DropOps, Tags);
-                _LocalWins ->
-                    {DropOps, NConflicts} = enforce_conflict_bound(
-                        StoreRef, DbName, DocId, Version, NConflicts0, Max),
-                    keep_local_add_conflict(StoreRef, DbName, DocId, DocBody,
-                                            Version, RemoteVV, Deleted, Old,
-                                            MergedVV, NConflicts, DropOps)
-            end
+resolver_result(Fun, DocId, Versions, LiveInfo) ->
+    try call_resolver(Fun, Versions) of
+        keep -> keep;
+        delete -> {true, #{}};
+        {merge, Body} when is_map(Body) -> {false, barrel_doc:doc_without_meta(Body)};
+        {choose, Tok} ->
+            case [V || #{token := T} = V <- Versions, T =:= Tok] of
+                [#{deleted := D, body := B}] -> {D, B};
+                [] -> keep
+            end;
+        _ -> keep
+    catch
+        Class:Reason ->
+            _ = LiveInfo,
+            logger:warning("conflict_resolver failed for ~p: ~p:~p",
+                           [DocId, Class, Reason]),
+            keep
     end.
 
-%% @private Ask the configured merger to resolve a concurrent write.
-%% Only meaningful when both sides are live documents. Any non-merge
-%% answer or a crash falls back to the conflict path.
-try_merge(Config, DocId, #{deleted := LocalDeleted, body := LocalBody},
-          RemoteBody, RemoteDeleted) ->
-    case maps:get(conflict_merger, Config, undefined) of
-        undefined ->
-            conflict;
-        _ when LocalDeleted; RemoteDeleted ->
-            conflict;
-        Merger ->
-            try call_merger(Merger, DocId, LocalBody, RemoteBody) of
-                {merge, Merged} when is_map(Merged) -> {merge, Merged};
-                _ -> conflict
-            catch
-                Class:Reason ->
-                    logger:warning(
-                        "conflict_merger failed for ~p: ~p:~p, "
-                        "falling back to conflict", [DocId, Class, Reason]),
-                    conflict
-            end
+call_resolver({M, F}, Versions) -> M:F(Versions);
+call_resolver(Fun, Versions) when is_function(Fun, 1) -> Fun(Versions).
+
+%% A canonical encoding of a resolver result, the same on every node:
+%% map keys sorted, every value tagged.
+canonical(T) -> iolist_to_binary(canon(T)).
+canon(M) when is_map(M) ->
+    [$m, integer_to_binary(map_size(M)), $:,
+     [[canon(K), canon(V)] || {K, V} <- lists:sort(maps:to_list(M))]];
+canon(L) when is_list(L) -> [$l, integer_to_binary(length(L)), $:, [canon(X) || X <- L]];
+canon(B) when is_binary(B) -> [$b, integer_to_binary(byte_size(B)), $:, B];
+canon(I) when is_integer(I) -> [$i, integer_to_binary(I), $;];
+canon(F) when is_float(F) -> [$f, float_to_binary(F, [short]), $;];
+canon(A) when is_atom(A) -> canon(atom_to_binary(A));
+canon(T) when is_tuple(T) -> [$t, canon(tuple_to_list(T))].
+
+%% @doc The body of a live version: the current body for the winner,
+%% the archived body for a conflict sibling; a delete has none.
+version_body(_StoreRef, _DbName, _DocId, #{version := V, body := B}, V) ->
+    case B of undefined -> #{}; _ -> B end;
+version_body(StoreRef, DbName, DocId, _Old, T) ->
+    case read_version_body(StoreRef, DbName, DocId, T) of
+        {ok, B} -> B;
+        {error, _} -> #{}
     end.
 
-call_merger({M, F}, DocId, LocalBody, RemoteBody) ->
-    M:F(DocId, LocalBody, RemoteBody);
-call_merger(Fun, DocId, LocalBody, RemoteBody) when is_function(Fun, 3) ->
-    Fun(DocId, LocalBody, RemoteBody).
+%% @doc Write a document's new barrel_live state in one batch: entity
+%% (winner, vector, conflict count, context), conflict and superseded
+%% chain rows, bodies, feed row, indexes, channels, history. A state
+%% that did not change writes nothing.
+write_state(StoreRef, DbName, DocId, Old, Live0, NewLive, BodyOf, Opts) ->
+    Unchanged = Old =/= undefined
+        andalso maps:get(ctx, Old) =/= undefined
+        andalso barrel_live:digest(Live0) =:= barrel_live:digest(NewLive),
+    case Unchanged of
+        true ->
+            {unchanged, DocId, barrel_version:to_token(maps:get(version, Old))};
+        false ->
+            do_write_state(StoreRef, DbName, DocId, Old, Live0, NewLive,
+                           BodyOf, Opts)
+    end.
 
-%% @private Apply a merger resolution in one batch: the remote version
-%% is archived as superseded (with its own replicated history entry),
-%% and a new local resolving write whose vector covers both sides
-%% becomes current. The resolving write replicates like any other.
-apply_merged(StoreRef, DbName, DocId, MergedBody, RemoteBody, Version,
-             RemoteVV, RemoteDeleted, Old, MergedVV, Tags) ->
+do_write_state(StoreRef, DbName, DocId, Old, Live0, NewLive, BodyOf, Opts) ->
     Ks = barrel_keyspace:resolve(DbName),
-    %% The remote arrival: superseded chain row, archived body, history
-    RemoteChangeHlc = alloc_hlc(DbName),
-    VersionEnc = barrel_version:encode(Version),
-    SiblingVV = barrel_vv:bump(RemoteVV, Version),
-    RemoteOps = [
-        {put, barrel_store_keys:doc_version(Ks, DocId, VersionEnc),
-         sibling_entry(superseded, RemoteDeleted, SiblingVV)},
-        {body_put, barrel_store_keys:doc_body_rev(Ks, DocId, VersionEnc),
-         barrel_docdb_codec_cbor:encode_cbor(RemoteBody)}
-    ] ++ barrel_history:write_ops(DbName, RemoteChangeHlc, DocId, Version,
-                                  RemoteDeleted, replicated, SiblingVV),
-
-    %% The resolving write goes through the ordinary local pipeline
-    %% with the merged vector as its base (its bump then covers both
-    %% sides); the old local winner is archived by build_write_ops
-    DocRecord0 = barrel_doc:make_doc_record(MergedBody#{<<"id">> => DocId}),
-    DocRecord = DocRecord0#{expected_version => undefined},
-    Old2 = Old#{vv := MergedVV},
-    %% The resolving write is a new current body: tag it so the outbox
-    %% consumer (e.g. the record indexer) re-processes the merged text.
-    {WriteOps, {DocId, NewToken, NextHlc, Deleted, NotifyBody}} =
-        build_write_ops(StoreRef, DbName, DocRecord, Old2,
-                        #{history_cause => resolve, outbox => Tags}),
-    ok = barrel_store_rocksdb:write_batch(StoreRef, RemoteOps ++ WriteOps, #{}),
-    notify_subscribers(DbName, DocId, NewToken, NextHlc, Deleted, NotifyBody),
-    {ok, DocId, NewToken}.
-
-%% @private Deterministically bound the live conflict siblings: when a
-%% new sibling would push the count past Max, the lowest versions (the
-%% new one included) are dropped with their archived bodies. Every
-%% replica seeing the same sibling set drops the same versions.
-enforce_conflict_bound(_StoreRef, _DbName, _DocId, _NewSibling, NConflicts,
-                       Max) when NConflicts =< Max ->
-    {[], NConflicts};
-enforce_conflict_bound(StoreRef, DbName, DocId, NewSibling, NConflicts, Max) ->
-    Ks = barrel_keyspace:resolve(DbName),
-    Existing = [V || {V, _Entry} <- conflict_siblings(StoreRef, DbName, DocId)],
-    Sorted = lists:sort(
-        fun(A, B) -> barrel_version:compare(A, B) =:= lt end,
-        [NewSibling | Existing]),
-    Victims = lists:sublist(Sorted, NConflicts - Max),
-    Ops = lists:flatmap(
-        fun(V) ->
-            VEnc = barrel_version:encode(V),
-            [{delete, barrel_store_keys:doc_version(Ks, DocId, VEnc)},
-             {body_delete,
-              barrel_store_keys:doc_body_rev(Ks, DocId, VEnc)}]
-        end,
-        Victims),
-    {Ops, Max}.
-
-%% @private Chain-row op for a version that is no longer current.
-chain_op(DbName, DocId, Version, Flag, Old) ->
-    Ks = barrel_keyspace:resolve(DbName),
-    {put,
-     barrel_store_keys:doc_version(Ks, DocId, barrel_version:encode(Version)),
-     sibling_entry(Flag, maps:get(deleted, Old), maps:get(vv, Old))}.
-
-%% @private The remote version becomes the current winner. `VV' is
-%% the entity's vector (merged); `HistVV' is the arrival's OWN causal
-%% vector (its bump), recorded in history. They differ only in the
-%% concurrent remote-wins case, and keeping the causal one preserves
-%% the concurrency information the timeline rewind reconstructs
-%% conflict windows from.
-apply_remote_current(StoreRef, DbName, DocId, DocBody, Version, VV, HistVV,
-                     Deleted, Old, NConflicts, ChainOps, Tags) ->
-    Ks = barrel_keyspace:resolve(DbName),
+    case barrel_live:view(NewLive) of
+        #{winner := undefined} -> erlang:error({empty_live, DocId});
+        _ -> ok
+    end,
+    #{winner := W, deleted := WDel, conflicts := Sibs} = barrel_live:view(NewLive),
+    Info1 = barrel_live:live(NewLive),
+    Info0 = barrel_live:live(Live0),
+    #{vv := WVV} = maps:get(W, Info1),
     ChangeHlc = alloc_hlc(DbName),
-    Token = barrel_version:to_token(Version),
-    {OldHlc, OldDocBody, OldDocBodyCbor, CreatedAt, ExpiresAt, Tier} =
+    Token = barrel_version:to_token(W),
+    {OldW, OldHlc, OldBody, OldCbor, OldDeleted, CreatedAt, ExpiresAt, Tier} =
         case Old of
             undefined ->
-                {undefined, undefined, undefined,
+                {undefined, undefined, undefined, undefined, false,
                  barrel_hlc:encode(ChangeHlc), 0, 0};
-            #{hlc := OH, body := OB, body_cbor := OBC,
-              created_at := OCA, expires_at := OEA, tier := OT} ->
-                {OH, OB, OBC, OCA, OEA, OT}
+            #{version := OV, hlc := OH, body := OB, body_cbor := OBC,
+              deleted := OD, created_at := OCA, expires_at := OEA, tier := OT} ->
+                {OV, OH, OB, OBC, OD, OCA, OEA, OT}
         end,
+    WinnerChanged = W =/= OldW,
+    WBody = case WinnerChanged of
+        true -> BodyOf(W);
+        false -> OldBody
+    end,
     DocColumns = [
-        {?COL_VERSION, barrel_version:encode(Version)},
-        {?COL_DELETED, deleted_to_bin(Deleted)},
+        {?COL_VERSION, barrel_version:encode(W)},
+        {?COL_DELETED, deleted_to_bin(WDel)},
         {?COL_HLC, barrel_hlc:encode(ChangeHlc)},
-        {?COL_VV, barrel_vv:encode(VV)},
-        {?COL_NCONFLICTS, NConflicts},
+        {?COL_VV, barrel_vv:encode(WVV)},
+        {?COL_NCONFLICTS, length(Sibs)},
+        {?COL_CTX, barrel_live:encode_ctx(NewLive)},
         {?COL_CREATED_AT, CreatedAt},
         {?COL_EXPIRES_AT, ExpiresAt},
         {?COL_TIER, Tier}
     ],
-    DocOps = [{entity_put, barrel_store_keys:doc_entity(Ks, DocId),
-               DocColumns}],
-    DocInfo = #{id => DocId, rev => Token, deleted => Deleted,
-                num_conflicts => NConflicts, hlc => ChangeHlc},
+    DocOps = [{entity_put, barrel_store_keys:doc_entity(Ks, DocId), DocColumns}],
+    ChainKey = fun(T) -> barrel_store_keys:doc_version(Ks, DocId,
+                                                       barrel_version:encode(T)) end,
+    BodyRevKey = fun(T) -> barrel_store_keys:doc_body_rev(Ks, DocId,
+                                                          barrel_version:encode(T)) end,
+    %% live siblings: conflict rows; new ones bring their body
+    SibOps = lists:flatmap(
+        fun(T) ->
+            #{deleted := D, vv := VV} = maps:get(T, Info1),
+            Row = {put, ChainKey(T), sibling_entry(conflict, D, VV)},
+            case maps:is_key(T, Info0) of
+                true -> [Row];
+                false -> [Row, {body_put, BodyRevKey(T),
+                                barrel_docdb_codec_cbor:encode_cbor(BodyOf(T))}]
+            end
+        end, Sibs),
+    %% versions no longer live: superseded rows (their bodies stay archived
+    %% until retention)
+    GoneOps = [{put, ChainKey(T), sibling_entry(superseded, D, VV)}
+               || {T, #{deleted := D, vv := VV}} <- maps:to_list(Info0),
+                  not maps:is_key(T, Info1)],
+    %% the winner lives in the entity, not in the chain
+    WinnerRowOps = case maps:is_key(W, Info0) andalso WinnerChanged of
+        true -> [{delete, ChainKey(W)}];
+        false -> []
+    end,
+    %% the previous winner's body moves to the archive when it stops
+    %% being the winner
+    ArchiveOps = case {WinnerChanged, OldW, OldCbor} of
+        {true, OldV, Cbor} when OldV =/= undefined, Cbor =/= undefined ->
+            [{body_put, BodyRevKey(OldV), Cbor}];
+        _ -> []
+    end,
+    DocInfo = #{id => DocId, rev => Token, deleted => WDel,
+                num_conflicts => length(Sibs), hlc => ChangeHlc},
     HlcDeleteOps = case OldHlc of
         undefined -> [];
         _ -> [{delete, barrel_store_keys:doc_hlc(Ks, OldHlc)}]
     end,
-    PathIndexOps = case Deleted of
-        true when OldDocBody =/= undefined ->
+    ChangeInfo = DocInfo#{doc => WBody},
+    ChangeOps = barrel_changes:write_change_ops(DbName, ChangeHlc, ChangeInfo),
+    {IndexOps, PathHlcOps, ChannelOps, BodyOps} =
+        case WinnerChanged of
+            true ->
+                PIdx = winner_index_ops(StoreRef, DbName, DocId, Old, WDel, WBody),
+                PHlc = case OldHlc of
+                    undefined ->
+                        barrel_changes:write_path_index_ops(DbName, ChangeHlc,
+                                                           ChangeInfo);
+                    _ ->
+                        barrel_changes:update_path_index_ops(DbName, ChangeHlc,
+                                                            ChangeInfo, OldHlc,
+                                                            OldBody)
+                end,
+                Chan = channel_ops(DbName, ChangeHlc, DocInfo, WBody, OldHlc,
+                                   OldBody, OldDeleted),
+                Body = [{body_put, barrel_store_keys:doc_body(Ks, DocId),
+                         barrel_docdb_codec_cbor:encode_cbor(
+                           case WBody of undefined -> #{}; _ -> WBody end)}],
+                {PIdx, PHlc, Chan, Body};
+            false ->
+                PHlc = barrel_changes:update_path_index_ops(DbName, ChangeHlc,
+                                                           ChangeInfo, OldHlc,
+                                                           OldBody),
+                Chan = barrel_channel:move_ops(
+                         fun(Key) -> barrel_store_rocksdb:get(StoreRef, Key) end,
+                         DbName, OldHlc, ChangeHlc, DocInfo),
+                {[], PHlc, Chan, []}
+        end,
+    %% history: one entry per version new to this document
+    New = [T || T <- maps:keys(Info1), not maps:is_key(T, Info0)],
+    Cause = maps:get(cause, Opts, replicated),
+    HistoryOps = lists:append(
+        [begin
+             #{deleted := D, vv := VV} = maps:get(T, Info1),
+             Hlc = case T of W -> ChangeHlc; _ -> alloc_hlc(DbName) end,
+             barrel_history:write_ops(DbName, Hlc, DocId, T, D, Cause, VV)
+         end || T <- New]),
+    OutboxOps = case WinnerChanged of
+        true -> barrel_outbox:write_ops(DbName, maps:get(outbox, Opts, []),
+                                        ChangeHlc, OldHlc, DocId, Token, WDel);
+        false -> []
+    end,
+    AllOps = DocOps ++ HlcDeleteOps ++ IndexOps ++ ChangeOps ++ PathHlcOps
+        ++ ArchiveOps ++ SibOps ++ GoneOps ++ WinnerRowOps ++ HistoryOps
+        ++ OutboxOps ++ ChannelOps ++ BodyOps,
+    ok = barrel_store_rocksdb:write_batch(StoreRef, AllOps, #{}),
+    notify_subscribers(DbName, DocId, Token, ChangeHlc, WDel, WBody),
+    {ok, DocId, Token}.
+
+winner_index_ops(StoreRef, DbName, DocId, Old, NewDeleted, NewBody) ->
+    {OldBody, OldDeleted} = case Old of
+        undefined -> {undefined, false};
+        #{body := OB, deleted := OD} -> {OB, OD}
+    end,
+    case NewDeleted of
+        true when OldBody =/= undefined, not OldDeleted ->
             case barrel_ars_index:get_doc_paths(StoreRef, DbName, DocId) of
-                {ok, OldPaths} ->
-                    barrel_ars_index:remove_doc_ops(DbName, DocId, OldPaths);
+                {ok, OldPaths} -> barrel_ars_index:remove_doc_ops(DbName, DocId, OldPaths);
                 not_found -> []
             end;
         true ->
             [];
-        false when OldDocBody =:= undefined ->
-            barrel_ars_index:index_doc_ops(DbName, DocId, DocBody);
+        false when OldBody =:= undefined; OldDeleted ->
+            barrel_ars_index:index_doc_ops(DbName, DocId, NewBody);
         false ->
-            case maps:get(deleted, Old) of
-                true ->
-                    barrel_ars_index:index_doc_ops(DbName, DocId, DocBody);
-                false ->
-                    barrel_ars_index:update_doc_ops(DbName, DocId,
-                                                    OldDocBody, DocBody)
-            end
-    end,
-    ChangeInfo = DocInfo#{doc => DocBody},
-    ChangeOps = barrel_changes:write_change_ops(DbName, ChangeHlc, ChangeInfo),
-    PathHlcOps = case OldHlc of
-        undefined ->
-            barrel_changes:write_path_index_ops(DbName, ChangeHlc, ChangeInfo);
-        _ ->
-            barrel_changes:update_path_index_ops(DbName, ChangeHlc, ChangeInfo,
-                                                 OldHlc, OldDocBody)
-    end,
-    ArchiveOps = case {Old, OldDocBodyCbor} of
-        {undefined, _} -> [];
-        {_, undefined} -> [];
-        {#{version := OldVersion}, OldCbor} ->
-            [{body_put,
-              barrel_store_keys:doc_body_rev(
-                  Ks, DocId, barrel_version:encode(OldVersion)),
-              OldCbor}]
-    end,
-    HistoryOps = barrel_history:write_ops(
-        DbName, ChangeHlc, DocId, Version, Deleted, replicated, HistVV),
-    OutboxOps = barrel_outbox:write_ops(DbName, Tags, ChangeHlc, OldHlc,
-                                        DocId, Token, Deleted),
-    %% Replicated arrivals land in channel feeds too
-    OldDeleted = case Old of
-        undefined -> false;
-        _ -> maps:get(deleted, Old)
-    end,
-    ChannelOps = channel_ops(DbName, ChangeHlc, DocInfo, DocBody, OldHlc,
-                             OldDocBody, OldDeleted),
-    CborBody = barrel_docdb_codec_cbor:encode_cbor(DocBody),
-    BodyOp = {body_put, barrel_store_keys:doc_body(Ks, DocId), CborBody},
-    AllOps = DocOps ++ HlcDeleteOps ++ PathIndexOps ++ ChangeOps ++ PathHlcOps
-        ++ ArchiveOps ++ ChainOps ++ OutboxOps ++ HistoryOps ++ ChannelOps
-        ++ [BodyOp],
-    ok = barrel_store_rocksdb:write_batch(StoreRef, AllOps, #{}),
-    notify_subscribers(DbName, DocId, Token, ChangeHlc, Deleted, DocBody),
-    {ok, DocId, Token}.
+            barrel_ars_index:update_doc_ops(DbName, DocId, OldBody, NewBody)
+    end.
 
-%% @private The local winner stays; the remote version is recorded as a
-%% live conflict sibling (its body archived, queryable). The doc's state
-%% changed (vector, conflict count), so a change event still fires.
-%% ExtraOps carry sibling-bound drops, applied after the sibling puts.
-keep_local_add_conflict(StoreRef, DbName, DocId, RemoteBody, Version, RemoteVV,
-                        RemoteDeleted, Old, MergedVV, NConflicts, ExtraOps) ->
-    Ks = barrel_keyspace:resolve(DbName),
-    #{version := LocalV, hlc := OldHlc, deleted := LocalDeleted,
-      body := LocalBody, created_at := CreatedAt, expires_at := ExpiresAt,
-      tier := Tier} = Old,
-    ChangeHlc = alloc_hlc(DbName),
-    LocalToken = barrel_version:to_token(LocalV),
-    DocColumns = [
-        {?COL_VERSION, barrel_version:encode(LocalV)},
-        {?COL_DELETED, deleted_to_bin(LocalDeleted)},
-        {?COL_HLC, barrel_hlc:encode(ChangeHlc)},
-        {?COL_VV, barrel_vv:encode(MergedVV)},
-        {?COL_NCONFLICTS, NConflicts},
-        {?COL_CREATED_AT, CreatedAt},
-        {?COL_EXPIRES_AT, ExpiresAt},
-        {?COL_TIER, Tier}
-    ],
-    DocOps = [{entity_put, barrel_store_keys:doc_entity(Ks, DocId),
-               DocColumns}],
-    DocInfo = #{id => DocId, rev => LocalToken, deleted => LocalDeleted,
-                num_conflicts => NConflicts, hlc => ChangeHlc},
-    HlcDeleteOps = [{delete, barrel_store_keys:doc_hlc(Ks, OldHlc)}],
-    ChangeInfo = DocInfo#{doc => LocalBody},
-    ChangeOps = barrel_changes:write_change_ops(DbName, ChangeHlc, ChangeInfo),
-    PathHlcOps = barrel_changes:update_path_index_ops(DbName, ChangeHlc,
-                                                      ChangeInfo, OldHlc,
-                                                      LocalBody),
-    %% The remote loser: conflict chain row + archived body
-    VersionEnc = barrel_version:encode(Version),
-    SiblingVV = barrel_vv:bump(RemoteVV, Version),
-    SiblingEntry = <<1:8, %% conflict
-                     (case RemoteDeleted of true -> 1; false -> 0 end):8,
-                     (barrel_vv:encode(SiblingVV))/binary>>,
-    ChainOps = [{put, barrel_store_keys:doc_version(Ks, DocId, VersionEnc),
-                 SiblingEntry}],
-    ArchiveOps = [{body_put,
-                   barrel_store_keys:doc_body_rev(Ks, DocId, VersionEnc),
-                   barrel_docdb_codec_cbor:encode_cbor(RemoteBody)}],
-    %% History records the arrival of the losing sibling
-    HistoryOps = barrel_history:write_ops(
-        DbName, ChangeHlc, DocId, Version, RemoteDeleted, replicated,
-        SiblingVV),
-    %% The winner's feed row moves to ChangeHlc; its channel rows move
-    %% with it (point-read move: a tombstone winner's membership cannot
-    %% be recomputed from its body)
-    ChannelOps = barrel_channel:move_ops(
-        fun(Key) -> barrel_store_rocksdb:get(StoreRef, Key) end,
-        DbName, OldHlc, ChangeHlc, DocInfo),
-    AllOps = DocOps ++ HlcDeleteOps ++ ChangeOps ++ PathHlcOps
-        ++ ChainOps ++ ArchiveOps ++ HistoryOps ++ ChannelOps ++ ExtraOps,
-    ok = barrel_store_rocksdb:write_batch(StoreRef, AllOps, #{}),
-    notify_subscribers(DbName, DocId, LocalToken, ChangeHlc, LocalDeleted,
-                       LocalBody),
-    {ok, DocId, LocalToken}.
-
-%% @doc The replication diff: which offered versions does this database
-%% not cover yet? `have' means the doc's version vector contains the
-%% offered version.
+%% @doc The replication diff for peers that send one version at a time:
+%% `have' when this document has seen the offered version.
 do_diff_versions(StoreRef, DbName, TokenMap) ->
     Result = maps:map(
         fun(DocId, Token) ->
@@ -2944,8 +3146,9 @@ do_diff_versions(StoreRef, DbName, TokenMap) ->
             case read_current(StoreRef, DbName, DocId) of
                 undefined ->
                     missing;
-                #{vv := LocalVV} ->
-                    case barrel_vv:contains(LocalVV, Version) of
+                Old ->
+                    case barrel_live:seen(load_live(StoreRef, DbName, DocId, Old),
+                                          Version) of
                         true -> have;
                         false -> missing
                     end
@@ -2953,6 +3156,22 @@ do_diff_versions(StoreRef, DbName, TokenMap) ->
         end,
         TokenMap),
     {ok, Result}.
+
+%% @doc The full-state diff: ids whose state differs from the offered
+%% digest (or that this database doesn't have).
+do_diff_states(StoreRef, DbName, DigestMap) ->
+    {ok, maps:map(
+           fun(DocId, Digest) ->
+               case read_current(StoreRef, DbName, DocId) of
+                   undefined -> missing;
+                   Old ->
+                       case barrel_live:digest(
+                              load_live(StoreRef, DbName, DocId, Old)) of
+                           Digest -> have;
+                           _ -> missing
+                       end
+               end
+           end, DigestMap)}.
 
 %% @doc Put a local document (per-database)
 do_put_local_doc(StoreRef, DbName, DocId, Doc) ->
@@ -3121,84 +3340,71 @@ conflict_siblings(StoreRef, DbName, DocId) ->
     end,
     lists:reverse(barrel_store_rocksdb:fold_range(StoreRef, Start, End, Fold, [])).
 
-%% @doc Resolve a conflict with a resolving local write.
-%% Resolution types:
-%%   {choose, Token} - the chosen sibling's body becomes the new current
-%%   {merge, Doc}    - the supplied body becomes the new current
-%% Either way ONE new version is written whose version vector covers the
-%% winner and every conflict sibling, and all siblings flip to
-%% superseded: the resolution is an ordinary write that replicates.
-do_resolve_conflict(StoreRef, DbName, DocId, BaseRev, Resolution) ->
+%% @doc Resolve a conflict with a new version replacing the versions the
+%% caller observed. `Observed' is the list of tokens read (new form), or
+%% the current winner's token (compatibility: replaces every current
+%% version, even one that arrived after the caller's read).
+%% Resolution: {choose, Token} (keeps that version's body and deleted
+%% flag), {merge, Body}, or delete.
+do_resolve_conflict(StoreRef, DbName, DocId, BaseRevOrObserved, Resolution) ->
     case read_current(StoreRef, DbName, DocId) of
         undefined ->
             {error, not_found};
-        #{num_conflicts := 0} ->
-            {error, no_conflicts};
-        #{version := Current, vv := CurrentVV} = Old ->
+        #{version := Current} = Old ->
             CurrentToken = barrel_version:to_token(Current),
-            case BaseRev of
+            Live = load_live(StoreRef, DbName, DocId, Old),
+            Replaces = case BaseRevOrObserved of
                 CurrentToken ->
-                    Siblings = conflict_siblings(StoreRef, DbName, DocId),
-                    apply_resolution(StoreRef, DbName, DocId, Old, CurrentVV,
-                                     Siblings, Resolution);
+                    barrel_live:tokens(Live);
+                Observed when is_list(Observed) ->
+                    In = [barrel_version:from_token(T) || T <- Observed],
+                    [T || T <- barrel_live:tokens(Live), lists:member(T, In)];
                 _ ->
                     {error, {conflict, CurrentToken}}
+            end,
+            case Replaces of
+                {error, _} = Err ->
+                    Err;
+                [] ->
+                    {error, conflict};
+                [_] when is_binary(BaseRevOrObserved) ->
+                    {error, no_conflicts};
+                _ ->
+                    resolve_with(StoreRef, DbName, DocId, Old, Live, Replaces,
+                                 Resolution)
             end
     end.
 
-%% @private Apply a conflict resolution as a superseding write.
-apply_resolution(StoreRef, DbName, DocId, Old, CurrentVV, Siblings, Resolution) ->
-    Ks = barrel_keyspace:resolve(DbName),
-    ResolvedBody = case Resolution of
+resolve_with(StoreRef, DbName, DocId, Old, Live, Replaces, Resolution) ->
+    Info = barrel_live:live(Live),
+    Picked = case Resolution of
         {merge, Doc} when is_map(Doc) ->
-            {ok, barrel_doc:doc_without_meta(Doc)};
-        {choose, Token} ->
-            CurrentToken = barrel_version:to_token(maps:get(version, Old)),
-            case Token of
-                CurrentToken ->
-                    {ok, maps:get(body, Old, #{})};
-                _ ->
-                    case lists:filter(
-                             fun({V, _E}) ->
-                                 barrel_version:to_token(V) =:= Token
-                             end, Siblings) of
-                        [{ChosenVersion, _Entry}] ->
-                            read_version_body(StoreRef, DbName, DocId,
-                                              ChosenVersion);
-                        [] ->
-                            {error, {unknown_version, Token}}
-                    end
+            {ok, false, barrel_doc:doc_without_meta(Doc)};
+        delete ->
+            {ok, true, #{}};
+        {choose, Tok} ->
+            case [T || T <- Replaces, barrel_version:to_token(T) =:= Tok] of
+                [T] ->
+                    #{deleted := D} = maps:get(T, Info),
+                    {ok, D, version_body(StoreRef, DbName, DocId, Old, T)};
+                [] ->
+                    {error, {unknown_version, Tok}}
             end;
         _ ->
             {error, {invalid_resolution, Resolution}}
     end,
-    case ResolvedBody of
-        {ok, Body} ->
-            %% Version vector of the resolving write covers everything
-            MergedVV = lists:foldl(
-                fun({_V, #{vv := SibVV}}, Acc) -> barrel_vv:merge(Acc, SibVV) end,
-                CurrentVV,
-                Siblings),
-            DocRecord0 = barrel_doc:make_doc_record(Body#{<<"id">> => DocId}),
-            DocRecord = DocRecord0#{expected_version => undefined},
-            %% Reuse the ordinary write pipeline with the merged VV and
-            %% conflict flips added on top
-            Old2 = Old#{vv := MergedVV, num_conflicts := 0},
-            {AllOps0, {DocId, NewToken, NextHlc, Deleted, DocBody}} =
-                build_write_ops(StoreRef, DbName, DocRecord, Old2,
-                                #{history_cause => resolve}),
-            %% Flip every conflict sibling to superseded
-            FlipOps = [{put,
-                        barrel_store_keys:doc_version(
-                            Ks, DocId, barrel_version:encode(V)),
-                        sibling_entry(superseded, maps:get(deleted, E),
-                                      maps:get(vv, E))}
-                       || {V, E} <- Siblings],
-            ok = barrel_store_rocksdb:write_batch(
-                     StoreRef, AllOps0 ++ FlipOps, #{}),
-            notify_subscribers(DbName, DocId, NewToken, NextHlc, Deleted, DocBody),
-            {ok, #{id => DocId, rev => NewToken,
-                   conflicts_resolved => length(Siblings)}};
+    case Picked of
+        {ok, Deleted, Body} ->
+            Hlc = above_live(DbName, Live, alloc_hlc(DbName)),
+            Token = barrel_version:new(Hlc, writer_id(DbName)),
+            NewLive = barrel_live:author(Live, Token, Deleted, Replaces),
+            BodyOf = fun(T) when T =:= Token -> Body;
+                        (T) -> version_body(StoreRef, DbName, DocId, Old, T)
+                     end,
+            {_, DocId, Rev} = write_state(StoreRef, DbName, DocId, Old, Live,
+                                          NewLive, BodyOf, #{cause => resolve}),
+            {ok, #{id => DocId, rev => Rev,
+                   conflicts_resolved => length(Replaces) - 1}};
         {error, _} = Err ->
             Err
     end.

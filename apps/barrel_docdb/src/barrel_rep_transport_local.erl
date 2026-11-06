@@ -15,6 +15,10 @@
 -export([
     get_doc/3,
     put_version/5,
+    full_state/1,
+    get_doc_state/2,
+    put_doc_state/4,
+    diff_states/2,
     diff_versions/2,
     get_changes/3,
     get_local_doc/2,
@@ -49,6 +53,13 @@ get_doc(DbName, DocId, _Opts) ->
     {ok, docid(), binary()} | {error, term()}.
 put_version(DbName, Doc, VersionToken, VVBin, Deleted) ->
     barrel_docdb:put_version(DbName, Doc, VersionToken, VVBin, Deleted).
+
+%% @doc Full-state replication (optional callbacks).
+full_state(_DbName) -> true.
+get_doc_state(DbName, DocId) -> barrel_docdb:get_doc_state(DbName, DocId).
+put_doc_state(DbName, DocId, StateBin, Bodies) ->
+    barrel_docdb:put_doc_state(DbName, DocId, StateBin, Bodies).
+diff_states(DbName, DigestMap) -> barrel_docdb:diff_states(DbName, DigestMap).
 
 %% @doc Which offered versions is this database missing?
 -spec diff_versions(db_name(), #{docid() => binary()}) ->

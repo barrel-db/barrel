@@ -141,13 +141,14 @@ merge_conflict_merger(Config) ->
     Db0 = ?config(db, Config),
     DataDir = ?config(data_dir, Config),
     Branch = ?config(branch, Config),
-    %% reopen the parent with a merger that unions the two bodies
+    %% reopen the parent with a resolver that unions the bodies
     ok = barrel_docdb:close_db(Db0),
-    Merger = fun(_Id, Local, Remote) ->
-        {merge, maps:merge(Local, Remote)}
+    Resolver = fun(Versions) ->
+        {merge, lists:foldl(fun(#{body := B}, Acc) -> maps:merge(Acc, B) end,
+                            #{}, Versions)}
     end,
     {ok, _} = barrel_docdb:create_db(Db0, #{data_dir => DataDir,
-                                            conflict_merger => Merger}),
+                                            conflict_resolver => Resolver}),
     {ok, _} = barrel_docdb:put_doc(Db0, #{<<"id">> => <<"d">>}),
     {ok, _} = barrel_docdb:branch_db(Db0, Branch, #{}),
     {ok, #{<<"_rev">> := PR}} = barrel_docdb:get_doc(Db0, <<"d">>),

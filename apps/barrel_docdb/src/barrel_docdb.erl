@@ -180,6 +180,9 @@
 %% Replication primitives (version-vector protocol)
 -export([
     put_version/5,
+    get_doc_state/2,
+    put_doc_state/4,
+    diff_states/2,
     diff_versions/2,
     get_doc_for_replication/2
 ]).
@@ -1132,34 +1135,32 @@ get_conflicts(Db, DocId) ->
         barrel_db_server:get_conflicts(Pid, DocId)
     end).
 
-%% @doc Resolve a document conflict.
+%% @doc Resolve a document conflict with a new version that replaces
+%% the versions you read.
 %%
-%% Allows explicit resolution of conflicting revisions. Two resolution
-%% strategies are supported:
-%%
-%% == Choose Resolution ==
-%% Pick one of the existing revisions as the winner. All other branches
-%% are marked as deleted.
+%% Pass the versions you read: the `_observed' list of a read with
+%% `conflicts => true'. Only those are replaced, so a version that
+%% arrived after your read stays as a conflict.
 %% ```
-%% {ok, Result} = barrel_docdb:resolve_conflict(<<"mydb">>, <<"doc1">>,
-%%     <<"2-winner">>, {choose, <<"2-abc">>}).
+%% {ok, #{<<"_observed">> := Seen}} =
+%%     barrel_docdb:get_doc(<<"mydb">>, <<"doc1">>, #{conflicts => true}),
+%% {ok, _} = barrel_docdb:resolve_conflict(<<"mydb">>, <<"doc1">>, Seen,
+%%                                         {merge, #{<<"v">> => 42}}).
 %% '''
+%% `{choose, Token}' keeps that version's body (and its deleted flag),
+%% `{merge, Body}' writes a new body, `delete' resolves to a delete.
 %%
-%% == Merge Resolution ==
-%% Provide a new merged document that supersedes all conflicting branches.
-%% ```
-%% MergedDoc = #{<<"name">> => <<"Merged Name">>, <<"value">> => 42},
-%% {ok, Result} = barrel_docdb:resolve_conflict(<<"mydb">>, <<"doc1">>,
-%%     <<"2-winner">>, {merge, MergedDoc}).
-%% '''
+%% Passing the winner's `_rev' instead of a list is the older form: it
+%% replaces every current version, including one that arrived after
+%% your read.
 %%
 %% @param Db Database name or pid
 %% @param DocId Document ID
-%% @param BaseRev The current winning revision (for optimistic locking)
-%% @param Resolution Either `{choose, RevId}' or `{merge, Doc}'
+%% @param Observed The tokens read, or the winner's `_rev'
+%% @param Resolution `{choose, Token}', `{merge, Body}' or `delete'
 %% @returns `{ok, #{id, rev, conflicts_resolved}}' or `{error, Reason}'
--spec resolve_conflict(binary() | pid(), binary(), binary(),
-                       {choose, binary()} | {merge, map()}) ->
+-spec resolve_conflict(binary() | pid(), binary(), binary() | [binary()],
+                       {choose, binary()} | {merge, map()} | delete) ->
     {ok, map()} | {error, term()}.
 resolve_conflict(Db, DocId, BaseRev, Resolution) ->
     with_db(Db, fun(Pid) ->
@@ -1920,13 +1921,36 @@ set_doc_embedding(Db, DocId, ExpectedRev, Vector) ->
 %% Replication Primitives
 %%====================================================================
 
-%% @doc Apply a replicated version (the version-vector protocol write).
-%%
-%% The version token and vector come from the source database and are
-%% preserved; only the change-sequence HLC is issued locally. Outcomes:
-%% already-covered versions are idempotent no-ops, dominating versions
-%% fast-forward the document, concurrent versions create a conflict
-%% sibling with a deterministic last-write-wins winner.
+%% @doc A document's full replication state: `#{id, state, digest,
+%% bodies}', where `state' is barrel_live:encode_state/1 and `bodies' maps
+%% each live version's token to its body.
+-spec get_doc_state(binary() | pid(), binary()) ->
+    {ok, map()} | {error, term()}.
+get_doc_state(Db, DocId) ->
+    with_db(Db, fun(Pid) -> barrel_db_server:get_doc_state(Pid, DocId) end).
+
+%% @doc Merge a peer's full document state into this database. Nothing
+%% is written when the merged state equals the current one.
+-spec put_doc_state(binary() | pid(), binary(), binary(),
+                    #{binary() => map()}) ->
+    {ok | unchanged, binary(), binary()} | {error, term()}.
+put_doc_state(Db, DocId, StateBin, Bodies) ->
+    with_db(Db, fun(Pid) ->
+        barrel_db_server:put_doc_state(Pid, DocId, StateBin, Bodies)
+    end).
+
+%% @doc Which offered document states differ from this database's:
+%% `#{DocId => Digest}' in, `#{DocId => missing | have}' out.
+-spec diff_states(binary() | pid(), #{binary() => binary()}) ->
+    {ok, #{binary() => missing | have}} | {error, term()}.
+diff_states(Db, DigestMap) ->
+    with_db(Db, fun(Pid) -> barrel_db_server:diff_states(Pid, DigestMap) end).
+
+%% @doc Apply one version from a peer that replicates a version at a
+%% time (an older server or client). It is ignored when this document
+%% has seen that exact version, else kept as a conflict; it never
+%% removes anything. Current peers replicate full states
+%% (put_doc_state/4).
 %%
 %% @param Db Database name or pid
 %% @param Doc Document map (must include `<<"id">>')

@@ -259,8 +259,11 @@ replication_loser_untagged(Config) ->
 %% tagged (the superseded remote arrival is not).
 replication_merge_tagged(Config) ->
     Db = tagged_db(Config, #{
-        conflict_merger =>
-            fun(_Id, Local, Remote) -> {merge, maps:merge(Remote, Local)} end
+        conflict_resolver =>
+            fun(Versions) ->
+        {merge, lists:foldl(fun(#{body := B}, Acc) -> maps:merge(Acc, B) end,
+                            #{}, Versions)}
+            end
     }),
     {VLoser, VVLoser} = remote_version(<<"peer_a">>),
     {ok, _} = barrel_docdb:put_doc(Db, #{<<"id">> => <<"a">>, <<"v">> => 1}),

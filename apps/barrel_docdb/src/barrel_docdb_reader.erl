@@ -346,7 +346,11 @@ maybe_add_conflicts(Doc, Columns, Opts, ReadCtx) ->
         true ->
             case conflict_tokens(Columns, ReadCtx) of
                 [] -> Doc;
-                Tokens -> Doc#{<<"_conflicts">> => Tokens}
+                %% _observed: every version this read showed; hand it
+                %% back on the next write to replace them all
+                Tokens -> Doc#{<<"_conflicts">> => Tokens,
+                               <<"_observed">> =>
+                                   [maps:get(<<"_rev">>, Doc) | Tokens]}
             end;
         false ->
             Doc
@@ -358,7 +362,8 @@ maybe_add_conflicts_to_meta(Meta, Columns, Opts, ReadCtx) ->
         true ->
             case conflict_tokens(Columns, ReadCtx) of
                 [] -> Meta;
-                Tokens -> Meta#{conflicts => Tokens}
+                Tokens -> Meta#{conflicts => Tokens,
+                                observed => [maps:get(rev, Meta) | Tokens]}
             end;
         false ->
             Meta

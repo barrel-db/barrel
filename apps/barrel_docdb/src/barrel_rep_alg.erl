@@ -44,7 +44,7 @@ replicate(Source, Target, SourceTransport, TargetTransport, Changes) ->
         TokenMap = maps:from_list(
             [{get_value(id, Change), get_value(rev, Change)}
              || Change <- Changes]),
-        case TargetTransport:diff_versions(Target, TokenMap) of
+        case diff(Source, Target, SourceTransport, TargetTransport, TokenMap) of
             {ok, DiffMap} ->
                 Missing = [DocId || {DocId, missing} <- maps:to_list(DiffMap)],
                 replicate_ids(Source, Target, SourceTransport,
@@ -70,11 +70,15 @@ replicate_ids(Source, Target, SourceTransport, TargetTransport, DocIds) ->
 replicate_ids(Source, Target, SourceTransport, TargetTransport, DocIds,
               Opts) ->
     Retry = maps:get(retry, Opts, false),
+    Sync = case full_state(Source, Target, SourceTransport, TargetTransport) of
+        true -> fun sync_state/7;
+        false -> fun sync_doc/7
+    end,
     try
         {ok, lists:foldl(
                fun(DocId, Acc) ->
-                   sync_doc(Source, Target, SourceTransport,
-                            TargetTransport, DocId, Retry, Acc)
+                   Sync(Source, Target, SourceTransport,
+                        TargetTransport, DocId, Retry, Acc)
                end,
                new_stats(),
                DocIds)}
@@ -123,6 +127,59 @@ replicate_loop(Source, Target, SourceTransport, TargetTransport, Since, Limit, C
             end;
         {error, Reason} ->
             {error, Reason}
+    end.
+
+%% A token diff can't see a state that differs only in its conflicts or
+%% in what it has seen: with full states every changed id is offered,
+%% and the target writes nothing for a state it already holds.
+diff(Source, Target, SourceTransport, TargetTransport, TokenMap) ->
+    case full_state(Source, Target, SourceTransport, TargetTransport) of
+        true -> {ok, maps:map(fun(_, _) -> missing end, TokenMap)};
+        false -> TargetTransport:diff_versions(Target, TokenMap)
+    end.
+
+%% Both ends replicate full document states: their transports have the
+%% calls, and an endpoint that may be an older server says it does.
+full_state(Source, Target, SourceTransport, TargetTransport) ->
+    exports(SourceTransport, get_doc_state, 2)
+        andalso exports(TargetTransport, put_doc_state, 4)
+        andalso supports(SourceTransport, Source)
+        andalso supports(TargetTransport, Target).
+
+supports(Transport, Endpoint) ->
+    case exports(Transport, full_state, 1) of
+        true -> Transport:full_state(Endpoint);
+        false -> true
+    end.
+
+exports(M, F, A) ->
+    _ = code:ensure_loaded(M),
+    erlang:function_exported(M, F, A).
+
+%% @doc Ship one document's full state: the target merges it, and writes
+%% nothing when it already holds that state.
+sync_state(Source, Target, SourceTransport, TargetTransport, DocId, Retry,
+           Stats) ->
+    case SourceTransport:get_doc_state(Source, DocId) of
+        {ok, #{state := State, bodies := Bodies}} ->
+            Stats2 = inc_stat(docs_read, Stats, 1),
+            case TargetTransport:put_doc_state(Target, DocId, State, Bodies) of
+                {ok, _DocId, _Winner} ->
+                    inc_stat(docs_written, Stats2, 1);
+                {unchanged, _DocId, _Winner} ->
+                    Stats2;
+                {error, clock_skew} ->
+                    throw({abort_batch, clock_skew});
+                {error, Reason} ->
+                    logger:error("replicate write error for ~p: ~p",
+                                 [DocId, Reason]),
+                    add_failed(DocId, inc_stat(doc_write_failures, Stats2, 1))
+            end;
+        {error, not_found} when Retry ->
+            Stats;
+        {error, Reason} ->
+            logger:warning("replicate read error for ~p: ~p", [DocId, Reason]),
+            add_failed(DocId, inc_stat(doc_read_failures, Stats, 1))
     end.
 
 %% @doc Ship one missing document: read it with its version metadata

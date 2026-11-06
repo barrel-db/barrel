@@ -178,21 +178,11 @@ t_resolution_replicates(Config) ->
     ok = sync_until_quiescent(Local, Endpoint),
     assert_converged(Local, Served, [DocId]),
 
-    %% Resolve wherever a conflict was recorded, then sync
-    lists:foreach(
-        fun(Db) ->
-            case barrel_docdb:get_conflicts(Db, DocId) of
-                {ok, []} ->
-                    ok;
-                {ok, _Some} ->
-                    {ok, #{<<"_rev">> := Rev}} =
-                        barrel_docdb:get_doc(Db, DocId),
-                    {ok, _} = barrel_docdb:resolve_conflict(
-                        Db, DocId, Rev,
-                        {merge, #{<<"v">> => <<"settled">>}})
-            end
-        end,
-        [Local, Served]),
+    %% Both replicas hold the conflict; resolve it on one, then sync
+    {ok, [_]} = barrel_docdb:get_conflicts(Served, DocId),
+    {ok, #{<<"_rev">> := Rev}} = barrel_docdb:get_doc(Local, DocId),
+    {ok, _} = barrel_docdb:resolve_conflict(
+        Local, DocId, Rev, {merge, #{<<"v">> => <<"settled">>}}),
     ok = sync_until_quiescent(Local, Endpoint),
     assert_converged(Local, Served, [DocId]),
 

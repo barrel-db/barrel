@@ -27,7 +27,8 @@ groups() ->
     [
         {sweep, [sequence], [
             sweep_prunes_history_and_superseded,
-            sweep_forgets_expired_tombstones,
+            sweep_stubs_expired_deletes,
+            purge_removes_old_stubs,
             sweep_is_idempotent,
             sweep_keeps_live_conflicts,
             sweep_respects_window,
@@ -115,27 +116,58 @@ sweep_prunes_history_and_superseded(Config) ->
                  [{maps:get(version, V), maps:get(status, V)} || V <- Versions]),
     ok.
 
-sweep_forgets_expired_tombstones(Config) ->
+%% An expired delete becomes a stub: no body, no history, but its state
+%% and feed row stay, so a peer pulling from the start gets the delete
+%% and an old copy of the document is recognised as replaced.
+sweep_stubs_expired_deletes(Config) ->
     Db = ?config(db, Config),
     DocId = <<"doc_gone">>,
 
     {ok, #{<<"rev">> := Rev1}} =
         barrel_docdb:put_doc(Db, #{<<"id">> => DocId, <<"v">> => 1}),
-    {ok, _} = barrel_docdb:delete_doc(Db, DocId, #{rev => Rev1}),
+    {ok, #{<<"rev">> := DelRev}} = barrel_docdb:delete_doc(Db, DocId, #{rev => Rev1}),
+    {ok, #{state := Before}} = barrel_docdb:get_doc_state(Db, DocId),
 
     age_past_window(),
     {ok, Stats} = barrel_docdb:sweep_retention(Db),
-    ?assertEqual(1, maps:get(docs_forgotten, Stats)),
+    ?assertEqual(1, maps:get(docs_stubbed, Stats)),
 
-    %% The database has fully forgotten the document
     ?assertEqual({error, not_found}, barrel_docdb:get_doc(Db, DocId)),
-    ?assertEqual({error, not_found}, barrel_docdb:get_doc_versions(Db, DocId)),
     ?assertEqual([], all_history(Db)),
+    {ok, #{state := After}} = barrel_docdb:get_doc_state(Db, DocId),
+    ?assertEqual(Before, After),
     {ok, Changes, _} = barrel_docdb:get_changes(Db, first),
-    ?assertEqual([], [C || C <- Changes, maps:get(id, C) =:= DocId]),
+    ?assertMatch([#{rev := DelRev, deleted := true}],
+                 [C || C <- Changes, maps:get(id, C) =:= DocId]),
 
-    %% The id is writable again as a brand new doc
+    %% An old copy of the document is still recognised as replaced
+    Old = barrel_version:from_token(Rev1),
+    {ok, DocId, DelRev} = barrel_docdb:put_version(
+        Db, #{<<"id">> => DocId, <<"v">> => 1}, Rev1,
+        barrel_vv:encode(barrel_vv:bump(barrel_vv:new(), Old)), false),
+
+    %% The id is writable again, over the delete
     {ok, _} = barrel_docdb:put_doc(Db, #{<<"id">> => DocId, <<"v">> => <<"new">>}),
+    {ok, []} = barrel_docdb:get_conflicts(Db, DocId),
+    ok.
+
+%% With tombstone_purge_after set, a stub older than that is removed.
+purge_removes_old_stubs(Config) ->
+    Db0 = ?config(db, Config),
+    DataDir = ?config(data_dir, Config),
+    ok = barrel_docdb:close_db(Db0),
+    {ok, _} = barrel_docdb:create_db(Db0, #{data_dir => DataDir,
+                                            retention_period => 1,
+                                            tombstone_purge_after => 1}),
+    DocId = <<"purged">>,
+    {ok, #{<<"rev">> := Rev1}} =
+        barrel_docdb:put_doc(Db0, #{<<"id">> => DocId}),
+    {ok, _} = barrel_docdb:delete_doc(Db0, DocId, #{rev => Rev1}),
+    age_past_window(),
+    {ok, #{docs_purged := 1}} = barrel_docdb:sweep_retention(Db0),
+    ?assertEqual({error, not_found}, barrel_docdb:get_doc_state(Db0, DocId)),
+    {ok, Changes, _} = barrel_docdb:get_changes(Db0, first),
+    ?assertEqual([], [C || C <- Changes, maps:get(id, C) =:= DocId]),
     ok.
 
 sweep_is_idempotent(Config) ->
@@ -155,7 +187,7 @@ sweep_is_idempotent(Config) ->
     {ok, Stats2} = barrel_docdb:sweep_retention(Db),
     ?assertEqual(0, maps:get(history_swept, Stats2)),
     ?assertEqual(0, maps:get(superseded_removed, Stats2)),
-    ?assertEqual(0, maps:get(docs_forgotten, Stats2)),
+    ?assertEqual(0, maps:get(docs_stubbed, Stats2)),
     ?assertEqual({ok, Doc}, barrel_docdb:get_doc(Db, DocId)),
     ok.
 
@@ -205,7 +237,7 @@ sweep_respects_window(Config) ->
 
         {ok, Stats} = barrel_docdb:sweep_retention(Db),
         ?assertEqual(0, maps:get(history_swept, Stats)),
-        ?assertEqual(0, maps:get(docs_forgotten, Stats)),
+        ?assertEqual(0, maps:get(docs_stubbed, Stats)),
         ?assertEqual(2, length(all_history(Db)))
     after
         barrel_docdb:delete_db(Db)
@@ -282,10 +314,12 @@ sweep_channels(Config) ->
     age_past_window(),
     {ok, Stats} = barrel_docdb:sweep_retention(Db),
     ?assert(maps:get(channel_leaves_swept, Stats) >= 1),
-    ?assert(maps:get(docs_forgotten, Stats) >= 1),
+    ?assert(maps:get(docs_stubbed, Stats) >= 1),
 
+    %% the delete of c stays in the channel feed: a filtered peer must
+    %% still get it
     {ok, After, _} = barrel_docdb:get_changes(
         Db, first, #{channel => <<"posts">>, include_leaves => true}),
-    ?assertMatch([#{id := <<"a">>}], After),
+    ?assertMatch([#{id := <<"a">>}, #{id := <<"c">>, deleted := true}], After),
     ?assertNot(maps:is_key(left, hd(After))),
     ok.
