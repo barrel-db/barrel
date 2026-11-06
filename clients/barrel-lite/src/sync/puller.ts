@@ -12,7 +12,7 @@ import { vvContains, vvDecode } from "../codec/vv.js";
 import type { LocalStore } from "../store/localstore.js";
 import type { SyncFilter } from "../wire/filters.js";
 import type { SyncTransport } from "../wire/transport.js";
-import { applyRemote, type ApplyOutcome } from "./apply.js";
+import { applyRemote, applyState, type ApplyOutcome } from "./apply.js";
 import { checkpointKey } from "./checkpoint.js";
 import type { OnConflict, PullStats } from "./types.js";
 
@@ -41,6 +41,7 @@ export async function pull(
   since = await resetIfBelowFloor(transport, store, key, since);
 
   const stats: PullStats = { scanned: 0, applied: 0 };
+  const fullState = await transport.fullState();
   for (;;) {
     const query = opts.filter ? { limit, filter: opts.filter } : { limit };
     const page = await transport.changes(since, query);
@@ -48,6 +49,16 @@ export async function pull(
 
     for (const row of page.changes) {
       stats.scanned++;
+      if (fullState) {
+        const outcome = applyState(store, row.id, await transport.getState(row.id),
+                                   opts.onConflict);
+        if (outcome !== "skip") {
+          opts.onApply?.(row.id, outcome === "created" ? "created" : "fast_forward",
+                         store.get(row.id)?.deleted ?? false);
+          stats.applied++;
+        }
+        continue;
+      }
       const local = store.get(row.id);
       const remoteVersion = versionFromToken(row.rev);
       if (local && vvContains(vvDecode(base64Decode(local.vv)), remoteVersion)) {

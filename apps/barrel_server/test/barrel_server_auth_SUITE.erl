@@ -150,7 +150,11 @@ t_capability_read_scope(Config) ->
     {200, _} = req(get, Db ++ "/_sync/info", bearer(RToken), <<>>),
     {200, _} = jreq(post, Db ++ "/_sync/changes", bearer(RToken), #{}),
     {200, _} = req(get, Db ++ "/_sync/doc/a", bearer(RToken), <<>>),
+    {200, StateBody} = req(get, Db ++ "/_sync/state/a", bearer(RToken), <<>>),
+    #{<<"state">> := StateB64} = json:decode(StateBody),
     %% but nothing that writes
+    {403, _} = jreq(put, Db ++ "/_sync/state/a", bearer(RToken),
+                    #{<<"state">> => StateB64, <<"bodies">> => #{}}),
     {403, _} = jreq(put, Db ++ "/doc/b", bearer(RToken), #{}),
     {403, _} = jreq(put, Db ++ "/_sync/doc/b", bearer(RToken), #{}),
     {403, _} = jreq(post, Db ++ "/_bulk_docs", bearer(RToken),
@@ -173,6 +177,12 @@ t_capability_write_scope(Config) ->
                          <<"version">> => Token,
                          <<"vv">> => base64:encode(barrel_vv:encode(VV))}),
     ?assertMatch(#{<<"winner">> := _}, json:decode(Body)),
+    %% and whole states merge through it too
+    {200, StateBody} = req(get, Db ++ "/_sync/state/w1", bearer(WToken), <<>>),
+    #{<<"state">> := StateB64, <<"bodies">> := Bodies} = json:decode(StateBody),
+    {200, PutBody} = jreq(put, Db ++ "/_sync/state/w1", bearer(WToken),
+                          #{<<"state">> => StateB64, <<"bodies">> => Bodies}),
+    ?assertMatch(#{<<"written">> := false}, json:decode(PutBody)),
     %% write does not reach lifecycle or timeline
     {403, _} = req(delete, Db, bearer(WToken), <<>>),
     {403, _} = jreq(post, Db ++ "/_timeline/branch", bearer(WToken),

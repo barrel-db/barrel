@@ -10,6 +10,7 @@ import type { LocalStore } from "../store/localstore.js";
 import type { DocRecord } from "../store/types.js";
 import type { SyncTransport } from "../wire/transport.js";
 import type { OnConflict, PushStats } from "./types.js";
+import { recordDocState } from "./apply.js";
 
 const DIFF_BATCH = 100;
 
@@ -25,6 +26,23 @@ export async function push(
   const dirty = store.dirtyRecords();
   const stats: PushStats = { pushed: 0, skipped: 0, conflicts: 0 };
   if (dirty.length === 0) return stats;
+
+  if (await transport.fullState()) {
+    // the server merges the whole state: a write that does not win is
+    // kept there as a conflict, and stays here too
+    for (const rec of dirty) {
+      const result = await transport.putState(rec.id, recordDocState(rec));
+      store.clearDirty(rec.id, rec.version);
+      if (result.written) stats.pushed++;
+      else stats.skipped++;
+      if (result.winner !== rec.version) {
+        stats.conflicts++;
+        opts.onConflict?.({ id: rec.id, losing: rec, winner: result.winner });
+      }
+    }
+    await store.flush();
+    return stats;
+  }
 
   for (let i = 0; i < dirty.length; i += DIFF_BATCH) {
     const batch = dirty.slice(i, i + DIFF_BATCH);

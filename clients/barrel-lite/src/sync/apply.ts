@@ -19,9 +19,11 @@ import {
   vvMerge,
   type VV,
 } from "../codec/vv.js";
-import type { LocalStore } from "../store/localstore.js";
+import { recordBodies, recordFromState, recordState, type LocalStore } from "../store/localstore.js";
 import type { DocRecord } from "../store/types.js";
-import type { DocForRep } from "../wire/transport.js";
+import type { DocForRep, DocState } from "../wire/transport.js";
+import { decodeState, encodeState, liveMerge } from "../codec/live.js";
+import type { JsonObject } from "../json.js";
 import type { OnConflict } from "./types.js";
 
 export type ApplyOutcome =
@@ -94,3 +96,51 @@ function cleanRecord(id: string, remote: DocForRep, vv: VV): DocRecord {
 }
 
 export type { Version };
+
+//====================================================================
+// Whole document states (servers that report full_state)
+//====================================================================
+
+export type StateOutcome = "created" | "merged" | "skip";
+
+/**
+ * Merge a document state pulled from the server into the local record.
+ * Concurrent versions are all kept: a local write that loses stays as a
+ * conflict, readable from the record, and onConflict tells the app.
+ */
+export function applyState(
+  store: LocalStore,
+  id: string,
+  remote: DocState,
+  onConflict?: OnConflict,
+): StateOutcome {
+  const local = store.get(id);
+  const remoteState = decodeState(remote.state);
+  const merged = local ? liveMerge(recordState(local), remoteState) : remoteState;
+  const encoded = base64Encode(encodeState(merged), "standard");
+  if (local && local.state === encoded) return "skip";
+  const bodies = recordBodies(local);
+  for (const [t, body] of Object.entries(remote.bodies)) {
+    const info = merged.live.get(t);
+    if (info) bodies.set(t, { deleted: info.deleted, body: info.deleted ? null : body });
+  }
+  const rec = recordFromState(id, merged, bodies, local?.dirty ?? false);
+  if (local && local.dirty && rec.version !== local.version && onConflict) {
+    // our write is no longer the winner; it stays as a conflict
+    if (merged.live.has(local.version)) {
+      onConflict({ id, losing: local, winner: rec.version });
+    }
+  }
+  store.putRecord(rec);
+  return local ? "merged" : "created";
+}
+
+/** The state and live bodies of a record, for a push. */
+export function recordDocState(rec: DocRecord): DocState {
+  const state = recordState(rec);
+  const bodies: Record<string, JsonObject> = {};
+  for (const [t, b] of recordBodies(rec)) {
+    if (state.live.has(t)) bodies[t] = b.body ?? {};
+  }
+  return { state: encodeState(state), bodies };
+}

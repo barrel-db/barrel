@@ -16,15 +16,18 @@ function clockAt(ms: number): HlcClock {
 }
 
 describe("local store", () => {
-  it("mints a stable source_id and authors versions with it", async () => {
+  it("authors versions with a writer id minted on every open", async () => {
     const area = await freshArea();
     const store = await LocalStore.open(area, clockAt(1000));
-    const sid = store.sourceId;
-    expect(sid).toMatch(/^[0-9a-f]{16}$/);
+    expect(store.writer).toMatch(/^w[0-9a-f]{16}$/);
     const rec = store.put("a", { v: 1 });
-    expect(versionFromToken(rec.version).author).toBe(sid);
+    expect(versionFromToken(rec.version).author).toBe(store.writer);
     expect(rec.dirty).toBe(true);
     expect(store.getBody("a")).toEqual({ v: 1 });
+    await store.flush();
+    const again = await LocalStore.open(area, clockAt(1000));
+    expect(again.writer).not.toBe(store.writer);
+    expect(again.sourceId).toBe(store.sourceId);
   });
 
   it("bumps the doc's own VV entry across updates", async () => {
@@ -32,7 +35,7 @@ describe("local store", () => {
     const store = await LocalStore.open(area, clockAt(1000));
     const r1 = store.put("a", { v: 1 });
     const r2 = store.put("a", { v: 2 });
-    const sid = store.sourceId;
+    const sid = store.writer;
     const v2 = versionFromToken(r2.version);
     const vv1 = vvDecode(base64Decode(r1.vv));
     const vv2 = vvDecode(base64Decode(r2.vv));

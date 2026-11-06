@@ -14,10 +14,19 @@ import { base64Decode, base64Encode } from "../codec/base64.js";
 import { randomSourceId, utf8Decode, utf8Encode } from "../codec/bytes.js";
 import { compareHlc, encodeHlc, type HlcClock } from "../codec/hlc.js";
 import { versionFromToken, versionToToken } from "../codec/version.js";
-import { vvBump, vvDecode, vvEncode, vvNew } from "../codec/vv.js";
+import { vvDecode, vvEncode } from "../codec/vv.js";
+import {
+  decodeState,
+  encodeState,
+  liveAuthor,
+  liveNew,
+  liveReplaces,
+  liveView,
+  type LiveState,
+} from "../codec/live.js";
 import { base64ToFloat32, float32ToBase64 } from "../codec/float32.js";
 import type { JsonObject } from "../json.js";
-import type { AttRef, DbMeta, DocRecord, StorageArea } from "./types.js";
+import type { AttRef, ConflictVersion, DbMeta, DocRecord, StorageArea } from "./types.js";
 
 const DOCS_BLOB = "docs.json";
 const META_BLOB = "meta.json";
@@ -54,6 +63,10 @@ export class LocalStore {
   private vectorDimValue: number | undefined;
   private meta: DbMeta;
   private needsFlush = false;
+  /** Authors this session's writes: new on every open, so a write that
+   * was pushed and then lost in a crash before a flush can never be
+   * reissued under the same token. */
+  private readonly writerId = `w${randomSourceId()}`;
 
   private constructor(area: StorageArea, clock: HlcClock, meta: DbMeta) {
     this.area = area;
@@ -110,6 +123,11 @@ export class LocalStore {
     return this.meta.sourceId;
   }
 
+  /** The author of this session's writes (new on every open). */
+  get writer(): string {
+    return this.writerId;
+  }
+
   /** The record for an id (including tombstones), or undefined. */
   get(id: string): DocRecord | undefined {
     return this.docs.get(id);
@@ -132,30 +150,42 @@ export class LocalStore {
     return out;
   }
 
-  /** Write a document locally, minting a new version authored by us. */
+  /** Write a document locally. It replaces the current winner (or,
+   * over a delete, every delete); any other conflict stays. */
   put(id: string, body: JsonObject): DocRecord {
-    return this.author(id, body, false);
+    return this.author(id, body, false, undefined);
   }
 
   /** Delete a document locally (a dirty tombstone to push). */
   remove(id: string): DocRecord {
-    return this.author(id, null, true);
+    return this.author(id, null, true, undefined);
   }
 
-  private author(id: string, body: JsonObject | null, deleted: boolean): DocRecord {
+  /** Resolve a document's conflicts: the new body (or a delete when null)
+   * replaces every live version, the winner and all conflicts. */
+  resolve(id: string, body: JsonObject | null): DocRecord {
+    const rec = this.docs.get(id);
+    const all = rec ? [rec.version, ...(rec.conflicts ?? []).map((c) => c.version)] : [];
+    return this.author(id, body, body === null, all);
+  }
+
+  private author(
+    id: string,
+    body: JsonObject | null,
+    deleted: boolean,
+    observed: string[] | undefined,
+  ): DocRecord {
     const existing = this.docs.get(id);
-    const baseVv = existing ? vvDecode(base64Decode(existing.vv)) : vvNew();
-    const hlc = this.clock.now();
-    const version = { hlc, author: this.meta.sourceId };
-    const vv = vvBump(baseVv, version);
-    const rec: DocRecord = {
-      id,
-      body,
-      version: versionToToken(version),
-      vv: base64Encode(vvEncode(vv), "standard"),
-      deleted,
-      dirty: true,
-    };
+    const state = existing ? recordState(existing) : liveNew();
+    const replaces = liveReplaces(state, existing?.version, observed);
+    if (replaces === "conflict") throw new Error(`conflict on ${id}`);
+    // the new version must sort above every live one
+    for (const t of state.live.values()) this.clock.update(t.version.hlc);
+    const version = { hlc: this.clock.now(), author: this.writerId };
+    const next = liveAuthor(state, version, deleted, replaces);
+    const bodies = recordBodies(existing);
+    bodies.set(versionToToken(version), { deleted, body });
+    const rec = recordFromState(id, next, bodies, true);
     this.docs.set(id, rec);
     this.needsFlush = true;
     return rec;
@@ -308,4 +338,61 @@ export class LocalStore {
   private allDocsRaw(): DocRecord[] {
     return [...this.docs.values()];
   }
+}
+
+//==================================================================
+// Records and replicated state
+//==================================================================
+
+/** A record's state; a record written before states existed counts
+ * only its own version as seen. */
+export function recordState(rec: DocRecord): LiveState {
+  if (rec.state) return decodeState(base64Decode(rec.state));
+  const v = versionFromToken(rec.version);
+  return {
+    live: new Map([[rec.version, { version: v, deleted: rec.deleted,
+                                   vv: vvDecode(base64Decode(rec.vv)) }]]),
+    obs: new Map(),
+    cloud: new Set([rec.version]),
+  };
+}
+
+/** Every live body a record holds, keyed by version token. */
+export function recordBodies(
+  rec: DocRecord | undefined,
+): Map<string, { deleted: boolean; body: JsonObject | null }> {
+  const out = new Map<string, { deleted: boolean; body: JsonObject | null }>();
+  if (!rec) return out;
+  out.set(rec.version, { deleted: rec.deleted, body: rec.body });
+  for (const c of rec.conflicts ?? []) out.set(c.version, { deleted: c.deleted, body: c.body });
+  return out;
+}
+
+/** The record for a state: the winner's body and vector, and the other
+ * live versions as conflicts. */
+export function recordFromState(
+  id: string,
+  state: LiveState,
+  bodies: Map<string, { deleted: boolean; body: JsonObject | null }>,
+  dirty: boolean,
+): DocRecord {
+  const view = liveView(state);
+  const winner = versionToToken(view.winner!);
+  const info = state.live.get(winner)!;
+  const conflicts: ConflictVersion[] = view.conflicts.map((v) => {
+    const t = versionToToken(v);
+    const b = bodies.get(t);
+    return { version: t, deleted: state.live.get(t)!.deleted, body: b ? b.body : null };
+  });
+  const rec: DocRecord = {
+    id,
+    body: view.deleted ? null : (bodies.get(winner)?.body ?? null),
+    version: winner,
+    vv: base64Encode(vvEncode(info.vv), "standard"),
+    deleted: view.deleted,
+    dirty,
+    state: base64Encode(encodeState(state), "standard"),
+  };
+  if (conflicts.length > 0) rec.conflicts = conflicts;
+  return rec;
 }

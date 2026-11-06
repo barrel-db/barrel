@@ -171,19 +171,33 @@ code is identical on either side.
 
 ## How (conflicts)
 
-Concurrent edits resolve by last-write-wins on the HLC, the same rule the
-server uses, so every replica converges on the same winner. To be told when a
-local edit lost:
+When the device and another replica edit the same document before they
+sync, both versions are kept, on the device and on the server. Every replica
+shows the same winner (the highest version), and the other version is a
+conflict you can read and resolve:
 
 ```ts
 const db = await Database.open("notes", {
   remote,
-  onConflict: (e) => console.warn("dropped local edit", e.id, "->", e.winner),
+  onConflict: (e) => console.warn("local edit is now a conflict", e.id),
 });
+
+await db.sync();
+const current = await db.get("note");          // the winner
+const others = await db.conflicts("note");     // [{version, deleted, body}]
+if (others.length > 0) {
+  await db.resolve("note", { text: mergeTexts(current, others) });
+  await db.push();                             // replaces both everywhere
+}
 ```
 
-The losing body is not kept locally (the server retains it as a conflict
-sibling); the winner arrives on the next pull.
+- `put` replaces the winner and leaves conflicts in place; `resolve` replaces
+  the winner and every conflict (pass `null` to resolve to a delete).
+- A server configured with a `conflict_resolver` resolves conflicts itself;
+  the resolution arrives on the next pull.
+- Against a server older than whole-state sync, the client falls back to
+  one version at a time: a local edit that loses is then not kept locally
+  (the server keeps it), as before.
 
 ## Notes
 

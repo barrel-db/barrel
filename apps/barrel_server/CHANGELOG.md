@@ -6,7 +6,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
-- `GET` and `PUT /db/:db/_sync/state/:id` send and merge a document's whole state, so replication between servers keeps every conflict and never brings a replaced version back. `_sync/info` reports `full_state`; replicators fall back to one version at a time with older servers.
+- `GET` and `PUT /db/:db/_sync/state/:id` send and merge a document's whole state, so replication between servers keeps every conflict and never brings a replaced version back. `_sync/info` reports `full_state`; replicators fall back to one version at a time with older servers. JSON clients get the state in base64, as version vectors. Fetching a state needs a read grant, merging one a write grant.
 
 ### Changed
 - `_sync/changes` with a filter now includes deletes and documents whose conflicts match, so a filtered peer receives the delete of a document it holds.
