@@ -113,6 +113,8 @@ application:set_env(barrel_docdb, sync_auth, #{
 }).
 ```
 
+Signed requests (signature v3) authenticate the client and protect each request, including the headers that change a write, but give neither confidentiality nor authenticated responses: use verified HTTPS for those. Upgrade servers before clients; see the signed requests section of the synchronization guide.
+
 Notes:
 - The URL key is the normalized URL: lowercase scheme and host, no trailing slash.
 - Tuning keys (`pool`, `connect_timeout`, `recv_timeout`, `request_timeout`) are saved with the task and kept across pause, resume and restart.

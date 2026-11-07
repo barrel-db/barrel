@@ -33,11 +33,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A bidirectional replication task shared one attachment position between its two directions and could skip attachments from either side. Each direction now keeps its own position, and existing tasks restart their attachment sync once.
 - Attachment deletes were dropped from the change feed after the retention period, so a replica resyncing from the start kept attachments deleted on the source. Deletes now stay until `tombstone_purge_after`, like document deletes, and are kept for good when it is 0.
 - A filtered replication copied every attachment, including those of documents the filter excluded. Attachments now follow the document filter (paths, query, channel), a document that enters the filter brings its existing attachments, and an unknown channel or a filter error stops the run.
+- Signed replication requests did not cover the headers that decide an attachment write or delete (its timestamp, digest, content type and touch marker) nor the clock header, so someone able to alter requests in transit could change their effect without breaking the signature. Signed requests now cover these headers too.
 
 ### Changed
 - Breaking: replication tasks refuse inline credentials (`auth`, `signing`, `ssl_options`, `headers`, or a user and password in the URL). Configure them in the app env instead. A one-shot replication also refuses a URL with a user and password.
 - Breaking: attachment replication now waits for the target to make its writes durable before each checkpoint (`att_durability => required`, the default), so a power loss on the target can no longer lose attachments a run reported as copied. A target that cannot do this fails the run with `att_flush_unsupported`; set `att_durability => best_effort` to replicate to it anyway, without that guarantee.
 - A filtered replication from a server that cannot filter attachments now fails with `att_filter_unsupported` instead of copying them all.
+- Breaking: signed replication requests use signature v3, which older servers refuse. Upgrade servers before clients.
 
 ### Added
 - `barrel_docdb:reopen_db/1` restarts a failed database with its last config.

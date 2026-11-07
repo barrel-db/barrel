@@ -23,7 +23,17 @@
     t_query_tamper_rejected/1,
     t_legacy_v1_accepted/1,
     t_legacy_rejected_when_required/1,
-    t_replication_over_signed/1
+    t_replication_over_signed/1,
+    t_att_delete_origin_tamper_rejected/1,
+    t_att_put_origin_tamper_rejected/1,
+    t_att_put_digest_tamper_rejected/1,
+    t_att_put_content_type_tamper_rejected/1,
+    t_att_touch_tamper_rejected/1,
+    t_sync_hlc_and_type_tamper_rejected/1,
+    t_signed_v3_writes_accepted/1,
+    t_bearer_att_headers_accepted/1,
+    t_legacy_semantic_header_rejected/1,
+    t_legacy_att_write_rejected/1
 ]).
 
 -include_lib("common_test/include/ct.hrl").
@@ -38,7 +48,13 @@ all() ->
      t_unknown_key_rejected, t_stale_rejected, t_replay_rejected,
      t_tampered_body_rejected, t_same_ms_distinct_nonce_accepted,
      t_query_tamper_rejected, t_legacy_v1_accepted,
-     t_legacy_rejected_when_required, t_replication_over_signed].
+     t_legacy_rejected_when_required, t_replication_over_signed,
+     t_att_delete_origin_tamper_rejected, t_att_put_origin_tamper_rejected,
+     t_att_put_digest_tamper_rejected,
+     t_att_put_content_type_tamper_rejected, t_att_touch_tamper_rejected,
+     t_sync_hlc_and_type_tamper_rejected, t_signed_v3_writes_accepted,
+     t_bearer_att_headers_accepted, t_legacy_semantic_header_rejected,
+     t_legacy_att_write_rejected].
 
 init_per_suite(Config) ->
     {Pub, Priv} = crypto:generate_key(eddsa, ed25519),
@@ -196,6 +212,9 @@ t_replication_over_signed(Config) ->
             list_to_binary(B ++ "/db/" ++ ?DB)),
         Endpoint = Endpoint0#{signing => #{key_id => ?KEYID,
                                            priv_key => ?config(priv, Config)}},
+        {ok, _} = barrel_docdb:put_attachment(
+            Local, <<"d1">>, <<"r.txt">>, <<"replicated">>,
+            #{content_type => <<"text/plain">>}),
         lists:foreach(
             fun(_) ->
                 {ok, #{ok := true}} = barrel_rep:replicate(
@@ -204,15 +223,204 @@ t_replication_over_signed(Config) ->
             end, lists:seq(1, 5)),
         H = build_signed(get, <<"/db/", ?DB, "/doc/d5">>, <<>>,
                          ?config(priv, Config), now_ms()),
-        {200, _} = send(get, B, <<"/db/", ?DB, "/doc/d5">>, H, <<>>)
+        {200, _} = send(get, B, <<"/db/", ?DB, "/doc/d5">>, H, <<>>),
+        %% attachment PUT and DELETE go out as v3 with their headers signed
+        {ok, <<"replicated">>} =
+            barrel_docdb:get_attachment(<<?DB>>, <<"d1">>, <<"r.txt">>),
+        {ok, #{content_type := <<"text/plain">>}} =
+            barrel_docdb:get_attachment_info(<<?DB>>, <<"d1">>, <<"r.txt">>),
+        ok = barrel_docdb:delete_attachment(Local, <<"d1">>, <<"r.txt">>),
+        {ok, #{ok := true}} = barrel_rep:replicate(
+            Local, Endpoint, #{target_transport => barrel_rep_transport_http}),
+        {error, not_found} =
+            barrel_docdb:get_attachment(<<?DB>>, <<"d1">>, <<"r.txt">>)
     after
         try barrel_docdb:delete_db(Local) catch _:_ -> ok end
     end,
     ok.
 
+
+%% The reviewer's case: a fresh signed DELETE whose origin would lose
+%% last-write-wins, sent first with only its origin made newer. It must
+%% fail authentication and leave the attachment in place.
+t_att_delete_origin_tamper_rejected(Config) ->
+    B = current_base(),
+    #{old := Old, new := New, path := Path} = seed_att(<<"a1">>),
+    Signed = signed_v3(delete, Path, <<>>, [origin(Old)], Config),
+    Altered = set_header(<<"x-barrel-att-origin">>, origin_wire(New), Signed),
+    {401, _} = send(delete, B, Path, Altered, <<>>),
+    {ok, <<"stored">>} = att_body(<<"a1">>),
+    %% the original is still honored: an older delete is ignored
+    {200, _} = send(delete, B, Path, Signed, <<>>),
+    {ok, <<"stored">>} = att_body(<<"a1">>),
+    ok.
+
+t_att_put_origin_tamper_rejected(Config) ->
+    B = current_base(),
+    #{old := Old, new := New, path := Path} = seed_att(<<"a2">>),
+    Body = <<"forged">>,
+    Signed = signed_put(Path, Body, [origin(Old)], Config),
+    Altered = set_header(<<"x-barrel-att-origin">>, origin_wire(New), Signed),
+    {401, _} = send(put, B, Path, Altered, Body),
+    {ok, <<"stored">>} = att_body(<<"a2">>),
+    ok.
+
+t_att_put_digest_tamper_rejected(Config) ->
+    B = current_base(),
+    #{new := New, path := Path} = seed_att(<<"a3">>),
+    Body = <<"newer">>,
+    Signed = signed_put(Path, Body, [origin(New)], Config),
+    Other = <<"sha256-", (barrel_sync_sig:content_sha256(<<"x">>))/binary>>,
+    Altered = set_header(<<"x-barrel-digest">>, Other, Signed),
+    {401, _} = send(put, B, Path, Altered, Body),
+    {ok, <<"stored">>} = att_body(<<"a3">>),
+    ok.
+
+t_att_put_content_type_tamper_rejected(Config) ->
+    B = current_base(),
+    #{new := New, path := Path} = seed_att(<<"a4">>),
+    Body = <<"newer">>,
+    Signed = signed_put(Path, Body, [origin(New)], Config),
+    Altered = set_header(<<"content-type">>, <<"text/html">>, Signed),
+    {401, _} = send(put, B, Path, Altered, Body),
+    {ok, <<"stored">>} = att_body(<<"a4">>),
+    ok.
+
+%% Removing or adding the touch marker changes the write: both 401.
+t_att_touch_tamper_rejected(Config) ->
+    B = current_base(),
+    #{new := New, path := Path} = seed_att(<<"a5">>),
+    Digest = stored_digest(<<"a5">>),
+    Touch = signed_v3(put, Path, {hash, Digest},
+                      [{<<"content-type">>, <<"application/octet-stream">>},
+                       {<<"x-barrel-att-touch">>, <<"1">>},
+                       {<<"x-barrel-digest">>, Digest}, origin(New)],
+                      Config),
+    {401, _} = send(put, B, Path,
+                    lists:keydelete(<<"x-barrel-att-touch">>, 1, Touch),
+                    <<>>),
+    Upload = signed_put(Path, <<"newer">>, [origin(New)], Config),
+    {401, _} = send(put, B, Path,
+                    [{<<"x-barrel-att-touch">>, <<"1">>} | Upload],
+                    <<"newer">>),
+    {ok, <<"stored">>} = att_body(<<"a5">>),
+    {200, Touched} = send(put, B, Path, Touch, <<>>),
+    #{<<"ok">> := <<"touched">>} = json:decode(Touched),
+    ok.
+
+%% The clock header and the body type of a sync write are signed too.
+t_sync_hlc_and_type_tamper_rejected(Config) ->
+    B = current_base(),
+    Path = <<"/db/", ?DB, "/_sync/local/l1">>,
+    Body = <<"{\"n\":1}">>,
+    Signed = signed_v3(put, Path, Body,
+                       [{<<"content-type">>, <<"application/json">>},
+                        {<<"x-barrel-hlc">>, origin_wire(
+                                               barrel_hlc:new_hlc())}],
+                       Config),
+    Far = barrel_hlc:new_hlc(),
+    {401, _} = send(put, B, Path,
+                    set_header(<<"x-barrel-hlc">>, origin_wire(Far), Signed),
+                    Body),
+    {401, _} = send(put, B, Path,
+                    set_header(<<"content-type">>, <<"application/cbor">>,
+                               Signed), Body),
+    {error, not_found} = barrel_docdb:get_local_doc(<<?DB>>, <<"l1">>),
+    {200, _} = send(put, B, Path, Signed, Body),
+    {ok, #{<<"n">> := 1}} = barrel_docdb:get_local_doc(<<?DB>>, <<"l1">>),
+    ok.
+
+t_signed_v3_writes_accepted(Config) ->
+    B = current_base(),
+    #{new := New, path := Path} = seed_att(<<"a6">>),
+    Put = signed_put(Path, <<"newer">>, [origin(New)], Config),
+    {200, _} = send(put, B, Path, Put, <<"newer">>),
+    {ok, <<"newer">>} = att_body(<<"a6">>),
+    Newest = barrel_hlc:new_hlc(),
+    Del = signed_v3(delete, Path, <<>>, [origin(Newest)], Config),
+    {200, _} = send(delete, B, Path, Del, <<>>),
+    {error, not_found} = att_body(<<"a6">>),
+    ok.
+
+t_bearer_att_headers_accepted(_Config) ->
+    B = current_base(),
+    #{new := New, path := Path} = seed_att(<<"a7">>),
+    {200, _} = send(delete, B, Path, [origin(New) | bearer()], <<>>),
+    {error, not_found} = att_body(<<"a7">>),
+    ok.
+
+%% A v2 signature does not cover the origin header: refused by name.
+t_legacy_semantic_header_rejected(Config) ->
+    B = current_base(),
+    #{new := New, path := Path} = seed_att(<<"a8">>),
+    H = build_signed(delete, Path, <<>>, ?config(priv, Config), now_ms()),
+    {401, Resp} = send(delete, B, Path, [origin(New) | H], <<>>),
+    #{<<"error">> := <<"signature_v3_required">>} = json:decode(Resp),
+    {ok, <<"stored">>} = att_body(<<"a8">>),
+    ok.
+
+%% Even without those headers, a v2 signature cannot write attachments
+%% (its content-type would be unauthenticated).
+t_legacy_att_write_rejected(Config) ->
+    B = current_base(),
+    #{path := Path} = seed_att(<<"a9">>),
+    Body = <<"v2 body">>,
+    H = build_signed(put, Path, Body, ?config(priv, Config), now_ms()),
+    {401, Resp} = send(put, B, Path, H, Body),
+    #{<<"error">> := <<"signature_v3_required">>} = json:decode(Resp),
+    {ok, <<"stored">>} = att_body(<<"a9">>),
+    ok.
+
 %%====================================================================
 %% Helpers
 %%====================================================================
+
+%% An attachment written at origin `mid', with an older and a newer HLC.
+seed_att(DocId) ->
+    Old = barrel_hlc:new_hlc(),
+    Mid = barrel_hlc:new_hlc(),
+    New = barrel_hlc:new_hlc(),
+    {ok, _} = barrel_docdb:put_doc(<<?DB>>, #{<<"id">> => DocId}),
+    {ok, _} = barrel_docdb:put_attachment(<<?DB>>, DocId, <<"f">>,
+                                          <<"stored">>,
+                                          #{origin_hlc => Mid}),
+    #{old => Old, new => New,
+      path => <<"/db/", ?DB, "/_sync/att/", DocId/binary, "/f">>}.
+
+att_body(DocId) ->
+    barrel_docdb:get_attachment(<<?DB>>, DocId, <<"f">>).
+
+stored_digest(DocId) ->
+    {ok, #{digest := Digest}} =
+        barrel_docdb:get_attachment_info(<<?DB>>, DocId, <<"f">>),
+    Digest.
+
+origin(Hlc) -> {<<"x-barrel-att-origin">>, origin_wire(Hlc)}.
+
+origin_wire(Hlc) -> base64:encode(barrel_hlc:encode(Hlc)).
+
+set_header(Name, Value, Headers) ->
+    lists:keystore(Name, 1, Headers, {Name, Value}).
+
+%% A signed attachment upload: the digest is the signed content hash.
+signed_put(Path, Body, Extra, Config) ->
+    Digest = <<"sha256-", (barrel_sync_sig:content_sha256(Body))/binary>>,
+    signed_v3(put, Path, {hash, Digest},
+              [{<<"content-type">>, <<"application/octet-stream">>},
+               {<<"x-barrel-digest">>, Digest} | Extra], Config).
+
+%% v3 headers over `Headers', signed over a body or `{hash, Digest}'.
+signed_v3(Method, Path, Body, Headers, Config) ->
+    CH = case Body of
+        {hash, Digest} -> Digest;
+        _ -> barrel_sync_sig:content_sha256(Body)
+    end,
+    {ok, Picked} = barrel_sync_sig:pick_headers(Headers),
+    Auth = barrel_sync_sig:sign_v3(?KEYID, ?config(priv, Config),
+                                   method_bin(Method), Path, <<>>, CH,
+                                   Picked, now_ms()),
+    Headers ++ [{<<"authorization">>, Auth},
+                {<<"x-barrel-content-sha256">>, CH}].
 
 %% The live base URL: a case may have restarted the server on another
 %% ephemeral port, so never trust the one captured at suite init.

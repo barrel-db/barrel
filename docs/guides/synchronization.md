@@ -163,6 +163,29 @@ application:set_env(barrel_server, auth,
 A reverse proxy in front of the sync endpoint must forward the path and the
 query string unmodified: the query is part of the signed target.
 
+Signature v3 also covers the request headers that change what a write does:
+`content-type`, `if-match`, `if-none-match`, `x-barrel-actor`,
+`x-barrel-session`, `x-barrel-source`, `x-barrel-hlc` and the attachment
+headers `x-barrel-att-origin`, `x-barrel-digest` and `x-barrel-att-touch`.
+Each is signed as present with its value or as absent, and the server acts on
+the signed values only: change one and the request answers 401. Clients newer
+than barrel_docdb 2.0.0 send v3 only. Rolling to it:
+
+1. Upgrade every server first (a v3 client is refused by an older server).
+2. Upgrade the clients. Meanwhile, v1 and v2 requests keep replicating
+   documents, but the server ignores their `x-barrel-hlc` and refuses them
+   with 401 `{"error":"signature_v3_required"}` when they write an attachment
+   or carry one of the other headers above.
+
+A proxy must forward these headers unchanged and must not send a signed
+header twice.
+
+What signing gives you: it authenticates the client and protects the
+integrity of each request. It does not hide the request or the response, and
+it does not authenticate the server's responses. Run the sync endpoint over
+verified HTTPS when you need either. Bearer requests get their integrity from
+HTTPS alone.
+
 ## How (TLS and mTLS)
 
 `barrel_server` serves cleartext HTTP/1.1 by default. Configure listeners to add

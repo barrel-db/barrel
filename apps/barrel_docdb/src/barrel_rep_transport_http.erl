@@ -481,7 +481,7 @@ open_download(Endpoint, DocId, Name) ->
                      ConnPid,
                      {get, url_path(Url),
                       base_headers(Endpoint, <<"GET">>, url_target(Url),
-                                   barrel_sync_sig:content_sha256(<<>>)),
+                                   barrel_sync_sig:content_sha256(<<>>), []),
                       <<>>}) of
                 {ok, 200, RespHeaders, ConnPid2} ->
                     ok = barrel_hlc:maybe_sync_from_header(
@@ -582,11 +582,12 @@ put_attachment(Endpoint, DocId, Name, Meta, ReadFun) ->
     %% The attachment body is streamed (never in memory here), so its
     %% content-address `Digest' is the signed content hash; body integrity
     %% rides the content-addressed store (422 digest_mismatch).
-    Headers = [{<<"content-type">>, att_content_type(ContentType)},
-               {?DIGEST_HEADER, Digest},
-               {?ORIGIN_HEADER,
-                base64:encode(barrel_hlc:encode(Origin))}
-               | base_headers(Endpoint, <<"PUT">>, url_target(AttUrl), Digest)],
+    Headers = base_headers(Endpoint, <<"PUT">>, url_target(AttUrl), Digest,
+                           [{<<"content-type">>,
+                             att_content_type(ContentType)},
+                            {?DIGEST_HEADER, Digest},
+                            {?ORIGIN_HEADER,
+                             base64:encode(barrel_hlc:encode(Origin))}]),
     %% connect, every chunk and the final response share one deadline
     bounded(fun() ->
         case hackney:request(put, AttUrl, Headers,
@@ -712,10 +713,10 @@ req_typed(#{url := BaseUrl} = Endpoint, Method, PathSuffix, BodyTerm,
             {CT, B} = encode_body(BodyTerm),
             {CT, B, barrel_sync_sig:content_sha256(B)}
     end,
-    Headers = [{<<"content-type">>, ContentType}
-               | ExtraHeaders]
-              ++ base_headers(Endpoint, method_bin(Method), url_target(Url),
-                              ContentHash),
+    Headers = base_headers(Endpoint, method_bin(Method), url_target(Url),
+                           ContentHash,
+                           [{<<"content-type">>, ContentType}
+                            | ExtraHeaders]),
     HttpOpts = [with_body | stream_opts(Endpoint)],
     case bounded(fun() ->
                      hackney:request(Method, Url, Headers, Body, HttpOpts)
@@ -779,12 +780,14 @@ remaining(Deadline) ->
 
 %% HLC + auth + endpoint headers. `Method' is the uppercase verb, `Path'
 %% the request target `{Path, Query}' (matching what the server signs),
-%% `ContentHash' the hex SHA-256 of the body (or the attachment digest).
-base_headers(Endpoint, Method, Target, ContentHash) ->
-    [{?HLC_HEADER,
-      base64:encode(barrel_hlc:encode(barrel_hlc:get_hlc()))}]
-    ++ auth_headers(Endpoint, Method, Target, ContentHash)
-    ++ maps:get(headers, Endpoint, []).
+%% `ContentHash' the hex SHA-256 of the body (or the attachment digest),
+%% `Headers' the request's own headers. The signature covers them all.
+base_headers(Endpoint, Method, Target, ContentHash, Headers0) ->
+    Headers = Headers0
+              ++ [{?HLC_HEADER,
+                   base64:encode(barrel_hlc:encode(barrel_hlc:get_hlc()))}]
+              ++ maps:get(headers, Endpoint, []),
+    Headers ++ auth_headers(Endpoint, Method, Target, ContentHash, Headers).
 
 stream_opts(Endpoint) ->
     Base = [{pool, maps:get(pool, Endpoint, barrel_rep)},
@@ -797,14 +800,19 @@ stream_opts(Endpoint) ->
 
 %% Signed requests take precedence over bearer when configured; otherwise
 %% fall back to the (unchanged) bearer resolution.
-auth_headers(Endpoint, Method, {Path, Query}, ContentHash) ->
+auth_headers(Endpoint, Method, {Path, Query}, ContentHash, Headers) ->
     case signing_config(Endpoint) of
         #{key_id := KeyId, priv_key := PrivKey} ->
             TsMs = erlang:system_time(millisecond),
-            %% v2: per-request nonce, query signed (servers must be on
-            %% barrel_server 1.6+, see the synchronization guide)
-            Auth = barrel_sync_sig:sign(KeyId, PrivKey, Method, Path, Query,
-                                        ContentHash, TsMs),
+            %% v3: nonce, query and semantic headers signed (servers must
+            %% accept v3: upgrade servers first, see the synchronization guide)
+            Signed = case barrel_sync_sig:pick_headers(Headers) of
+                {ok, Picked} -> Picked;
+                %% an endpoint header repeats a signed one
+                {error, duplicate_header} -> error(duplicate_signed_header)
+            end,
+            Auth = barrel_sync_sig:sign_v3(KeyId, PrivKey, Method, Path,
+                                           Query, ContentHash, Signed, TsMs),
             [{<<"authorization">>, Auth},
              {<<"x-barrel-content-sha256">>, ContentHash}];
         undefined ->

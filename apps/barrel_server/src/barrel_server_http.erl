@@ -448,7 +448,7 @@ bulk_docs(Req) ->
 prov_opts(Req) ->
     Prov = lists:foldl(
         fun({Header, Key}, Acc) ->
-            case livery_req:header(Header, Req, undefined) of
+            case barrel_server_auth:header(Header, Req) of
                 undefined -> Acc;
                 Value -> Acc#{Key => Value}
             end
@@ -673,7 +673,11 @@ query_input(Req) ->
                         Bql, #{})
             end;
         _ ->
-            ContentType = livery_req:header(<<"content-type">>, Req, <<>>),
+            ContentType = case barrel_server_auth:header(<<"content-type">>,
+                                                         Req) of
+                undefined -> <<>>;
+                CT -> CT
+            end,
             IsJson = binary:match(ContentType, <<"application/json">>)
                      =/= nomatch,
             case {IsJson, read_body(Req)} of
@@ -1020,7 +1024,7 @@ att_write_opts(Req) ->
 %% `create_only' is a boolean in the Erlang API, not an etag -- only the
 %% wildcard form of If-None-Match has an equivalent to translate.
 if_none_match_opt(Req) ->
-    case livery_req:header(<<"if-none-match">>, Req, undefined) of
+    case barrel_server_auth:header(<<"if-none-match">>, Req) of
         undefined -> {ok, #{}};
         <<"*">> -> {ok, #{create_only => true}};
         Other -> {error, {bad_if_none_match, Other}}
@@ -1028,7 +1032,7 @@ if_none_match_opt(Req) ->
 
 -spec if_match_opt(term()) -> {ok, map()}.
 if_match_opt(Req) ->
-    case livery_req:header(<<"if-match">>, Req, undefined) of
+    case barrel_server_auth:header(<<"if-match">>, Req) of
         undefined -> {ok, #{}};
         Etag -> {ok, #{expected_etag => unquote_etag(Etag)}}
     end.
