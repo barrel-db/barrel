@@ -5,7 +5,8 @@
 %%% certs (`verify_peer' + `fail_if_no_peer_cert'), plus H2 and H3
 %%% listeners, and `accept => [mtls]'. Verifies: all three listeners bind;
 %%% a client presenting a CA-signed cert authenticates; a client with no
-%%% cert is refused at the TLS handshake. Requires `openssl' (skips
+%%% cert is refused at the TLS handshake; a request presenting a signature
+%%% is judged by it alone (`accept => [mtls, signed]'). Requires `openssl' (skips
 %%% otherwise). The sync client speaks HTTP/1.1, so the gate is exercised
 %%% on H1-TLS.
 %%% @end
@@ -14,15 +15,18 @@
 
 -export([all/0, init_per_suite/1, end_per_suite/1]).
 -export([t_listeners_bind/1, t_mtls_client_authenticates/1,
-         t_certless_refused/1]).
+         t_certless_refused/1, t_bad_signature_rejected/1,
+         t_valid_signature_accepted/1]).
 
 -include_lib("common_test/include/ct.hrl").
 -include_lib("stdlib/include/assert.hrl").
 
 -define(DB, "mdb").
+-define(KEYID, <<"node1">>).
 
 all() ->
-    [t_listeners_bind, t_mtls_client_authenticates, t_certless_refused].
+    [t_listeners_bind, t_mtls_client_authenticates, t_certless_refused,
+     t_bad_signature_rejected, t_valid_signature_accepted].
 
 init_per_suite(Config) ->
     case os:find_executable("openssl") of
@@ -42,11 +46,14 @@ init_per_suite(Config) ->
                                   keyfile => f(Dir, "server.key"),
                                   cacertfile => f(Dir, "ca.pem"),
                                   verify => verify_peer}),
-            application:set_env(barrel_server, auth, #{accept => [mtls]}),
+            {Pub, Priv} = crypto:generate_key(eddsa, ed25519),
+            application:set_env(barrel_server, auth,
+                                #{accept => [mtls, signed],
+                                  signers => #{?KEYID => Pub}}),
             {ok, _} = application:ensure_all_started(barrel_server),
             {ok, _} = application:ensure_all_started(hackney),
             Listeners = listeners(),
-            [{dir, Dir}, {listeners, Listeners} | Config]
+            [{dir, Dir}, {listeners, Listeners}, {priv, Priv} | Config]
     end.
 
 end_per_suite(Config) ->
@@ -87,6 +94,26 @@ t_certless_refused(Config) ->
     ?assertMatch({error, _}, Res),
     ok.
 
+%% A trusted client certificate does not rescue a failing signature.
+t_bad_signature_rejected(Config) ->
+    Base = tls_base(Config),
+    Dir = ?config(dir, Config),
+    Path = <<"/db/", ?DB, "/doc/badsig">>,
+    {_, OtherPriv} = crypto:generate_key(eddsa, ed25519),
+    H = signed(put, Path, <<"{}">>, OtherPriv),
+    {401, _} = req(put, Base, Path, H, <<"{}">>, client_ssl(Dir)),
+    {404, _} = req(get, Base, Path, [], <<>>, client_ssl(Dir)),
+    ok.
+
+t_valid_signature_accepted(Config) ->
+    Base = tls_base(Config),
+    Dir = ?config(dir, Config),
+    Path = <<"/db/", ?DB, "/doc/goodsig">>,
+    H = signed(put, Path, <<"{}">>, ?config(priv, Config)),
+    {201, _} = req(put, Base, Path, H, <<"{}">>, client_ssl(Dir)),
+    {200, _} = req(get, Base, Path, [], <<>>, client_ssl(Dir)),
+    ok.
+
 %%====================================================================
 %% Helpers
 %%====================================================================
@@ -118,6 +145,24 @@ req(Method, Url, SslOpts) ->
     {ok, S, _H, RB} = hackney:request(Method, list_to_binary(Url), [], <<>>,
                                       [with_body, {ssl_options, SslOpts}]),
     {S, RB}.
+
+req(Method, Base, Path, Headers, Body, SslOpts) ->
+    Url = iolist_to_binary([Base, Path]),
+    {ok, S, _H, RB} = hackney:request(Method, Url, Headers, Body,
+                                      [with_body, {ssl_options, SslOpts}]),
+    {S, RB}.
+
+%% v3 signed headers over a JSON body.
+signed(Method, Path, Body, Priv) ->
+    Headers = [{<<"content-type">>, <<"application/json">>}],
+    CH = barrel_sync_sig:content_sha256(Body),
+    {ok, Picked} = barrel_sync_sig:pick_headers(Headers),
+    Auth = barrel_sync_sig:sign_v3(?KEYID, Priv,
+                                   string:uppercase(atom_to_binary(Method)),
+                                   Path, <<>>, CH, Picked,
+                                   erlang:system_time(millisecond)),
+    Headers ++ [{<<"authorization">>, Auth},
+                {<<"x-barrel-content-sha256">>, CH}].
 
 f(Dir, Name) -> filename:join(Dir, Name).
 

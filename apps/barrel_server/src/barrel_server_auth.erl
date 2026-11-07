@@ -21,6 +21,9 @@
 %%% hashed (fixed length, no length oracle) and compared with
 %%% crypto:hash_equals/2.
 %%%
+%%% A request presenting a signature is judged by it alone (bearer and
+%%% mTLS never rescue a failed one) and its body must hash to the signed
+%%% content hash. Unsigned requests: capability token, bearer, then mTLS.
 %%% A signed request reaches its handler with the headers its signature
 %%% covers in the request meta; handlers read them through header/2.
 %%% @end
@@ -134,20 +137,53 @@ call(Req, Next, State) ->
             %% tokens plus capability tokens
             Next(Req);
         Path ->
-            %% Capability tokens (bsp_...) are a scoped principal for the
-            %% agent layer and are handled as before, independent of the
-            %% global `accept' set. Everything else must satisfy one of
-            %% the accepted global methods.
-            case livery_ext:bearer_token(Req) of
-                <<"bsp_", _/binary>> = Token ->
-                    capability(Req, Next, Token, Path);
-                _ ->
-                    case authorized(Req, State) of
-                        {true, Req2} -> Next(Req2);
-                        {false, Reason} -> unauthorized(Reason)
-                    end
+            case presented_signature(Req) of
+                {ok, Auth} ->
+                    signed_only(Req, Next, Auth, State);
+                none ->
+                    unsigned(Req, Next, Path, State)
             end
     end.
+
+%% A request presenting a signature is judged by it alone: a failed
+%% signature is never rescued by a bearer token or a client certificate.
+signed_only(Req, Next, Auth, #{accept := Accept} = State) ->
+    case lists:member(signed, Accept) of
+        true ->
+            case try_signed(Req, Auth, State) of
+                {ok, Req2} -> signed_body(Req2, Next);
+                {error, Reason} -> unauthorized(Reason)
+            end;
+        false ->
+            unauthorized()
+    end.
+
+%% Capability tokens (bsp_...) are a scoped principal for the agent layer,
+%% independent of `accept'. Otherwise bearer, then mTLS.
+unsigned(Req, Next, Path, State) ->
+    case livery_ext:bearer_token(Req) of
+        <<"bsp_", _/binary>> = Token ->
+            capability(Req, Next, Token, Path);
+        _ ->
+            case authorized(Req, State) of
+                true -> Next(Req);
+                false -> unauthorized()
+            end
+    end.
+
+%% The first Authorization value using the Signature scheme, whatever
+%% other Authorization headers the request carries.
+presented_signature(Req) ->
+    Values = [V || {<<"authorization">>, V} <- livery_req:headers(Req)],
+    case [V || V <- Values, is_signature(V)] of
+        [Auth | _] -> {ok, Auth};
+        [] -> none
+    end.
+
+is_signature(<<Scheme:10/binary, _/binary>>) ->
+    string:lowercase(Scheme) =:= <<"signature ">>;
+is_signature(_Value) ->
+    false.
 
 %% @doc A request header as authenticated: on a signed request only the
 %% values its signature covers (absent otherwise), else the raw header
@@ -164,33 +200,17 @@ header(Name, Req) ->
             end
     end.
 
-%% `{true, Req}' if any accepted global method authenticates the request,
-%% else `{false, Reason}'.
+%% Whether bearer or mTLS (when accepted) authenticates an unsigned request.
 authorized(Req, #{accept := Accept} = State) ->
-    Signed = case lists:member(signed, Accept) of
-        true -> try_signed(Req, State);
-        false -> {error, unauthorized}
-    end,
-    case Signed of
-        {ok, Req2} ->
-            {true, Req2};
-        {error, Reason} ->
-            case (lists:member(bearer, Accept)
-                  andalso try_bearer(Req, State))
-                 orelse (lists:member(mtls, Accept) andalso mtls_ok(Req)) of
-                true -> {true, Req};
-                false -> {false, Reason}
-            end
-    end.
+    (lists:member(bearer, Accept) andalso try_bearer(Req, State))
+        orelse (lists:member(mtls, Accept) andalso mtls_ok(Req)).
 
 %% Ed25519 signed request: verify the signature, then consume it against
-%% the replay cache. Any failure (no header, unknown key, bad signature,
-%% stale timestamp, replay, or cache down) is a decline.
-try_signed(Req, #{signers := Signers, skew_ms := SkewMs} = State) ->
+%% the replay cache. Any failure (malformed header, unknown key, bad
+%% signature, stale timestamp, replay, or cache down) is a 401.
+try_signed(Req, Auth, #{signers := Signers, skew_ms := SkewMs} = State) ->
     Picked = barrel_sync_sig:pick_headers(livery_req:headers(Req)),
-    case {barrel_sync_sig:parse_auth(
-              livery_req:header(<<"authorization">>, Req, undefined)),
-          Picked} of
+    case {barrel_sync_sig:parse_auth(Auth), Picked} of
         {{ok, #{key_id := KeyId, ts := Ts, sig := Sig} = Parsed},
          {ok, Headers}} ->
             Method = livery_req:method(Req),
@@ -226,6 +246,61 @@ try_signed(Req, #{signers := Signers, skew_ms := SkewMs} = State) ->
         _ ->
             {error, unauthorized}
     end.
+
+%% The body of a signed request must hash to its signed
+%% `x-barrel-content-sha256' before any handler runs. The replication
+%% attachment upload streams instead: its writer checks the same hash as
+%% the content address and aborts the staged upload on a mismatch.
+signed_body(Req, Next) ->
+    Declared = livery_req:header(<<"x-barrel-content-sha256">>, Req,
+                                 undefined),
+    case streamed_upload(livery_req:method(Req), livery_req:path(Req)) of
+        true when Declared =:= undefined ->
+            unauthorized(content_hash_mismatch);
+        true ->
+            Next(Req);
+        false ->
+            case read_body(Req) of
+                {ok, Bin} ->
+                    case content_hash_matches(Declared, Bin) of
+                        true -> Next(livery_req:set_body(body(Bin), Req));
+                        false -> unauthorized(content_hash_mismatch)
+                    end;
+                {error, {limit, max_size}} ->
+                    body_error(413, too_large);
+                {error, _} ->
+                    body_error(400, bad_body)
+            end
+    end.
+
+%% No declared hash is only valid for an empty body.
+content_hash_matches(undefined, Bin) ->
+    Bin =:= <<>>;
+content_hash_matches(Declared, Bin) ->
+    barrel_sync_sig:content_sha256(Bin) =:= Declared.
+
+streamed_upload(<<"PUT">>, Path) ->
+    case binary:split(Path, <<"/">>, [global]) of
+        [<<>>, <<"db">>, _Db, <<"_sync">>, <<"att">>, _Id, _Name] -> true;
+        _ -> false
+    end;
+streamed_upload(_Method, _Path) ->
+    false.
+
+%% Same limits as the handlers' own body reads.
+read_body(Req) ->
+    case livery_req:body(Req) of
+        empty -> {ok, <<>>};
+        {buffered, Io} -> {ok, iolist_to_binary(Io)};
+        {stream, Reader} ->
+            case livery_body:read_all(Reader) of
+                {ok, Bin, _R2} -> {ok, Bin};
+                {error, Reason, _R2} -> {error, Reason}
+            end
+    end.
+
+body(<<>>) -> empty;
+body(Bin) -> {buffered, Bin}.
 
 %% The header values a verified signature vouches for. v3 covers them all.
 %% v1/v2 cover none: they may not carry a header that changes a write, nor
@@ -448,6 +523,12 @@ unauthorized(Reason) ->
         401,
         [{<<"www-authenticate">>, <<"Bearer">>},
          {<<"content-type">>, <<"application/json">>}],
+        {full, json:encode(#{error => atom_to_binary(Reason)})}).
+
+body_error(Status, Reason) ->
+    livery_resp:new(
+        Status,
+        [{<<"content-type">>, <<"application/json">>}],
         {full, json:encode(#{error => atom_to_binary(Reason)})}).
 
 forbidden() ->

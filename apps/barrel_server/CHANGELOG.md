@@ -11,9 +11,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Filtered replication from a server copied every attachment, including those of excluded documents. `_sync/att_changes` now applies the filter.
 - Replicating an attachment the server already held with the same bytes kept its older timestamp, so an older delete could remove it later. The server now records the newer timestamp without receiving the bytes again.
 - A signed request did not cover the headers that decide what a write does, such as an attachment's timestamp, digest, content type and touch marker, the replication clock or document preconditions. Someone able to alter requests in transit could change their effect, for example turn an ignored attachment delete into one that removes the attachment. The server now acts only on signed values and answers 401 when one was changed.
+- Signed requests outside replication were not checked against their signed body hash, so a document, bulk, attachment or context write could have its body replaced in transit. Every signed request with a body is now checked before it is handled and answers 401 `content_hash_mismatch` when the body does not match.
+- When client certificates were accepted, a request whose signature failed still got in through its certificate, and the server then acted on its unsigned headers. A request that presents a signature is now judged by that signature only.
 
 ### Changed
 - Breaking: requests signed with signature v1 or v2 can no longer write attachments or carry the headers above; they are refused with 401 `signature_v3_required`. They still replicate documents, but their clock header is ignored. Upgrade servers first, then clients. Bearer-token requests are unchanged; they rely on HTTPS for integrity.
+- Breaking: a request with a failing signature now answers 401 even when it also carries a valid bearer token or an accepted client certificate. A signed replication request whose body does not match its hash now answers 401 instead of 400. Clients that sign correctly are not affected.
 
 ### Added
 - `PUT /db/:db/_sync/repair/:id` restores the stored bodies of a document's live versions from a healthy copy, without changing its state (write grant). `barrel_rep:reconcile/3` uses it. `_sync/info` reports `read_only` for a read-only database.
