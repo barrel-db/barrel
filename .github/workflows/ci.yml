@@ -9,6 +9,8 @@ name: CI
 #   - server:   network server leg (pulls livery + transports)
 #   - s3:       S3 attachment-backend leg (real RustFS + Garage)
 #   - barrel-lite: TypeScript client (typecheck, build, unit tests)
+#   - package:  each published app's docs and Hex package, built the way
+#               `rebar3 hex publish` does (scripts/check_package.sh)
 # Dev target is OTP 29; CI pins OTP 28 everywhere (image guaranteed, code
 # builds on both), except the leaf/barrel_embed leg, piloting the move to
 # OTP 29 (no NIF, no sibling umbrella deps -- an incompatibility surfaces
@@ -115,6 +117,35 @@ jobs:
     # Note: barrel_vectordb, barrel, and barrel_server have sibling deps, so
     # they are exercised by the umbrella/server jobs. Standalone (hex-resolved)
     # builds for them land with the publishing workflow.
+
+  # Docs and Hex package of every published app, as `rebar3 hex publish`
+  # builds them: a broken doc or a dependency missing from the package fails
+  # here, not at publish time. barrel_faiss needs the FAISS library and is
+  # left to the faiss job.
+  package:
+    name: Package (${{ matrix.app }})
+    runs-on: ubuntu-latest
+    container:
+      image: erlang:28
+    strategy:
+      fail-fast: false
+      matrix:
+        app: [barrel_crypto, barrel_docdb, barrel_vectordb, barrel_embed,
+              barrel_rerank, barrel_ngram, barrel_att_s3, barrel,
+              barrel_spaces, barrel_server]
+    steps:
+      - uses: actions/checkout@v4
+      - name: System dependencies
+        run: |
+          apt-get update
+          apt-get install -y cmake build-essential libssl-dev zlib1g-dev \
+            libsnappy-dev liblz4-dev libzstd-dev python3 python3-venv
+          git config --global --add safe.directory '*'
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/rebar3
+          key: rebar3-package-${{ matrix.app }}-${{ hashFiles(format('apps/{0}/rebar.config', matrix.app)) }}
+      - run: scripts/check_package.sh ${{ matrix.app }}
 
   # barrel_ngram's NIFs built natively with MSVC (no WSL). Sibling apps are
   # copied into _checkouts (symlinks are unreliable on Windows), so a release
