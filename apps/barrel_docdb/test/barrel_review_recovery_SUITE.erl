@@ -185,7 +185,7 @@ killed_with_attachment_stream_reopens(Config) ->
     {ok, _} = barrel_docdb:put_attachment(Db, <<"d">>, <<"b">>, <<"more">>),
     %% the old handle is closed, not shared with the new instance
     Holder ! read,
-    receive {read, R} -> ?assertEqual(closed, R)
+    receive {read, R} -> ?assertEqual({error, db_restarted}, R)
     after 5000 -> ct:fail(no_read)
     end.
 

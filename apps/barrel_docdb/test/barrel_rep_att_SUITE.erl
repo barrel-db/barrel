@@ -21,7 +21,8 @@
          mixed_docs_and_attachments/1,
          floor_forces_resync/1,
          source_lacks_feed_reports_skipped/1,
-         target_lacks_feed_puts_land_without_lww/1]).
+         target_lacks_feed_puts_land_without_lww/1,
+         delete_preserves_staged_upload/1]).
 
 all() ->
     [basic_sync_and_digest_skip,
@@ -33,7 +34,8 @@ all() ->
      mixed_docs_and_attachments,
      floor_forces_resync,
      source_lacks_feed_reports_skipped,
-     target_lacks_feed_puts_land_without_lww].
+     target_lacks_feed_puts_land_without_lww,
+     delete_preserves_staged_upload].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(barrel_docdb),
@@ -252,3 +254,15 @@ target_lacks_feed_puts_land_without_lww(Config) ->
         _ = barrel_docdb:delete_db(Tgt)
     end.
 
+%% A delete removes the published attachment only: an upload staged
+%% before it still publishes when it finishes.
+delete_preserves_staged_upload(Config) ->
+    Db = ?config(src, Config),
+    Data = binary:copy(<<"n">>, 65536),
+    {ok, _} = barrel_docdb:put_attachment(Db, <<"d">>, <<"a">>, <<"old">>),
+    {ok, W0} = barrel_docdb:open_attachment_writer(
+                 Db, <<"d">>, <<"a">>, <<"application/octet-stream">>),
+    {ok, W1} = barrel_docdb:write_attachment_chunk(W0, Data),
+    ok = barrel_docdb:delete_attachment(Db, <<"d">>, <<"a">>),
+    {ok, _} = barrel_docdb:finish_attachment_writer(W1),
+    ?assertEqual({ok, Data}, barrel_docdb:get_attachment(Db, <<"d">>, <<"a">>)).
