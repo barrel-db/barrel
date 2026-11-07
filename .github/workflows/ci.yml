@@ -116,8 +116,9 @@ jobs:
     # they are exercised by the umbrella/server jobs. Standalone (hex-resolved)
     # builds for them land with the publishing workflow.
 
-  # barrel_ngram's NIFs built natively with MSVC (no WSL). Sibling deps come
-  # from hex: symlinked _checkouts are unreliable on Windows.
+  # barrel_ngram's NIFs built natively with MSVC (no WSL). Sibling apps are
+  # copied into _checkouts (symlinks are unreliable on Windows), so a release
+  # that moves barrel_docdb builds before Hex has the new version.
   windows-ngram:
     name: Leaf (barrel_ngram, Windows)
     runs-on: windows-latest
@@ -134,6 +135,12 @@ jobs:
         with:
           path: ~/.cache/rebar3
           key: rebar3-windows-barrel_ngram-${{ hashFiles('apps/barrel_ngram/rebar.config') }}
+      - name: Use the in-repo sibling apps
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force _checkouts | Out-Null
+          Copy-Item -Recurse ../barrel_docdb _checkouts/barrel_docdb
+          Copy-Item -Recurse ../barrel_crypto _checkouts/barrel_crypto
       - name: Compile
         run: rebar3 compile
       - name: Check the NIF DLLs

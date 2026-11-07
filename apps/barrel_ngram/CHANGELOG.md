@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.4] - 2026-11-07
+
+### Changed
+- Requires barrel_docdb `~> 2.0`, whose replication keeps every concurrent write. See the barrel_docdb changelog for its breaking changes.
+
 ## [0.11.3] - 2026-10-06
 
 ### Added
