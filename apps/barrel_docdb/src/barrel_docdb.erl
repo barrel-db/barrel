@@ -202,6 +202,7 @@
 %% Local documents (for checkpoints, not replicated)
 -export([
     put_local_doc/3,
+    put_local_doc/4,
     get_local_doc/2,
     delete_local_doc/2,
     fold_local_docs/4
@@ -2112,6 +2113,15 @@ sweep_ttl(Db) ->
 put_local_doc(Db, DocId, Doc) ->
     with_db(Db, fun(Pid) ->
         barrel_db_server:put_local_doc(Pid, DocId, Doc)
+    end).
+
+%% @doc put_local_doc/3 with options. `sync => true' returns once the
+%% document is on disk, so it survives a power cut.
+-spec put_local_doc(binary() | pid(), binary(), map(), map()) ->
+    ok | {error, term()}.
+put_local_doc(Db, DocId, Doc, Opts) when is_map(Opts) ->
+    with_db(Db, fun(Pid) ->
+        barrel_db_server:put_local_doc(Pid, DocId, Doc, Opts)
     end).
 
 %% @doc Get a local document.

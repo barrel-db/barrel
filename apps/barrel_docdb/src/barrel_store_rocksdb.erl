@@ -36,7 +36,7 @@
 -export([body_multi_get_with_snapshot/3, body_multi_get_with_snapshot/4]).
 
 %% Local document column family operations (no revtree, config/state storage)
--export([local_put/3, local_get/2, local_delete/2, local_fold/4]).
+-export([local_put/3, local_put/4, local_get/2, local_delete/2, local_fold/4]).
 
 %% Wide column (entity) operations
 -export([put_entity/3, put_entity/4, get_entity/2, multi_get_entity/2, delete_entity/2]).
@@ -935,8 +935,13 @@ compact_default_cf(#{ref := Ref, default_cf := DefaultCF}) ->
 
 %% @doc Put a local document
 -spec local_put(db_ref(), binary(), binary()) -> ok | {error, term()}.
-local_put(#{ref := Ref, local_cf := LocalCF}, Key, Value) ->
-    rocksdb:put(Ref, LocalCF, Key, Value, []).
+local_put(DbRef, Key, Value) ->
+    local_put(DbRef, Key, Value, []).
+
+%% @doc Store a local document with write options (`[{sync, true}]').
+-spec local_put(db_ref(), binary(), binary(), list()) -> ok | {error, term()}.
+local_put(#{ref := Ref, local_cf := LocalCF}, Key, Value, Opts) ->
+    rocksdb:put(Ref, LocalCF, Key, Value, Opts).
 
 %% @doc Get a local document
 -spec local_get(db_ref(), binary()) -> {ok, binary()} | not_found | {error, term()}.

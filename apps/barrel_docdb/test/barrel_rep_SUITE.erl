@@ -79,6 +79,7 @@ groups() ->
             task_resumes_after_source_reopen,
             task_user_pause_not_resumed,
             task_restored_opens_source,
+            task_replays_to_rolled_back_target,
             task_survives_stream_end,
             task_stop_ends_stream
         ]}
@@ -1048,6 +1049,29 @@ task_restored_opens_source(Config) ->
         application:unset_env(barrel_docdb, task_db_opener)
     end,
     ok = barrel_rep_tasks:delete_task(TaskId),
+    ok = barrel_docdb:delete_db(Src).
+
+%% A target that loses what it acknowledged (here: dropped and made
+%% again, empty) is caught up: the task finds its marker gone and
+%% replays, although its own position is past every change.
+task_replays_to_rolled_back_target(Config) ->
+    Src = <<"rollback_src">>,
+    Tgt = <<"rollback_tgt">>,
+    TgtDir = ?config(data_dir, Config) ++ "_" ++ binary_to_list(Tgt),
+    _ = open_source(Config, Src),
+    {ok, _} = barrel_docdb:create_db(Tgt, #{data_dir => TgtDir}),
+    {ok, TaskId} = barrel_rep_tasks:start_task(#{source => Src, target => Tgt,
+                                                 mode => continuous,
+                                                 direction => push}),
+    [{ok, _} = barrel_docdb:put_doc(Src, #{<<"id">> => integer_to_binary(I)})
+     || I <- lists:seq(1, 20)],
+    ok = wait_until(doc_in(Tgt, <<"20">>), 50, 600),
+    ok = barrel_docdb:delete_db(Tgt),
+    {ok, _} = barrel_docdb:create_db(Tgt, #{data_dir => TgtDir}),
+    ok = wait_until(doc_in(Tgt, <<"1">>), 100, 300),
+    ok = wait_until(doc_in(Tgt, <<"20">>), 50, 600),
+    ok = barrel_rep_tasks:delete_task(TaskId),
+    ok = barrel_docdb:delete_db(Tgt),
     ok = barrel_docdb:delete_db(Src).
 
 open_for_task(Name) ->

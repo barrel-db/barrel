@@ -1,0 +1,14 @@
+[faults]
+fifo_path="/tmp/faults.fifo"
+
+[cache]
+# never write a page back on its own: only an fsync persists data
+apply_eviction=false
+
+[cache.simple]
+custom_size="2GB"
+blocks_per_page=1
+
+[filesystem]
+log_all_operations=false
+logfile=""

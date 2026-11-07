@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- A continuous replication task whose target lost power never sent again what the target had lost. The task now notices and sends it again.
+- A replication task created just before a power cut could disappear. Creating a task and changing its status now wait for the disk.
 - A continuous replication task restored after a restart stayed paused until something else opened its database. An application can now give the task manager a way to open it (`task_db_opener`), and the task resumes on its own.
 - A deleted version read from history, or sent to a peer, carried the body it had deleted. It now has no body.
 - Replication lost conflicts. Only a document's winner was sent, so a concurrent version stayed on the replica that noticed the conflict, and after 8 later edits it was deleted from the only replica that held it. Replication now sends each document's whole state: every concurrent version reaches every replica and stays until someone resolves it, and a version that was replaced never comes back.
@@ -21,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - After a restart with a clock that had gone back, new changes could sort before a peer's checkpoint and never replicate. They now always sort after every earlier change; a clock that cannot catch up fails the write with `clock_skew`.
 
 ### Added
+- `put_local_doc/4` with `sync => true` writes a local document that survives a power cut.
 - Reads with `conflicts => true` return `_observed`, the versions the read showed. A write or a `resolve_conflict` given that list replaces exactly those versions; a version that arrived after the read stays as a conflict.
 - `resolve_conflict/4` accepts the observed list, and a `delete` resolution.
 - `conflict_resolver`: a function the database runs whenever a document has conflicts. Given an order-independent function, every replica writes the same resolution, so a conflict ends in one version everywhere.

@@ -282,6 +282,15 @@ Subsequent replications automatically resume from the last checkpoint:
 %% R2 shows fewer docs_read than R1
 ```
 
+### Power cuts
+
+Writes return before they reach the disk unless you pass `sync => true`, so a power cut can lose the last writes a database acknowledged, including documents it received by replication. Replication repairs that: a one-shot run starts from the lower of the source's and the target's checkpoints, and a continuous task leaves a marker in its target after each batch, so a target that lost a batch is sent it again. A write lost on the database that made it, before it reached another replica, is gone.
+
+```erlang
+%% a write that must survive a power cut
+{ok, _} = barrel_docdb:put_doc(Db, Doc, #{sync => true}).
+```
+
 ## Transports
 
 ### The Transport Behaviour

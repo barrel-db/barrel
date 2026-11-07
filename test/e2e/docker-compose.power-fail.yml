@@ -1,0 +1,24 @@
+# Two peers whose data directory is on LazyFS (see Dockerfile.lazyfs).
+# FUSE needs a privileged container.
+name: barrel-e2e-power
+
+services:
+  peer-a:
+    build:
+      context: .
+      dockerfile: Dockerfile.lazyfs
+    image: barrel-server-e2e-lazyfs
+    container_name: barrel-e2e-peer-a
+    privileged: true
+    ports:
+      - "8091:8080"
+
+  peer-b:
+    image: barrel-server-e2e-lazyfs
+    container_name: barrel-e2e-peer-b
+    privileged: true
+    depends_on:
+      peer-a:
+        condition: service_started
+    ports:
+      - "8092:8080"
