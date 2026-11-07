@@ -17,7 +17,11 @@
     t_hlc_header/1,
     t_encoded_doc_id/1,
     t_invalid_query_filter/1,
-    t_state_missing_bodies/1
+    t_state_missing_bodies/1,
+    t_att_state/1,
+    t_att_flush/1,
+    t_att_touch/1,
+    t_att_changes_filter/1
 ]).
 
 -include_lib("common_test/include/ct.hrl").
@@ -28,7 +32,8 @@
 all() ->
     [t_info, t_hlc_exchange, t_put_get_version, t_changes_and_filters,
      t_diff, t_local_docs, t_hlc_header, t_encoded_doc_id,
-     t_invalid_query_filter, t_state_missing_bodies].
+     t_invalid_query_filter, t_state_missing_bodies, t_att_state,
+     t_att_flush, t_att_touch, t_att_changes_filter].
 
 init_per_suite(Config) ->
     application:load(barrel_server),
@@ -97,6 +102,8 @@ t_info(Config) ->
     %% floors absent until retention ever swept
     ?assertNot(maps:is_key(<<"history_floor">>, Info)),
     ?assertNot(maps:is_key(<<"att_floor">>, Info)),
+    %% attachment sync capabilities
+    ?assertMatch(#{<<"att_flush">> := true, <<"att_filter">> := true}, Info),
     ok.
 
 t_hlc_exchange(Config) ->
@@ -256,3 +263,91 @@ t_state_missing_bodies(Config) ->
     {200, Got} = req(get, url("/doc/mb1", Config), <<>>),
     ?assertEqual(42, maps:get(<<"valuable">>, maps:get(<<"doc">>, Got))),
     ok = barrel_docdb:delete_db(Src).
+
+%%====================================================================
+%% Attachment sync routes
+%%====================================================================
+
+endpoint(Config) ->
+    barrel_rep_transport_http:endpoint(
+      list_to_binary(base(Config) ++ "/db/" ++ ?DB)).
+
+t_att_state(Config) ->
+    Db = list_to_binary(?DB),
+    {ok, _} = barrel_docdb:put_attachment(Db, <<"sd">>, <<"f">>, <<"x">>),
+    {200, #{<<"op">> := <<"put">>, <<"origin">> := _,
+            <<"digest">> := Digest}} =
+        req(get, url("/att_state/sd/f", Config), <<>>),
+    {ok, #{digest := Digest}} = barrel_docdb:get_attachment_info(Db, <<"sd">>,
+                                                                 <<"f">>),
+    ok = barrel_docdb:delete_attachment(Db, <<"sd">>, <<"f">>),
+    {200, #{<<"op">> := <<"delete">>}} =
+        req(get, url("/att_state/sd/f", Config), <<>>),
+    {404, _} = req(get, url("/att_state/sd/none", Config), <<>>),
+    ?assertMatch({ok, #{op := delete}},
+                 barrel_rep_transport_http:att_state(endpoint(Config),
+                                                     <<"sd">>, <<"f">>)),
+    ?assertEqual({error, not_found},
+                 barrel_rep_transport_http:att_state(endpoint(Config),
+                                                     <<"sd">>, <<"none">>)),
+    ok.
+
+t_att_flush(Config) ->
+    {200, #{<<"ok">> := true}} = req_json(post, url("/att_flush", Config), #{}),
+    ?assertEqual(ok, barrel_rep_transport_http:flush_attachments(
+                       endpoint(Config))),
+    ?assertEqual({ok, #{flush => true, filter => true}},
+                 barrel_rep_transport_http:att_capabilities(endpoint(Config))),
+    ok.
+
+%% A touch records the newer origin only when the stored bytes match.
+t_att_touch(Config) ->
+    Db = list_to_binary(?DB),
+    E = endpoint(Config),
+    {ok, #{digest := Digest}} =
+        barrel_docdb:put_attachment(Db, <<"td">>, <<"f">>, <<"bytes">>),
+    Newer = barrel_hlc:new_hlc(),
+    ?assertEqual({ok, touched},
+                 barrel_rep_transport_http:touch_attachment(
+                   E, <<"td">>, <<"f">>, #{origin => Newer, digest => Digest})),
+    {ok, #{origin := Newer}} = barrel_docdb:att_state(Db, <<"td">>, <<"f">>),
+    ?assertEqual({ok, ignored},
+                 barrel_rep_transport_http:touch_attachment(
+                   E, <<"td">>, <<"f">>, #{origin => Newer, digest => Digest})),
+    ?assertEqual({error, bytes_needed},
+                 barrel_rep_transport_http:touch_attachment(
+                   E, <<"td">>, <<"f">>,
+                   #{origin => barrel_hlc:new_hlc(), digest => <<"other">>})),
+    ?assertEqual({ok, <<"bytes">>},
+                 barrel_docdb:get_attachment(Db, <<"td">>, <<"f">>)),
+    %% the diff answers touch for same bytes under an older origin
+    ?assertMatch({ok, [#{status := touch}]},
+                 barrel_rep_transport_http:diff_attachments(
+                   E, [#{id => <<"td">>, name => <<"f">>, digest => Digest,
+                         origin => barrel_hlc:new_hlc()}])),
+    %% and by digest for a client that sends no origin
+    ?assertMatch({200, #{<<"diff">> := [#{<<"status">> := <<"have">>}]}},
+                 req_json(post, url("/att_diff", Config),
+                          #{attachments => [#{id => <<"td">>, name => <<"f">>,
+                                              digest => Digest}]})),
+    ok.
+
+t_att_changes_filter(Config) ->
+    Db = list_to_binary(?DB),
+    E = endpoint(Config),
+    {ok, _} = barrel_docdb:put_doc(Db, #{<<"id">> => <<"fpub">>,
+                                         <<"type">> => <<"public">>}),
+    {ok, _} = barrel_docdb:put_doc(Db, #{<<"id">> => <<"fpriv">>,
+                                         <<"type">> => <<"private">>}),
+    {ok, _} = barrel_docdb:put_attachment(Db, <<"fpub">>, <<"a">>, <<"1">>),
+    {ok, _} = barrel_docdb:put_attachment(Db, <<"fpriv">>, <<"a">>, <<"2">>),
+    {ok, Entries, _} = barrel_rep_transport_http:att_changes(
+                         E, first, #{filter => #{paths => [<<"type/public">>]}}),
+    Ids = [Id || #{id := Id, op := put} <- Entries],
+    ?assert(lists:member(<<"fpub">>, Ids)),
+    ?assertNot(lists:member(<<"fpriv">>, Ids)),
+    ?assertMatch({error, {http, 400, _}},
+                 barrel_rep_transport_http:att_changes(
+                   E, first, #{filter => #{channel => <<"nope">>}})),
+    {400, _} = req(get, url("/att_changes?filter=a*b", Config), <<>>),
+    ok.

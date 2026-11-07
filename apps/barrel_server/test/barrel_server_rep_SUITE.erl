@@ -25,7 +25,12 @@
     t_registry_grants_over_http/1,
     t_binary_field_round_trip/1,
     t_json_only_client/1,
-    t_unknown_db/1
+    t_unknown_db/1,
+    t_att_filters_over_http/1,
+    t_att_filter_errors_over_http/1,
+    t_att_doc_enters_scope_over_http/1,
+    t_att_empty_page_over_http/1,
+    t_att_touch_over_http/1
 ]).
 
 -include_lib("common_test/include/ct.hrl").
@@ -36,7 +41,9 @@ all() ->
      t_filtered_pull, t_checkpoint_reuse, t_att_sync_rides_along,
      t_continuous_push_over_http, t_continuous_pull_over_http,
      t_registry_grants_over_http, t_binary_field_round_trip,
-     t_json_only_client, t_unknown_db].
+     t_json_only_client, t_unknown_db, t_att_filters_over_http,
+     t_att_filter_errors_over_http, t_att_doc_enters_scope_over_http,
+     t_att_empty_page_over_http, t_att_touch_over_http].
 
 init_per_suite(Config) ->
     application:load(barrel_server),
@@ -384,3 +391,145 @@ put_content_type(DocId) ->
                binary:longest_common_suffix([Url, Suffix])
                    =:= byte_size(Suffix)],
     CT.
+
+%%====================================================================
+%% Attachment filters and origins over the wire
+%%====================================================================
+
+-define(PUBLIC_QUERY, #{where => [{path, [<<"type">>], <<"public">>}]}).
+
+with_channels(Served) ->
+    ok = barrel_server_dbs:close(Served),
+    {ok, _} = barrel_server_dbs:ensure(
+                Served, #{docdb => #{channels =>
+                                         #{<<"public">> => [<<"type/public">>]}}}),
+    ok.
+
+seed_scoped(Served) ->
+    {ok, _} = barrel_docdb:put_doc(Served, #{<<"id">> => <<"pub">>,
+                                             <<"type">> => <<"public">>}),
+    {ok, _} = barrel_docdb:put_doc(Served, #{<<"id">> => <<"priv">>,
+                                             <<"type">> => <<"private">>}),
+    {ok, _} = barrel_docdb:put_attachment(Served, <<"pub">>, <<"a">>,
+                                          <<"public">>),
+    {ok, _} = barrel_docdb:put_attachment(Served, <<"priv">>, <<"a">>,
+                                          <<"private">>),
+    ok.
+
+%% The served source filters its attachment feed: path, query, channel.
+t_att_filters_over_http(Config) ->
+    Served = ?config(served, Config),
+    Endpoint = ?config(endpoint, Config),
+    ok = with_channels(Served),
+    ok = seed_scoped(Served),
+    Dir = filename:join(?config(priv_dir, Config), "local"),
+    lists:foreach(
+      fun({N, Filter}) ->
+          Local = <<"att_filters_http_", (integer_to_binary(N))/binary>>,
+          _ = barrel_docdb:delete_db(Local),
+          {ok, _} = barrel_docdb:create_db(Local, #{data_dir => Dir}),
+          try
+              {ok, R} = barrel_rep:replicate(Endpoint, Local,
+                                             (pull_opts())#{filter => Filter}),
+              ?assertMatch(#{docs_written := 1}, R),
+              ?assertEqual({ok, <<"public">>},
+                           barrel_docdb:get_attachment(Local, <<"pub">>, <<"a">>)),
+              ?assertEqual({error, not_found},
+                           barrel_docdb:get_attachment(Local, <<"priv">>, <<"a">>))
+          after
+              _ = barrel_docdb:delete_db(Local)
+          end
+      end,
+      [{1, #{paths => [<<"type/public">>]}},
+       {2, #{query => ?PUBLIC_QUERY}},
+       {3, #{channel => <<"public">>}}]),
+    ok.
+
+t_att_filter_errors_over_http(Config) ->
+    Local = ?config(local, Config),
+    Served = ?config(served, Config),
+    Endpoint = ?config(endpoint, Config),
+    ok = seed_scoped(Served),
+    ?assertMatch({error, _},
+                 barrel_rep:replicate(Endpoint, Local,
+                                      (pull_opts())#{filter =>
+                                                         #{channel => <<"nope">>}})),
+    %% the attachment phase alone stops on the server's refusal
+    ?assertMatch({error, {http, 400, _}},
+                 barrel_rep_att:sync_from(
+                   Endpoint, Local, barrel_rep_transport_http,
+                   barrel_rep_transport_local, first, fun(_) -> ok end,
+                   #{filter => #{channel => <<"nope">>}})),
+    %% a filter evaluation error stops it too
+    ok = meck:new(barrel_query, [passthrough]),
+    ok = meck:expect(barrel_query, match, fun(_, _) -> error(boom) end),
+    ?assertMatch({error, {http, 400, _}},
+                 barrel_rep_att:sync_from(
+                   Endpoint, Local, barrel_rep_transport_http,
+                   barrel_rep_transport_local, first, fun(_) -> ok end,
+                   #{filter => #{query => ?PUBLIC_QUERY}})),
+    ?assertEqual({error, not_found},
+                 barrel_docdb:get_attachment(Local, <<"priv">>, <<"a">>)),
+    ?assertEqual({error, not_found},
+                 barrel_docdb:get_attachment(Local, <<"pub">>, <<"a">>)),
+    ok.
+
+t_att_doc_enters_scope_over_http(Config) ->
+    Local = ?config(local, Config),
+    Served = ?config(served, Config),
+    Endpoint = ?config(endpoint, Config),
+    Opts = (pull_opts())#{filter => #{query => ?PUBLIC_QUERY}},
+    {ok, _} = barrel_docdb:put_doc(Served, #{<<"id">> => <<"d">>,
+                                             <<"type">> => <<"private">>}),
+    {ok, _} = barrel_docdb:put_attachment(Served, <<"d">>, <<"a">>, <<"kept">>),
+    {ok, _} = barrel_rep:replicate(Endpoint, Local, Opts),
+    ?assertEqual({error, not_found},
+                 barrel_docdb:get_attachment(Local, <<"d">>, <<"a">>)),
+    {ok, Doc} = barrel_docdb:get_doc(Served, <<"d">>),
+    {ok, _} = barrel_docdb:put_doc(Served, Doc#{<<"type">> => <<"public">>}),
+    {ok, _} = barrel_rep:replicate(Endpoint, Local, Opts),
+    ?assertEqual({ok, <<"kept">>},
+                 barrel_docdb:get_attachment(Local, <<"d">>, <<"a">>)),
+    ok.
+
+t_att_empty_page_over_http(Config) ->
+    Local = ?config(local, Config),
+    Served = ?config(served, Config),
+    Endpoint = ?config(endpoint, Config),
+    Opts = (pull_opts())#{filter => #{query => ?PUBLIC_QUERY},
+                          att_batch_size => 2},
+    [{ok, _} = barrel_docdb:put_doc(Served, #{<<"id">> => Id,
+                                              <<"type">> => T})
+     || {Id, T} <- [{<<"p1">>, <<"private">>}, {<<"p2">>, <<"private">>},
+                    {<<"pub">>, <<"public">>}]],
+    {ok, _} = barrel_rep:replicate(Endpoint, Local, Opts),
+    [{ok, _} = barrel_docdb:put_attachment(Served, Id, <<"a">>, Id)
+     || Id <- [<<"p1">>, <<"p2">>, <<"pub">>]],
+    {ok, R} = barrel_rep:replicate(Endpoint, Local, Opts),
+    ?assertMatch(#{atts_written := 1}, maps:get(att_sync, R)),
+    ?assertEqual({ok, <<"pub">>},
+                 barrel_docdb:get_attachment(Local, <<"pub">>, <<"a">>)),
+    ?assertEqual({error, not_found},
+                 barrel_docdb:get_attachment(Local, <<"p1">>, <<"a">>)),
+    ok.
+
+%% Pushed over the wire: same bytes, newer origin, touched not resent;
+%% an older delete then loses on the served side.
+t_att_touch_over_http(Config) ->
+    Local = ?config(local, Config),
+    Served = ?config(served, Config),
+    Endpoint = ?config(endpoint, Config),
+    H1 = barrel_hlc:new_hlc(),
+    H2 = barrel_hlc:new_hlc(),
+    H3 = barrel_hlc:new_hlc(),
+    {ok, _} = barrel_docdb:put_attachment(Served, <<"d">>, <<"a">>, <<"same">>,
+                                          #{origin_hlc => H1}),
+    {ok, _} = barrel_docdb:put_attachment(Local, <<"d">>, <<"a">>, <<"same">>,
+                                          #{origin_hlc => H3}),
+    {ok, R} = barrel_rep:replicate(Local, Endpoint, push_opts()),
+    ?assertMatch(#{atts_touched := 1, atts_written := 0}, maps:get(att_sync, R)),
+    ok = barrel_docdb:delete_attachment(Served, <<"d">>, <<"a">>,
+                                        #{origin_hlc => H2}),
+    ?assertEqual({ok, <<"same">>},
+                 barrel_docdb:get_attachment(Served, <<"d">>, <<"a">>)),
+    ok.

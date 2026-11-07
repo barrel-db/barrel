@@ -22,7 +22,8 @@
          floor_forces_resync/1,
          source_lacks_feed_reports_skipped/1,
          target_lacks_feed_puts_land_without_lww/1,
-         delete_preserves_staged_upload/1]).
+         delete_preserves_staged_upload/1,
+         same_bytes_preserve_origin/1]).
 
 all() ->
     [basic_sync_and_digest_skip,
@@ -35,7 +36,8 @@ all() ->
      floor_forces_resync,
      source_lacks_feed_reports_skipped,
      target_lacks_feed_puts_land_without_lww,
-     delete_preserves_staged_upload].
+     delete_preserves_staged_upload,
+     same_bytes_preserve_origin].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(barrel_docdb),
@@ -172,12 +174,13 @@ floor_forces_resync(Config) ->
     Src = <<"floor_src2">>,
     Tgt = ?config(tgt, Config),
     {ok, _} = barrel_docdb:create_db(Src, #{data_dir => Dir,
-                                            retention_period => 1}),
+                                            retention_period => 1,
+                                            tombstone_purge_after => 1}),
     try
         {ok, _} = barrel_docdb:put_attachment(Src, <<"d">>, <<"keep">>,
                                               <<"kept">>),
         {ok, _} = barrel_rep:replicate(Src, Tgt),
-        %% a delete swept past the window moves the floor above the
+        %% a delete purged past the window moves the floor above the
         %% target's checkpoint
         {ok, _} = barrel_docdb:put_attachment(Src, <<"d">>, <<"gone">>,
                                               <<"bye">>),
@@ -245,7 +248,11 @@ target_lacks_feed_puts_land_without_lww(Config) ->
         {ok, _} = barrel_docdb:put_attachment(Tgt, <<"d">>, <<"f">>, <<"new">>),
         %% the source has an older value for the same attachment
         {ok, _} = barrel_docdb:put_attachment(Src, <<"d">>, <<"f">>, <<"old">>),
-        {ok, R} = barrel_rep:replicate(Src, Tgt),
+        %% a target that cannot sync fails the default durability
+        ?assertEqual({error, {att_sync_failed, att_flush_unsupported}},
+                     barrel_rep:replicate(Src, Tgt)),
+        {ok, R} = barrel_rep:replicate(Src, Tgt,
+                                       #{att_durability => best_effort}),
         ?assertMatch(#{atts_written := 1}, att_stats(R)),
         ?assertEqual({ok, <<"old">>},
                      barrel_docdb:get_attachment(Tgt, <<"d">>, <<"f">>))
@@ -266,3 +273,22 @@ delete_preserves_staged_upload(Config) ->
     ok = barrel_docdb:delete_attachment(Db, <<"d">>, <<"a">>),
     {ok, _} = barrel_docdb:finish_attachment_writer(W1),
     ?assertEqual({ok, Data}, barrel_docdb:get_attachment(Db, <<"d">>, <<"a">>)).
+
+%% Same bytes under a newer origin: the target records the origin, so
+%% an older delete loses against it.
+same_bytes_preserve_origin(Config) ->
+    Src = ?config(src, Config),
+    Tgt = ?config(tgt, Config),
+    H1 = barrel_hlc:new_hlc(),
+    H2 = barrel_hlc:new_hlc(),
+    H3 = barrel_hlc:new_hlc(),
+    {ok, _} = barrel_docdb:put_attachment(Tgt, <<"d">>, <<"a">>, <<"same">>,
+                                          #{origin_hlc => H1}),
+    {ok, _} = barrel_docdb:put_attachment(Src, <<"d">>, <<"a">>, <<"same">>,
+                                          #{origin_hlc => H3}),
+    {ok, R} = barrel_rep:replicate(Src, Tgt),
+    ?assertMatch(#{atts_touched := 1, atts_written := 0}, att_stats(R)),
+    ok = barrel_docdb:delete_attachment(Tgt, <<"d">>, <<"a">>,
+                                        #{origin_hlc => H2}),
+    ?assertEqual({ok, <<"same">>},
+                 barrel_docdb:get_attachment(Tgt, <<"d">>, <<"a">>)).

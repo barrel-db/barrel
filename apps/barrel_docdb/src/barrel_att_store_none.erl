@@ -48,6 +48,7 @@
 -export([write_chunk/2, finish_stream/1, abort_stream/1]).
 -export([get_stream/4, read_chunk/1, close_stream/1]).
 -export([rebuild_feed/2]).
+-export([flush/1]).
 
 %% @doc No RocksDB instance, no directory. With `purge_existing => true',
 %% a stale store left at `Path' by a previous backend is removed.
@@ -67,6 +68,10 @@ purge(Path) ->
 
 -spec close(map()) -> ok.
 close(_AttRef) -> ok.
+
+%% @doc Nothing is ever written, so nothing waits on a sync.
+-spec flush(map()) -> ok.
+flush(_AttRef) -> ok.
 
 -spec put(map(), binary(), binary(), binary(), binary()) -> {error, attachments_disabled}.
 put(_AttRef, _DbName, _DocId, _AttName, _Data) -> {error, attachments_disabled}.

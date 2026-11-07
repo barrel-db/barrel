@@ -27,6 +27,9 @@
     delete_local/1,
     att_changes/1,
     att_diff/1,
+    att_state/1,
+    att_list/1,
+    att_flush/1,
     get_att/1,
     put_att/1,
     delete_att/1
@@ -36,6 +39,7 @@
 -define(HLC_HEADER, <<"x-barrel-hlc">>).
 -define(DIGEST_HEADER, <<"x-barrel-digest">>).
 -define(ORIGIN_HEADER, <<"x-barrel-att-origin">>).
+-define(TOUCH_HEADER, <<"x-barrel-att-touch">>).
 -define(BODY_READ_TIMEOUT, 30000).
 
 %%====================================================================
@@ -55,7 +59,15 @@ info(Req) ->
                 WithAtt = maybe_put(att_floor,
                                     maps:get(att_floor, Info, undefined),
                                     WithHist),
-                json_resp(Req, 200, WithAtt);
+                %% att_flush: POST _sync/att_flush syncs attachment
+                %% writes; att_filter: att_changes applies a filter
+                Caps = case barrel_docdb:att_capabilities(DbBin) of
+                    {ok, #{flush := Flush, filter := Filter}} ->
+                        #{att_flush => Flush, att_filter => Filter};
+                    _ ->
+                        #{}
+                end,
+                json_resp(Req, 200, maps:merge(WithAtt, Caps));
             {error, Reason} ->
                 error_resp(Req, Reason)
         end
@@ -242,9 +254,10 @@ delete_local(Req) ->
 att_changes(Req) ->
     with_sync_db(Req, fun(DbBin) ->
         case att_changes_params(Req) of
-            {ok, Since, Limit} ->
+            {ok, Since, Limit, Filter} ->
                 case barrel_docdb:att_changes(DbBin, Since,
-                                              #{limit => Limit}) of
+                                              #{limit => Limit,
+                                                filter => Filter}) of
                     {ok, Entries, LastSeq} ->
                         json_resp(Req, 200, #{
                             changes =>
@@ -254,11 +267,15 @@ att_changes(Req) ->
                     {error, att_sync_unsupported} ->
                         json_resp(Req, 501,
                                   #{error => <<"att_sync_unsupported">>});
+                    {error, not_found} ->
+                        error_resp(Req, not_found);
                     {error, Reason} ->
-                        error_resp(Req, Reason)
+                        %% an unknown channel or a bad query: the
+                        %% client stops instead of widening
+                        json_resp(Req, 400, #{error => err_bin(Reason)})
                 end;
-            error ->
-                json_resp(Req, 400, #{error => <<"bad_since">>})
+            {error, Field} ->
+                json_resp(Req, 400, #{error => Field})
         end
     end).
 
@@ -268,7 +285,9 @@ att_diff(Req) ->
             case att_diff_input(maps:get(<<"attachments">>, Body,
                                          undefined)) of
                 {ok, Entries} ->
-                    case barrel_docdb:diff_attachments(DbBin, Entries) of
+                    Touch = maps:get(<<"touch">>, Body, false) =:= true,
+                    case barrel_docdb:diff_attachments(DbBin, Entries,
+                                                       #{touch => Touch}) of
                         {ok, Diff} ->
                             json_resp(Req, 200, #{diff =>
                                 [#{id => Id, name => Name,
@@ -282,6 +301,61 @@ att_diff(Req) ->
                     json_resp(Req, 400, #{error => <<"bad_json">>})
             end
         end)
+    end).
+
+%% The feed index state of one attachment (deletes included).
+att_state(Req) ->
+    with_sync_db(Req, fun(DbBin) ->
+        DocId = binding(<<"id">>, Req),
+        AttName = binding(<<"name">>, Req),
+        case barrel_docdb:att_state(DbBin, DocId, AttName) of
+            {ok, #{origin := Origin, op := Op, digest := Digest}} ->
+                json_resp(Req, 200, #{origin => hlc_to_wire(Origin),
+                                      op => atom_to_binary(Op, utf8),
+                                      digest => Digest});
+            {error, unsupported} ->
+                json_resp(Req, 501, #{error => <<"att_sync_unsupported">>});
+            {error, Reason} ->
+                error_resp(Req, Reason)
+        end
+    end).
+
+%% Current attachment entries of the given documents.
+att_list(Req) ->
+    with_sync_db(Req, fun(DbBin) ->
+        with_json(Req, fun(Body) ->
+            case maps:get(<<"ids">>, Body, undefined) of
+                Ids when is_list(Ids) ->
+                    case lists:all(fun is_binary/1, Ids) andalso
+                         barrel_docdb:att_list(DbBin, Ids) of
+                        false ->
+                            json_resp(Req, 400, #{error => <<"bad_json">>});
+                        {ok, Entries} ->
+                            json_resp(Req, 200, #{attachments =>
+                                [att_entry_to_wire(E) || E <- Entries]});
+                        {error, unsupported} ->
+                            json_resp(Req, 501,
+                                      #{error => <<"att_sync_unsupported">>});
+                        {error, Reason} ->
+                            error_resp(Req, Reason)
+                    end;
+                _ ->
+                    json_resp(Req, 400, #{error => <<"bad_json">>})
+            end
+        end)
+    end).
+
+%% Answers 200 only once the attachment writes are synced.
+att_flush(Req) ->
+    with_sync_db(Req, fun(DbBin) ->
+        case barrel_docdb:flush_attachments(DbBin) of
+            ok ->
+                json_resp(Req, 200, #{ok => true});
+            {error, unsupported} ->
+                json_resp(Req, 501, #{error => <<"att_flush_unsupported">>});
+            {error, Reason} ->
+                error_resp(Req, Reason)
+        end
     end).
 
 %% Raw octets out, chunk by chunk; the status is decided before the
@@ -362,7 +436,13 @@ put_att(Req) ->
         AttName = binding(<<"name">>, Req),
         ContentType = livery_req:header(<<"content-type">>, Req,
                                         <<"application/octet-stream">>),
+        Touch = livery_req:header(?TOUCH_HEADER, Req, undefined),
         case att_write_opts(Req) of
+            {ok, #{origin_hlc := _, expected_digest := _} = Opts}
+                    when Touch =/= undefined ->
+                touch_att(DbBin, DocId, AttName, Opts, Req);
+            {ok, _} when Touch =/= undefined ->
+                json_resp(Req, 400, #{error => <<"bad_touch">>});
             {ok, Opts} ->
                 case barrel_docdb:open_attachment_writer(
                          DbBin, DocId, AttName, ContentType, Opts) of
@@ -375,6 +455,23 @@ put_att(Req) ->
                 json_resp(Req, 400, #{error => <<"bad_origin">>})
         end
     end).
+
+%% A touch: the stored bytes get the newer origin when their digest
+%% matches; otherwise 412 asks for the bytes.
+touch_att(DbBin, DocId, AttName, #{origin_hlc := Origin,
+                                   expected_digest := Digest}, Req) ->
+    case barrel_docdb:touch_attachment(DbBin, DocId, AttName,
+                                       #{origin_hlc => Origin,
+                                         digest => Digest}) of
+        {ok, touched} ->
+            json_resp(Req, 200, #{ok => <<"touched">>});
+        {ok, ignored} ->
+            json_resp(Req, 200, #{ok => <<"ignored">>});
+        {error, bytes_needed} ->
+            json_resp(Req, 412, #{error => <<"bytes_needed">>});
+        {error, Reason} ->
+            error_resp(Req, Reason)
+    end.
 
 att_write_opts(Req) ->
     %% Bind the body to the SIGNED content hash. x-barrel-content-sha256 is
@@ -570,9 +667,30 @@ att_changes_params(Req) ->
         {_, S} -> S;
         false -> <<"first">>
     end,
-    case seq_from_wire(SinceWire) of
-        {ok, Since} -> {ok, Since, Limit};
-        error -> error
+    case {seq_from_wire(SinceWire), att_filter(Params)} of
+        {{ok, Since}, {ok, Filter}} -> {ok, Since, Limit, Filter};
+        {error, _} -> {error, <<"bad_since">>};
+        {_, error} -> {error, <<"bad_filter">>}
+    end.
+
+%% base64url JSON of barrel_rep_filter:to_wire/1.
+att_filter(Params) ->
+    case lists:keyfind(<<"filter">>, 1, Params) of
+        false ->
+            {ok, #{}};
+        {_, B64} ->
+            try json:decode(base64:decode(B64, #{mode => urlsafe,
+                                                 padding => false})) of
+                Wire when is_map(Wire) ->
+                    case barrel_rep_filter:from_wire(Wire) of
+                        {ok, Filter} -> {ok, Filter};
+                        {error, _} -> error
+                    end;
+                _ ->
+                    error
+            catch
+                _:_ -> error
+            end
     end.
 
 query_params(Req) ->
@@ -582,16 +700,25 @@ query_params(Req) ->
     end.
 
 att_diff_input(List) when is_list(List) ->
-    Decoded = [#{id => Id, name => Name, digest => Digest}
+    Decoded = [with_origin(E, #{id => Id, name => Name, digest => Digest})
                || #{<<"id">> := Id, <<"name">> := Name,
-                    <<"digest">> := Digest} <- List,
+                    <<"digest">> := Digest} = E <- List,
                   is_binary(Id), is_binary(Name), is_binary(Digest)],
-    case length(Decoded) =:= length(List) of
+    case length(Decoded) =:= length(List)
+         andalso not lists:member(error, Decoded) of
         true -> {ok, Decoded};
         false -> error
     end;
 att_diff_input(_) ->
     error.
+
+%% An older client sends no origin: the diff is then by digest.
+with_origin(#{<<"origin">> := B64}, Entry) ->
+    try Entry#{origin => barrel_hlc:decode(base64:decode(B64))}
+    catch _:_ -> error
+    end;
+with_origin(_, Entry) ->
+    Entry.
 
 %%====================================================================
 %% Request plumbing

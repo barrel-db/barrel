@@ -139,6 +139,12 @@
     att_changes/3,
     att_floor/1,
     diff_attachments/2,
+    diff_attachments/3,
+    touch_attachment/4,
+    att_state/3,
+    att_list/2,
+    flush_attachments/1,
+    att_capabilities/1,
     rebuild_attachment_feed/1,
     read_attachment_chunk/1,
     close_attachment_stream/1,
@@ -1341,7 +1347,9 @@ get_attachment_info(Db, DocId, AttName) ->
 %% @doc Attachment feed entries since an HLC (exclusive), in write
 %% order. One entry per attachment: op put or delete, digest, length,
 %% content_type, seq (feed HLC) and origin (the LWW timestamp).
-%% Options: limit.
+%% Options: limit, filter (a replication filter: paths, query or
+%% channel; puts pass when their document does, deletes always pass).
+%% A filtered page can be empty while its last seq moves on.
 -spec att_changes(binary() | pid(), barrel_hlc:timestamp() | first) ->
     {ok, [map()], barrel_hlc:timestamp() | first} | {error, term()}.
 att_changes(Db, Since) ->
@@ -1351,11 +1359,38 @@ att_changes(Db, Since) ->
                   map()) ->
     {ok, [map()], barrel_hlc:timestamp() | first} | {error, term()}.
 att_changes(Db, Since, Opts) ->
-    with_att(Db, fun(AttRef, DbName) ->
+    Filter = maps:get(filter, Opts, #{}),
+    Page = with_att(Db, fun(AttRef, DbName) ->
         case barrel_att_store:supports_sync(AttRef) of
-            true -> barrel_att_store:att_changes(AttRef, DbName, Since, Opts);
+            true -> barrel_att_store:att_changes(AttRef, DbName, Since,
+                                                 maps:remove(filter, Opts));
             false -> {error, att_sync_unsupported}
         end
+    end),
+    case Page of
+        {ok, Entries, LastSeq} when map_size(Filter) > 0 ->
+            filter_att_entries(Db, Filter, Entries, LastSeq);
+        Other ->
+            Other
+    end.
+
+filter_att_entries(Db, Filter, Entries, LastSeq) ->
+    Ids = lists:usort([Id || #{op := put, id := Id} <- Entries]),
+    case filter_doc_ids(Db, Filter, Ids) of
+        {ok, Passing} ->
+            Keep = sets:from_list(Passing, [{version, 2}]),
+            {ok, [E || #{op := Op, id := Id} = E <- Entries,
+                       Op =:= delete orelse sets:is_element(Id, Keep)],
+             LastSeq};
+        {error, _} = Error ->
+            Error
+    end.
+
+filter_doc_ids(Db, Filter, Ids) ->
+    with_db(Db, fun(Pid) ->
+        {ok, StoreRef} = barrel_db_server:get_store_ref(Pid),
+        {ok, #{name := DbName}} = barrel_db_server:info(Pid),
+        barrel_changes:filter_doc_ids(StoreRef, DbName, Filter, Ids)
     end).
 
 %% @doc Oldest HLC the attachment feed is complete from (undefined
@@ -1370,24 +1405,122 @@ att_floor(Db) ->
         end
     end).
 
-%% @doc Digest diff: which of the offered attachments does this
-%% database already hold with the same content?
+%% @doc Which offered attachments does this database still need?
+%% Entries carrying an `origin' are compared under last-write-wins:
+%% `have' when this database already covers the offered state, `touch'
+%% when it holds the same bytes under an older origin (see
+%% touch_attachment/4), `missing' otherwise. Entries without an origin
+%% are compared by digest only.
 -spec diff_attachments(binary() | pid(),
                        [#{id := binary(), name := binary(),
-                          digest := binary()}]) ->
+                          digest := binary(), origin => term()}]) ->
     {ok, [#{id := binary(), name := binary(),
-            status := have | missing}]} | {error, term()}.
+            status := have | missing | touch}]} | {error, term()}.
 diff_attachments(Db, Entries) ->
+    diff_attachments(Db, Entries, #{touch => true}).
+
+%% @doc diff_attachments/2; `touch => false' answers `missing' where it
+%% would answer `touch' (a caller that cannot touch).
+-spec diff_attachments(binary() | pid(), [map()], map()) ->
+    {ok, [map()]} | {error, term()}.
+diff_attachments(Db, Entries, Opts) ->
     with_att(Db, fun(AttRef, DbName) ->
+        Touch = maps:get(touch, Opts, false)
+            andalso barrel_att_store:supports_touch(AttRef),
         {ok, [begin
-                  #{id := Id, name := Name, digest := Digest} = Entry,
-                  Status = case barrel_att_store:get_info(
-                                    AttRef, DbName, Id, Name) of
-                      {ok, #{digest := Digest}} -> have;
-                      _ -> missing
-                  end,
-                  #{id => Id, name => Name, status => Status}
+                  #{id := Id, name := Name} = Entry,
+                  #{id => Id, name => Name,
+                    status => att_status(AttRef, DbName, Entry, Touch)}
               end || Entry <- Entries]}
+    end).
+
+att_status(AttRef, DbName, #{id := Id, name := Name, digest := Digest,
+                             origin := Origin}, Touch) ->
+    case barrel_att_store:att_state(AttRef, DbName, Id, Name) of
+        {ok, #{origin := StoredOrigin, digest := StoredDigest, op := Op}} ->
+            case barrel_att_feed:lww(StoredOrigin, StoredDigest, Origin,
+                                     Digest) of
+                ignored -> have;
+                apply when Op =:= put, StoredDigest =:= Digest ->
+                    same_bytes(Touch);
+                apply -> missing
+            end;
+        not_found ->
+            missing;
+        unsupported ->
+            digest_status(AttRef, DbName, Id, Name, Digest)
+    end;
+att_status(AttRef, DbName, #{id := Id, name := Name, digest := Digest},
+           _Touch) ->
+    digest_status(AttRef, DbName, Id, Name, Digest).
+
+same_bytes(true) -> touch;
+same_bytes(false) -> missing.
+
+digest_status(AttRef, DbName, Id, Name, Digest) ->
+    case barrel_att_store:get_info(AttRef, DbName, Id, Name) of
+        {ok, #{digest := Digest}} -> have;
+        _ -> missing
+    end.
+
+%% @doc Record a replicated state whose bytes this database already
+%% holds: Opts carries `origin_hlc' and `digest'. Answers `{ok, touched}',
+%% `{ok, ignored}' (a newer state is stored) or `{error, bytes_needed}'
+%% when the stored bytes differ.
+-spec touch_attachment(binary() | pid(), binary(), binary(), map()) ->
+    {ok, touched | ignored} | {error, term()}.
+touch_attachment(Db, DocId, AttName, Opts) ->
+    with_att_write(Db, fun(AttRef, DbName) ->
+        case barrel_att_store:touch(AttRef, DbName, DocId, AttName, Opts) of
+            {error, unsupported} -> {error, bytes_needed};
+            Other -> Other
+        end
+    end).
+
+%% @doc Current state of one attachment in the feed index: `origin',
+%% `op' (put or delete), `digest', `length', `content_type'.
+-spec att_state(binary() | pid(), binary(), binary()) ->
+    {ok, map()} | {error, not_found | unsupported | term()}.
+att_state(Db, DocId, AttName) ->
+    with_att(Db, fun(AttRef, DbName) ->
+        case barrel_att_store:att_state(AttRef, DbName, DocId, AttName) of
+            {ok, State} -> {ok, (maps:remove(seq, State))#{id => DocId,
+                                                          name => AttName}};
+            not_found -> {error, not_found};
+            unsupported -> {error, unsupported}
+        end
+    end).
+
+%% @doc Current feed index entries of the given documents' attachments
+%% (deletes included), shaped like att_changes/3 entries.
+-spec att_list(binary() | pid(), [binary()]) ->
+    {ok, [map()]} | {error, term()}.
+att_list(Db, DocIds) ->
+    with_att(Db, fun(AttRef, DbName) ->
+        att_list_docs(AttRef, DbName, DocIds, [])
+    end).
+
+att_list_docs(_AttRef, _DbName, [], Acc) ->
+    {ok, lists:append(lists:reverse(Acc))};
+att_list_docs(AttRef, DbName, [DocId | Rest], Acc) ->
+    case barrel_att_store:att_list(AttRef, DbName, DocId) of
+        {ok, Entries} -> att_list_docs(AttRef, DbName, Rest, [Entries | Acc]);
+        {error, _} = Error -> Error
+    end.
+
+%% @doc Make every acknowledged attachment write of this database
+%% durable. `{error, unsupported}' for a backend that cannot.
+-spec flush_attachments(binary() | pid()) -> ok | {error, term()}.
+flush_attachments(Db) ->
+    with_att(Db, fun(AttRef, _DbName) -> barrel_att_store:flush(AttRef) end).
+
+%% @doc What this database's attachment replication supports:
+%% `flush' (flush_attachments/1) and `filter' (filtered att_changes/3).
+-spec att_capabilities(binary() | pid()) -> {ok, map()} | {error, term()}.
+att_capabilities(Db) ->
+    with_att(Db, fun(AttRef, _DbName) ->
+        {ok, #{flush => barrel_att_store:supports_flush(AttRef),
+               filter => true}}
     end).
 
 %% @doc Maintenance: synthesize feed rows for attachments written

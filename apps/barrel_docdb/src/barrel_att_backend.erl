@@ -105,6 +105,26 @@
 -callback rebuild_feed(AttRef :: map(), DbName :: binary()) ->
     {ok, map()} | {error, term()}.
 
+%% Current feed index entry of one attachment (deletes included).
+-callback att_state(AttRef :: map(), DbName :: binary(), DocId :: binary(),
+                    AttName :: binary()) ->
+    {ok, map()} | not_found.
+
+%% Current feed index entries of one document's attachments.
+-callback att_list(AttRef :: map(), DbName :: binary(), DocId :: binary()) ->
+    [map()].
+
+%% Record a newer origin for bytes already stored (digest must match),
+%% without sending them again. Answers {error, bytes_needed} otherwise.
+-callback touch(AttRef :: map(), DbName :: binary(), DocId :: binary(),
+                AttName :: binary(), Opts :: map()) ->
+    {ok, touched} | {ok, ignored} | {error, term()}.
+
+%% Make every acknowledged write durable (replication checkpoints wait
+%% on it). Backends without it cannot be a target under att_durability
+%% required.
+-callback flush(AttRef :: map()) -> ok | {error, term()}.
+
 %% Hard-link snapshot of the whole attachment store into a new
 %% directory (timeline forks). Backends without it cannot be branched.
 -callback checkpoint(AttRef :: map(), Path :: string()) ->
@@ -139,6 +159,10 @@
                        AttName :: binary(), Opts :: map()) ->
     {commit, Commit :: term()}.
 
+-callback stage_touch(AttRef :: map(), DbName :: binary(), DocId :: binary(),
+                      AttName :: binary(), Opts :: map()) ->
+    {commit, Commit :: term()}.
+
 -callback commit(AttRef :: map(), Commit :: term(),
                  Alloc :: fun((term()) -> term())) ->
     {ok, map()} | {ok, ignored} | ok | {error, term()}.
@@ -157,5 +181,7 @@
 -optional_callbacks([delete/5, att_changes/4, att_floor/2,
                      sweep_att_feed/3, rebuild_feed/2, checkpoint/2,
                      destroy/2, seek_stream/2,
-                     stage_put/6, stage_finish/1, stage_delete/5, commit/3,
+                     att_state/4, att_list/3, touch/5, flush/1,
+                     stage_put/6, stage_finish/1, stage_delete/5,
+                     stage_touch/5, commit/3,
                      rebuild_feed/3, gc_uploads/3]).

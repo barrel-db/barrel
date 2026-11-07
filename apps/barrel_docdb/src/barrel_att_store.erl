@@ -47,6 +47,8 @@
 -export([delete/5, att_changes/4, att_floor/2, att_last_hlc/2,
          sweep_att_feed/3,
          rebuild_feed/2, supports_sync/1]).
+-export([att_state/4, att_list/3, touch/5, supports_touch/1,
+         flush/1, supports_flush/1]).
 -export([checkpoint/2]).
 -export([destroy/2]).
 -export([gc_uploads/3]).
@@ -381,6 +383,66 @@ gc_uploads(AttRef, DbName, MaxAgeMs) ->
         true -> B:gc_uploads(AttRef, barrel_keyspace:resolve(DbName), MaxAgeMs);
         false -> {ok, #{uploads_removed => 0}}
     end.
+
+%% @doc Current feed index entry of one attachment; `unsupported' for
+%% a backend without a feed index.
+-spec att_state(att_ref(), binary(), binary(), binary()) ->
+    {ok, map()} | not_found | unsupported.
+att_state(AttRef, DbName, DocId, AttName) ->
+    B = backend(AttRef),
+    case exported(B, att_state, 4) of
+        true -> B:att_state(AttRef, barrel_keyspace:resolve(DbName), DocId,
+                            AttName);
+        false -> unsupported
+    end.
+
+%% @doc Current feed index entries of one document's attachments.
+-spec att_list(att_ref(), binary(), binary()) ->
+    {ok, [map()]} | {error, unsupported}.
+att_list(AttRef, DbName, DocId) ->
+    B = backend(AttRef),
+    case exported(B, att_list, 3) of
+        true -> {ok, B:att_list(AttRef, barrel_keyspace:resolve(DbName), DocId)};
+        false -> {error, unsupported}
+    end.
+
+%% @doc Record a newer origin for bytes already stored (Opts:
+%% origin_hlc, digest). {error, bytes_needed} when the stored digest
+%% differs, {error, unsupported} for a backend without it.
+-spec touch(att_ref(), binary(), binary(), binary(), map()) ->
+    {ok, touched} | {ok, ignored} | {error, term()}.
+touch(AttRef, DbName, DocId, AttName, Opts) ->
+    B = backend(AttRef),
+    Ks = barrel_keyspace:resolve(DbName),
+    case {staged(AttRef) andalso exported(B, stage_touch, 5),
+          exported(B, touch, 5)} of
+        {true, _} ->
+            commit_staged(AttRef, B:stage_touch(AttRef, Ks, DocId, AttName,
+                                                Opts));
+        {false, true} ->
+            B:touch(AttRef, Ks, DocId, AttName, Opts);
+        {false, false} ->
+            {error, unsupported}
+    end.
+
+-spec supports_touch(att_ref()) -> boolean().
+supports_touch(AttRef) ->
+    B = backend(AttRef),
+    exported(B, touch, 5) orelse exported(B, stage_touch, 5).
+
+%% @doc Make every acknowledged attachment write durable.
+%% {error, unsupported} for a backend without it.
+-spec flush(att_ref()) -> ok | {error, term()}.
+flush(AttRef) ->
+    B = backend(AttRef),
+    case exported(B, flush, 1) of
+        true -> B:flush(AttRef);
+        false -> {error, unsupported}
+    end.
+
+-spec supports_flush(att_ref()) -> boolean().
+supports_flush(AttRef) ->
+    exported(backend(AttRef), flush, 1).
 
 %% @doc Whether this database's backend supports attachment sync.
 -spec supports_sync(att_ref()) -> boolean().

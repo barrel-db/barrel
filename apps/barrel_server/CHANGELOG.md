@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Merging a document state that names a version without its body now answers 400 instead of storing an empty document.
 - A changes request whose query filter does not compile now answers 400 instead of returning every document.
+- Filtered replication from a server copied every attachment, including those of excluded documents. `_sync/att_changes` now applies the filter.
+- Replicating an attachment the server already held with the same bytes kept its older timestamp, so an older delete could remove it later. The server now records the newer timestamp without receiving the bytes again.
+
+### Added
+- `GET /db/:db/_sync/att_state/:id/:name` and `POST /db/:db/_sync/att_list` report attachment states (read grant); `POST /db/:db/_sync/att_flush` answers once attachment writes are durable (write grant). `_sync/info` reports `att_flush` and `att_filter`, `_sync/att_changes` takes a `filter`, and `_sync/att_diff` compares timestamps when the client sends them.
 
 ## [1.12.0] - 2026-11-07
 

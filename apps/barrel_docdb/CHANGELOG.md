@@ -27,14 +27,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - After the clock went back, for example a restarted clock process or a node clock reset, new attachment changes could be placed before a replication checkpoint and never sync. Feed positions now always move forward, and a database whose clock cannot catch up refuses writes with a clock skew error instead, keeping its data.
 - An attachment stream or upload kept open across a database restart crashed the caller. It now returns `{error, db_restarted}` and the upload publishes nothing.
 - A small attachment whose bytes looked like the store's internal chunk metadata read back empty. It now reads back exactly as written.
+- A failed attachment transfer during replication was counted and then skipped: the checkpoint moved past it and later runs never retried it. A failure now stops the attachment phase with an error, the checkpoint stays before it, and the next run sends it again. An attachment missing at the source is skipped only when a later delete or write replaced it.
+- An unreadable attachment checkpoint restarted the attachment feed from the beginning, and a failed checkpoint write crashed the run. Both now end the run with an error before or after the transfers, and a retry converges.
+- Replicating an attachment the target already held with the same bytes kept the target's older timestamp, so an older delete could later remove it. The target now records the newer timestamp, without the bytes being sent again.
+- A bidirectional replication task shared one attachment position between its two directions and could skip attachments from either side. Each direction now keeps its own position, and existing tasks restart their attachment sync once.
+- Attachment deletes were dropped from the change feed after the retention period, so a replica resyncing from the start kept attachments deleted on the source. Deletes now stay until `tombstone_purge_after`, like document deletes, and are kept for good when it is 0.
+- A filtered replication copied every attachment, including those of documents the filter excluded. Attachments now follow the document filter (paths, query, channel), a document that enters the filter brings its existing attachments, and an unknown channel or a filter error stops the run.
 
 ### Changed
 - Breaking: replication tasks refuse inline credentials (`auth`, `signing`, `ssl_options`, `headers`, or a user and password in the URL). Configure them in the app env instead. A one-shot replication also refuses a URL with a user and password.
+- Breaking: attachment replication now waits for the target to make its writes durable before each checkpoint (`att_durability => required`, the default), so a power loss on the target can no longer lose attachments a run reported as copied. A target that cannot do this fails the run with `att_flush_unsupported`; set `att_durability => best_effort` to replicate to it anyway, without that guarantee.
+- A filtered replication from a server that cannot filter attachments now fails with `att_filter_unsupported` instead of copying them all.
 
 ### Added
 - `barrel_docdb:reopen_db/1` restarts a failed database with its last config.
 - The `att_upload_timeout` database option (seconds, default 3600): uploads left unfinished for longer are removed when the database opens and every `retention_check_interval`, also when retention is off. Finishing one afterwards returns `{error, upload_expired}`.
 - The `sync_auth`, `sync_signing` and `sync_ssl` settings accept a database URL as key, in addition to an origin, so each remote database can have its own credentials.
+- The `att_durability` replication and task option (`required` or `best_effort`).
+- `barrel_docdb:flush_attachments/1` makes a database's attachment writes durable; `barrel_docdb:att_capabilities/1`, `att_state/3`, `att_list/2` and `touch_attachment/4` support attachment replication, and `att_changes/3` takes a `filter`.
 
 ## [2.0.0] - 2026-11-07
 

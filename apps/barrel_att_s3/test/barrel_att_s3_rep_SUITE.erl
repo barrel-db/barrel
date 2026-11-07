@@ -118,8 +118,8 @@ s3_target_rejects_stale_replicated_write_garage(Config) ->
 %% only ever advances. B (S3) writes second, so its own row is genuinely,
 %% provably LATER. Replicating A -> B therefore offers B a real (not
 %% contrived) stale write for the same attachment: a target with a working
-%% feed must reject it (atts_ignored, not atts_written) and keep its own
-%% newer value.
+%% feed answers the diff that it covers it (atts_skipped, nothing sent)
+%% and keeps its own newer value.
 run_s3_target_rejects_stale_replicated_write(Config, S3Opts, SrcName, TgtName) ->
     Dir = ?config(dir, Config),
     {ok, _} = barrel_docdb:create_db(SrcName, #{data_dir => Dir}),
@@ -131,7 +131,7 @@ run_s3_target_rejects_stale_replicated_write(Config, S3Opts, SrcName, TgtName) -
         {ok, _} = barrel_docdb:put_attachment(SrcName, <<"d">>, <<"f">>, <<"from a">>),
         {ok, _} = barrel_docdb:put_attachment(TgtName, <<"d">>, <<"f">>, <<"from b">>),
         {ok, R} = barrel_rep:replicate(SrcName, TgtName),
-        ?assertMatch(#{atts_written := 0, atts_ignored := 1}, att_stats(R)),
+        ?assertMatch(#{atts_written := 0, atts_skipped := 1}, att_stats(R)),
         ?assertEqual({ok, <<"from b">>},
                      barrel_docdb:get_attachment(TgtName, <<"d">>, <<"f">>)),
         ok = barrel_docdb:delete_attachment(TgtName, <<"d">>, <<"f">>)

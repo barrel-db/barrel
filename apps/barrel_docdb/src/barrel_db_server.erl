@@ -1378,12 +1378,16 @@ do_retention_sweep(StoreRef, AttRef, DbName, RetentionPeriod, PurgeAfter,
                barrel_hlc:encode(Cutoff)},
     Final = fun(Stats0) ->
         %% in the writer, serialized with attachment commits: feed
-        %% tombstones follow the same window (separate RocksDB, separate
-        %% floor) and abandoned uploads go
-        AttSwept = case barrel_att_store:supports_sync(AttRef) of
+        %% tombstones follow the stub purge window (kept for good when 0,
+        %% so a resync from first still sees every delete) and abandoned
+        %% uploads go
+        AttSwept = case PurgeAfter > 0
+                        andalso barrel_att_store:supports_sync(AttRef) of
             true ->
+                AttCutoff = barrel_hlc:from_wall_time(
+                              NowMs - PurgeAfter * 1000),
                 {ok, #{tombstones_swept := N}} =
-                    barrel_att_store:sweep_att_feed(AttRef, DbName, Cutoff),
+                    barrel_att_store:sweep_att_feed(AttRef, DbName, AttCutoff),
                 N;
             false ->
                 0

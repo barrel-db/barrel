@@ -36,8 +36,11 @@
          rebuild_feed/2, rebuild_feed/3]).
 
 %% Staged writes committed by the database writer (see barrel_att_backend)
--export([stage_put/6, stage_finish/1, stage_delete/5, commit/3,
-         gc_uploads/3]).
+-export([stage_put/6, stage_finish/1, stage_delete/5, stage_touch/5,
+         commit/3, gc_uploads/3]).
+
+%% Replication support
+-export([att_state/4, att_list/3, touch/5, flush/1]).
 
 %% Streaming API
 -export([put_stream/5, put_stream/6]).
@@ -208,13 +211,43 @@ stage_delete(_AttRef, DbName, DocId, AttName, Opts) ->
                origin => maps:get(origin_hlc, Opts, undefined),
                sync => maps:get(sync, Opts, false)}}.
 
+%% @doc Stage a touch: a newer origin for the stored bytes.
+-spec stage_touch(att_ref(), db_name(), docid(), binary(), map()) ->
+    {commit, map()}.
+stage_touch(_AttRef, DbName, DocId, AttName, Opts) ->
+    {commit, #{op => touch, db => DbName, doc_id => DocId,
+               att_name => AttName,
+               origin => maps:get(origin_hlc, Opts),
+               digest => maps:get(digest, Opts)}}.
+
+%% @doc Touch committed in the caller (a store used without a database).
+-spec touch(att_ref(), db_name(), docid(), binary(), map()) ->
+    {ok, touched} | {ok, ignored} | {error, term()}.
+touch(AttRef, DbName, DocId, AttName, Opts) ->
+    commit_here(AttRef, stage_touch(AttRef, DbName, DocId, AttName, Opts)).
+
+%% @doc Sync the write-ahead log: every acknowledged write survives a
+%% power loss once this returns.
+-spec flush(att_ref()) -> ok | {error, term()}.
+flush(#{ref := Ref}) ->
+    rocksdb:sync_wal(Ref).
+
+-spec att_state(att_ref(), db_name(), docid(), binary()) ->
+    {ok, map()} | not_found.
+att_state(#{ref := Ref}, DbName, DocId, AttName) ->
+    barrel_att_feed:index_get(Ref, DbName, DocId, AttName).
+
+-spec att_list(att_ref(), db_name(), docid()) -> [map()].
+att_list(#{ref := Ref}, DbName, DocId) ->
+    barrel_att_feed:index_list(Ref, DbName, DocId).
+
 %% @doc Publish a staged write. Runs in the database writer, which
 %% serializes the last-write-wins check, the metadata and feed batch and
 %% the cleanup of the previously published generation. Alloc(Floor)
 %% returns a feed HLC above Floor and above every HLC the database wrote.
 -spec commit(att_ref(), map(), fun((barrel_hlc:timestamp()) ->
                                      barrel_hlc:timestamp())) ->
-    {ok, att_info()} | {ok, ignored} | ok | {error, term()}.
+    {ok, att_info()} | {ok, ignored} | {ok, touched} | ok | {error, term()}.
 commit(#{ref := Ref}, #{op := put, db := DbName, doc_id := DocId,
                         att_name := AttName, value := Value} = C, Alloc) ->
     Own = own_ops(DbName, DocId, AttName, Value),
@@ -237,6 +270,37 @@ commit(#{ref := Ref}, #{op := put, db := DbName, doc_id := DocId,
 commit(#{ref := Ref}, #{op := delete} = C, Alloc) ->
     try unpublish(Ref, C, Alloc)
     catch throw:{error, _} = Error -> Error
+    end;
+commit(#{ref := Ref} = AttRef, #{op := touch} = C, Alloc) ->
+    try retouch(Ref, AttRef, C, Alloc)
+    catch throw:{error, _} = Error -> Error
+    end.
+
+%% Only the origin and the feed row move; the bytes must already match.
+retouch(Ref, AttRef, #{db := DbName, doc_id := DocId, att_name := AttName,
+                       origin := Origin, digest := Digest}, Alloc) ->
+    case get_info(AttRef, DbName, DocId, AttName) of
+        {ok, #{digest := Digest} = Info} ->
+            case resolve_origin(Ref, DbName, DocId, AttName, Origin, Digest,
+                                Alloc) of
+                ignored ->
+                    {ok, ignored};
+                {apply, OriginHlc, LocalHlc} ->
+                    Meta = case barrel_att_feed:index_get(Ref, DbName, DocId,
+                                                          AttName) of
+                        {ok, #{op := put} = Idx} -> Idx;
+                        _ -> Info
+                    end,
+                    FeedOps = barrel_att_feed:ops(
+                        Ref, DbName, DocId, AttName, put, OriginHlc, LocalHlc,
+                        maps:with([digest, length, content_type], Meta)),
+                    case apply_batch(Ref, FeedOps, false) of
+                        ok -> {ok, touched};
+                        {error, _} = Error -> Error
+                    end
+            end;
+        _ ->
+            {error, bytes_needed}
     end.
 
 publish(Ref, #{db := DbName, doc_id := DocId, att_name := AttName,

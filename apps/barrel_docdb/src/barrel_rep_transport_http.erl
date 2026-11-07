@@ -45,7 +45,9 @@
 %% Attachment sync (optional callbacks): raw octets streamed both
 %% directions, digest and origin HLC in headers.
 -export([att_changes/3, diff_attachments/2, get_attachment_stream/3,
-         put_attachment/5, delete_attachment/4]).
+         put_attachment/5, delete_attachment/4, touch_attachment/4,
+         att_state/3, att_list/2, flush_attachments/1,
+         att_capabilities/1]).
 
 -export_type([endpoint/0]).
 
@@ -71,6 +73,7 @@
 -define(HLC_HEADER, <<"x-barrel-hlc">>).
 -define(DIGEST_HEADER, <<"x-barrel-digest">>).
 -define(ORIGIN_HEADER, <<"x-barrel-att-origin">>).
+-define(TOUCH_HEADER, <<"x-barrel-att-touch">>).
 
 %%====================================================================
 %% Endpoint
@@ -283,11 +286,16 @@ db_info(Endpoint) ->
             Info0 = #{db => maps:get(<<"db">>, Body, undefined)},
             Info1 = maybe_floor(history_floor, <<"history_floor">>, Body,
                                 Info0),
-            Info = maybe_floor(att_floor, <<"att_floor">>, Body, Info1),
+            Info2 = maybe_floor(att_floor, <<"att_floor">>, Body, Info1),
+            Info = Info2#{att_flush => flag(<<"att_flush">>, Body),
+                          att_filter => flag(<<"att_filter">>, Body)},
             {ok, Info};
         Other ->
             error_of(Other)
     end.
+
+flag(WireKey, Body) ->
+    maps:get(WireKey, Body, false) =:= true.
 
 maybe_floor(Key, WireKey, Body, Info) ->
     case maps:get(WireKey, Body, undefined) of
@@ -318,8 +326,16 @@ sync_hlc(Endpoint, Hlc) ->
 
 att_changes(Endpoint, Since, Opts) ->
     Limit = maps:get(limit, Opts, 100),
+    FilterParam = case barrel_rep_filter:to_wire(maps:get(filter, Opts, #{})) of
+        Wire when map_size(Wire) =:= 0 ->
+            [];
+        Wire ->
+            [<<"&filter=">>,
+             base64:encode(iolist_to_binary(json:encode(Wire)),
+                           #{mode => urlsafe, padding => false})]
+    end,
     Path = [<<"/att_changes?since=">>, quote(seq_to_wire(Since)),
-            <<"&limit=">>, integer_to_binary(Limit)],
+            <<"&limit=">>, integer_to_binary(Limit) | FilterParam],
     case req(Endpoint, get, Path, undefined) of
         {ok, 200, #{<<"changes">> := Changes,
                     <<"last_seq">> := LastSeqWire}} ->
@@ -338,19 +354,89 @@ att_changes(Endpoint, Since, Opts) ->
             error_of(Other)
     end.
 
+%% Origins ride along: a server that knows them answers under
+%% last-write-wins (and `touch'), an older one by digest.
 diff_attachments(Endpoint, Entries) ->
+    Wire = [maps:fold(fun(origin, O, Acc) -> Acc#{origin => hlc_to_wire(O)};
+                         (K, V, Acc) -> Acc#{K => V}
+                      end, #{}, maps:with([id, name, digest, origin], E))
+            || E <- Entries],
     case req(Endpoint, post, <<"/att_diff">>,
-             #{attachments => Entries}) of
-        {ok, 200, #{<<"diff">> := Wire}} ->
+             #{attachments => Wire, touch => true}) of
+        {ok, 200, #{<<"diff">> := Diff}} ->
             {ok, [#{id => maps:get(<<"id">>, D),
                     name => maps:get(<<"name">>, D),
                     status => case maps:get(<<"status">>, D) of
                                   <<"have">> -> have;
+                                  <<"touch">> -> touch;
                                   <<"missing">> -> missing
-                              end} || D <- Wire]};
+                              end} || D <- Diff]};
         Other ->
             error_of(Other)
     end.
+
+%% An empty PUT on the attachment route marked as a touch. An older
+%% server writes the empty body, fails its digest check (422) and so
+%% asks for the bytes too.
+touch_attachment(Endpoint, DocId, Name, #{origin := Origin,
+                                          digest := Digest}) ->
+    Extra = [{?TOUCH_HEADER, <<"1">>},
+             {?DIGEST_HEADER, Digest},
+             {?ORIGIN_HEADER, hlc_to_wire(Origin)}],
+    case req_hashed(Endpoint, put,
+                    [<<"/att/">>, quote(DocId), <<"/">>, quote(Name)],
+                    Digest, Extra) of
+        {ok, 200, #{<<"ok">> := <<"ignored">>}} -> {ok, ignored};
+        {ok, 200, #{<<"ok">> := <<"touched">>}} -> {ok, touched};
+        {ok, 200, _} -> {error, bytes_needed};
+        {ok, 412, _} -> {error, bytes_needed};
+        {ok, 422, _} -> {error, bytes_needed};
+        Other -> error_of(Other)
+    end.
+
+att_state(Endpoint, DocId, Name) ->
+    case req(Endpoint, get,
+             [<<"/att_state/">>, quote(DocId), <<"/">>, quote(Name)],
+             undefined) of
+        {ok, 200, #{<<"origin">> := O, <<"op">> := Op} = B} ->
+            {ok, #{id => DocId, name => Name, origin => hlc_from_wire(O),
+                   op => case Op of
+                             <<"put">> -> put;
+                             <<"delete">> -> delete
+                         end,
+                   digest => maps:get(<<"digest">>, B, <<>>)}};
+        Other ->
+            error_of(Other)
+    end.
+
+att_list(Endpoint, DocIds) ->
+    case req(Endpoint, post, <<"/att_list">>, #{ids => DocIds}) of
+        {ok, 200, #{<<"attachments">> := Entries}} ->
+            {ok, [att_entry_from_wire(E) || E <- Entries]};
+        Other ->
+            error_of(Other)
+    end.
+
+%% 200 only once the server synced its attachment writes.
+flush_attachments(Endpoint) ->
+    case req(Endpoint, post, <<"/att_flush">>, #{}) of
+        {ok, 200, _} -> ok;
+        {ok, 501, _} -> {error, unsupported};
+        Other -> error_of(Other)
+    end.
+
+%% From _sync/info: an older server advertises neither.
+att_capabilities(Endpoint) ->
+    case db_info(Endpoint) of
+        {ok, Info} ->
+            {ok, #{flush => maps:get(att_flush, Info, false),
+                   filter => maps:get(att_filter, Info, false)}};
+        {error, _} = Error ->
+            Error
+    end.
+
+hlc_to_wire(Hlc) ->
+    base64:encode(barrel_hlc:encode(Hlc)).
 
 %% hackney's sync request/5 always buffers the response body, so the
 %% streamed read goes through connect + send_request, which leaves the
@@ -607,12 +693,25 @@ req(Endpoint, Method, PathSuffix, BodyTerm, ExtraHeaders) ->
         {error, _} = Err -> Err
     end.
 
+%% Empty-bodied request signed over ContentHash (an attachment digest).
+req_hashed(Endpoint, Method, PathSuffix, ContentHash, ExtraHeaders) ->
+    case req_typed(Endpoint, Method, PathSuffix, {hash, ContentHash},
+                   ExtraHeaders) of
+        {ok, Status, _Encoding, Body} -> {ok, Status, Body};
+        {error, _} = Err -> Err
+    end.
+
 %% Like req/5, with the response encoding (cbor | json).
 req_typed(#{url := BaseUrl} = Endpoint, Method, PathSuffix, BodyTerm,
           ExtraHeaders) ->
     Url = iolist_to_binary([BaseUrl, <<"/_sync">>, PathSuffix]),
-    {ContentType, Body} = encode_body(BodyTerm),
-    ContentHash = barrel_sync_sig:content_sha256(Body),
+    {ContentType, Body, ContentHash} = case BodyTerm of
+        {hash, Hash} ->
+            {<<"application/octet-stream">>, <<>>, Hash};
+        _ ->
+            {CT, B} = encode_body(BodyTerm),
+            {CT, B, barrel_sync_sig:content_sha256(B)}
+    end,
     Headers = [{<<"content-type">>, ContentType}
                | ExtraHeaders]
               ++ base_headers(Endpoint, method_bin(Method), url_target(Url),

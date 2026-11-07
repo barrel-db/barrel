@@ -132,7 +132,13 @@ replicate(Source, Target) ->
 %%   <li>`checkpoint_size' - Write checkpoint after this many documents (default: 10)</li>
 %%   <li>`source_transport' - Transport module for source</li>
 %%   <li>`target_transport' - Transport module for target</li>
-%%   <li>`filter' - Filter options for selective replication (see below)</li>
+%%   <li>`filter' - Filter options for selective replication (see below);
+%%       it applies to attachments too</li>
+%%   <li>`attachments' - Replicate attachments (default: true)</li>
+%%   <li>`att_durability' - `required' (default): the target syncs its
+%%       attachment writes before each attachment checkpoint, and a target
+%%       that cannot fails the run; `best_effort': no sync, a power loss on
+%%       the target can lose checkpointed attachments</li>
 %% </ul>
 %%
 %% == Filter Options ==
@@ -197,9 +203,12 @@ replicate(Source, Target, Opts) ->
 %% @see replicate/2
 -spec replicate_one_shot(rep_config(), map()) -> {ok, rep_result()} | {error, term()}.
 replicate_one_shot(Config, Opts) ->
-    case barrel_rep_filter:check(maps:get(filter, Opts, #{})) of
-        ok -> replicate_urls_checked(Config, Opts);
-        {error, _} = Invalid -> Invalid
+    case {barrel_rep_filter:check(maps:get(filter, Opts, #{})),
+          maps:get(att_durability, Opts, required)} of
+        {ok, D} when D =:= required; D =:= best_effort ->
+            replicate_urls_checked(Config, Opts);
+        {ok, Bad} -> {error, {invalid_option, {att_durability, Bad}}};
+        {{error, _} = Invalid, _} -> Invalid
     end.
 
 %% Inline credentials are fine here (nothing is persisted), but not in
@@ -260,16 +269,44 @@ run_one_shot(Config, Opts, RepId, Checkpoint0) ->
     BatchSize = maps:get(batch_size, Opts, 100),
     CheckpointSize = maps:get(checkpoint_size, Opts, 10),
     Filter = maps:get(filter, Opts, #{}),
+    %% a filtered run copies the attachments of the documents it copies
+    Scan = case doc_atts(Config, Opts, RepId) of
+        {ok, AttCtx} -> {ok, #{filter => Filter, att => AttCtx}};
+        {error, _} = AttErr -> AttErr
+    end,
 
     %% The final checkpoint write is part of the run: a failure ends it
     %% with an error (docs are committed; the next run resumes earlier).
     %% Pending ids are retried first, by id; a success leaves the set.
-    Run = case retry_pending(Source, Target, SourceTransport,
-                             TargetTransport, Checkpoint0) of
+    Run = case Scan of
+        {error, _} = ScanSetupErr ->
+            ScanSetupErr;
+        {ok, ScanCtx} ->
+            run_scan(Source, Target, SourceTransport, TargetTransport,
+                     Checkpoint0, StartSeq, BatchSize, CheckpointSize,
+                     ScanCtx)
+    end,
+    finish_one_shot(Run, Config, Opts, RepId, StartSeq).
+
+run_scan(Source, Target, SourceTransport, TargetTransport, Checkpoint0,
+         StartSeq, BatchSize, CheckpointSize, Scan) ->
+    Retried = case retry_pending(Source, Target, SourceTransport,
+                                 TargetTransport, Checkpoint0) of
+        {ok, _, Cp1} = RetryOk ->
+            Copied = barrel_rep_checkpoint:get_pending(Checkpoint0)
+                -- barrel_rep_checkpoint:get_pending(Cp1),
+            case barrel_rep_att:sync_docs(maps:get(att, Scan), Copied) of
+                {ok, _} -> RetryOk;
+                {error, AttReason} -> {error, {att_sync_failed, AttReason}}
+            end;
+        RetryErr0 ->
+            RetryErr0
+    end,
+    case Retried of
         {ok, RetryStats, Checkpoint} ->
             case do_replicate(Source, Target, SourceTransport,
                               TargetTransport, StartSeq, BatchSize,
-                              CheckpointSize, Checkpoint, Filter) of
+                              CheckpointSize, Checkpoint, Scan) of
                 {ok, ScanStats, Cp} ->
                     {ok, merge_stats(RetryStats, ScanStats), Cp};
                 ScanErr ->
@@ -277,7 +314,15 @@ run_one_shot(Config, Opts, RepId, Checkpoint0) ->
             end;
         RetryErr ->
             RetryErr
-    end,
+    end.
+
+finish_one_shot(Run, Config, Opts, RepId, StartSeq) ->
+    #{
+        source := Source,
+        target := Target,
+        source_transport := SourceTransport,
+        target_transport := TargetTransport
+    } = Config,
     Run2 = case Run of
         {ok, Stats0, FinalCheckpoint0} ->
             case barrel_rep_checkpoint:write_checkpoint(FinalCheckpoint0) of
@@ -358,7 +403,7 @@ do_replicate(Source, Target, SourceTransport, TargetTransport, Since,
 do_replicate(Source, Target, SourceTransport, TargetTransport, Since,
              BatchSize, CheckpointSize, Checkpoint, Filter, AccStats, DocsProcessed) ->
     %% Build changes options with limit and optional filters
-    ChangesOpts = build_changes_opts(BatchSize, Filter),
+    ChangesOpts = build_changes_opts(BatchSize, maps:get(filter, Filter)),
     %% Get next batch of changes
     case SourceTransport:get_changes(Source, Since, ChangesOpts) of
         {ok, [], LastSeq} ->
@@ -385,9 +430,9 @@ do_replicate(Source, Target, SourceTransport, TargetTransport, Since,
                     {error, {no_progress, Since, LastSeq}};
                 true ->
                     %% Replicate this batch
-                    case barrel_rep_alg:replicate(
+                    case replicate_batch(
                              Source, Target, SourceTransport, TargetTransport,
-                             Changes) of
+                             Changes, Filter) of
                         {ok, BatchStats} ->
                             do_replicate_batch_done(
                                 Source, Target, SourceTransport, TargetTransport,
@@ -452,6 +497,46 @@ do_replicate_continue(Source, Target, SourceTransport, TargetTransport,
                          Filter, MergedStats,
                          NewDocsProcessed rem CheckpointSize)
     end.
+
+%% @private One batch of the doc phase, then (filtered runs) the
+%% attachments of its documents, before the position moves past them.
+replicate_batch(Source, Target, SourceTransport, TargetTransport, Changes,
+                #{att := AttCtx}) ->
+    case barrel_rep_alg:replicate(Source, Target, SourceTransport,
+                                  TargetTransport, Changes) of
+        {ok, _} = Ok ->
+            Ids = [Id || #{id := Id} = C <- Changes,
+                         not maps:get(deleted, C, false)],
+            case barrel_rep_att:sync_docs(AttCtx, Ids) of
+                {ok, _} -> Ok;
+                {error, Reason} -> {error, {att_sync_failed, Reason}}
+            end;
+        Other ->
+            Other
+    end.
+
+%% @private The attachment context for a filtered run's doc phase.
+doc_atts(Config, Opts, RepId) ->
+    case maps:get(filter, Opts, #{}) of
+        Filter when map_size(Filter) > 0 ->
+            case maps:get(attachments, Opts, true) of
+                true ->
+                    #{source := Source, target := Target,
+                      source_transport := ST, target_transport := TT} = Config,
+                    case barrel_rep_att:prepare(Source, Target, ST, TT,
+                                                Opts#{rep_id => RepId}) of
+                        {error, Reason} -> {error, {att_sync_failed, Reason}};
+                        Prepared -> {ok, unwrap(Prepared)}
+                    end;
+                false ->
+                    {ok, skipped}
+            end;
+        _ ->
+            {ok, skipped}
+    end.
+
+unwrap({ok, Ctx}) -> Ctx;
+unwrap(skipped) -> skipped.
 
 %% @private Retry the pending ids by id, before the scan.
 retry_pending(Source, Target, SourceTransport, TargetTransport, Checkpoint) ->

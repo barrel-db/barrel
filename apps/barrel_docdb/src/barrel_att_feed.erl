@@ -17,8 +17,9 @@
 %%
 %% Invariant: ONE feed row per (DocId, AttName), moved on every write
 %% (doc-feed style, not history style), so a full resync is one bounded
-%% feed walk. Put rows are never age-swept; delete tombstones sweep
-%% past the retention window, recorded by the floor.
+%% feed walk. Put rows are never age-swept; delete tombstones are kept
+%% until the database's tombstone_purge_after window (never when 0),
+%% recorded by the floor.
 %%
 %% Convergence: attachments have no version vectors, so bidirectional
 %% sync uses last-write-wins on an ORIGIN HLC that travels with the
@@ -34,7 +35,9 @@
     ops/8,
     next_hlc/1,
     check/6,
+    lww/4,
     index_get/4,
+    index_list/3,
     index_get/5,
     att_changes/4,
     att_floor/2,
@@ -143,15 +146,21 @@ check(Ref, DbName, DocId, AttName, IncomingOrigin, IncomingDigest) ->
         {ok, IdxBin} ->
             #{origin := StoredOrigin, digest := StoredDigest} =
                 decode_index(IdxBin),
-            case {barrel_hlc:less(IncomingOrigin, StoredOrigin),
-                  barrel_hlc:equal(IncomingOrigin, StoredOrigin)} of
-                {true, _} -> ignored;
-                {_, false} -> apply;
-                {_, true} when IncomingDigest > StoredDigest -> apply;
-                {_, true} -> ignored
-            end;
+            lww(StoredOrigin, StoredDigest, IncomingOrigin, IncomingDigest);
         _ ->
             apply
+    end.
+
+%% @doc The last-write-wins rule of check/6 against a stored state.
+-spec lww(barrel_hlc:timestamp(), binary(), barrel_hlc:timestamp(),
+          binary()) -> apply | ignored.
+lww(StoredOrigin, StoredDigest, IncomingOrigin, IncomingDigest) ->
+    case {barrel_hlc:less(IncomingOrigin, StoredOrigin),
+          barrel_hlc:equal(IncomingOrigin, StoredOrigin)} of
+        {true, _} -> ignored;
+        {_, false} -> apply;
+        {_, true} when IncomingDigest > StoredDigest -> apply;
+        {_, true} -> ignored
     end.
 
 %% @doc Current index entry for one attachment (delete tombstones are
@@ -169,6 +178,36 @@ index_get(Ref, DbName, DocId, AttName, ReadOpts) ->
         {ok, Bin} -> {ok, decode_index(Bin)};
         _ -> not_found
     end.
+
+%% @doc Current index entries of one document's attachments (deletes
+%% included), shaped like feed entries.
+-spec index_list(rocksdb:db_handle(), db_name(), docid()) -> [entry()].
+index_list(Ref, DbName, DocId) ->
+    Head = <<?TAG, ?INDEX, (byte_size(DbName)):16, DbName/binary,
+             (byte_size(DocId)):16, DocId/binary>>,
+    Prefix = <<Head/binary, $:>>,
+    PLen = byte_size(Prefix),
+    ReadOpts = [{iterate_lower_bound, Prefix},
+                {iterate_upper_bound, <<Head/binary, ($: + 1)>>}],
+    {ok, Itr} = rocksdb:iterator(Ref, ReadOpts),
+    try
+        index_loop(rocksdb:iterator_move(Itr, first), Itr, Prefix, PLen,
+                   DocId, [])
+    after
+        rocksdb:iterator_close(Itr)
+    end.
+
+index_loop({ok, Key, Value}, Itr, Prefix, PLen, DocId, Acc) ->
+    case Key of
+        <<Prefix:PLen/binary, Name/binary>> ->
+            Entry = (decode_index(Value))#{id => DocId, name => Name},
+            index_loop(rocksdb:iterator_move(Itr, next), Itr, Prefix, PLen,
+                       DocId, [Entry | Acc]);
+        _ ->
+            lists:reverse(Acc)
+    end;
+index_loop({error, _}, _Itr, _Prefix, _PLen, _DocId, Acc) ->
+    lists:reverse(Acc).
 
 %%====================================================================
 %% Feed reads

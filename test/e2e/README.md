@@ -53,9 +53,10 @@ document state digest (`_sync/state`) on every peer.
 
 ## Mixed versions
 
-`mixed-version.sh` builds a peer from the previous release (`OLD_REF`,
-default `main`) and replicates it with two upgraded peers, both ways, with
-the replicator on either side:
+`mixed-version.sh` builds a peer from an older release (`OLD_REF`, default
+`barrel_server-v1.11.1`, the last release before whole-state replication)
+and replicates it with two upgraded peers, both ways, with the replicator on
+either side:
 
 ```console
 $ test/e2e/mixed-version.sh

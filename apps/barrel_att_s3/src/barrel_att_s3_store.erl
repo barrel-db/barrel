@@ -171,6 +171,7 @@
 -export([write_chunk/2, finish_stream/1, abort_stream/1]).
 -export([get_stream/4, read_chunk/1, close_stream/1]).
 -export([att_changes/4, att_floor/2, sweep_att_feed/3, rebuild_feed/2]).
+-export([att_state/4, att_list/3, flush/1]).
 
 -define(DEFAULT_PART_SIZE, 8 * 1024 * 1024). %% 8 MiB; used starting Step 3
 -define(MAX_KEY_SIZE, 1024).
@@ -847,6 +848,20 @@ att_floor(#{feed_ref := FeedRef}, DbName) ->
     {ok, #{tombstones_swept := non_neg_integer()}}.
 sweep_att_feed(#{feed_ref := FeedRef}, DbName, Cutoff) ->
     barrel_att_feed:sweep(FeedRef, DbName, Cutoff).
+
+-spec att_state(map(), binary(), binary(), binary()) -> {ok, map()} | not_found.
+att_state(#{feed_ref := FeedRef}, DbName, DocId, AttName) ->
+    barrel_att_feed:index_get(FeedRef, DbName, DocId, AttName).
+
+-spec att_list(map(), binary(), binary()) -> [map()].
+att_list(#{feed_ref := FeedRef}, DbName, DocId) ->
+    barrel_att_feed:index_list(FeedRef, DbName, DocId).
+
+%% @doc Objects are durable once S3 acknowledged them; the local feed
+%% (origins, deletes) is synced here.
+-spec flush(map()) -> ok | {error, term()}.
+flush(#{feed_ref := FeedRef}) ->
+    rocksdb:sync_wal(FeedRef).
 
 %% @doc Maintenance escape hatch: resynthesize feed rows for every
 %% attachment currently present in the bucket, for when the local feed is

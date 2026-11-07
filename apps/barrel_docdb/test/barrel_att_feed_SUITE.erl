@@ -313,7 +313,8 @@ docdb_api_level(Config) ->
     Db = <<"att_api_db">>,
     {ok, _} = barrel_docdb:create_db(Db, #{
         data_dir => ?config(dir, Config),
-        retention_period => 1
+        retention_period => 1,
+        tombstone_purge_after => 1
     }),
     try
         {ok, Info} = barrel_docdb:put_attachment(
@@ -346,7 +347,7 @@ docdb_api_level(Config) ->
             Db, <<"doc1">>, <<"f.bin">>,
             #{origin_hlc => barrel_hlc:new_hlc()}),
         {ok, [#{op := delete}], _} = barrel_docdb:att_changes(Db, first),
-        %% the retention sweep ages it out and advances the floor
+        %% the purge window ages it out and advances the floor
         timer:sleep(1200),
         {ok, Stats} = barrel_docdb:sweep_retention(Db),
         ?assertEqual(1, maps:get(att_tombstones_swept, Stats)),
