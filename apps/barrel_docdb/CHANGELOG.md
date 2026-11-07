@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- A filtered replication could skip matching documents: with a small batch size only the first pages arrived, and a channel filter with a query stopped at the first page where nothing matched. Every matching document is now copied.
+- A channel filter with a query did not send deletes or documents whose only match was a conflicting version, so replicas kept documents deleted on the source. Channel filters now follow the same replication rules as other filters.
+- A replicated document state that named a version without sending its body stored an empty document, and sending the body later changed nothing. Such a state is now refused and nothing is written.
+- A replicated version too far ahead of the local clock was accepted anyway, and the next local write on that document hung. It is now refused with a clock skew error, nothing is written, and the database keeps serving writes.
+- An invalid query filter was ignored, so changes feeds and replications sent every document. It is now an error and nothing is copied.
+
 ## [2.0.0] - 2026-11-07
 
 ### Fixed

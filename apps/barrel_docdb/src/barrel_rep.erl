@@ -197,6 +197,12 @@ replicate(Source, Target, Opts) ->
 %% @see replicate/2
 -spec replicate_one_shot(rep_config(), map()) -> {ok, rep_result()} | {error, term()}.
 replicate_one_shot(Config, Opts) ->
+    case barrel_rep_filter:check(maps:get(filter, Opts, #{})) of
+        ok -> replicate_checked(Config, Opts);
+        {error, _} = Invalid -> Invalid
+    end.
+
+replicate_checked(Config, Opts) ->
     #{
         source := Source,
         target := Target,
@@ -342,9 +348,20 @@ do_replicate(Source, Target, SourceTransport, TargetTransport, Since,
     ChangesOpts = build_changes_opts(BatchSize, Filter),
     %% Get next batch of changes
     case SourceTransport:get_changes(Source, Since, ChangesOpts) of
-        {ok, [], _LastSeq} ->
-            %% No more changes
-            {ok, AccStats, Checkpoint};
+        {ok, [], LastSeq} ->
+            %% A filtered page can be empty while the feed moved on:
+            %% continue from there; no progress means the end
+            case barrel_rep_checkpoint:empty_page_advanced(Since, LastSeq) of
+                true ->
+                    do_replicate(Source, Target, SourceTransport,
+                                 TargetTransport, LastSeq, BatchSize,
+                                 CheckpointSize,
+                                 barrel_rep_checkpoint:set_last_seq(
+                                   LastSeq, Checkpoint),
+                                 Filter, AccStats, DocsProcessed);
+                false ->
+                    {ok, AccStats, Checkpoint}
+            end;
 
         {ok, Changes, LastSeq} ->
             case barrel_rep_checkpoint:seq_advanced(Since, LastSeq) of

@@ -29,7 +29,7 @@
 -export([encode_seq/1, decode_seq/1]).
 
 %% Sequence ordering
--export([seq_advanced/2]).
+-export([seq_advanced/2, empty_page_advanced/2]).
 
 %% Internal API for reading checkpoints
 -export([
@@ -147,6 +147,13 @@ set_last_seq(Seq, #checkpoint{docs_processed = DocsProcessed} = Checkpoint) ->
 seq_advanced(_Old, first) -> false;
 seq_advanced(first, _New) -> true;
 seq_advanced(Old, New) -> barrel_hlc:compare(New, Old) =:= gt.
+
+%% @doc An empty page moved the position when its sequence is past the
+%% one asked for (the start of an empty feed is not a move).
+-spec empty_page_advanced(barrel_hlc:timestamp() | first,
+                          barrel_hlc:timestamp() | first) -> boolean().
+empty_page_advanced(Since, LastSeq) ->
+    LastSeq =/= barrel_hlc:min() andalso seq_advanced(Since, LastSeq).
 
 %% @doc Check if checkpoint should be written and write it if needed.
 -spec maybe_write_checkpoint(checkpoint()) ->

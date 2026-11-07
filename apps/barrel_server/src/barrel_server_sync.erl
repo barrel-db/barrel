@@ -195,6 +195,9 @@ put_state(Req) ->
                                               written => Written =:= ok});
                     {error, clock_skew} ->
                         json_resp(Req, 409, #{error => <<"clock_skew">>});
+                    {error, {missing_bodies, Tokens}} ->
+                        json_resp(Req, 400, #{error => <<"missing_bodies">>,
+                                              tokens => Tokens});
                     {error, Reason} ->
                         error_resp(Req, Reason)
                 end;
