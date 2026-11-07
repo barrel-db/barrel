@@ -5,6 +5,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-11-07
+
 ### Fixed
 - Two writes to the same attachment at the same time could let an older replicated write replace a newer one and leave two change feed rows for it. Writes to one attachment now run one at a time, so the newest write wins and the feed keeps one row.
 - After the clock went back, for example a node clock reset, new attachment changes could be placed before a replication checkpoint and never sync. Feed positions now always move forward.
