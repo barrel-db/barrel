@@ -205,6 +205,15 @@ get_changes(StoreRef, DbName, Since, Opts) ->
 
     Replication = maps:get(replication, Opts, false)
         andalso (PathPatterns =/= undefined orelse QuerySpec =/= undefined),
+    %% an invalid query is an error, never an unfiltered feed
+    try dispatch_changes(StoreRef, DbName, Ks, Since, Opts, DocIds,
+                         PathPatterns, QuerySpec, Channel, Replication)
+    catch
+        throw:{invalid_query, _} = Invalid -> {error, Invalid}
+    end.
+
+dispatch_changes(StoreRef, DbName, Ks, Since, Opts, DocIds, PathPatterns,
+                 QuerySpec, Channel, Replication) ->
     case Channel of
         undefined when Replication ->
             %% A replication filter is tested against every row of the
@@ -240,48 +249,71 @@ get_changes(StoreRef, DbName, Since, Opts) ->
             {error, {unknown_channel, Channel}}
     end.
 
-%% @private One bounded range scan over the channel's write-time feed:
-%% limit pushdown, exclusive since, leave rows hidden by default. A
-%% query filter fetches bodies for the visited rows only.
+%% @private Range scans over the channel's write-time feed: limit
+%% pushdown, exclusive since, leave rows hidden by default. A query
+%% filter fetches bodies for the visited rows and scans on until the
+%% limit is filled or the feed ends, so a page is never empty early.
 get_changes_by_channel(StoreRef, DbName, Ks, Channel, Since, Opts) ->
     case lists:member(Channel, barrel_channel:names(DbName)) of
         false ->
             {error, {unknown_channel, Channel}};
         true ->
-            {ok, Rows, LastHlc} = barrel_channel:fold(
-                StoreRef, DbName, Channel, Since,
-                maps:with([limit, include_leaves], Opts)),
             IncludeDocs = maps:get(include_docs, Opts, false),
             CompiledQuery = compile_query(maps:get(query, Opts, undefined)),
-            NeedDocs = IncludeDocs orelse CompiledQuery =/= undefined,
-            Rows1 = case NeedDocs of
-                true ->
-                    batch_fetch_doc_bodies(
-                        StoreRef, Ks,
-                        [{maps:get(id, R), R} || R <- Rows]);
-                false ->
-                    Rows
-            end,
+            Replication = maps:get(replication, Opts, false),
+            Ctx = #{store => StoreRef, db => DbName, ks => Ks,
+                    channel => Channel, opts => Opts,
+                    query => CompiledQuery, replication => Replication,
+                    need_docs => IncludeDocs orelse CompiledQuery =/= undefined},
+            {RevRows, LastHlc} = channel_pages(Ctx, Since,
+                                               maps:get(limit, Opts, infinity),
+                                               []),
             Style = maps:get(style, Opts, all_docs),
-            Rows2 = lists:filtermap(
-                fun(Change) ->
-                    case maybe_match_query(CompiledQuery, Change) of
-                        true -> {true, apply_style(Style, Change)};
-                        false -> false
-                    end
-                end,
-                Rows1),
-            Rows3 = case {CompiledQuery, IncludeDocs} of
-                {undefined, _} -> Rows2;
-                {_, true} -> Rows2;
-                {_, false} -> [maps:remove(doc, C) || C <- Rows2]
+            Rows = [apply_style(Style, C) || C <- lists:reverse(RevRows)],
+            Rows1 = case {CompiledQuery, IncludeDocs} of
+                {undefined, _} -> Rows;
+                {_, true} -> Rows;
+                {_, false} -> [maps:remove(doc, C) || C <- Rows]
             end,
             Changes = case maps:get(descending, Opts, false) of
-                true -> lists:reverse(Rows3);
-                false -> Rows3
+                true -> lists:reverse(Rows1);
+                false -> Rows1
             end,
             {ok, Changes, LastHlc}
     end.
+
+channel_pages(#{store := StoreRef, db := DbName, channel := Channel,
+                opts := Opts} = Ctx, Since, Limit, Acc) ->
+    {ok, Rows, LastHlc} = barrel_channel:fold(
+        StoreRef, DbName, Channel, Since,
+        (maps:with([include_leaves], Opts))#{limit => Limit}),
+    Matched = channel_matches(Ctx, Rows),
+    Acc1 = lists:reverse(Matched, Acc),
+    case Limit of
+        infinity ->
+            {Acc1, LastHlc};
+        _ when length(Rows) < Limit ->
+            %% the feed ended
+            {Acc1, LastHlc};
+        _ when length(Matched) >= Limit ->
+            {Acc1, LastHlc};
+        _ ->
+            channel_pages(Ctx, LastHlc, Limit - length(Matched), Acc1)
+    end.
+
+%% A replication filter passes deletes and documents with any live
+%% version matching; otherwise the winner's body must match.
+channel_matches(#{need_docs := false}, Rows) ->
+    Rows;
+channel_matches(#{store := StoreRef, ks := Ks, query := Query,
+                  replication := Replication}, Rows) ->
+    WithDocs = batch_fetch_doc_bodies(StoreRef, Ks,
+                                      [{maps:get(id, R), R} || R <- Rows]),
+    [C || C <- WithDocs,
+          case Replication of
+              true -> replication_passes(StoreRef, Ks, C, undefined, Query);
+              false -> maybe_match_query(Query, C)
+          end].
 
 %% @doc Get changes with continuation support for pagination.
 %% Accepts either an HLC timestamp, 'first', or a continuation token (binary).
@@ -520,6 +552,9 @@ get_changes_filtered(StoreRef, DbName, Since, Opts) ->
     PathPatterns = maps:get(paths, Opts, undefined),
     QuerySpec = maps:get(query, Opts, undefined),
 
+    %% Compile the query first: an invalid one throws before the trie exists
+    CompiledQuery = compile_query(QuerySpec),
+
     %% If path filter specified, prepare a match trie for efficient matching
     PathMatcher = case PathPatterns of
         undefined ->
@@ -529,9 +564,6 @@ get_changes_filtered(StoreRef, DbName, Since, Opts) ->
             lists:foreach(fun(P) -> match_trie:insert(Trie, P) end, Patterns),
             Trie
     end,
-
-    %% If query filter specified, compile it
-    CompiledQuery = compile_query(QuerySpec),
 
     %% Do we need doc body for filtering or include_docs?
     IncludeDocs = maps:get(include_docs, Opts, false),
@@ -585,8 +617,9 @@ get_changes_filtered_chunked(StoreRef, DbName, Since, Opts,
                                                   Filter, CompiledQuery, Style,
                                                   Results, ResultCount, Limit),
                         case Done of
-                            true ->
-                                {stop, {[], 0, NewResults, NewResultCount, NewLastHlc}};
+                            {true, FillHlc} ->
+                                %% resume after the row that filled the limit
+                                {stop, {[], 0, NewResults, NewResultCount, FillHlc}};
                             false ->
                                 {ok, {[], 0, NewResults, NewResultCount, NewLastHlc}}
                         end;
@@ -604,17 +637,20 @@ get_changes_filtered_chunked(StoreRef, DbName, Since, Opts,
         _ -> fun fold_changes/5
     end,
 
-    {ok, {FinalChunk, _, RevResults, FinalCount, LastHlc}, _FoldHlc} =
+    {ok, {FinalChunk, _, RevResults, FinalCount, ScanHlc}, _FoldHlc} =
         FoldChanges(StoreRef, DbName, Since, FoldFun, {[], 0, [], 0, StartHlc}),
 
     %% Process any remaining chunk
-    {AllResults, _FinalResultCount, _} = case FinalChunk of
+    {AllResults, LastHlc} = case FinalChunk of
         [] ->
-            {RevResults, FinalCount, false};
+            {RevResults, ScanHlc};
         _ ->
-            process_change_chunk(StoreRef, DbName, lists:reverse(FinalChunk),
-                                  Filter, CompiledQuery, Style,
-                                  RevResults, FinalCount, Limit)
+            case process_change_chunk(StoreRef, DbName, lists:reverse(FinalChunk),
+                                      Filter, CompiledQuery, Style,
+                                      RevResults, FinalCount, Limit) of
+                {Res, _, {true, LeftFill}} -> {Res, LeftFill};
+                {Res, _, false} -> {Res, ScanHlc}
+            end
     end,
 
     %% Cleanup the trie if we created one
@@ -630,7 +666,8 @@ get_changes_filtered_chunked(StoreRef, DbName, Since, Opts,
 
     {ok, Changes, LastHlc}.
 
-%% @private Process a chunk of changes with batch doc fetching
+%% @private Process a chunk of changes with batch doc fetching. Done is
+%% {true, Hlc} with the hlc of the row that filled the limit.
 process_change_chunk(StoreRef, DbName, DocChangePairs,
                       {PathMatcher, Replication}, CompiledQuery, Style,
                       Results, ResultCount, Limit) ->
@@ -641,8 +678,8 @@ process_change_chunk(StoreRef, DbName, DocChangePairs,
     lists:foldl(
         fun(ChangeWithDoc, {Acc, Count, Done}) ->
             case Done of
-                true ->
-                    {Acc, Count, true};
+                {true, _} ->
+                    {Acc, Count, Done};
                 false ->
                     Include = case Replication of
                         true ->
@@ -660,7 +697,10 @@ process_change_chunk(StoreRef, DbName, DocChangePairs,
                             FilteredChange = apply_style(Style, ChangeWithDoc),
                             NewCount = Count + 1,
                             NewAcc = [FilteredChange | Acc],
-                            IsDone = Limit =/= infinity andalso NewCount >= Limit,
+                            IsDone = case Limit =/= infinity andalso NewCount >= Limit of
+                                true -> {true, maps:get(hlc, ChangeWithDoc)};
+                                false -> false
+                            end,
                             {NewAcc, NewCount, IsDone}
                     end
             end
@@ -752,12 +792,15 @@ get_changes_filtered_simple(StoreRef, DbName, Since, Opts, DocIds, Style) ->
     {ok, Changes, LastHlc}.
 
 %% @private Compile query spec if provided
+%% Throws {invalid_query, Reason}, caught in get_changes/4.
 compile_query(undefined) -> undefined;
 compile_query(QuerySpec) when is_map(QuerySpec) ->
     case barrel_query:compile(QuerySpec) of
         {ok, Plan} -> Plan;
-        {error, _} -> undefined
-    end.
+        {error, Reason} -> throw({invalid_query, Reason})
+    end;
+compile_query(QuerySpec) ->
+    throw({invalid_query, {not_a_map, QuerySpec}}).
 
 %% @private Check if change matches query
 maybe_match_query(undefined, _Change) -> true;

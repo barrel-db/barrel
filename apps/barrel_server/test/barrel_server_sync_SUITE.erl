@@ -15,7 +15,9 @@
     t_diff/1,
     t_local_docs/1,
     t_hlc_header/1,
-    t_encoded_doc_id/1
+    t_encoded_doc_id/1,
+    t_invalid_query_filter/1,
+    t_state_missing_bodies/1
 ]).
 
 -include_lib("common_test/include/ct.hrl").
@@ -25,7 +27,8 @@
 
 all() ->
     [t_info, t_hlc_exchange, t_put_get_version, t_changes_and_filters,
-     t_diff, t_local_docs, t_hlc_header, t_encoded_doc_id].
+     t_diff, t_local_docs, t_hlc_header, t_encoded_doc_id,
+     t_invalid_query_filter, t_state_missing_bodies].
 
 init_per_suite(Config) ->
     application:load(barrel_server),
@@ -220,3 +223,36 @@ t_encoded_doc_id(Config) ->
     ?assertEqual(DocId,
                  maps:get(<<"id">>, maps:get(<<"doc">>, Got))),
     ok.
+
+%% A query that decodes but does not compile is refused, not ignored.
+t_invalid_query_filter(Config) ->
+    {400, #{<<"error">> := Err}} =
+        req_json(post, url("/changes", Config),
+                 #{since => <<"first">>,
+                   filter => #{query => #{where =>
+                                             [[<<"regex">>, [<<"a">>],
+                                               <<"(">>]]}}}),
+    ?assertMatch({_, _}, binary:match(Err, <<"invalid_query">>)),
+    ok.
+
+%% A state naming a new version without its body writes nothing.
+t_state_missing_bodies(Config) ->
+    Src = <<"sync_missing_bodies_src">>,
+    {ok, _} = barrel_docdb:create_db(Src),
+    {ok, _} = barrel_docdb:put_doc(Src, #{<<"id">> => <<"mb1">>,
+                                         <<"valuable">> => 42}),
+    {ok, #{state := State, bodies := Bodies}} =
+        barrel_docdb:get_doc_state(Src, <<"mb1">>),
+    Wire = base64:encode(State),
+    {400, #{<<"error">> := <<"missing_bodies">>,
+            <<"tokens">> := Tokens}} =
+        req_json(put, url("/state/mb1", Config),
+                 #{state => Wire, bodies => #{}}),
+    ?assertEqual(lists:sort(maps:keys(Bodies)), Tokens),
+    {404, _} = req(get, url("/doc/mb1", Config), <<>>),
+    {200, #{<<"written">> := true}} =
+        req_json(put, url("/state/mb1", Config),
+                 #{state => Wire, bodies => Bodies}),
+    {200, Got} = req(get, url("/doc/mb1", Config), <<>>),
+    ?assertEqual(42, maps:get(<<"valuable">>, maps:get(<<"doc">>, Got))),
+    ok = barrel_docdb:delete_db(Src).

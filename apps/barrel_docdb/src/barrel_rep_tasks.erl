@@ -570,7 +570,7 @@ init_wake(_Ctx, _From, _Since) ->
 
 run_task_loop(Ctx, Since0) ->
     Since = rewind_to_target(Ctx, Since0),
-    #{parent := Parent, task_id := TaskId, mode := Mode,
+    #{mode := Mode,
       from := From, to := To,
       from_transport := FromTransport, to_transport := ToTransport,
       batch_size := BatchSize, filter := Filter,
@@ -581,36 +581,16 @@ run_task_loop(Ctx, Since0) ->
                              maps:with([paths, query, channel], Filter)),
 
     case FromTransport:get_changes(From, Since, ChangesOpts) of
-        {ok, [], _LastSeq} when Mode =:= one_shot ->
-            %% No more doc changes: run the attachment phase to completion
-            %% once (mirrors barrel_rep:replicate_one_shot/2's "doc phase to
-            %% completion, then one attachment pass" shape) before reporting
-            %% the task done.
-            case {sync_attachments(Ctx), maps:get(pending, Ctx)} of
-                {ok, [_ | _] = Pending} ->
-                    report_done(Ctx, {task_error, TaskId,
-                                      {docs_pending, Pending}});
-                {ok, []} ->
-                    report_done(Ctx, {task_complete, TaskId});
-                {{error, Reason}, _} ->
-                    report_done(Ctx, {task_error, TaskId,
-                                      {att_sync_failed, Reason}})
+        {ok, [], LastSeq} ->
+            case barrel_rep_checkpoint:empty_page_advanced(Since, LastSeq) of
+                true ->
+                    %% a filtered page with nothing to copy: move on
+                    ok = mark_target(Ctx, LastSeq),
+                    _ = save_dir_state(Ctx, LastSeq),
+                    run_task_loop(Ctx, LastSeq);
+                false ->
+                    idle_task_loop(Ctx, Since)
             end;
-
-        {ok, [], _LastSeq} ->
-            %% Idle on the doc side. Attachments have their own feed, so a
-            %% doc-only wake signal never fires for an attachment-only
-            %% write: catch those up here too, best-effort, before waiting
-            %% again. Poll mode already revisits this branch on every sleep
-            %% cycle; stream mode's bounded wake (see wait_for_wake/1) is
-            %% what makes it revisit this branch when idle on a live stream.
-            case sync_attachments(Ctx) of
-                ok -> ok;
-                {error, Reason} ->
-                    gen_server:cast(Parent, {task_last_error, TaskId,
-                                             {att_sync_failed, Reason}})
-            end,
-            run_task_loop(wait_for_wake(retry_pending(Ctx, Since)), Since);
 
         {ok, Changes, LastSeq} ->
             case barrel_rep_checkpoint:seq_advanced(Since, LastSeq) of
@@ -655,6 +635,35 @@ run_task_loop(Ctx, Since0) ->
         {error, Reason} ->
             handle_loop_error(Ctx, Since, Reason)
     end.
+
+%% No progress on the doc side: one-shot finishes, continuous waits.
+idle_task_loop(#{task_id := TaskId, mode := one_shot} = Ctx, _Since) ->
+    %% No more doc changes: run the attachment phase to completion once
+    %% (mirrors barrel_rep:replicate_one_shot/2's "doc phase to
+    %% completion, then one attachment pass" shape) before reporting the
+    %% task done.
+    case {sync_attachments(Ctx), maps:get(pending, Ctx)} of
+        {ok, [_ | _] = Pending} ->
+            report_done(Ctx, {task_error, TaskId, {docs_pending, Pending}});
+        {ok, []} ->
+            report_done(Ctx, {task_complete, TaskId});
+        {{error, Reason}, _} ->
+            report_done(Ctx, {task_error, TaskId, {att_sync_failed, Reason}})
+    end;
+idle_task_loop(#{parent := Parent, task_id := TaskId} = Ctx, Since) ->
+    %% Idle on the doc side. Attachments have their own feed, so a
+    %% doc-only wake signal never fires for an attachment-only write:
+    %% catch those up here too, best-effort, before waiting again. Poll
+    %% mode already revisits this branch on every sleep cycle; stream
+    %% mode's bounded wake (see wait_for_wake/1) is what makes it revisit
+    %% this branch when idle on a live stream.
+    case sync_attachments(Ctx) of
+        ok -> ok;
+        {error, Reason} ->
+            gen_server:cast(Parent, {task_last_error, TaskId,
+                                     {att_sync_failed, Reason}})
+    end,
+    run_task_loop(wait_for_wake(retry_pending(Ctx, Since)), Since).
 
 %% The task's position lives with the task. A target that loses power
 %% rolls back to a prefix of its writes, so the task also leaves a marker
@@ -1259,7 +1268,7 @@ validate_config(Config) ->
             try
                 _ = resolve_endpoint(maps:get(source, Config)),
                 _ = resolve_endpoint(maps:get(target, Config)),
-                ok
+                barrel_rep_filter:check(maps:get(filter, Config, #{}))
             catch
                 error:{invalid_sync_url, Url} ->
                     {error, {invalid_sync_url, Url}}

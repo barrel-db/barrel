@@ -5,6 +5,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- Merging a document state that names a version without its body now answers 400 instead of storing an empty document.
+- A changes request whose query filter does not compile now answers 400 instead of returning every document.
+
 ## [1.12.0] - 2026-11-07
 
 ### Added

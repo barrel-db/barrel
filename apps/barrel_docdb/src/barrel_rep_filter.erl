@@ -16,7 +16,24 @@
 %% deep recursion (stack/CPU) with a pathological filter.
 -define(MAX_FILTER_DEPTH, 32).
 
--export([to_wire/1, from_wire/1]).
+-export([to_wire/1, from_wire/1, check/1]).
+
+%%====================================================================
+%% Check
+%%====================================================================
+
+%% @doc A filter whose query does not compile is refused: replicating
+%% with it would copy every document.
+-spec check(map()) -> ok | {error, {invalid_query, term()}}.
+check(#{query := Query}) when is_map(Query) ->
+    case barrel_query:compile(Query) of
+        {ok, _} -> ok;
+        {error, Reason} -> {error, {invalid_query, Reason}}
+    end;
+check(#{query := Query}) ->
+    {error, {invalid_query, {not_a_map, Query}}};
+check(_Filter) ->
+    ok.
 
 %%====================================================================
 %% Encode

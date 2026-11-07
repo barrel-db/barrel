@@ -2315,8 +2315,17 @@ above_live(DbName, Live, Hlc) ->
         [] ->
             Hlc;
         Higher ->
-            _ = barrel_hlc:sync_hlc(lists:max(Higher)),
+            %% a live version the clock may not reach: refuse, don't spin
+            sync_or_throw(lists:max(Higher)),
             above_live(DbName, Live, alloc_hlc(DbName))
+    end.
+
+%% Advance the clock to a remote HLC; throws {error, clock_skew} when
+%% the clock rejects it (too far ahead).
+sync_or_throw(Hlc) ->
+    case barrel_hlc:sync_hlc(Hlc) of
+        {ok, _} -> ok;
+        {error, clock_skew} -> throw({error, clock_skew})
     end.
 
 %% @doc A local write's new state, entity vector, conflict count,
@@ -2868,8 +2877,8 @@ build_delete_ops(StoreRef, DbName, DocId, Current, Opts) ->
 %% it never removes anything (barrel_live:legacy_arrival/4).
 do_put_version(StoreRef, DbName, Config, Doc, Version, RemoteVV, Deleted) ->
     %% Advance the local clock past the remote write so subsequent local
-    %% change HLCs stay strictly increasing
-    _ = barrel_hlc:sync_hlc(barrel_version:hlc(Version)),
+    %% change HLCs stay strictly increasing; a rejected one writes nothing
+    sync_or_throw(barrel_version:hlc(Version)),
     {DocId, DocBody} = id_and_body(Doc),
     Old = read_current(StoreRef, DbName, DocId),
     Live0 = load_live(StoreRef, DbName, DocId, Old),
@@ -2884,15 +2893,25 @@ do_put_version(StoreRef, DbName, Config, Doc, Version, RemoteVV, Deleted) ->
 %% the two states, then eviction and automatic resolution.
 do_put_state(StoreRef, DbName, Config, DocId, StateBin, RemoteBodies) ->
     Remote = barrel_live:decode_state(StateBin),
-    _ = [barrel_hlc:sync_hlc(H) || {H, _} <- barrel_live:tokens(Remote)],
+    lists:foreach(fun({H, _}) -> sync_or_throw(H) end,
+                  barrel_live:tokens(Remote)),
     Old = read_current(StoreRef, DbName, DocId),
     Live0 = load_live(StoreRef, DbName, DocId, Old),
     Live1 = barrel_live:merge(Live0, Remote),
     Bodies = maps:from_list(
                [{barrel_version:from_token(T), B}
                 || {T, B} <- maps:to_list(RemoteBodies)]),
-    commit_state(StoreRef, DbName, Config, DocId, Old, Live0, Live1, Bodies,
-                 replication_opts(Config)).
+    %% a new live version without its body would be stored empty
+    Known = barrel_live:tokens(Live0),
+    case [barrel_version:to_token(T)
+          || {T, #{deleted := false}} <- maps:to_list(barrel_live:live(Live1)),
+             not lists:member(T, Known), not maps:is_key(T, Bodies)] of
+        [] ->
+            commit_state(StoreRef, DbName, Config, DocId, Old, Live0, Live1,
+                         Bodies, replication_opts(Config));
+        Missing ->
+            {error, {missing_bodies, lists:sort(Missing)}}
+    end.
 
 %% @doc A document's full state for replication: its barrel_live state
 %% and the body of every live version, under one read in the writer.
