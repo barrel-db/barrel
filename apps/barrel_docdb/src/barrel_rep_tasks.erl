@@ -53,6 +53,8 @@
          handle_info/2, terminate/2]).
 
 -define(MAX_PENDING, 1000).
+%% format of the positions this version saves (2.0.0 saved none)
+-define(POSITIONS_VSN, 2).
 -define(SERVER, ?MODULE).
 -define(TASKS_DB, <<"_replication_tasks">>).
 
@@ -511,6 +513,7 @@ run_task(Parent, TaskId, Config, SourceTransport, TargetTransport) ->
         <<"replication.mode">> => atom_to_binary(Mode, utf8)
     },
 
+    ok = upgrade_positions(TaskId, maps:get(filter, Ctx0)),
     barrel_trace:with_db_span(rep_task, undefined, ExtraAttrs, fun() ->
         %% Run replication based on direction
         case Direction of
@@ -1129,6 +1132,32 @@ get_dir_state(TaskId, Key) ->
             {first, []}
     end.
 
+%% Pre-2.1 positions may sit past rows never copied (attachments, and
+%% docs when filtered): they restart from first once, pending ids kept.
+upgrade_positions(TaskId, Filter) ->
+    _ = update_task_doc(TaskId, fun(Doc) ->
+        upgrade_doc(TaskId, map_size(Filter) > 0, Doc)
+    end),
+    ok.
+
+upgrade_doc(_TaskId, _Filtered, #{<<"vsn">> := V} = Doc)
+        when is_integer(V), V >= ?POSITIONS_VSN ->
+    Doc;
+upgrade_doc(TaskId, Filtered, Doc) ->
+    Keys = [<<"att_seq">>, <<"pull_att_seq">>]
+        ++ [K || Filtered, K <- [<<"last_seq">>, <<"pull_last_seq">>]],
+    First = format_seq(first),
+    Moved = [K || K <- Keys, maps:get(K, Doc, First) =/= First],
+    case Moved of
+        [] -> ok;
+        _ -> logger:warning("barrel_rep_tasks: ~s: pre-2.1 positions ~p "
+                            "reset, replaying from the start once (2.0 "
+                            "could save positions past rows it never "
+                            "copied)", [TaskId, Moved])
+    end,
+    maps:merge(Doc#{<<"vsn">> => ?POSITIONS_VSN},
+               maps:from_list([{K, First} || K <- Moved])).
+
 %% A `both' task saved before positions were split shares one last_seq
 %% (and one att_seq) across both feeds, which can skip either side's
 %% rows: both directions restart from first once.
@@ -1206,6 +1235,7 @@ task_to_doc(#{id := Id, config := Config, status := Status,
         <<"status">> => atom_to_binary(Status),
         <<"last_seq">> => format_seq(maps:get(last_seq, Task, first)),
         <<"att_seq">> => format_seq(maps:get(att_seq, Task, first)),
+        <<"vsn">> => ?POSITIONS_VSN,
         <<"created_at">> => CreatedAt,
         <<"updated_at">> => UpdatedAt
     }.

@@ -21,7 +21,7 @@
 
 -include("barrel_docdb.hrl").
 
--export([sync/5, sync_from/7, prepare/5, sync_docs/2]).
+-export([sync/5, sync_from/7, prepare/5, sync_docs/2, reconcile/5]).
 
 -define(DEFAULT_BATCH, 100).
 
@@ -50,7 +50,9 @@ do_sync(Source, Target, SourceTransport, TargetTransport, Opts) ->
         target => Target,
         source_transport => SourceTransport,
         target_transport => TargetTransport,
-        options => Opts
+        options => Opts,
+        %% 2.0 checkpointed past failed transfers
+        reset_legacy => true
     }),
     case barrel_rep_checkpoint:read_error(Checkpoint) of
         {Side, Reason} ->
@@ -134,6 +136,72 @@ sync_docs(#{st := ST} = Ctx, DocIds) ->
                     Error
             end
     end.
+
+%% @doc Walk the whole source feed (no checkpoint), sending what the target
+%% lacks or holds with other bytes; failures go to `failed', the walk goes on.
+-spec reconcile(term(), term(), module(), module(), map()) ->
+    {ok, map()} | skipped | {error, term()}.
+reconcile(Source, Target, SourceTransport, TargetTransport, Opts) ->
+    case supports(SourceTransport) andalso supports(TargetTransport) of
+        false ->
+            skipped;
+        true ->
+            case context(Source, Target, SourceTransport, TargetTransport,
+                         Opts) of
+                {ok, Ctx} -> reconcile_loop(Ctx, first,
+                                            (new_stats())#{failed => []});
+                {error, _} = Error -> Error
+            end
+    end.
+
+reconcile_loop(Ctx, Since, Stats) ->
+    #{source := Source, st := ST, batch := BatchSize,
+      filter := Filter} = Ctx,
+    ChangesOpts = case map_size(Filter) of
+        0 -> #{limit => BatchSize};
+        _ -> #{limit => BatchSize, filter => Filter}
+    end,
+    case ST:att_changes(Source, Since, ChangesOpts) of
+        {error, att_sync_unsupported} ->
+            skipped;
+        {error, _} = Error ->
+            Error;
+        {ok, [], LastSeq} ->
+            case barrel_rep_checkpoint:empty_page_advanced(Since, LastSeq) of
+                true ->
+                    reconcile_loop(Ctx, LastSeq, Stats);
+                false ->
+                    case flush(Ctx) of
+                        ok -> {ok, Stats};
+                        {error, _} = Error -> Error
+                    end
+            end;
+        {ok, Entries, LastSeq} ->
+            case barrel_rep_checkpoint:seq_advanced(Since, LastSeq) of
+                false ->
+                    {error, {no_progress, Since, LastSeq}};
+                true ->
+                    Puts = [E || #{op := put} = E <- Entries],
+                    case diff(Ctx, Puts) of
+                        {ok, Status} ->
+                            reconcile_loop(Ctx, LastSeq,
+                                           reconcile_entries(Ctx, Entries,
+                                                             Status, Stats));
+                        {error, _} = Error ->
+                            Error
+                    end
+            end
+    end.
+
+reconcile_entries(Ctx, Entries, Status, Stats) ->
+    lists:foldl(
+        fun(#{id := Id, name := Name} = Entry, Acc) ->
+            case apply_entry(Ctx, Entry, Status, Acc) of
+                {ok, Acc1} -> Acc1;
+                {error, #{failed := F} = Acc1} ->
+                    Acc1#{failed => [{Id, Name} | F]}
+            end
+        end, Stats, Entries).
 
 run(Source, Target, SourceTransport, TargetTransport, Since,
     CheckpointFun, Opts) ->

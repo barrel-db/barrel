@@ -32,6 +32,7 @@
     full_state/1,
     get_doc_state/2,
     put_doc_state/4,
+    repair_doc_bodies/3,
     diff_versions/2,
     get_changes/3,
     get_local_doc/2,
@@ -230,6 +231,18 @@ put_doc_state(Endpoint, DocId, State, Bodies) ->
             error_of(Other)
     end.
 
+%% Rewrite stored bodies from a healthy copy (barrel_rep:reconcile/3).
+repair_doc_bodies(Endpoint, DocId, Bodies) ->
+    Body = {encoded, <<"application/cbor">>,
+            barrel_docdb_codec_cbor:encode_wire(#{bodies => Bodies})},
+    case req(Endpoint, put, [<<"/repair/">>, quote(DocId)], Body,
+             [{<<"accept">>, <<"application/cbor">>}]) of
+        {ok, 200, #{<<"id">> := Id, <<"repaired">> := Tokens}} ->
+            {ok, Id, Tokens};
+        Other ->
+            error_of(Other)
+    end.
+
 diff_versions(Endpoint, TokenMap) ->
     case req(Endpoint, post, <<"/diff">>, #{versions => TokenMap}) of
         {ok, 200, #{<<"diff">> := Wire}} ->
@@ -288,7 +301,8 @@ db_info(Endpoint) ->
                                 Info0),
             Info2 = maybe_floor(att_floor, <<"att_floor">>, Body, Info1),
             Info = Info2#{att_flush => flag(<<"att_flush">>, Body),
-                          att_filter => flag(<<"att_filter">>, Body)},
+                          att_filter => flag(<<"att_filter">>, Body),
+                          read_only => flag(<<"read_only">>, Body)},
             {ok, Info};
         Other ->
             error_of(Other)

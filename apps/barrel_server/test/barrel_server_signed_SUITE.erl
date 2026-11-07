@@ -33,7 +33,8 @@
     t_signed_v3_writes_accepted/1,
     t_bearer_att_headers_accepted/1,
     t_legacy_semantic_header_rejected/1,
-    t_legacy_att_write_rejected/1
+    t_legacy_att_write_rejected/1,
+    t_reconcile_over_signed/1
 ]).
 
 -include_lib("common_test/include/ct.hrl").
@@ -54,7 +55,7 @@ all() ->
      t_att_put_content_type_tamper_rejected, t_att_touch_tamper_rejected,
      t_sync_hlc_and_type_tamper_rejected, t_signed_v3_writes_accepted,
      t_bearer_att_headers_accepted, t_legacy_semantic_header_rejected,
-     t_legacy_att_write_rejected].
+     t_legacy_att_write_rejected, t_reconcile_over_signed].
 
 init_per_suite(Config) ->
     {Pub, Priv} = crypto:generate_key(eddsa, ed25519),
@@ -369,6 +370,39 @@ t_legacy_att_write_rejected(Config) ->
     {401, Resp} = send(put, B, Path, H, Body),
     #{<<"error">> := <<"signature_v3_required">>} = json:decode(Resp),
     {ok, <<"stored">>} = att_body(<<"a9">>),
+    ok.
+
+%% The body repair is a signed write: it goes through with a v3
+%% signature, an unauthenticated one is refused.
+t_reconcile_over_signed(Config) ->
+    B = current_base(),
+    Local = <<"signed_reconcile_local">>,
+    {ok, _} = barrel_docdb:create_db(Local, #{
+        data_dir => filename:join(?config(priv_dir, Config), "signed_rc")
+    }),
+    try
+        {ok, _} = barrel_docdb:put_doc(Local, #{<<"id">> => <<"rc">>,
+                                                <<"v">> => 7}),
+        Endpoint0 = barrel_rep_transport_http:endpoint(
+            list_to_binary(B ++ "/db/" ++ ?DB)),
+        Endpoint = Endpoint0#{signing => #{key_id => ?KEYID,
+                                           priv_key => ?config(priv, Config)}},
+        Opts = #{target_transport => barrel_rep_transport_http},
+        {ok, _} = barrel_rep:replicate(Local, Endpoint, Opts),
+        Ks = barrel_keyspace:resolve(<<?DB>>),
+        ok = barrel_store_rocksdb:write_batch(
+               persistent_term:get({barrel_store, <<?DB>>}),
+               [{body_put, barrel_store_keys:doc_body(Ks, <<"rc">>),
+                 barrel_docdb_codec_cbor:encode_cbor(#{})}], #{}),
+        {401, _} = send(put, B, <<"/db/", ?DB, "/_sync/repair/rc">>,
+                        [{<<"content-type">>, <<"application/json">>}],
+                        <<"{\"bodies\":{}}">>),
+        {ok, #{bodies_repaired := 1}} =
+            barrel_rep:reconcile(Local, Endpoint, Opts),
+        {ok, #{<<"v">> := 7}} = barrel_docdb:get_doc(<<?DB>>, <<"rc">>)
+    after
+        try barrel_docdb:delete_db(Local) catch _:_ -> ok end
+    end,
     ok.
 
 %%====================================================================

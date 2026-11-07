@@ -304,12 +304,14 @@ tuning_keys_survive_resume(Config) ->
     ok = barrel_rep_tasks:pause_task(Id),
     ok = meck:new(hackney, [passthrough, no_link]),
     ok = barrel_rep_tasks:resume_task(Id),
-    _ = next_auth(),
     {ok, #{config := #{source := Source}}} = barrel_rep_tasks:get_task(Id),
     ?assertEqual(Tuning#{url => Url}, Source),
-    Opts = [O || {_, {hackney, request, [_, _, _, _, O]}, _}
-                     <- meck:history(hackney)],
-    ?assertMatch([_ | _], Opts),
+    %% wait on the resumed task's own request, not on a stub message a
+    %% pre-pause poll may have left
+    Requests = fun() -> [O || {_, {hackney, request, [_, _, _, _, O]}, _}
+                                  <- meck:history(hackney)] end,
+    ok = wait_until(fun() -> Requests() =/= [] end, 50, 100),
+    Opts = Requests(),
     [begin
          ?assertEqual(4321, proplists:get_value(recv_timeout, O)),
          ?assertEqual(1234, proplists:get_value(connect_timeout, O))

@@ -18,6 +18,7 @@
     full_state/1,
     get_doc_state/2,
     put_doc_state/4,
+    repair_doc_bodies/3,
     diff_states/2,
     diff_versions/2,
     get_changes/3,
@@ -62,6 +63,8 @@ get_doc_state(DbName, DocId) -> barrel_docdb:get_doc_state(DbName, DocId).
 put_doc_state(DbName, DocId, StateBin, Bodies) ->
     barrel_docdb:put_doc_state(DbName, DocId, StateBin, Bodies).
 diff_states(DbName, DigestMap) -> barrel_docdb:diff_states(DbName, DigestMap).
+repair_doc_bodies(DbName, DocId, Bodies) ->
+    barrel_docdb:repair_doc_bodies(DbName, DocId, Bodies).
 
 %% @doc Which offered versions is this database missing?
 -spec diff_versions(db_name(), #{docid() => binary()}) ->

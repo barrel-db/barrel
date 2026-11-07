@@ -65,6 +65,7 @@
     replicate/3,
     replicate_one_shot/1,
     replicate_one_shot/2,
+    reconcile/3,
     rep_id/5
 ]).
 
@@ -238,9 +239,11 @@ replicate_checked(Config, Opts) ->
                    maps:get(filter, Opts, #{})),
 
     %% Create checkpoint state
+    %% a pre-2.1 filtered checkpoint may sit past skipped matches
     CheckpointConfig = Config#{
         id => RepId,
-        options => Opts
+        options => Opts,
+        reset_legacy => map_size(maps:get(filter, Opts, #{})) > 0
     },
     Checkpoint0 = barrel_rep_checkpoint:new(CheckpointConfig),
     case barrel_rep_checkpoint:read_error(Checkpoint0) of
@@ -379,6 +382,193 @@ finish_one_shot(Run, Config, Opts, RepId, StartSeq) ->
             barrel_metrics:inc_rep_errors(RepId),
             Error
     end.
+
+%% @doc Repair a target from a healthy source, once (after upgrading
+%% from 2.0, see the replication guide). Walks the source's whole feed
+%% without checkpoints: for each document, a version both sides hold
+%% but the target stores with another body (such as `#{}') gets the
+%% source's body, then the source state is merged as usual. Then every
+%% source attachment the target lacks or holds with other bytes is sent
+%% again. Failures are listed, the walk goes on.
+%%
+%% Options: `source_transport', `target_transport', `filter',
+%% `batch_size', `attachments' (default true), `att_batch_size',
+%% `att_durability', as for replicate/3.
+%%
+%% ```
+%% {ok, #{docs_checked := _, bodies_repaired := _, atts_resent := _,
+%%        doc_failures := [], att_failures := []}} =
+%%     barrel_rep:reconcile(<<"healthy">>, <<"damaged">>, #{}).
+%% '''
+-spec reconcile(term(), term(), map()) -> {ok, map()} | {error, term()}.
+reconcile(Source, Target, Opts) ->
+    ST = maps:get(source_transport, Opts, barrel_rep_transport_local),
+    TT = maps:get(target_transport, Opts, barrel_rep_transport_local),
+    Filter = maps:get(filter, Opts, #{}),
+    Checks = [fun() -> barrel_rep_filter:check(Filter) end,
+              fun() -> check_durability(Opts) end,
+              fun() ->
+                  case lists:any(fun has_userinfo/1, [Source, Target]) of
+                      true -> {error, {invalid_sync_url, userinfo}};
+                      false -> ok
+                  end
+              end,
+              fun() -> reconcile_capable(Source, Target, ST, TT) end,
+              fun() -> writable(Target, TT) end],
+    case run_checks(Checks) of
+        ok ->
+            Ctx = #{source => Source, target => Target, st => ST, tt => TT,
+                    opts => build_changes_opts(maps:get(batch_size, Opts, 100),
+                                               Filter)},
+            case reconcile_docs(Ctx, first, reconcile_stats()) of
+                {ok, DocStats} -> reconcile_atts(Ctx, Opts, DocStats);
+                {error, _} = Error -> Error
+            end;
+        {error, _} = Error ->
+            Error
+    end.
+
+run_checks([]) -> ok;
+run_checks([Check | Rest]) ->
+    case Check() of
+        ok -> run_checks(Rest);
+        {error, _} = Error -> Error
+    end.
+
+check_durability(Opts) ->
+    case maps:get(att_durability, Opts, required) of
+        D when D =:= required; D =:= best_effort -> ok;
+        Bad -> {error, {invalid_option, {att_durability, Bad}}}
+    end.
+
+%% Body repair needs whole states on both sides.
+reconcile_capable(Source, Target, ST, TT) ->
+    Has = fun(M, F, A) ->
+              _ = code:ensure_loaded(M),
+              erlang:function_exported(M, F, A)
+          end,
+    Full = fun(M, E) ->
+               not Has(M, full_state, 1) orelse M:full_state(E)
+           end,
+    case Has(ST, get_doc_state, 2) andalso Has(TT, get_doc_state, 2)
+            andalso Has(TT, put_doc_state, 4)
+            andalso Has(TT, repair_doc_bodies, 3)
+            andalso Full(ST, Source) andalso Full(TT, Target) of
+        true -> ok;
+        false -> {error, full_state_unsupported}
+    end.
+
+writable(Target, TT) ->
+    case TT:db_info(Target) of
+        {ok, #{read_only := true}} -> {error, read_only};
+        {ok, _} -> ok;
+        {error, _} = Error -> Error
+    end.
+
+reconcile_stats() ->
+    #{docs_checked => 0, bodies_repaired => 0, docs_written => 0,
+      doc_failures => []}.
+
+reconcile_docs(#{source := Source, st := ST, opts := ChangesOpts} = Ctx,
+               Since, Stats) ->
+    case ST:get_changes(Source, Since, ChangesOpts) of
+        {ok, [], LastSeq} ->
+            case barrel_rep_checkpoint:empty_page_advanced(Since, LastSeq) of
+                true -> reconcile_docs(Ctx, LastSeq, Stats);
+                false -> {ok, Stats}
+            end;
+        {ok, Changes, LastSeq} ->
+            case barrel_rep_checkpoint:seq_advanced(Since, LastSeq) of
+                false ->
+                    {error, {no_progress, Since, LastSeq}};
+                true ->
+                    Ids = lists:usort([Id || #{id := Id} <- Changes]),
+                    reconcile_docs(Ctx, LastSeq,
+                                   lists:foldl(fun(Id, Acc) ->
+                                                   reconcile_doc(Ctx, Id, Acc)
+                                               end, Stats, Ids))
+            end;
+        {error, _} = Error ->
+            Error
+    end.
+
+reconcile_doc(#{source := Source, st := ST} = Ctx, DocId, Stats) ->
+    case ST:get_doc_state(Source, DocId) of
+        {ok, #{state := State, bodies := Bodies}} ->
+            Stats1 = bump(docs_checked, 1, Stats),
+            case repair_bodies(Ctx, DocId, Bodies) of
+                {ok, N} ->
+                    merge_state(Ctx, DocId, State, Bodies,
+                                bump(bodies_repaired, N, Stats1));
+                {error, Reason} ->
+                    doc_failed(DocId, Reason, Stats1)
+            end;
+        {error, not_found} ->
+            Stats;
+        {error, Reason} ->
+            doc_failed(DocId, Reason, Stats)
+    end.
+
+%% A token names one body: one the target stores differently is damage.
+repair_bodies(#{target := Target, tt := TT}, DocId, Bodies) ->
+    case TT:get_doc_state(Target, DocId) of
+        {ok, #{bodies := Have}} ->
+            Differ = maps:filter(fun(Tok, B) ->
+                                     case Have of
+                                         #{Tok := B} -> false;
+                                         #{Tok := _} -> true;
+                                         _ -> false
+                                     end
+                                 end, Bodies),
+            case map_size(Differ) of
+                0 ->
+                    {ok, 0};
+                _ ->
+                    case TT:repair_doc_bodies(Target, DocId, Differ) of
+                        {ok, _, Tokens} -> {ok, length(Tokens)};
+                        {error, _} = Error -> Error
+                    end
+            end;
+        {error, not_found} ->
+            {ok, 0};
+        {error, _} = Error ->
+            Error
+    end.
+
+merge_state(#{target := Target, tt := TT}, DocId, State, Bodies, Stats) ->
+    case TT:put_doc_state(Target, DocId, State, Bodies) of
+        {ok, _, _} -> bump(docs_written, 1, Stats);
+        {unchanged, _, _} -> Stats;
+        {error, Reason} -> doc_failed(DocId, Reason, Stats)
+    end.
+
+doc_failed(DocId, Reason, #{doc_failures := F} = Stats) ->
+    logger:warning("reconcile: ~p failed: ~p", [DocId, Reason]),
+    Stats#{doc_failures => [DocId | F]}.
+
+reconcile_atts(#{source := Source, target := Target, st := ST, tt := TT},
+               Opts, DocStats) ->
+    Done = DocStats#{doc_failures => lists:reverse(
+                                       maps:get(doc_failures, DocStats))},
+    Att = case maps:get(attachments, Opts, true) of
+        true -> barrel_rep_att:reconcile(Source, Target, ST, TT, Opts);
+        false -> disabled
+    end,
+    case Att of
+        {ok, #{failed := Failed} = AttStats} ->
+            {ok, Done#{atts_resent => maps:get(atts_written, AttStats)
+                                          + maps:get(atts_touched, AttStats),
+                       att_failures => lists:reverse(Failed),
+                       att_sync => maps:remove(failed, AttStats)}};
+        {error, _} = Error ->
+            Error;
+        Other ->
+            {ok, Done#{atts_resent => 0, att_failures => [],
+                       att_sync => Other}}
+    end.
+
+bump(Key, N, Stats) ->
+    maps:update_with(Key, fun(V) -> V + N end, N, Stats).
 
 %% @doc Perform one-shot replication with config only.
 %%

@@ -157,6 +157,8 @@ t_capability_read_scope(Config) ->
     %% but nothing that writes
     {403, _} = jreq(put, Db ++ "/_sync/state/a", bearer(RToken),
                     #{<<"state">> => StateB64, <<"bodies">> => #{}}),
+    {403, _} = jreq(put, Db ++ "/_sync/repair/a", bearer(RToken),
+                    #{<<"bodies">> => #{}}),
     {403, _} = jreq(put, Db ++ "/doc/b", bearer(RToken), #{}),
     {403, _} = jreq(put, Db ++ "/_sync/doc/b", bearer(RToken), #{}),
     {403, _} = jreq(post, Db ++ "/_bulk_docs", bearer(RToken),
@@ -185,6 +187,9 @@ t_capability_write_scope(Config) ->
     {200, PutBody} = jreq(put, Db ++ "/_sync/state/w1", bearer(WToken),
                           #{<<"state">> => StateB64, <<"bodies">> => Bodies}),
     ?assertMatch(#{<<"written">> := false}, json:decode(PutBody)),
+    {200, RepairBody} = jreq(put, Db ++ "/_sync/repair/w1", bearer(WToken),
+                             #{<<"bodies">> => Bodies}),
+    ?assertMatch(#{<<"repaired">> := []}, json:decode(RepairBody)),
     %% write does not reach lifecycle or timeline
     {403, _} = req(delete, Db, bearer(WToken), <<>>),
     {403, _} = jreq(post, Db ++ "/_timeline/branch", bearer(WToken),

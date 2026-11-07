@@ -30,7 +30,9 @@
     t_att_filter_errors_over_http/1,
     t_att_doc_enters_scope_over_http/1,
     t_att_empty_page_over_http/1,
-    t_att_touch_over_http/1
+    t_att_touch_over_http/1,
+    t_reconcile_push_over_http/1,
+    t_reconcile_pull_over_http/1
 ]).
 
 -include_lib("common_test/include/ct.hrl").
@@ -43,7 +45,8 @@ all() ->
      t_registry_grants_over_http, t_binary_field_round_trip,
      t_json_only_client, t_unknown_db, t_att_filters_over_http,
      t_att_filter_errors_over_http, t_att_doc_enters_scope_over_http,
-     t_att_empty_page_over_http, t_att_touch_over_http].
+     t_att_empty_page_over_http, t_att_touch_over_http,
+     t_reconcile_push_over_http, t_reconcile_pull_over_http].
 
 init_per_suite(Config) ->
     application:load(barrel_server),
@@ -533,3 +536,47 @@ t_att_touch_over_http(Config) ->
     ?assertEqual({ok, <<"same">>},
                  barrel_docdb:get_attachment(Served, <<"d">>, <<"a">>)),
     ok.
+
+%% A served copy damaged by 2.0 (a live body stored as #{}, an
+%% attachment never sent) is repaired from the healthy local one.
+t_reconcile_push_over_http(Config) ->
+    Local = ?config(local, Config),
+    Served = ?config(served, Config),
+    Endpoint = ?config(endpoint, Config),
+    {ok, _} = barrel_docdb:put_doc(Local, #{<<"id">> => <<"b">>,
+                                            <<"v">> => 1}),
+    {ok, _} = barrel_rep:replicate(Local, Endpoint,
+                                   (push_opts())#{attachments => false}),
+    {ok, _} = barrel_docdb:put_attachment(Local, <<"b">>, <<"f">>, <<"blob">>),
+    empty_body(Served, <<"b">>),
+    {ok, R} = barrel_rep:reconcile(Local, Endpoint, push_opts()),
+    ?assertMatch(#{docs_checked := 1, bodies_repaired := 1, atts_resent := 1,
+                   doc_failures := [], att_failures := []}, R),
+    ?assertMatch({ok, #{<<"v">> := 1}}, barrel_docdb:get_doc(Served, <<"b">>)),
+    ?assertEqual({ok, <<"blob">>},
+                 barrel_docdb:get_attachment(Served, <<"b">>, <<"f">>)),
+    ok.
+
+t_reconcile_pull_over_http(Config) ->
+    Local = ?config(local, Config),
+    Served = ?config(served, Config),
+    Endpoint = ?config(endpoint, Config),
+    {ok, _} = barrel_docdb:put_doc(Served, #{<<"id">> => <<"p">>,
+                                             <<"v">> => 2}),
+    {ok, _} = barrel_rep:replicate(Endpoint, Local, pull_opts()),
+    empty_body(Local, <<"p">>),
+    {ok, #{bodies_repaired := 1}} =
+        barrel_rep:reconcile(Endpoint, Local, pull_opts()),
+    ?assertMatch({ok, #{<<"v">> := 2}}, barrel_docdb:get_doc(Local, <<"p">>)),
+    ok.
+
+%% What the 2.0 missing-body bug left: a live winner stored as #{}.
+empty_body(Db, DocId) ->
+    Ks = barrel_keyspace:resolve(Db),
+    StoreRef = persistent_term:get({barrel_store, Db}),
+    ok = barrel_store_rocksdb:write_batch(
+           StoreRef, [{body_put, barrel_store_keys:doc_body(Ks, DocId),
+                       barrel_docdb_codec_cbor:encode_cbor(#{})}], #{}),
+    {ok, #{<<"id">> := DocId} = Doc} = barrel_docdb:get_doc(Db, DocId),
+    ?assertEqual([], [K || K <- maps:keys(Doc), binary:first(K) =/= $_,
+                           K =/= <<"id">>]).

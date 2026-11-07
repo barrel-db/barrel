@@ -190,6 +190,7 @@
     get_doc_state/2,
     stub_stats/1,
     put_doc_state/4,
+    repair_doc_bodies/3,
     diff_states/2,
     diff_versions/2,
     get_doc_for_replication/2
@@ -2134,6 +2135,18 @@ stub_stats(Db) ->
 put_doc_state(Db, DocId, StateBin, Bodies) ->
     with_db(Db, fun(Pid) ->
         barrel_db_server:put_doc_state(Pid, DocId, StateBin, Bodies)
+    end).
+
+%% @doc Repair stored bodies from a healthy copy: `Bodies' maps version
+%% tokens to their bodies (as get_doc_state/2 returns them). Each live,
+%% non-deleted version stored with a different body gets the given one;
+%% the state does not change, an empty body is never written. Returns
+%% the tokens rewritten. Used by barrel_rep:reconcile/3.
+-spec repair_doc_bodies(binary() | pid(), binary(), #{binary() => map()}) ->
+    {ok, binary(), [binary()]} | {error, term()}.
+repair_doc_bodies(Db, DocId, Bodies) ->
+    with_db(Db, fun(Pid) ->
+        barrel_db_server:repair_doc_bodies(Pid, DocId, Bodies)
     end).
 
 %% @doc Which offered document states differ from this database's:
