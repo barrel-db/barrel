@@ -94,6 +94,31 @@ A task whose local database closes pauses until the database is open again. Afte
 application:set_env(barrel_docdb, task_db_opener, {my_app, open_db}).
 ```
 
+### Credentials for tasks
+
+A task config is saved to disk, so it must not hold secrets. `start_task/1` refuses an endpoint with `auth`, `signing`, `ssl_options` or `headers`, and a URL with user info (`user:pass@host`), with `{error, {inline_credentials, Keys}}`. Put the credentials in the app env instead, keyed by the database URL or by its origin (the URL wins):
+
+```erlang
+application:set_env(barrel_docdb, sync_auth, #{
+    <<"https://remote:8443/db/mydb">> => <<"token-for-mydb">>,
+    <<"https://remote:8443">> => <<"token-for-the-rest">>
+}).
+%% likewise sync_signing (#{key_id, priv_key}) and sync_ssl (ssl options)
+
+{ok, TaskId} = barrel_rep_tasks:start_task(#{
+    source => <<"mydb">>,
+    target => #{url => <<"https://remote:8443/db/mydb">>,
+                recv_timeout => 60000},
+    mode => continuous
+}).
+```
+
+Notes:
+- The URL key is the normalized URL: lowercase scheme and host, no trailing slash.
+- Tuning keys (`pool`, `connect_timeout`, `recv_timeout`, `request_timeout`) are saved with the task and kept across pause, resume and restart.
+- `barrel_rep:replicate/3` still accepts inline credentials (nothing is saved), but not a URL with user info.
+- `request_timeout` (default 5 minutes) bounds each whole HTTP request, an attachment download or upload included; past it the call returns `{error, request_timeout}`.
+
 ### Attachments
 
 Tasks replicate attachments by default, same as `barrel_rep:replicate/2,3`. Attachments live on their own feed (independent of the document changes feed), so they have their own checkpoint (`att_seq`, persisted alongside `last_seq`) and their own idle-wake handling: a continuous task periodically re-checks attachments even when no document change occurs, so an attachment added to an already-replicated document still converges without any further doc write.
@@ -336,7 +361,7 @@ Attachment sync, plus `rep_id_term/1` for checkpoint-stable endpoint identity, a
     }).
 ```
 
-The HTTP endpoint is a normalized URL; credentials come from `auth => #{token => Bin}` on the endpoint or the `{barrel_docdb, sync_auth, #{Origin => Token}}` app env, so secrets never land in persisted task configs.
+The HTTP endpoint is a normalized URL; credentials come from `auth => #{token => Bin}` on the endpoint or the `{barrel_docdb, sync_auth, #{UrlOrOrigin => Token}}` app env, so secrets never land in persisted task configs (see [Credentials for tasks](#credentials-for-tasks)).
 
 ### Implementing a Custom Transport
 

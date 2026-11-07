@@ -124,6 +124,17 @@ init([]) ->
 
     %% Database supervisor for managing individual database processes
     %% Note: Each database starts its own compaction filter handler in barrel_db_server
+    %% Finds restarted writers and records failed databases; starts
+    %% before the databases and stops after them
+    DbWatch = #{
+        id => barrel_db_watch,
+        start => {barrel_db_watch, start_link, []},
+        restart => permanent,
+        shutdown => 5000,
+        type => worker,
+        modules => [barrel_db_watch]
+    },
+
     DbSup = #{
         id => barrel_db_sup,
         start => {barrel_db_sup, start_link, []},
@@ -144,6 +155,6 @@ init([]) ->
     },
 
     %% Child specs (embedded-only; no HTTP server)
-    ChildSpecs = [Metrics, Cache, Hlc, Sub, QuerySub, PathDict, QueryCursor, Parallel, DbSup, RepTasks],
+    ChildSpecs = [Metrics, Cache, Hlc, Sub, QuerySub, PathDict, QueryCursor, Parallel, DbWatch, DbSup, RepTasks],
 
     {ok, {SupFlags, ChildSpecs}}.

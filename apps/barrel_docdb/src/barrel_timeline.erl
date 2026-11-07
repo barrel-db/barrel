@@ -68,8 +68,12 @@ branch_db(Parent, BranchName, Opts) when is_binary(Parent),
                         {ok, ParentPid} ->
                             do_branch(Parent, ParentPid, BranchName, Opts);
                         {error, not_found} ->
-                            {error, parent_not_found}
-                    end
+                            {error, parent_not_found};
+                        {error, _} = ParentErr ->
+                            ParentErr
+                    end;
+                {error, _} = BranchErr ->
+                    BranchErr
             end;
         {error, _} = Err ->
             Err
@@ -191,7 +195,9 @@ merge_branch(Branch, Opts) when is_binary(Branch), is_map(Opts) ->
                 {ok, _} ->
                     do_merge(Branch, Parent, ForkHlc, Opts);
                 {error, not_found} ->
-                    {error, parent_not_found}
+                    {error, parent_not_found};
+                {error, _} = ParentErr ->
+                    ParentErr
             end;
         {ok, _} ->
             {error, not_a_branch};

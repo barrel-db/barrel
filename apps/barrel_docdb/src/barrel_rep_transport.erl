@@ -78,6 +78,8 @@
 %% Transports lacking these degrade: the attachment phase reports
 %% att_sync => skipped. read_fun() is the transport-neutral pull
 %% stream: fun(() -> {ok, Chunk, NextReadFun} | eof | {error, term()}).
+%% A stream holding a resource may return `close => fun(() -> ok)' in
+%% its Info; the caller calls it once the target is done with it.
 
 -callback att_changes(Endpoint :: term(), Since :: seq() | first,
                       Opts :: map()) ->

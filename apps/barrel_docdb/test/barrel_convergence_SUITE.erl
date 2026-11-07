@@ -289,7 +289,7 @@ kill_and_recover_consistency(Config) ->
     HistoryBefore = history_len(Db),
 
     %% Kill the database process outright; committed batches must
-    %% survive the crash. Reopening is create_db over the same dir.
+    %% survive the crash. Its supervisor restarts it over the same dir.
     {ok, Pid} = barrel_docdb:db_pid(Db),
     MRef = erlang:monitor(process, Pid),
     exit(Pid, kill),
@@ -327,6 +327,7 @@ wait_reopen(_Db, _DataDir, 0) ->
 wait_reopen(Db, DataDir, N) ->
     case barrel_docdb:create_db(Db, #{data_dir => DataDir}) of
         {ok, Pid} when is_pid(Pid) -> {ok, Pid};
+        {error, already_exists} -> barrel_docdb:db_pid(Db);
         _ ->
             timer:sleep(100),
             wait_reopen(Db, DataDir, N - 1)

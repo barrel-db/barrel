@@ -148,9 +148,18 @@ stop() ->
 
 %% @doc Start a new replication task
 %% Returns the task ID which can be used to manage the task.
+%%
+%% Task configs are persisted, so remote endpoints carry no secrets:
+%% `auth', `signing', `ssl_options', `headers' or a URL with user info
+%% return `{error, {inline_credentials, Keys}}'. Set them in the
+%% `sync_auth', `sync_signing' and `sync_ssl' app env instead (see
+%% barrel_rep_transport_http). An invalid config returns
+%% `{error, Reason}'.
 -spec start_task(task_config()) -> {ok, task_id()} | {error, term()}.
-start_task(Config) ->
-    gen_server:call(?SERVER, {start_task, Config}).
+start_task(Config) when is_map(Config) ->
+    gen_server:call(?SERVER, {start_task, Config});
+start_task(_Config) ->
+    {error, invalid_config}.
 
 %% @doc Stop a running task
 -spec stop_task(task_id()) -> ok | {error, term()}.
@@ -351,7 +360,7 @@ do_start_task(Config, State) ->
             case save_task(Task) of
                 ok ->
                     %% Start the task
-                    {ok, NewState} = start_task_process(Task, State),
+                    {ok, NewState} = spawn_task(Task, State),
                     {ok, TaskId, NewState};
                 {error, _} = Error ->
                     Error
@@ -439,7 +448,22 @@ do_list_tasks(Filter, State) ->
 %% Internal - Task execution
 %%====================================================================
 
-start_task_process(#{id := TaskId, config := Config}, State) ->
+%% A persisted config is validated again: one that no longer does (a
+%% filter that stopped decoding) fails the task instead of running it.
+start_task_process(#{id := TaskId, config := Config} = Task, State) ->
+    case validate_config(Config) of
+        ok ->
+            spawn_task(Task, State);
+        {error, Reason} ->
+            logger:warning("barrel_rep_tasks: task ~s has an invalid "
+                           "config: ~p", [TaskId, Reason]),
+            _ = update_task_status(TaskId, failed,
+                                   #{<<"error">> => format_reason(
+                                                      {invalid_config, Reason})}),
+            {error, {invalid_config, Reason}}
+    end.
+
+spawn_task(#{id := TaskId, config := Config}, State) ->
     %% Get transport modules
     SourceTransport = get_transport(source, Config),
     TargetTransport = get_transport(target, Config),
@@ -820,57 +844,40 @@ wait_for_wake(#{wake := poll, poll := Poll} = Ctx) ->
     timer:sleep(Poll),
     Ctx#{poll := min(Poll * 2, ?POLL_MAX)}.
 
-%% @doc Wait for documents to reach downstream targets
-%% For each change, verify the revision exists at all wait_for targets
+%% @doc Wait for the replicated versions to reach the downstream
+%% targets: each target must answer `have' for every version (a delete
+%% counts once its stub is there); missing ids are retried.
 wait_for_downstream(_Changes, []) ->
     ok;
 wait_for_downstream(Changes, WaitFor) ->
-    %% Extract doc IDs and their revisions from changes
-    DocsToVerify = lists:filtermap(
-        fun(Change) ->
-            case Change of
-                #{id := DocId, rev := Rev} -> {true, {DocId, Rev}};
-                #{<<"id">> := DocId, <<"rev">> := Rev} -> {true, {DocId, Rev}};
-                _ -> false
-            end
-        end,
-        Changes
-    ),
-    %% Verify each document at each target
-    verify_at_targets(DocsToVerify, WaitFor, 10, 500).
+    Versions = maps:from_list(
+        [{DocId, Rev} || #{id := DocId, rev := Rev} <- Changes] ++
+        [{DocId, Rev} || #{<<"id">> := DocId, <<"rev">> := Rev} <- Changes]),
+    verify_at_targets([{T, Versions} || T <- WaitFor], 10, 500).
 
-%% @doc Verify documents exist at targets with retry logic
-verify_at_targets(_Docs, _Targets, 0, _Delay) ->
-    {error, wait_for_timeout};
-verify_at_targets([], _Targets, _Retries, _Delay) ->
+verify_at_targets([], _Retries, _Delay) ->
     ok;
-verify_at_targets(Docs, Targets, Retries, Delay) ->
-    %% Check all docs at all targets
-    Results = lists:map(
-        fun(Target) ->
-            Transport = get_transport_for_target(Target),
-            lists:map(
-                fun({DocId, _ExpectedRev}) ->
-                    case Transport:get_doc(Target, DocId, #{}) of
-                        {ok, _Doc, _Meta} -> ok;
-                        {error, not_found} -> not_found;
-                        {error, _} -> error
-                    end
-                end,
-                Docs
-            )
-        end,
-        Targets
-    ),
-    %% Flatten and check if all succeeded
-    AllResults = lists:flatten(Results),
-    case lists:all(fun(R) -> R =:= ok end, AllResults) of
-        true ->
+verify_at_targets(_Pending, 0, _Delay) ->
+    {error, wait_for_timeout};
+verify_at_targets(Pending, Retries, Delay) ->
+    case [{T, V} || {T, V0} <- Pending,
+                    V <- [missing_at(T, V0)], map_size(V) > 0] of
+        [] ->
             ok;
-        false ->
-            %% Some docs not yet at targets, retry
+        Still ->
             timer:sleep(Delay),
-            verify_at_targets(Docs, Targets, Retries - 1, Delay)
+            verify_at_targets(Still, Retries - 1, Delay)
+    end.
+
+%% The versions the target does not have yet; an error retries all.
+missing_at(Target, Versions) ->
+    Transport = get_transport_for_target(Target),
+    case Transport:diff_versions(Target, Versions) of
+        {ok, Diff} ->
+            maps:filter(fun(Id, _) -> maps:get(Id, Diff, missing) =/= have end,
+                        Versions);
+        {error, _} ->
+            Versions
     end.
 
 %% @doc Get the appropriate transport for a (resolved) target
@@ -938,8 +945,8 @@ check_running_tasks(State0) ->
                             AccState;
                         false ->
                             %% Task should be running but isn't - restart it
-                            {ok, NewState} = start_task_process(Task, AccState),
-                            NewState
+                            started(start_task_process(Task, AccState),
+                                    AccState)
                     end
                 end,
                 State,
@@ -948,6 +955,9 @@ check_running_tasks(State0) ->
         {error, _} ->
             State
     end.
+
+started({ok, State}, _Old) -> State;
+started({error, _}, Old) -> Old.
 
 %% Resume the tasks paused by a database close once their local
 %% databases are open again.
@@ -1010,8 +1020,11 @@ open_local(_M, _F, _Endpoint) ->
 local_open(Endpoint) ->
     case is_remote(Endpoint) of
         true -> true;
-        false -> barrel_docdb:db_pid(Endpoint) =/= {error, not_found}
+        false -> local_running(barrel_docdb:db_pid(Endpoint))
     end.
+
+local_running({ok, _Pid}) -> true;
+local_running({error, _}) -> false.
 
 %%====================================================================
 %% Internal - Persistence
@@ -1036,9 +1049,13 @@ restore_tasks(State) ->
         {ok, Tasks} ->
             lists:foldl(
                 fun(#{id := Id} = Task, AccState) ->
-                    {ok, NewState} = start_task_process(Task, AccState),
-                    Restored = NewState#state.restored,
-                    NewState#state{restored = Restored#{Id => true}}
+                    case start_task_process(Task, AccState) of
+                        {ok, NewState} ->
+                            Restored = NewState#state.restored,
+                            NewState#state{restored = Restored#{Id => true}};
+                        {error, _} ->
+                            AccState
+                    end
                 end,
                 State,
                 Tasks
@@ -1177,9 +1194,9 @@ doc_to_task(Doc) ->
         Doc).
 
 %% The persisted config uses binary keys and wire-safe values: enums
-%% as binaries, the filter through barrel_rep_filter, and endpoints
-%% by their URL only (no secrets in task docs; auth re-resolves from
-%% the sync_auth env at task start).
+%% as binaries, the filter through barrel_rep_filter, and remote
+%% endpoints by their URL and tuning keys (no secrets in task docs;
+%% credentials resolve from the app env at task start).
 config_to_map(Config) ->
     maps:fold(
         fun(source, V, Acc) -> Acc#{<<"source">> => endpoint_to_doc(V)};
@@ -1203,27 +1220,70 @@ config_to_map(Config) ->
         #{},
         Config).
 
-endpoint_to_doc(#{url := Url}) -> Url;
-endpoint_to_doc(Other) -> Other.
+endpoint_to_doc(#{url := Url} = Endpoint) ->
+    maps:fold(fun(pool, V, Acc) -> Acc#{<<"pool">> => atom_to_binary(V)};
+                 (request_timeout, infinity, Acc) ->
+                      Acc#{<<"request_timeout">> => <<"infinity">>};
+                 (K, V, Acc) when K =:= connect_timeout;
+                                  K =:= recv_timeout;
+                                  K =:= request_timeout ->
+                      Acc#{atom_to_binary(K) => V};
+                 (_, _, Acc) -> Acc
+              end, #{<<"url">> => Url}, Endpoint);
+endpoint_to_doc(Other) ->
+    Other.
+
+%% Reads both the map form and the older URL-only form.
+endpoint_from_doc(#{<<"url">> := Url} = Doc) ->
+    maps:fold(fun(<<"pool">>, V, Acc) when is_binary(V) ->
+                      Acc#{pool => binary_to_atom(V)};
+                 (<<"request_timeout">>, <<"infinity">>, Acc) ->
+                      Acc#{request_timeout => infinity};
+                 (K, V, Acc) when K =:= <<"connect_timeout">>;
+                                  K =:= <<"recv_timeout">>;
+                                  K =:= <<"request_timeout">> ->
+                      Acc#{binary_to_atom(K) => V};
+                 (_, _, Acc) -> Acc
+              end, #{url => Url}, Doc);
+endpoint_from_doc(Other) ->
+    Other.
+
+%% An unknown enum stays a binary, which validation then rejects.
+enum_from_doc(V, Allowed) ->
+    case [A || A <- Allowed, atom_to_binary(A) =:= V] of
+        [A] -> A;
+        [] -> V
+    end.
+
+module_from_doc(V) when is_binary(V) ->
+    try binary_to_existing_atom(V)
+    catch error:badarg -> V
+    end;
+module_from_doc(V) ->
+    V.
 
 map_to_config(Map) ->
     maps:fold(
-        fun(<<"source">>, V, Acc) -> Acc#{source => V};
-           (<<"target">>, V, Acc) -> Acc#{target => V};
+        fun(<<"source">>, V, Acc) -> Acc#{source => endpoint_from_doc(V)};
+           (<<"target">>, V, Acc) -> Acc#{target => endpoint_from_doc(V)};
            (<<"mode">>, V, Acc) ->
-               Acc#{mode => binary_to_existing_atom(V, utf8)};
+               Acc#{mode => enum_from_doc(V, [one_shot, continuous])};
            (<<"direction">>, V, Acc) ->
-               Acc#{direction => binary_to_existing_atom(V, utf8)};
+               Acc#{direction => enum_from_doc(V, [push, pull, both])};
            (<<"source_transport">>, V, Acc) ->
-               Acc#{source_transport => binary_to_existing_atom(V, utf8)};
+               Acc#{source_transport => module_from_doc(V)};
            (<<"target_transport">>, V, Acc) ->
-               Acc#{target_transport => binary_to_existing_atom(V, utf8)};
+               Acc#{target_transport => module_from_doc(V)};
            (<<"batch_size">>, V, Acc) -> Acc#{batch_size => V};
            (<<"filter">>, V, Acc) ->
+               %% an undecodable filter is kept as such: validation
+               %% fails the task rather than running it unfiltered
                case barrel_rep_filter:from_wire(V) of
                    {ok, Filter} -> Acc#{filter => Filter};
-                   {error, _} -> Acc
+                   {error, Reason} -> Acc#{filter => {undecodable, Reason}}
                end;
+           (<<"wait_for">>, V, Acc) when is_list(V) ->
+               Acc#{wait_for => [endpoint_from_doc(W) || W <- V]};
            (<<"wait_for">>, V, Acc) -> Acc#{wait_for => V};
            (<<"attachments">>, V, Acc) -> Acc#{attachments => V};
            (<<"att_batch_size">>, V, Acc) -> Acc#{att_batch_size => V};
@@ -1260,22 +1320,113 @@ format_reason(Reason) ->
 %% Internal - Helpers
 %%====================================================================
 
-validate_config(Config) ->
-    case {maps:is_key(source, Config), maps:is_key(target, Config)} of
-        {true, true} ->
-            %% a bad remote URL fails at start_task, not asynchronously
-            %% inside the task process
-            try
-                _ = resolve_endpoint(maps:get(source, Config)),
-                _ = resolve_endpoint(maps:get(target, Config)),
-                barrel_rep_filter:check(maps:get(filter, Config, #{}))
-            catch
-                error:{invalid_sync_url, Url} ->
-                    {error, {invalid_sync_url, Url}}
-            end;
-        {false, _} -> {error, missing_source};
-        {_, false} -> {error, missing_target}
+%% Total: every bad shape is an error, never a crash of the manager.
+%% Unknown keys are left alone.
+validate_config(Config) when is_map(Config) ->
+    try
+        Source = required(source, Config, missing_source),
+        Target = required(target, Config, missing_target),
+        WaitFor = case maps:get(wait_for, Config, []) of
+            L when is_list(L) -> L;
+            Bad -> throw({invalid, {invalid_option, {wait_for, Bad}}})
+        end,
+        case lists:usort(lists:append(
+                 [credential_keys(E) || E <- [Source, Target | WaitFor]])) of
+            [] -> ok;
+            Keys -> throw({invalid, {inline_credentials, Keys}})
+        end,
+        ok = check_endpoint(Source, maps:get(source_transport, Config, undefined)),
+        ok = check_endpoint(Target, maps:get(target_transport, Config, undefined)),
+        lists:foreach(fun(W) -> check_endpoint(W, undefined) end, WaitFor),
+        maps:foreach(fun check_option/2, Config)
+    catch
+        throw:{invalid, Reason} -> {error, Reason}
+    end;
+validate_config(_Config) ->
+    {error, invalid_config}.
+
+required(Key, Config, Missing) ->
+    case Config of
+        #{Key := V} -> V;
+        _ -> throw({invalid, Missing})
     end.
+
+%% Secrets an endpoint would persist in the task doc.
+credential_keys(#{url := Url} = Endpoint) ->
+    secret_keys(Endpoint) ++ userinfo_keys(Url);
+credential_keys(Endpoint) when is_map(Endpoint) ->
+    secret_keys(Endpoint);
+credential_keys(Url) when is_binary(Url) ->
+    userinfo_keys(Url);
+credential_keys(_Endpoint) ->
+    [].
+
+secret_keys(Endpoint) ->
+    [K || K <- [auth, signing, ssl_options, headers], maps:is_key(K, Endpoint)].
+
+userinfo_keys(Url) ->
+    case barrel_rep_transport_http:has_userinfo(Url) of
+        true -> [userinfo];
+        false -> []
+    end.
+
+%% A custom transport owns its endpoint shape.
+check_endpoint(Endpoint, Transport) when Transport =:= undefined;
+                                         Transport =:= barrel_rep_transport_local;
+                                         Transport =:= barrel_rep_transport_http ->
+    case is_remote(Endpoint) of
+        true ->
+            try _ = barrel_rep_transport_http:endpoint(Endpoint), ok
+            catch error:_ -> throw({invalid, {invalid_endpoint, Endpoint}})
+            end;
+        false when is_binary(Endpoint) ->
+            case barrel_docdb:validate_db_name(Endpoint) of
+                ok -> ok;
+                {error, _} -> throw({invalid, {invalid_endpoint, Endpoint}})
+            end;
+        false ->
+            throw({invalid, {invalid_endpoint, Endpoint}})
+    end;
+check_endpoint(_Endpoint, _Transport) ->
+    ok.
+
+check_option(mode, V) when V =:= one_shot; V =:= continuous -> ok;
+check_option(direction, V) when V =:= push; V =:= pull; V =:= both -> ok;
+check_option(batch_size, V) when is_integer(V), V > 0 -> ok;
+check_option(att_batch_size, V) when is_integer(V), V > 0 -> ok;
+check_option(attachments, V) when is_boolean(V) -> ok;
+check_option(source_transport, V) when is_atom(V) -> ok;
+check_option(target_transport, V) when is_atom(V) -> ok;
+check_option(filter, V) ->
+    case check_filter(V) of
+        ok -> ok;
+        {error, Reason} -> throw({invalid, Reason})
+    end;
+check_option(K, V) when K =:= mode; K =:= direction; K =:= batch_size;
+                        K =:= att_batch_size; K =:= attachments;
+                        K =:= source_transport; K =:= target_transport ->
+    throw({invalid, {invalid_option, {K, V}}});
+check_option(_K, _V) ->
+    ok.
+
+%% The filter must compile and survive the task doc round trip.
+check_filter(Filter) when is_map(Filter) ->
+    try
+        case barrel_rep_filter:check(Filter) of
+            ok ->
+                case barrel_rep_filter:from_wire(
+                       barrel_rep_filter:to_wire(Filter)) of
+                    {ok, _} -> ok;
+                    {error, Reason} -> {error, {invalid_filter, Reason}}
+                end;
+            {error, _} = Err ->
+                Err
+        end
+    catch
+        _:R -> {error, {invalid_filter, R}}
+    end;
+check_filter(Filter) ->
+    {error, {invalid_filter, Filter}}.
 
 generate_task_id() ->
     Rand = crypto:strong_rand_bytes(8),

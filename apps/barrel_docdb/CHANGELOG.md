@@ -13,6 +13,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A replicated document state that named a version without sending its body stored an empty document, and sending the body later changed nothing. Such a state is now refused and nothing is written.
 - A replicated version too far ahead of the local clock was accepted anyway, and the next local write on that document hung. It is now refused with a clock skew error, nothing is written, and the database keeps serving writes.
 - An invalid query filter was ignored, so changes feeds and replications sent every document. It is now an error and nothing is copied.
+- A database whose writer crashed stayed down until something reopened it by hand. It now restarts on its own, up to 3 times in 60 seconds; past that it is reported as failed instead of missing, and other databases are not affected.
+- A database killed while a caller held an attachment stream could not reopen: its attachment store stayed locked. Reopening now always works.
+- A crash of a database's compaction filter went unnoticed. It is now logged and the database keeps running.
+- A replication task lost its credentials and timeouts on pause, resume or restart, so it ran unauthenticated. Credentials now come from the app env every time, and timeouts are kept.
+- A malformed task config crashed the task manager and stopped every running task. It is now refused with an error, and a saved config that is no longer valid (such as a filter that no longer decodes) fails that task instead of running it unfiltered.
+- An HTTP replication request kept running after its caller died, and attachment downloads and uploads ignored the request timeout. Requests now stop with their caller, every request including attachments ends at its timeout, and a download the target refused is closed.
+- A task with `wait_for` treated a downstream holding an older version of a document as up to date. It now waits until the downstream has the version that was sent, deletes included.
+
+### Changed
+- Breaking: replication tasks refuse inline credentials (`auth`, `signing`, `ssl_options`, `headers`, or a user and password in the URL). Configure them in the app env instead. A one-shot replication also refuses a URL with a user and password.
+
+### Added
+- `barrel_docdb:reopen_db/1` restarts a failed database with its last config.
+- The `sync_auth`, `sync_signing` and `sync_ssl` settings accept a database URL as key, in addition to an origin, so each remote database can have its own credentials.
 
 ## [2.0.0] - 2026-11-07
 
