@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-11-07
+
 ### Fixed
 - A filtered replication could skip matching documents: with a small batch size only the first pages arrived, and a channel filter with a query stopped at the first page where nothing matched. Every matching document is now copied.
 - A channel filter with a query did not send deletes or documents whose only match was a conflicting version, so replicas kept documents deleted on the source. Channel filters now follow the same replication rules as other filters.

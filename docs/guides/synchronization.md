@@ -168,10 +168,11 @@ Signature v3 also covers the request headers that change what a write does:
 `x-barrel-session`, `x-barrel-source`, `x-barrel-hlc` and the attachment
 headers `x-barrel-att-origin`, `x-barrel-digest` and `x-barrel-att-touch`.
 Each is signed as present with its value or as absent, and the server acts on
-the signed values only: change one and the request answers 401. Clients newer
-than barrel_docdb 2.0.0 send v3 only. Rolling to it:
+the signed values only: change one and the request answers 401. Clients from
+barrel_docdb 2.1.0 send v3 only. Rolling to it:
 
-1. Upgrade every server first (a v3 client is refused by an older server).
+1. Upgrade every server to barrel_server 1.13.0 first (a v3 client is
+   refused by an older server).
 2. Upgrade the clients. Meanwhile, v1 and v2 requests keep replicating
    documents, but the server ignores their `x-barrel-hlc` and refuses them
    with 401 `{"error":"signature_v3_required"}` when they write an attachment
