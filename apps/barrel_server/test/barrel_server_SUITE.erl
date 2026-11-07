@@ -24,6 +24,9 @@
     t_query_get/1,
     t_query_params_json/1,
     t_query_parse_error/1,
+    t_find_missing_where/1,
+    t_find_bad_condition/1,
+    t_find_valid/1,
     t_query_max_rows/1,
     t_query_meta_bound/1,
     t_query_deadline/1,
@@ -52,7 +55,8 @@ all() ->
      t_vector_search, t_changes_json, t_changes_sse,
      t_changes_continuous, t_embedding,
      t_query_ndjson, t_query_get, t_query_params_json,
-     t_query_parse_error, t_query_max_rows, t_query_meta_bound,
+     t_query_parse_error, t_find_missing_where, t_find_bad_condition,
+     t_find_valid, t_query_max_rows, t_query_meta_bound,
      t_query_deadline, t_query_bad_bounds, t_query_embedding_meta,
      t_query_subscribe_requires_sse,
      t_query_subscribe_sse, t_not_found, t_no_atom_leak,
@@ -268,6 +272,37 @@ t_query_parse_error(Config) ->
     {400, Err2} = req(post, url("/query", B),
                       <<"SELECT * FROM db WHERE _x = 1">>),
     ?assertEqual(<<"invalid_query">>, maps:get(<<"error">>, Err2)),
+    ok.
+
+%% An invalid /find query is a client error naming the problem.
+t_find_missing_where(Config) ->
+    B = base(Config),
+    {400, Err} = req_json(post, url("/find", B), #{limit => 5}),
+    ?assertEqual(<<"invalid_query">>, maps:get(<<"error">>, Err)),
+    ?assertMatch({_, _}, binary:match(maps:get(<<"reason">>, Err),
+                                      <<"missing_clause">>)),
+    ok.
+
+t_find_bad_condition(Config) ->
+    B = base(Config),
+    {400, Err} = req_json(post, url("/find", B),
+                          #{where => [[<<"nope">>, [<<"type">>], 1]]}),
+    ?assertEqual(<<"invalid_query">>, maps:get(<<"error">>, Err)),
+    {400, Err2} = req_json(post, url("/find", B),
+                           #{where => [[<<"regex">>, [<<"t">>], <<"(">>]]}),
+    ?assertEqual(<<"invalid_query">>, maps:get(<<"error">>, Err2)),
+    ok.
+
+t_find_valid(Config) ->
+    B = base(Config),
+    {201, _} = req_json(put, url("/doc/find1", B),
+                        #{<<"kind">> => <<"findme">>, <<"n">> => 1}),
+    {201, _} = req_json(put, url("/doc/find2", B),
+                        #{<<"kind">> => <<"other">>, <<"n">> => 2}),
+    {200, #{<<"rows">> := Rows}} =
+        req_json(post, url("/find", B),
+                 #{where => [[<<"path">>, [<<"kind">>], <<"findme">>]]}),
+    ?assertEqual(1, length(Rows)),
     ok.
 
 t_query_subscribe_requires_sse(Config) ->

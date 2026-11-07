@@ -85,7 +85,7 @@ GET    /db/:db/doc/:id/_versions        live versions (conflict siblings)
 GET    /db/:db/doc/:id/_versions/:rev   one version's body
 POST   /db/:db/_bulk_docs               {"docs":[...]}  -> {"results":[...]}
 POST   /db/:db/_bulk_get                {"ids":[...]}   -> {"results":[...]}
-POST   /db/:db/find                     body = query, returns rows
+POST   /db/:db/find                     {"where":[...],"limit":10} -> rows
 POST   /db/:db/query                    BQL: {"query":"...","max_rows":N,"deadline_ms":N}
 GET    /db/:db/query                    BQL via ?q= (and ?max_rows=, ?deadline_ms=)
 GET    /db/:db/changes                  changes feed (JSON, or SSE)

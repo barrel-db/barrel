@@ -6,7 +6,8 @@
 %%% listeners, and `accept => [mtls]'. Verifies: all three listeners bind;
 %%% a client presenting a CA-signed cert authenticates; a client with no
 %%% cert is refused at the TLS handshake; a request presenting a signature
-%%% is judged by it alone (`accept => [mtls, signed]'). Requires `openssl' (skips
+%%% is judged by it alone, and so is a presented bearer or capability
+%%% token (`accept => [mtls, signed, bearer]'). Requires `openssl' (skips
 %%% otherwise). The sync client speaks HTTP/1.1, so the gate is exercised
 %%% on H1-TLS.
 %%% @end
@@ -16,17 +17,22 @@
 -export([all/0, init_per_suite/1, end_per_suite/1]).
 -export([t_listeners_bind/1, t_mtls_client_authenticates/1,
          t_certless_refused/1, t_bad_signature_rejected/1,
-         t_valid_signature_accepted/1]).
+         t_valid_signature_accepted/1, t_wrong_bearer_rejected/1,
+         t_invalid_capability_rejected/1, t_unknown_scheme_rejected/1,
+         t_valid_bearer_accepted/1]).
 
 -include_lib("common_test/include/ct.hrl").
 -include_lib("stdlib/include/assert.hrl").
 
 -define(DB, "mdb").
 -define(KEYID, <<"node1">>).
+-define(TOKEN, <<"mtls-suite-token">>).
 
 all() ->
     [t_listeners_bind, t_mtls_client_authenticates, t_certless_refused,
-     t_bad_signature_rejected, t_valid_signature_accepted].
+     t_bad_signature_rejected, t_valid_signature_accepted,
+     t_wrong_bearer_rejected, t_invalid_capability_rejected,
+     t_unknown_scheme_rejected, t_valid_bearer_accepted].
 
 init_per_suite(Config) ->
     case os:find_executable("openssl") of
@@ -48,7 +54,8 @@ init_per_suite(Config) ->
                                   verify => verify_peer}),
             {Pub, Priv} = crypto:generate_key(eddsa, ed25519),
             application:set_env(barrel_server, auth,
-                                #{accept => [mtls, signed],
+                                #{accept => [mtls, signed, bearer],
+                                  tokens => [?TOKEN],
                                   signers => #{?KEYID => Pub}}),
             {ok, _} = application:ensure_all_started(barrel_server),
             {ok, _} = application:ensure_all_started(hackney),
@@ -114,9 +121,40 @@ t_valid_signature_accepted(Config) ->
     {200, _} = req(get, Base, Path, [], <<>>, client_ssl(Dir)),
     ok.
 
+%% A trusted client certificate does not rescue a failing bearer.
+t_wrong_bearer_rejected(Config) ->
+    rejected(Config, <<"wrongbearer">>, <<"Bearer not-the-token">>).
+
+t_invalid_capability_rejected(Config) ->
+    rejected(Config, <<"badcap">>, <<"Bearer bsp_not-a-capability">>).
+
+%% An Authorization scheme the server does not understand is a 401.
+t_unknown_scheme_rejected(Config) ->
+    rejected(Config, <<"basic">>, <<"Basic dXNlcjpwYXNz">>).
+
+t_valid_bearer_accepted(Config) ->
+    Base = tls_base(Config),
+    Dir = ?config(dir, Config),
+    Path = <<"/db/", ?DB, "/doc/goodbearer">>,
+    H = [{<<"content-type">>, <<"application/json">>},
+         {<<"authorization">>, <<"Bearer ", ?TOKEN/binary>>}],
+    {201, _} = req(put, Base, Path, H, <<"{}">>, client_ssl(Dir)),
+    {200, _} = req(get, Base, Path, [], <<>>, client_ssl(Dir)),
+    ok.
+
 %%====================================================================
 %% Helpers
 %%====================================================================
+
+rejected(Config, DocId, Auth) ->
+    Base = tls_base(Config),
+    Dir = ?config(dir, Config),
+    Path = <<"/db/", ?DB, "/doc/", DocId/binary>>,
+    H = [{<<"content-type">>, <<"application/json">>},
+         {<<"authorization">>, Auth}],
+    {401, _} = req(put, Base, Path, H, <<"{}">>, client_ssl(Dir)),
+    {404, _} = req(get, Base, Path, [], <<>>, client_ssl(Dir)),
+    ok.
 
 listeners() ->
     Children = supervisor:which_children(barrel_server_sup),

@@ -229,6 +229,12 @@ and per-database rights, layer bearer or signed auth on top
 signing key). Mapping a client certificate to an identity needs livery to
 surface the peer certificate, which it does not yet.
 
+A request is judged by the credential it presents: a signature, else a bearer
+or capability token in `Authorization`. If that credential fails, or its scheme
+is not understood, the answer is 401 even with an accepted client certificate;
+the certificate alone authenticates only requests with no `Authorization`
+header.
+
 ## How (selective replication)
 
 Filters apply at the source. Path and query filters compose with AND:
