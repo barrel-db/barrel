@@ -20,12 +20,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A malformed task config crashed the task manager and stopped every running task. It is now refused with an error, and a saved config that is no longer valid (such as a filter that no longer decodes) fails that task instead of running it unfiltered.
 - An HTTP replication request kept running after its caller died, and attachment downloads and uploads ignored the request timeout. Requests now stop with their caller, every request including attachments ends at its timeout, and a download the target refused is closed.
 - A task with `wait_for` treated a downstream holding an older version of a document as up to date. It now waits until the downstream has the version that was sent, deletes included.
+- Reading an attachment while it was being replaced returned a mix of old and new bytes, and an aborted or stale upload (one answered `{ok, ignored}`) corrupted the stored attachment. An upload is now invisible until it finishes, and an aborted or refused one leaves the stored attachment as it was.
+- Deleting an attachment while an upload of it was in progress broke that upload: it finished but its data could not be read. The upload now finishes normally.
+- Reading an attachment while another caller replaced or deleted it could fail with a missing chunk. Reads and streams now always see one complete version. Close a stream you stop reading early: it holds that version until then.
+- Two writes to the same attachment at the same time could let an older replicated write replace a newer one, and left two change feed rows for one attachment. Attachment writes are now applied one at a time by the database, so the newest write wins and the feed keeps one row.
+- After the clock went back, for example a restarted clock process or a node clock reset, new attachment changes could be placed before a replication checkpoint and never sync. Feed positions now always move forward, and a database whose clock cannot catch up refuses writes with a clock skew error instead, keeping its data.
+- An attachment stream or upload kept open across a database restart crashed the caller. It now returns `{error, db_restarted}` and the upload publishes nothing.
+- A small attachment whose bytes looked like the store's internal chunk metadata read back empty. It now reads back exactly as written.
 
 ### Changed
 - Breaking: replication tasks refuse inline credentials (`auth`, `signing`, `ssl_options`, `headers`, or a user and password in the URL). Configure them in the app env instead. A one-shot replication also refuses a URL with a user and password.
 
 ### Added
 - `barrel_docdb:reopen_db/1` restarts a failed database with its last config.
+- The `att_upload_timeout` database option (seconds, default 3600): uploads left unfinished for longer are removed when the database opens and every `retention_check_interval`, also when retention is off. Finishing one afterwards returns `{error, upload_expired}`.
 - The `sync_auth`, `sync_signing` and `sync_ssl` settings accept a database URL as key, in addition to an origin, so each remote database can have its own credentials.
 
 ## [2.0.0] - 2026-11-07

@@ -21,6 +21,11 @@
 %%% the backend split is transparent to them. This dispatcher is also the
 %%% single keyspace choke point: every DbName resolves here, so backends
 %%% always build blob and att-feed keys with the keyspace.
+%%%
+%%% An `att_ref' handed out by barrel_docdb carries `db' (the logical
+%%% database name, its writer pid and epoch). Backends with staged writes
+%%% (`commit/3') then commit inside that writer, never the keyspace's,
+%%% and streams answer `{error, db_restarted}' once that writer is gone.
 %%% @end
 %%%-------------------------------------------------------------------
 -module(barrel_att_store).
@@ -44,6 +49,7 @@
          rebuild_feed/2, supports_sync/1]).
 -export([checkpoint/2]).
 -export([destroy/2]).
+-export([gc_uploads/3]).
 
 -export_type([att_ref/0, att_stream/0]).
 
@@ -130,15 +136,20 @@ close(AttRef) ->
 -spec put(att_ref(), binary(), binary(), binary(), binary()) ->
     {ok, map()} | {error, term()}.
 put(AttRef, DbName, DocId, AttName, Data) ->
-    B = backend(AttRef),
-    B:put(AttRef, barrel_keyspace:resolve(DbName), DocId, AttName, Data).
+    put(AttRef, DbName, DocId, AttName, Data, #{}).
 
 -spec put(att_ref(), binary(), binary(), binary(), binary(), map()) ->
     {ok, map()} | {error, term()}.
 put(AttRef, DbName, DocId, AttName, Data, Opts) ->
     B = backend(AttRef),
-    B:put(AttRef, barrel_keyspace:resolve(DbName), DocId, AttName, Data,
-          Opts).
+    Ks = barrel_keyspace:resolve(DbName),
+    case staged(AttRef) of
+        true ->
+            commit_staged(AttRef, B:stage_put(AttRef, Ks, DocId, AttName,
+                                              Data, Opts));
+        false ->
+            B:put(AttRef, Ks, DocId, AttName, Data, Opts)
+    end.
 
 -spec get(att_ref(), binary(), binary(), binary()) ->
     {ok, binary()} | not_found | {error, term()}.
@@ -148,13 +159,26 @@ get(AttRef, DbName, DocId, AttName) ->
 
 -spec delete(att_ref(), binary(), binary(), binary()) -> ok | {error, term()}.
 delete(AttRef, DbName, DocId, AttName) ->
-    B = backend(AttRef),
-    B:delete(AttRef, barrel_keyspace:resolve(DbName), DocId, AttName).
+    case staged(AttRef) of
+        true -> delete(AttRef, DbName, DocId, AttName, #{});
+        false ->
+            B = backend(AttRef),
+            B:delete(AttRef, barrel_keyspace:resolve(DbName), DocId, AttName)
+    end.
 
 -spec delete_all(att_ref(), binary(), binary()) -> ok | {error, term()}.
 delete_all(AttRef, DbName, DocId) ->
-    B = backend(AttRef),
-    B:delete_all(AttRef, barrel_keyspace:resolve(DbName), DocId).
+    case staged(AttRef) of
+        true ->
+            Names = fold(AttRef, DbName, DocId,
+                         fun(Name, _Data, Acc) -> {ok, [Name | Acc]} end, []),
+            lists:foreach(fun(Name) ->
+                              _ = delete(AttRef, DbName, DocId, Name, #{})
+                          end, Names);
+        false ->
+            B = backend(AttRef),
+            B:delete_all(AttRef, barrel_keyspace:resolve(DbName), DocId)
+    end.
 
 -spec fold(att_ref(), binary(), binary(), fun(), term()) -> term().
 fold(AttRef, DbName, DocId, Fun, Acc) ->
@@ -188,10 +212,20 @@ put_stream(AttRef, DbName, DocId, AttName, ContentType, Opts) ->
 -spec write_chunk(att_stream(), binary()) -> {ok, att_stream()} | {error, term()}.
 write_chunk(Stream, Data) ->
     B = stream_backend(Stream),
-    B:write_chunk(Stream, Data).
+    guard(Stream, fun() -> B:write_chunk(Stream, Data) end).
 
 -spec finish_stream(att_stream()) ->
     {ok, map()} | {ok, ignored} | {error, term()}.
+finish_stream(#{att_ref := AttRef} = Stream) ->
+    B = stream_backend(Stream),
+    case staged(AttRef) of
+        true ->
+            guard(Stream, fun() ->
+                commit_staged(AttRef, B:stage_finish(Stream))
+            end);
+        false ->
+            guard(Stream, fun() -> B:finish_stream(Stream) end)
+    end;
 finish_stream(Stream) ->
     B = stream_backend(Stream),
     B:finish_stream(Stream).
@@ -199,7 +233,10 @@ finish_stream(Stream) ->
 -spec abort_stream(att_stream()) -> ok.
 abort_stream(Stream) ->
     B = stream_backend(Stream),
-    B:abort_stream(Stream).
+    case guard(Stream, fun() -> B:abort_stream(Stream) end) of
+        ok -> ok;
+        {error, db_restarted} -> ok   % its store is closed
+    end.
 
 -spec get_stream(att_ref(), binary(), binary(), binary()) ->
     {ok, att_stream()} | {error, term()}.
@@ -233,13 +270,23 @@ get_stream(AttRef, DbName, DocId, AttName, Opts) ->
     end.
 
 -spec read_chunk(att_stream()) -> {ok, binary(), att_stream()} | eof | {error, term()}.
-read_chunk(#{range := #{left := 0}}) ->
+read_chunk(Stream) ->
+    case guard(Stream, fun() -> do_read_chunk(Stream) end) of
+        {error, db_restarted} = Error ->
+            ok = close_stream(Stream),
+            Error;
+        Result ->
+            Result
+    end.
+
+do_read_chunk(#{range := #{left := 0}} = Stream) ->
+    ok = close_stream(Stream),
     eof;
-read_chunk(#{range := #{skip := Skip, left := Left}} = Stream) ->
+do_read_chunk(#{range := #{skip := Skip, left := Left}} = Stream) ->
     B = stream_backend(Stream),
     case B:read_chunk(Stream) of
         {ok, Chunk, Stream2} when byte_size(Chunk) =< Skip ->
-            read_chunk(Stream2#{range => #{skip => Skip - byte_size(Chunk),
+            do_read_chunk(Stream2#{range => #{skip => Skip - byte_size(Chunk),
                                            left => Left}});
         {ok, Chunk, Stream2} ->
             <<_:Skip/binary, Rest/binary>> = Chunk,
@@ -248,7 +295,7 @@ read_chunk(#{range := #{skip := Skip, left := Left}} = Stream) ->
         Other ->
             Other
     end;
-read_chunk(Stream) ->
+do_read_chunk(Stream) ->
     B = stream_backend(Stream),
     B:read_chunk(Stream).
 
@@ -263,7 +310,9 @@ take_range(Bin, Left) ->
 -spec close_stream(att_stream()) -> ok.
 close_stream(Stream) ->
     B = stream_backend(Stream),
-    B:close_stream(Stream).
+    try B:close_stream(Stream)
+    catch error:badarg -> ok   % its store is closed
+    end.
 
 %%====================================================================
 %% Internal
@@ -274,8 +323,14 @@ close_stream(Stream) ->
     ok | {error, term()}.
 delete(AttRef, DbName, DocId, AttName, Opts) ->
     B = backend(AttRef),
-    B:delete(AttRef, barrel_keyspace:resolve(DbName), DocId, AttName,
-             Opts).
+    Ks = barrel_keyspace:resolve(DbName),
+    case staged(AttRef) of
+        true ->
+            commit_staged(AttRef, B:stage_delete(AttRef, Ks, DocId, AttName,
+                                                 Opts));
+        false ->
+            B:delete(AttRef, Ks, DocId, AttName, Opts)
+    end.
 
 %% @doc Attachment feed entries since an HLC (exclusive).
 -spec att_changes(att_ref(), binary(), term(), map()) ->
@@ -308,7 +363,24 @@ sweep_att_feed(AttRef, DbName, Cutoff) ->
 -spec rebuild_feed(att_ref(), binary()) -> {ok, map()} | {error, term()}.
 rebuild_feed(AttRef, DbName) ->
     B = backend(AttRef),
-    B:rebuild_feed(AttRef, barrel_keyspace:resolve(DbName)).
+    Ks = barrel_keyspace:resolve(DbName),
+    case maps:is_key(db, AttRef) andalso exported(B, rebuild_feed, 3) of
+        true ->
+            in_writer(AttRef, fun(Alloc) -> B:rebuild_feed(AttRef, Ks, Alloc) end);
+        false ->
+            B:rebuild_feed(AttRef, Ks)
+    end.
+
+%% @doc Remove staged uploads older than MaxAgeMs (backends exporting
+%% gc_uploads/3; the database writer calls it).
+-spec gc_uploads(att_ref(), binary(), non_neg_integer()) ->
+    {ok, map()} | {error, term()}.
+gc_uploads(AttRef, DbName, MaxAgeMs) ->
+    B = backend(AttRef),
+    case exported(B, gc_uploads, 3) of
+        true -> B:gc_uploads(AttRef, barrel_keyspace:resolve(DbName), MaxAgeMs);
+        false -> {ok, #{uploads_removed => 0}}
+    end.
 
 %% @doc Whether this database's backend supports attachment sync.
 -spec supports_sync(att_ref()) -> boolean().
@@ -335,6 +407,44 @@ destroy(AttRef, DbName) ->
         true -> B:destroy(AttRef, barrel_keyspace:resolve(DbName));
         false -> {error, unsupported}
     end.
+
+%% Staged writes: the backend splits stage/commit and the ref names
+%% the database whose writer commits.
+staged(#{db := _} = AttRef) ->
+    exported(backend(AttRef), commit, 3);
+staged(_AttRef) ->
+    false.
+
+commit_staged(AttRef, {commit, Commit}) ->
+    B = backend(AttRef),
+    in_writer(AttRef, fun(Alloc) -> B:commit(AttRef, Commit, Alloc) end);
+commit_staged(_AttRef, Other) ->
+    Other.
+
+in_writer(#{db := #{pid := Pid, epoch := Epoch}}, Fun) ->
+    barrel_db_server:att_commit(Pid, Epoch, Fun).
+
+%% A stream (or ref) opened through a database answers db_restarted
+%% once that database's writer is gone: its store handle is closed.
+guard(#{att_ref := #{db := #{pid := Pid, name := Name}}}, Fun) ->
+    case current(Pid, Name) of
+        false ->
+            {error, db_restarted};
+        true ->
+            try Fun()
+            catch error:badarg:Stack ->
+                case current(Pid, Name) of
+                    true -> erlang:raise(error, badarg, Stack);
+                    false -> {error, db_restarted}
+                end
+            end
+    end;
+guard(_Stream, Fun) ->
+    Fun().
+
+current(Pid, Name) ->
+    is_process_alive(Pid)
+        andalso persistent_term:get({barrel_db, Name}, undefined) =:= Pid.
 
 backend(#{backend := B}) -> B;
 backend(_) -> backend_module(?DEFAULT_BACKEND).

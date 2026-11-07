@@ -1273,10 +1273,7 @@ put_attachment(Db, DocId, AttName, Data, Opts) ->
 -spec get_attachment(binary() | pid(), binary(), binary()) ->
     {ok, binary()} | {error, term()}.
 get_attachment(Db, DocId, AttName) ->
-    with_db(Db, fun(Pid) ->
-        {ok, AttRef} = barrel_db_server:get_att_ref(Pid),
-        {ok, Info} = barrel_db_server:info(Pid),
-        DbName = maps:get(name, Info),
+    with_att(Db, fun(AttRef, DbName) ->
         barrel_att:get_attachment(AttRef, DbName, DocId, AttName)
     end).
 
@@ -1318,10 +1315,7 @@ delete_attachment(Db, DocId, AttName, Opts) ->
 %% @returns List of attachment names
 -spec list_attachments(binary() | pid(), binary()) -> [binary()].
 list_attachments(Db, DocId) ->
-    with_db(Db, fun(Pid) ->
-        {ok, AttRef} = barrel_db_server:get_att_ref(Pid),
-        {ok, Info} = barrel_db_server:info(Pid),
-        DbName = maps:get(name, Info),
+    with_att(Db, fun(AttRef, DbName) ->
         barrel_att:list_attachments(AttRef, DbName, DocId)
     end).
 
@@ -1336,10 +1330,7 @@ list_attachments(Db, DocId) ->
 -spec get_attachment_info(binary() | pid(), binary(), binary()) ->
     {ok, map()} | {error, term()}.
 get_attachment_info(Db, DocId, AttName) ->
-    with_db(Db, fun(Pid) ->
-        {ok, AttRef} = barrel_db_server:get_att_ref(Pid),
-        {ok, Info} = barrel_db_server:info(Pid),
-        DbName = maps:get(name, Info),
+    with_att(Db, fun(AttRef, DbName) ->
         barrel_att_store:get_info(AttRef, DbName, DocId, AttName)
     end).
 
@@ -1429,6 +1420,11 @@ rebuild_attachment_feed(Db) ->
 %%     end.
 %% '''
 %%
+%% The stream reads one consistent version, even while the attachment
+%% is overwritten or deleted. Close it when you stop before `eof': an
+%% open stream holds a store snapshot. Once the database's writer
+%% restarts, reads return `{error, db_restarted}'.
+%%
 %% @param Db Database name or pid
 %% @param DocId Document ID
 %% @param AttName Attachment name
@@ -1436,10 +1432,7 @@ rebuild_attachment_feed(Db) ->
 -spec open_attachment_stream(binary() | pid(), binary(), binary()) ->
     {ok, map()} | {error, term()}.
 open_attachment_stream(Db, DocId, AttName) ->
-    with_db(Db, fun(Pid) ->
-        {ok, AttRef} = barrel_db_server:get_att_ref(Pid),
-        {ok, Info} = barrel_db_server:info(Pid),
-        DbName = maps:get(name, Info),
+    with_att(Db, fun(AttRef, DbName) ->
         barrel_att_store:get_stream(AttRef, DbName, DocId, AttName)
     end).
 
@@ -1452,10 +1445,7 @@ open_attachment_stream(Db, DocId, AttName) ->
 -spec open_attachment_stream(binary() | pid(), binary(), binary(), map()) ->
     {ok, map()} | {error, term()}.
 open_attachment_stream(Db, DocId, AttName, Opts) ->
-    with_db(Db, fun(Pid) ->
-        {ok, AttRef} = barrel_db_server:get_att_ref(Pid),
-        {ok, Info} = barrel_db_server:info(Pid),
-        DbName = maps:get(name, Info),
+    with_att(Db, fun(AttRef, DbName) ->
         barrel_att_store:get_stream(AttRef, DbName, DocId, AttName, Opts)
     end).
 
@@ -1548,8 +1538,11 @@ write_attachment_chunk(Writer, Data) ->
 %% @doc Finish writing an attachment and store metadata.
 %%
 %% @param Writer The writer to finish
-%% @returns `{ok, AttInfo}', or `{ok, ignored}' when the write lost
-%% the last-write-wins race against a newer origin
+%% @returns `{ok, AttInfo}', `{ok, ignored}' when the write lost
+%% the last-write-wins race against a newer origin, `{error,
+%% db_restarted}' when the database restarted since the writer opened
+%% (nothing is published), or `{error, upload_expired}' when the upload
+%% outlived the `att_upload_timeout' database option
 -spec finish_attachment_writer(map()) ->
     {ok, map()} | {ok, ignored} | {error, term()}.
 finish_attachment_writer(Writer) ->
@@ -2665,16 +2658,23 @@ with_db(Name, Fun) when is_binary(Name) ->
     end.
 
 %% @private Resolve the attachment store ref + db name for a handler.
+%% The ref names the database (logical name, writer pid and epoch):
+%% commits go through this writer, and streams fail once it is gone.
 with_att(Db, Fun) ->
     with_db(Db, fun(Pid) ->
         {ok, AttRef} = barrel_db_server:get_att_ref(Pid),
         {ok, Info} = barrel_db_server:info(Pid),
         DbName = maps:get(name, Info),
-        att_call(Fun, AttRef, DbName)
+        att_call(Fun, att_ctx(AttRef, Pid, DbName), DbName)
     end).
 
+att_ctx(AttRef, Pid, DbName) ->
+    AttRef#{db => #{name => DbName, pid => Pid,
+                    epoch => persistent_term:get({barrel_writer, DbName},
+                                                 undefined)}}.
+
 %% @private Like with_att/2 for attachment writes: a read-only database
-%% refuses them (attachments bypass the writer process).
+%% refuses them (the writer refuses their commits too).
 with_att_write(Db, Fun) ->
     with_db(Db, fun(Pid) ->
         {ok, AttRef} = barrel_db_server:get_att_ref(Pid),
@@ -2682,7 +2682,7 @@ with_att_write(Db, Fun) ->
             {ok, #{read_only := true}} ->
                 {error, read_only};
             {ok, #{name := DbName}} ->
-                att_call(Fun, AttRef, DbName)
+                att_call(Fun, att_ctx(AttRef, Pid, DbName), DbName)
         end
     end).
 

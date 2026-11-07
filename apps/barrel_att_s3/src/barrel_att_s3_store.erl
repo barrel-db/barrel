@@ -33,6 +33,13 @@
 %%% at its own blob-data handle. The feed handle is stored in `att_ref' as
 %%% `feed_ref'.
 %%%
+%%% == Concurrent writes ==
+%%% put, delete and finish_stream hold a per-attachment lock (global:trans
+%%% keyed by the logical database name) from the last-write-wins check to
+%%% the feed commit, so the S3 I/O never runs in the database writer.
+%%% Feed HLCs are floored above the newest feed row and the stored origin
+%%% (barrel_att_feed:ops/7).
+%%%
 %%% == Key scheme ==
 %%% `Prefix/hex(DocId)/AttName'. `DocId' is arbitrary bytes with no length
 %%% cap, so it is hex-encoded; `AttName' is already validated to exclude
@@ -519,6 +526,7 @@ do_put(#{client := Client, bucket := Bucket, conditional_writes := CW,
             Err;
         ok ->
             OriginOpt = maps:get(origin_hlc, Opts, undefined),
+            with_att_lock(AttRef, DbName, DocId, AttName, fun() ->
             case resolve_origin(FeedRef, DbName, DocId, AttName, OriginOpt, Digest) of
                 ignored ->
                     {ok, ignored};
@@ -548,7 +556,25 @@ do_put(#{client := Client, bucket := Bucket, conditional_writes := CW,
                             end
                     end
             end
+            end)
     end.
+
+%% @private Serializes the last-write-wins check, the S3 write and the
+%% feed commit of one attachment across callers. Keyed by the logical
+%% database name (a branch shares its parent's keyspace); the S3 I/O
+%% runs here, never in the database writer.
+with_att_lock(AttRef, DbName, DocId, AttName, Fun) ->
+    Logical = case AttRef of
+        #{db := #{name := Name}} -> Name;
+        _ -> DbName
+    end,
+    global:trans({{?MODULE, Logical, DocId, AttName}, self()},
+                 fun() ->
+                     try Fun()
+                     catch throw:{error, _} = Err -> Err
+                     end
+                 end,
+                 [node()]).
 
 %% @private expected_digest is a data-integrity check on the incoming bytes
 %% (mirrors barrel_att_store_blob's put/6), distinct from the
@@ -560,14 +586,19 @@ check_expected_digest(Digest, Opts) ->
         _Other -> {error, digest_mismatch}
     end.
 
-%% @private Local writes (no origin_hlc) always mint a fresh origin and
-%% proceed unconditionally -- there is no "other version" to compare
+%% @private Local writes (no origin_hlc) always mint a fresh origin above
+%% the stored one and proceed unconditionally -- there is no "other version" to compare
 %% against for a direct, non-replicated write. Replicated writes (an
 %% origin_hlc supplied) run the last-write-wins guard against the local
 %% feed, exactly mirroring barrel_att_store_blob:resolve_origin/6, just
 %% against this backend's own local feed_ref instead of its blob handle.
-resolve_origin(_FeedRef, _DbName, _DocId, _AttName, undefined, _Digest) ->
-    {apply, barrel_hlc:new_hlc()};
+resolve_origin(FeedRef, DbName, DocId, AttName, undefined, _Digest) ->
+    %% above the stored origin, so a local write wins over what it replaces
+    Floor = case barrel_att_feed:index_get(FeedRef, DbName, DocId, AttName) of
+        {ok, #{origin := Stored}} -> Stored;
+        not_found -> barrel_hlc:min()
+    end,
+    {apply, barrel_att_feed:next_hlc(Floor)};
 resolve_origin(FeedRef, DbName, DocId, AttName, OriginHlc, Digest) ->
     case barrel_att_feed:check(FeedRef, DbName, DocId, AttName, OriginHlc, Digest) of
         apply -> {apply, OriginHlc};
@@ -695,8 +726,13 @@ delete(#{prefix := Prefix} = AttRef, DbName, DocId, AttName, Opts) ->
         do_delete(AttRef, DbName, DocId, Key, AttName, Opts)
     end).
 
-do_delete(#{client := Client, bucket := Bucket, feed_ref := FeedRef},
-          DbName, DocId, Key, AttName, Opts) ->
+do_delete(AttRef, DbName, DocId, Key, AttName, Opts) ->
+    with_att_lock(AttRef, DbName, DocId, AttName, fun() ->
+        locked_delete(AttRef, DbName, DocId, Key, AttName, Opts)
+    end).
+
+locked_delete(#{client := Client, bucket := Bucket, feed_ref := FeedRef},
+              DbName, DocId, Key, AttName, Opts) ->
     OriginOpt = maps:get(origin_hlc, Opts, undefined),
     case resolve_origin(FeedRef, DbName, DocId, AttName, OriginOpt, <<>>) of
         ignored ->
@@ -830,13 +866,13 @@ sweep_att_feed(#{feed_ref := FeedRef}, DbName, Cutoff) ->
 %% same outcome a tombstone would have produced). Safe to re-run.
 -spec rebuild_feed(map(), binary()) -> {ok, #{rows := non_neg_integer()}} | {error, term()}.
 rebuild_feed(#{client := Client, bucket := Bucket, prefix := Prefix,
-               feed_ref := FeedRef}, DbName) ->
+               feed_ref := FeedRef} = AttRef, DbName) ->
     ListPrefix = <<Prefix/binary, "/">>,
     case livery_s3:list_objects_all(Client, Bucket, #{prefix => ListPrefix}) of
         {ok, #{objects := Objects}} ->
             N = lists:foldl(
                 fun(#{key := Key}, Count) ->
-                    case rebuild_one(Client, Bucket, Prefix, FeedRef, DbName, Key) of
+                    case rebuild_one(AttRef, Client, Bucket, Prefix, FeedRef, DbName, Key) of
                         true -> Count + 1;
                         false -> Count
                     end
@@ -852,7 +888,7 @@ rebuild_feed(#{client := Client, bucket := Bucket, prefix := Prefix,
 %% alone carries none of those) and writes one feed row for it. A 404 here
 %% means it raced with a delete between the listing and this HEAD -- skip
 %% it rather than fabricating a row for something no longer there.
-rebuild_one(Client, Bucket, Prefix, FeedRef, DbName, Key) ->
+rebuild_one(AttRef, Client, Bucket, Prefix, FeedRef, DbName, Key) ->
     case key_to_doc_att(Prefix, Key) of
         {ok, DocId, AttName} ->
             case livery_s3:head_object(Client, Bucket, Key) of
@@ -863,11 +899,13 @@ rebuild_one(Client, Bucket, Prefix, FeedRef, DbName, Key) ->
                                            mimerl:filename(AttName)),
                     Length = maps:get(content_length, Meta, 0),
                     OriginHlc = decode_origin(maps:get(?META_ORIGIN, Metadata, undefined)),
-                    Ops = barrel_att_feed:ops(FeedRef, DbName, DocId, AttName, put,
-                                              OriginHlc,
-                                              #{digest => Digest, length => Length,
-                                                content_type => ContentType}),
-                    ok = commit_feed(FeedRef, DbName, DocId, AttName, Ops),
+                    ok = with_att_lock(AttRef, DbName, DocId, AttName, fun() ->
+                        Ops = barrel_att_feed:ops(FeedRef, DbName, DocId, AttName,
+                                                  put, OriginHlc,
+                                                  #{digest => Digest, length => Length,
+                                                    content_type => ContentType}),
+                        commit_feed(FeedRef, DbName, DocId, AttName, Ops)
+                    end),
                     true;
                 {error, _} ->
                     false
@@ -1084,6 +1122,7 @@ finish_stream(#{type := write, multipart := undefined} = Stream) ->
         {error, _} = Err ->
             Err;
         ok ->
+            with_att_lock(AttRef, DbName, DocId, AttName, fun() ->
             case resolve_origin(FeedRef, DbName, DocId, AttName, OriginOpt, Digest) of
                 ignored ->
                     {ok, ignored};
@@ -1111,6 +1150,7 @@ finish_stream(#{type := write, multipart := undefined} = Stream) ->
                             end
                     end
             end
+            end)
     end;
 finish_stream(#{type := write, multipart := MP} = Stream) ->
     #{att_ref := #{client := Client, bucket := Bucket, feed_ref := FeedRef,
@@ -1142,6 +1182,7 @@ finish_stream(#{type := write, multipart := MP} = Stream) ->
                     _ = livery_s3:abort_multipart_upload(Client, Bucket, Key, UploadId),
                     DigestErr;
                 ok ->
+                    with_att_lock(AttRef, DbName, DocId, AttName, fun() ->
                     case resolve_origin(FeedRef, DbName, DocId, AttName, OriginOpt, Digest) of
                         ignored ->
                             _ = livery_s3:abort_multipart_upload(Client, Bucket, Key, UploadId),
@@ -1157,6 +1198,7 @@ finish_stream(#{type := write, multipart := MP} = Stream) ->
                                              Digest, OriginHlc)
                             end
                     end
+                    end)
             end
     end.
 

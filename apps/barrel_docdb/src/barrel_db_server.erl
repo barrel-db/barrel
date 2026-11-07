@@ -18,7 +18,8 @@
 -export([info/1, stop/1]).
 -export([get_store_ref/1, get_att_ref/1]).
 -export([sweep_ttl/1]).
--export([source_id/1, writer_id/1, alloc_hlc/1, stub_census/2]).
+-export([source_id/1, writer_id/1, alloc_hlc/1, alloc_hlc/2, stub_census/2]).
+-export([att_commit/3]).
 
 %% Document API
 -export([
@@ -106,6 +107,8 @@
     retention_period :: non_neg_integer(),  %% Retention window in seconds (0 = infinite)
     retention_timer :: reference() | undefined,  %% Timer for periodic retention sweeps
     retention_interval :: pos_integer(),  %% Interval between sweeps in ms
+    %% abandoned-upload sweep when no retention timer runs (it does it)
+    upload_gc_timer :: reference() | undefined,
     ttl_sweep_interval = 0 :: non_neg_integer(),  %% Doc TTL sweep interval in ms (0 = off)
     ttl_sweep_batch = 512 :: pos_integer(),  %% Max expired docs per sweep pass
     ttl_timer :: reference() | undefined,  %% Timer for periodic TTL sweeps
@@ -181,6 +184,9 @@
 -define(DEFAULT_RETENTION_PERIOD, 2592000).  %% 30 days in seconds
 -define(DEFAULT_RETENTION_INTERVAL, 600000).  %% 10 minutes in ms
 
+%% Staged attachment uploads older than this (seconds) are abandoned.
+-define(DEFAULT_ATT_UPLOAD_TIMEOUT, 3600).
+
 %% Live conflict siblings per document are bounded; beyond the bound
 %% the lowest versions are dropped deterministically.
 -define(DEFAULT_MAX_CONFLICT_VERSIONS, 8).
@@ -223,6 +229,19 @@ get_store_ref(Pid) ->
 get_att_ref(Pid) ->
     gen_server:call(Pid, get_att_ref).
 
+
+%% @doc Run an attachment commit in the writer. Fun gets Alloc(Floor),
+%% a feed HLC above Floor and every HLC this database wrote. Epoch is
+%% the writer id the caller started under: a writer that died or
+%% restarted since answers `{error, db_restarted}', and a read-only
+%% database `{error, read_only}'.
+-spec att_commit(pid(), binary() | undefined,
+                 fun((fun((barrel_hlc:timestamp()) ->
+                             barrel_hlc:timestamp())) -> term())) -> term().
+att_commit(Pid, Epoch, Fun) ->
+    try gen_server:call(Pid, {att_commit, Epoch, Fun}, infinity)
+    catch exit:_ -> {error, db_restarted}
+    end.
 
 %% @doc Stop the database server
 -spec stop(pid()) -> ok.
@@ -529,6 +548,7 @@ init(Name, Config, CompiledChannels, DbPath, Keyspace, Parent, ForkHlc, Env) ->
                                         source_id(ReadOnly, StoreRef, Name,
                                                   DbPath)),
                     ok = init_writer(ReadOnly, StoreRef, AttRef, Name, Keyspace),
+                    _ = gc_att_uploads(ReadOnly, AttRef, Name, Config),
                     ok = barrel_channel:install(Name, CompiledChannels),
 
                     %% Compaction settings from config (or defaults)
@@ -551,6 +571,11 @@ init(Name, Config, CompiledChannels, DbPath, Keyspace, Parent, ForkHlc, Env) ->
                         0 -> undefined;
                         _ -> arm_unless(ReadOnly, RetentionInterval,
                                         retention_sweep)
+                    end,
+                    UploadGcTimer = case RetentionTimer of
+                        undefined -> arm_unless(ReadOnly, RetentionInterval,
+                                                upload_gc);
+                        _ -> undefined
                     end,
 
                     %% Doc TTL sweeper (opt-in): turns lazily expired
@@ -588,6 +613,7 @@ init(Name, Config, CompiledChannels, DbPath, Keyspace, Parent, ForkHlc, Env) ->
                         retention_period = RetentionPeriod,
                         retention_timer = RetentionTimer,
                         retention_interval = RetentionInterval,
+                        upload_gc_timer = UploadGcTimer,
                         ttl_sweep_interval = TtlInterval,
                         ttl_sweep_batch = TtlBatch,
                         ttl_timer = TtlTimer,
@@ -644,6 +670,7 @@ write_request({put_doc_state, _, _, _}) -> true;
 write_request({put_local_doc, _, _}) -> true;
 write_request({put_local_doc, _, _, _}) -> true;
 write_request({delete_local_doc, _}) -> true;
+write_request({att_commit, _, _}) -> true;
 write_request(_) -> false.
 
 handle_call_rw(info, _From, #state{name = Name, keyspace = Keyspace,
@@ -727,6 +754,23 @@ handle_call_rw({fold_docs, Fun, Acc, Opts}, _From,
     Result = barrel_docdb_reader:fold_docs(StoreRef, DbName, Fun, Acc, Opts),
     {reply, Result, State};
 
+%% Attachment commits: serialized here, with feed HLCs from the writer
+handle_call_rw({att_commit, Epoch, Fun}, _From, #state{name = Name} = State) ->
+    Result = case persistent_term:get({barrel_writer, Name}, undefined) of
+        Epoch ->
+            try Fun(fun(Floor) -> alloc_hlc(Name, Floor) end)
+            catch
+                throw:{error, _} = Err -> Err;
+                Class:Reason ->
+                    logger:error("Database ~s: attachment commit failed: ~p:~p",
+                                 [Name, Class, Reason]),
+                    {error, {att_commit_failed, Reason}}
+            end;
+        _ ->
+            {error, db_restarted}
+    end,
+    {reply, Result, State};
+
 %% Embedding column write-back
 handle_call_rw({set_doc_embedding, DocId, ExpectedRev, Vector}, _From,
                #state{name = DbName, store_ref = StoreRef} = State) ->
@@ -747,7 +791,7 @@ handle_call_rw({sweep_retention, NowMs}, From,
                       retention_period = RetentionPeriod} = State) ->
     Fun = fun() -> do_retention_sweep(StoreRef, AttRef, DbName,
                                       RetentionPeriod, purge_after(State),
-                                      NowMs) end,
+                                      NowMs, State#state.config) end,
     {noreply, start_sweep(retention, Fun, From, false, State)};
 
 %% Doc TTL sweep (manual trigger; also runs on the timer).
@@ -866,8 +910,17 @@ handle_info(retention_sweep, #state{name = DbName, store_ref = StoreRef,
                              = State) ->
     Fun = fun() -> do_retention_sweep(StoreRef, AttRef, DbName,
                                       RetentionPeriod, purge_after(State),
-                                      erlang:system_time(millisecond)) end,
+                                      erlang:system_time(millisecond),
+                                      State#state.config) end,
     {noreply, start_sweep(retention, Fun, none, true, State)};
+
+handle_info(upload_gc, #state{name = DbName, att_ref = AttRef,
+                              config = Config,
+                              retention_interval = Interval} = State) ->
+    %% upload rows only: cheap enough to run in the writer
+    _ = gc_att_uploads(AttRef, DbName, Config),
+    {noreply, State#state{upload_gc_timer =
+                              erlang:send_after(Interval, self(), upload_gc)}};
 
 handle_info(ttl_sweep, #state{name = DbName, store_ref = StoreRef,
                               ttl_sweep_batch = Batch} = State) ->
@@ -924,6 +977,7 @@ terminate(_Reason, #state{name = Name, store_ref = StoreRef, att_ref = AttRef,
                           filter_pid = FilterPid,
                           compaction_timer = CompactionTimer,
                           retention_timer = RetentionTimer,
+                          upload_gc_timer = UploadGcTimer,
                           ttl_timer = TtlTimer,
                           sweep_workers = Workers}) ->
     %% Workers only read; stop them before the stores close
@@ -931,6 +985,10 @@ terminate(_Reason, #state{name = Name, store_ref = StoreRef, att_ref = AttRef,
     _ = case TtlTimer of
             undefined -> ok;
             _ -> erlang:cancel_timer(TtlTimer)
+        end,
+    _ = case UploadGcTimer of
+            undefined -> ok;
+            _ -> erlang:cancel_timer(UploadGcTimer)
         end,
     %% Cancel compaction timer
     _ =
@@ -1288,21 +1346,24 @@ drop_expiry_row(StoreRef, Key) ->
 purge_after(#state{config = Config}) ->
     maps:get(tombstone_purge_after, Config, 0).
 
+%% In the writer: drop staged uploads older than att_upload_timeout.
+gc_att_uploads(true, _AttRef, _DbName, _Config) ->
+    0;
+gc_att_uploads(false, AttRef, DbName, Config) ->
+    gc_att_uploads(AttRef, DbName, Config).
+
+gc_att_uploads(AttRef, DbName, Config) ->
+    MaxAgeMs = maps:get(att_upload_timeout, Config,
+                        ?DEFAULT_ATT_UPLOAD_TIMEOUT) * 1000,
+    {ok, #{uploads_removed := N}} =
+        barrel_att_store:gc_uploads(AttRef, DbName, MaxAgeMs),
+    N.
+
 do_retention_sweep(StoreRef, AttRef, DbName, RetentionPeriod, PurgeAfter,
-                   NowMs) ->
+                   NowMs, Config) ->
     Ks = barrel_keyspace:resolve(DbName),
     CutoffMs = NowMs - RetentionPeriod * 1000,
     Cutoff = barrel_hlc:from_wall_time(CutoffMs),
-    %% Attachment feed tombstones follow the same window (separate
-    %% RocksDB; the two floors are independent)
-    AttSwept = case barrel_att_store:supports_sync(AttRef) of
-        true ->
-            {ok, #{tombstones_swept := N}} =
-                barrel_att_store:sweep_att_feed(AttRef, DbName, Cutoff),
-            N;
-        false ->
-            0
-    end,
     Zero = #{history_swept => 0, superseded_removed => 0,
              docs_stubbed => 0, docs_purged => 0},
     Purge = purge_candidates(StoreRef, DbName, PurgeAfter, NowMs),
@@ -1316,6 +1377,18 @@ do_retention_sweep(StoreRef, AttRef, DbName, RetentionPeriod, PurgeAfter,
     FloorOp = {put, barrel_store_keys:db_meta(Ks, <<"history_floor">>),
                barrel_hlc:encode(Cutoff)},
     Final = fun(Stats0) ->
+        %% in the writer, serialized with attachment commits: feed
+        %% tombstones follow the same window (separate RocksDB, separate
+        %% floor) and abandoned uploads go
+        AttSwept = case barrel_att_store:supports_sync(AttRef) of
+            true ->
+                {ok, #{tombstones_swept := N}} =
+                    barrel_att_store:sweep_att_feed(AttRef, DbName, Cutoff),
+                N;
+            false ->
+                0
+        end,
+        Uploads = gc_att_uploads(AttRef, DbName, Config),
         {PurgeOps, Stats} = purge_ops(StoreRef, DbName, Purge, Stats0),
         ok = barrel_store_rocksdb:write_batch(StoreRef,
                                               [FloorOp | LeaveOps ++ PurgeOps],
@@ -1329,7 +1402,8 @@ do_retention_sweep(StoreRef, AttRef, DbName, RetentionPeriod, PurgeAfter,
                       end
                   end),
         {ok, Stats#{floor => Cutoff, channel_leaves_swept => LeavesSwept,
-                    att_tombstones_swept => AttSwept}}
+                    att_tombstones_swept => AttSwept,
+                    att_uploads_removed => Uploads}}
     end,
     {writer_apply,
      fun() -> retention_apply(StoreRef, DbName, Entries, Zero, Final) end}.
@@ -2218,16 +2292,14 @@ init_writer(false, StoreRef, AttRef, Name, Keyspace) ->
            StoreRef, barrel_store_keys:db_meta(Name, <<"writer_id">>),
            WriterId, [{sync, true}]),
     persistent_term:put({barrel_writer, Name}, WriterId),
-    High = max_hlc(stored_hlc(StoreRef, barrel_store_keys:db_meta(
-                                          Keyspace, <<"hlc_high">>)),
-                   stored_hlc(StoreRef,
-                              barrel_store_keys:db_last_hlc(Keyspace))),
-    %% the attachment feed is written by callers, not the writer: its
-    %% newest row only moves the clock, so it can't go back across a
-    %% restart either
-    _ = barrel_hlc:sync_hlc(max_hlc(High,
-                                    barrel_att_store:att_last_hlc(AttRef,
-                                                                  Name))),
+    %% the floor covers the attachment feed too; a clock that can't
+    %% reach it fails writes with clock_skew (alloc_hlc), data stays
+    High = lists:foldl(fun max_hlc/2, barrel_hlc:min(),
+                       [stored_hlc(StoreRef, barrel_store_keys:db_meta(
+                                               Keyspace, <<"hlc_high">>)),
+                        stored_hlc(StoreRef,
+                                   barrel_store_keys:db_last_hlc(Keyspace)),
+                        barrel_att_store:att_last_hlc(AttRef, Name)]),
     put({?MODULE, hlc_high, Name}, High),
     ok.
 
@@ -2250,12 +2322,17 @@ max_hlc(A, B) ->
 %% `{error, clock_skew}' when the clock can't get past that floor.
 -spec alloc_hlc(binary()) -> barrel_hlc:timestamp().
 alloc_hlc(DbName) ->
+    alloc_hlc(DbName, barrel_hlc:min()).
+
+%% @doc alloc_hlc/1, also above Floor (an attachment's stored origin).
+-spec alloc_hlc(binary(), barrel_hlc:timestamp()) -> barrel_hlc:timestamp().
+alloc_hlc(DbName, Floor) ->
     Key = {?MODULE, hlc_high, DbName},
     case get(Key) of
         undefined ->
             erlang:error({hlc_alloc_outside_writer, DbName});
         High ->
-            Hlc = above(High, barrel_hlc:new_hlc()),
+            Hlc = above(max_hlc(High, Floor), barrel_hlc:new_hlc()),
             put(Key, Hlc),
             Hlc
     end.

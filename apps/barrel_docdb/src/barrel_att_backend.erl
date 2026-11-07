@@ -10,7 +10,8 @@
 %%% touching the document layer.
 %%%
 %%% `AttRef' is the opaque handle returned by the `open' callback; the dispatcher tags
-%%% it with the backend module. `Stream' is the opaque streaming handle returned
+%%% it with the backend module (and, for a database's handle, `db': its
+%%% logical name, writer pid and epoch). `Stream' is the opaque streaming handle returned
 %%% by the `put_stream' / `get_stream' callbacks and embeds its `att_ref'.
 %%% @end
 %%%-------------------------------------------------------------------
@@ -70,6 +71,8 @@
 -callback read_chunk(Stream :: map()) ->
     {ok, binary(), map()} | eof | {error, term()}.
 
+%% Releases what a read stream holds (safe to call more than once, and
+%% after eof).
 -callback close_stream(Stream :: map()) -> ok.
 
 %% Position a fresh read stream at byte Offset. Returns the stream moved
@@ -113,6 +116,46 @@
 -callback destroy(AttRef :: map(), DbName :: binary()) ->
     ok | {error, term()}.
 
+%%====================================================================
+%% Optional: staged writes committed by the database writer
+%%====================================================================
+%% A backend exporting commit/3 splits each write: the stage callbacks
+%% run in the caller and write bulk bytes where no reader sees them; the
+%% dispatcher then runs commit/3 inside the database's writer process,
+%% which serializes the last-write-wins check, the metadata and feed
+%% batch and the cleanup of the replaced data. Alloc(Floor) returns a
+%% feed HLC above Floor and above every HLC the database wrote. Without
+%% commit/3 (or for a store used without a database) put/6, delete/5 and
+%% finish_stream/1 are called directly and the backend serializes itself.
+
+-callback stage_put(AttRef :: map(), DbName :: binary(), DocId :: binary(),
+                    AttName :: binary(), Data :: binary(), Opts :: map()) ->
+    {commit, Commit :: term()} | {error, term()}.
+
+-callback stage_finish(Stream :: map()) ->
+    {commit, Commit :: term()} | {error, term()}.
+
+-callback stage_delete(AttRef :: map(), DbName :: binary(), DocId :: binary(),
+                       AttName :: binary(), Opts :: map()) ->
+    {commit, Commit :: term()}.
+
+-callback commit(AttRef :: map(), Commit :: term(),
+                 Alloc :: fun((term()) -> term())) ->
+    {ok, map()} | {ok, ignored} | ok | {error, term()}.
+
+%% rebuild_feed/2 run in the writer, with feed HLCs from Alloc.
+-callback rebuild_feed(AttRef :: map(), DbName :: binary(),
+                       Alloc :: fun((term()) -> term())) ->
+    {ok, map()} | {error, term()}.
+
+%% Drop staged uploads older than MaxAgeMs; called by the writer at open
+%% and on the retention timer.
+-callback gc_uploads(AttRef :: map(), DbName :: binary(),
+                     MaxAgeMs :: non_neg_integer()) ->
+    {ok, map()}.
+
 -optional_callbacks([delete/5, att_changes/4, att_floor/2,
                      sweep_att_feed/3, rebuild_feed/2, checkpoint/2,
-                     destroy/2, seek_stream/2]).
+                     destroy/2, seek_stream/2,
+                     stage_put/6, stage_finish/1, stage_delete/5, commit/3,
+                     rebuild_feed/3, gc_uploads/3]).

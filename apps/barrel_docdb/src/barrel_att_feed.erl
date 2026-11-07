@@ -8,8 +8,12 @@
 %% ```
 %%   feed   <<16#FF, $C, DbNameLen:16, DbName, LocalHlc:12>>
 %%   index  <<16#FF, $A, DbNameLen:16, DbName, DocIdLen:16, DocId, $:, Name>>
-%%   meta   <<16#FF, $M, DbNameLen:16, DbName, "att_floor">>
+%%   meta   <<16#FF, $M, DbNameLen:16, DbName, "att_floor" | "att_hlc_high">>
+%%   upload <<16#FF, $U, DbNameLen:16, DbName, Gen:64, DocIdLen:16, DocId, Name>>
 %% '''
+%%
+%% Upload rows mark chunk generations staged by the blob backend and not
+%% yet published (see barrel_att_store_blob).
 %%
 %% Invariant: ONE feed row per (DocId, AttName), moved on every write
 %% (doc-feed style, not history style), so a full resync is one bounded
@@ -27,8 +31,11 @@
 
 -export([
     ops/7,
+    ops/8,
+    next_hlc/1,
     check/6,
     index_get/4,
+    index_get/5,
     att_changes/4,
     att_floor/2,
     last_hlc/2,
@@ -57,18 +64,30 @@
 -define(INDEX, $A).
 -define(META, $M).
 -define(FLOOR_NAME, <<"att_floor">>).
+-define(HIGH_NAME, <<"att_hlc_high">>).
 
 %%====================================================================
 %% Ops (called from the blob store's commit points)
 %%====================================================================
 
-%% @doc Batch ops recording one applied write: move the (DocId, Name)
-%% feed row to a fresh local HLC and rewrite the index row. Info
-%% carries digest/length/content_type (empty for deletes).
+%% @doc Batch ops recording one applied write, with a feed HLC above
+%% the newest feed row and the stored origin. Callers outside a
+%% database writer use this; the writer passes its own HLC (ops/8).
 -spec ops(rocksdb:db_handle(), db_name(), docid(), binary(), op(),
           barrel_hlc:timestamp(), map()) -> [term()].
 ops(Ref, DbName, DocId, AttName, Op, OriginHlc, Info) ->
-    LocalHlc = barrel_hlc:new_hlc(),
+    Floor = case index_get(Ref, DbName, DocId, AttName) of
+        {ok, #{origin := Stored}} -> max_hlc(Stored, last_hlc(Ref, DbName));
+        not_found -> last_hlc(Ref, DbName)
+    end,
+    ops(Ref, DbName, DocId, AttName, Op, OriginHlc, next_hlc(Floor), Info).
+
+%% @doc Batch ops recording one applied write: move the (DocId, Name)
+%% feed row to LocalHlc, rewrite the index row and raise att_hlc_high.
+%% Info carries digest/length/content_type (empty for deletes).
+-spec ops(rocksdb:db_handle(), db_name(), docid(), binary(), op(),
+          barrel_hlc:timestamp(), barrel_hlc:timestamp(), map()) -> [term()].
+ops(Ref, DbName, DocId, AttName, Op, OriginHlc, LocalHlc, Info) ->
     IndexKey = index_key(DbName, DocId, AttName),
     DeleteOld = case rocksdb:get(Ref, IndexKey, []) of
         {ok, OldIdxBin} ->
@@ -88,7 +107,31 @@ ops(Ref, DbName, DocId, AttName, Op, OriginHlc, Info) ->
     },
     DeleteOld ++
         [{put, feed_key(DbName, LocalHlc), encode_feed(Op, Entry)},
-         {put, IndexKey, encode_index(Entry#{seq => LocalHlc})}].
+         {put, IndexKey, encode_index(Entry#{seq => LocalHlc})},
+         {put, high_key(DbName), barrel_hlc:encode(LocalHlc)}].
+
+%% @doc A fresh HLC above Floor; throws {error, clock_skew} when the
+%% clock refuses to move past it.
+-spec next_hlc(barrel_hlc:timestamp()) -> barrel_hlc:timestamp().
+next_hlc(Floor) ->
+    Hlc = barrel_hlc:new_hlc(),
+    case barrel_hlc:less(Floor, Hlc) of
+        true ->
+            Hlc;
+        false ->
+            _ = barrel_hlc:sync_hlc(Floor),
+            Hlc2 = barrel_hlc:new_hlc(),
+            case barrel_hlc:less(Floor, Hlc2) of
+                true -> Hlc2;
+                false -> throw({error, clock_skew})
+            end
+    end.
+
+max_hlc(A, B) ->
+    case barrel_hlc:less(A, B) of
+        true -> B;
+        false -> A
+    end.
 
 %% @doc Last-write-wins guard for writes carrying an origin HLC.
 %% Deterministic across replicas: older origin loses; equal origins
@@ -116,7 +159,13 @@ check(Ref, DbName, DocId, AttName, IncomingOrigin, IncomingDigest) ->
 -spec index_get(rocksdb:db_handle(), db_name(), docid(), binary()) ->
     {ok, map()} | not_found.
 index_get(Ref, DbName, DocId, AttName) ->
-    case rocksdb:get(Ref, index_key(DbName, DocId, AttName), []) of
+    index_get(Ref, DbName, DocId, AttName, []).
+
+%% @doc index_get/4 with read options (a snapshot).
+-spec index_get(rocksdb:db_handle(), db_name(), docid(), binary(), list()) ->
+    {ok, map()} | not_found.
+index_get(Ref, DbName, DocId, AttName, ReadOpts) ->
+    case rocksdb:get(Ref, index_key(DbName, DocId, AttName), ReadOpts) of
         {ok, Bin} -> {ok, decode_index(Bin)};
         _ -> not_found
     end.
@@ -175,17 +224,23 @@ att_floor(Ref, DbName) ->
         _ -> undefined
     end.
 
-%% @doc HLC of the newest feed row (min() for an empty feed).
+%% @doc Highest feed HLC ever written: the newest feed row or the
+%% att_hlc_high mark, which a tombstone sweep never lowers (min() when
+%% empty).
 -spec last_hlc(rocksdb:db_handle(), db_name()) -> barrel_hlc:timestamp().
 last_hlc(Ref, DbName) ->
     ReadOpts = [{iterate_lower_bound, feed_key(DbName, barrel_hlc:min())},
                 {iterate_upper_bound, feed_end(DbName)}],
     {ok, Itr} = rocksdb:iterator(Ref, ReadOpts),
-    try rocksdb:iterator_move(Itr, last) of
+    Tail = try rocksdb:iterator_move(Itr, last) of
         {ok, Key, _Value} -> feed_key_hlc(DbName, Key);
         {error, _} -> barrel_hlc:min()
     after
         rocksdb:iterator_close(Itr)
+    end,
+    case rocksdb:get(Ref, high_key(DbName), []) of
+        {ok, Bin} -> max_hlc(Tail, barrel_hlc:decode(Bin));
+        _ -> Tail
     end.
 
 %% @doc Sweep delete tombstones older than the cutoff and advance the
@@ -252,6 +307,10 @@ index_key(DbName, DocId, AttName) ->
 floor_key(DbName) ->
     <<?TAG, ?META, (byte_size(DbName)):16, DbName/binary,
       ?FLOOR_NAME/binary>>.
+
+high_key(DbName) ->
+    <<?TAG, ?META, (byte_size(DbName)):16, DbName/binary,
+      ?HIGH_NAME/binary>>.
 
 %%====================================================================
 %% Codecs
