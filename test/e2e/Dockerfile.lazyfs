@@ -1,0 +1,27 @@
+# barrel_server on LazyFS, for power-fail tests. LazyFS (a FUSE file
+# system) keeps every write that was not fsynced in its own memory, so
+# killing the container loses exactly what a power cut would. Built on
+# the image test/e2e/Dockerfile produces.
+
+FROM debian:trixie-slim AS lazyfs
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        g++ cmake make git ca-certificates pkg-config libfuse3-dev \
+    && rm -rf /var/lib/apt/lists/*
+ARG LAZYFS_REF=0.3.1
+RUN git clone --depth 1 --branch ${LAZYFS_REF} https://github.com/dsrhaslab/lazyfs /opt/lazyfs \
+    && cd /opt/lazyfs/libs/libpcache && ./build.sh \
+    && cd /opt/lazyfs/lazyfs && ./build.sh
+
+FROM barrel-server-e2e
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends fuse3 procps \
+    && rm -rf /var/lib/apt/lists/* \
+    && echo user_allow_other >> /etc/fuse.conf
+COPY --from=lazyfs /opt/lazyfs /opt/lazyfs
+COPY lazyfs.toml /etc/lazyfs.toml
+COPY lazyfs-entrypoint.sh /usr/local/bin/lazyfs-entrypoint.sh
+# every database lives on the LazyFS mount
+RUN mkdir -p /lazyfs/root /lazyfs/mnt \
+    && rm -rf /opt/barrel_server/data && ln -s /lazyfs/mnt /opt/barrel_server/data
+CMD ["/usr/local/bin/lazyfs-entrypoint.sh"]

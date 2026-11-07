@@ -79,6 +79,25 @@ the task (acknowledged writes must survive and the restored task must
 finish), then one of two peers writing the same ids while a two-way task
 runs. Every acknowledged write must be on both peers once they converge.
 
+## Power cuts
+
+`power-fail.sh` puts each peer's data directory on
+[LazyFS](https://github.com/dsrhaslab/lazyfs), a FUSE file system that keeps
+every write that was not fsynced in its own memory. A power cut kills the
+server, drops that memory and restarts the container, so what was not
+synced is gone, as after a real power loss. The containers run privileged
+(FUSE).
+
+```console
+$ test/e2e/power-fail.sh
+```
+
+It checks the harness first (an unsynced file loses its data, a synced one
+keeps it), then: writes made with `sync => true` survive; a target that
+loses a batch it acknowledged gets it again, from a one-shot run and from a
+continuous task; and a peer that loses writes which had already reached the
+other peer gets them back through a two-way task.
+
 ## S3 attachment backend
 
 `attachments-s3.sh` brings up real RustFS and Garage containers plus two

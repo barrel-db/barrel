@@ -568,7 +568,8 @@ init_wake(#{mode := continuous}, From, Since) when is_binary(From) ->
 init_wake(_Ctx, _From, _Since) ->
     poll.
 
-run_task_loop(Ctx, Since) ->
+run_task_loop(Ctx, Since0) ->
+    Since = rewind_to_target(Ctx, Since0),
     #{parent := Parent, task_id := TaskId, mode := Mode,
       from := From, to := To,
       from_transport := FromTransport, to_transport := ToTransport,
@@ -624,6 +625,7 @@ run_task_loop(Ctx, Since) ->
                         {ok, Ctx1} ->
                             %% Persist the position and pending ids here
                             %% in the task process, off the manager loop.
+                            ok = mark_target(Ctx1, LastSeq),
                             _ = save_dir_state(Ctx1, LastSeq),
                             Ctx2 = Ctx1,
                             case Mode of
@@ -653,6 +655,51 @@ run_task_loop(Ctx, Since) ->
         {error, Reason} ->
             handle_loop_error(Ctx, Since, Reason)
     end.
+
+%% The task's position lives with the task. A target that loses power
+%% rolls back to a prefix of its writes, so the task also leaves a marker
+%% in the target after each batch: a marker that is gone or behind the
+%% position means the target lost changes it had acknowledged, and the
+%% task replays from the marker.
+target_mark_id(TaskId, Key) ->
+    <<"replication-task-", Key/binary, TaskId/binary>>.
+
+mark_target(#{task_id := TaskId, key := Key, to := To,
+              to_transport := ToTransport}, Seq) ->
+    case ToTransport:put_local_doc(To, target_mark_id(TaskId, Key),
+                                   #{<<"last_seq">> => format_seq(Seq)}) of
+        ok ->
+            ok;
+        {error, Reason} ->
+            %% the next batch finds the marker behind and sends again
+            logger:warning("barrel_rep_tasks: ~s: marking the target "
+                           "failed: ~p", [TaskId, Reason]),
+            ok
+    end.
+
+rewind_to_target(_Ctx, first) ->
+    first;
+rewind_to_target(#{task_id := TaskId, key := Key, to := To,
+                   to_transport := ToTransport}, Since) ->
+    case ToTransport:get_local_doc(To, target_mark_id(TaskId, Key)) of
+        {ok, #{<<"last_seq">> := Bin}} ->
+            Mark = parse_seq(Bin),
+            case barrel_rep_checkpoint:seq_advanced(Mark, Since) of
+                true -> rewound(TaskId, Since, Mark);
+                false -> Since
+            end;
+        {error, not_found} ->
+            rewound(TaskId, Since, first);
+        {error, _} ->
+            %% unreachable: the batch fails and backs off
+            Since
+    end.
+
+rewound(TaskId, Since, Mark) ->
+    logger:warning("barrel_rep_tasks: ~s: the target is behind the task "
+                   "(~p < ~p), replaying from its position",
+                   [TaskId, Mark, Since]),
+    Mark.
 
 replicate_batch(From, To, FromTransport, ToTransport, Changes, WaitFor,
                 #{pending := Pending0} = Ctx) ->
@@ -993,7 +1040,9 @@ restore_tasks(State) ->
 
 save_task(#{id := TaskId} = Task) ->
     Doc = task_to_doc(Task),
-    barrel_docdb:put_local_doc(?TASKS_DB, task_doc_id(TaskId), Doc).
+    %% synced: a task the caller was told exists survives a power cut
+    barrel_docdb:put_local_doc(?TASKS_DB, task_doc_id(TaskId), Doc,
+                               #{sync => true}).
 
 update_task_status(TaskId, Status) ->
     update_task_status(TaskId, Status, #{}).
@@ -1003,7 +1052,7 @@ update_task_status(TaskId, Status, Extra) ->
     update_task_doc(TaskId, fun(Doc) ->
         Doc1 = maps:remove(<<"paused_reason">>, Doc),
         maps:merge(Doc1#{<<"status">> => atom_to_binary(Status)}, Extra)
-    end).
+    end, #{sync => true}).
 
 %% A direction's position and pending ids, saved together. `Key' is
 %% <<>> for push (and single-direction tasks), <<"pull_">> for the pull
@@ -1054,19 +1103,24 @@ update_task_last_error(TaskId, Reason) ->
 
 %% Read-modify-write of the task doc, serialized per task: the manager
 %% and a `both' task's two directions update it concurrently.
+%% Positions are written unsynced: one lost in a power cut only makes
+%% the task send again. Status changes are synced.
 update_task_doc(TaskId, Fun) ->
+    update_task_doc(TaskId, Fun, #{}).
+
+update_task_doc(TaskId, Fun, Opts) ->
     global:trans({{?MODULE, TaskId}, self()},
-                 fun() -> do_update_task_doc(TaskId, Fun) end,
+                 fun() -> do_update_task_doc(TaskId, Fun, Opts) end,
                  [node()]).
 
-do_update_task_doc(TaskId, Fun) ->
+do_update_task_doc(TaskId, Fun, Opts) ->
     case barrel_docdb:get_local_doc(?TASKS_DB, task_doc_id(TaskId)) of
         {ok, Doc} ->
             Doc2 = Fun(Doc),
             Doc3 = Doc2#{<<"updated_at">> =>
                              erlang:system_time(millisecond)},
             barrel_docdb:put_local_doc(?TASKS_DB, task_doc_id(TaskId),
-                                       Doc3);
+                                       Doc3, Opts);
         {error, _} ->
             ok
     end.

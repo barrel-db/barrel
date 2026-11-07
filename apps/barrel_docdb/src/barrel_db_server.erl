@@ -63,6 +63,7 @@
 %% Local document API (for checkpoints, not replicated)
 -export([
     put_local_doc/3,
+    put_local_doc/4,
     get_local_doc/2,
     delete_local_doc/2,
     fold_local_docs/4
@@ -381,6 +382,11 @@ diff_versions(Pid, TokenMap) when is_map(TokenMap) ->
 put_local_doc(Pid, DocId, Doc) ->
     gen_server:call(Pid, {put_local_doc, DocId, Doc}).
 
+%% @doc put_local_doc/3 with options: `sync => true' waits for the disk.
+-spec put_local_doc(pid(), binary(), map(), map()) -> ok | {error, term()}.
+put_local_doc(Pid, DocId, Doc, Opts) ->
+    gen_server:call(Pid, {put_local_doc, DocId, Doc, Opts}).
+
 %% @doc Get a local document
 -spec get_local_doc(pid(), binary()) -> {ok, map()} | {error, not_found}.
 get_local_doc(Pid, DocId) ->
@@ -622,6 +628,7 @@ write_request({resolve_conflict, _, _, _}) -> true;
 write_request({put_version, _, _, _, _}) -> true;
 write_request({put_doc_state, _, _, _}) -> true;
 write_request({put_local_doc, _, _}) -> true;
+write_request({put_local_doc, _, _, _}) -> true;
 write_request({delete_local_doc, _}) -> true;
 write_request(_) -> false.
 
@@ -800,7 +807,11 @@ handle_call_rw({diff_versions, TokenMap}, _From,
 %% Local document operations
 handle_call_rw({put_local_doc, DocId, Doc}, _From,
                #state{name = DbName, store_ref = StoreRef} = State) ->
-    Result = do_put_local_doc(StoreRef, DbName, DocId, Doc),
+    Result = do_put_local_doc(StoreRef, DbName, DocId, Doc, #{}),
+    {reply, Result, State};
+handle_call_rw({put_local_doc, DocId, Doc, Opts}, _From,
+               #state{name = DbName, store_ref = StoreRef} = State) ->
+    Result = do_put_local_doc(StoreRef, DbName, DocId, Doc, Opts),
     {reply, Result, State};
 
 handle_call_rw({get_local_doc, DocId}, _From,
@@ -3223,11 +3234,12 @@ do_diff_states(StoreRef, DbName, DigestMap) ->
            end, DigestMap)}.
 
 %% @doc Put a local document (per-database)
-do_put_local_doc(StoreRef, DbName, DocId, Doc) ->
+do_put_local_doc(StoreRef, DbName, DocId, Doc, Opts) ->
     Ks = barrel_keyspace:resolve(DbName),
     Key = barrel_store_keys:local_doc_key(Ks, DocId),
     Value = term_to_binary(Doc),
-    ok = barrel_store_rocksdb:local_put(StoreRef, Key, Value),
+    ok = barrel_store_rocksdb:local_put(StoreRef, Key, Value,
+                                        [{sync, maps:get(sync, Opts, false)}]),
     ok.
 
 %% @doc Get a local document (per-database)
