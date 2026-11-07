@@ -48,7 +48,7 @@ GET    /db/:db/doc/:id             fetch a document
 DELETE /db/:db/doc/:id             delete a document
 POST   /db/:db/_bulk_docs          {"docs":[...]} -> {"results":[...]}
 POST   /db/:db/_bulk_get           {"ids":[...]}  -> {"results":[...]}
-POST   /db/:db/find                body = query, returns rows
+POST   /db/:db/find                {"where":[...],"limit":10} -> rows
 POST   /db/:db/query               BQL (ndjson rows; SUBSCRIBE over SSE)
 GET    /db/:db/query?q=            the same, for EventSource clients
 GET    /db/:db/changes            changes feed (JSON, or SSE via Accept)
@@ -73,6 +73,16 @@ POST|GET /spaces, /spaces/:space, .../grants, .../sessions, /handoffs
 POST|GET /contexts, /contexts/:id, /contexts/_query, /worksets, ...
                                    contexts and working sets (below)
 POST|GET /mcp                      the MCP endpoint (see the mcp guide)
+```
+
+## Find documents by field
+
+`POST /db/:db/find` takes `where`, a list of conditions in the replication filter form, plus optional `limit`, `offset`, `include_docs` and `id_prefix`. An invalid query answers 400 `invalid_query`.
+
+```console
+$ curl -XPOST localhost:8080/db/mydb/find -H 'content-type: application/json' \
+    -d '{"where": [["path", ["kind"], "user"]], "limit": 10}'
+{"rows":[...],"meta":{...}}
 ```
 
 ## Bound a query and read what answered

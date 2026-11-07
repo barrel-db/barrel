@@ -21,9 +21,12 @@
 %%% hashed (fixed length, no length oracle) and compared with
 %%% crypto:hash_equals/2.
 %%%
-%%% A request presenting a signature is judged by it alone (bearer and
-%%% mTLS never rescue a failed one) and its body must hash to the signed
-%%% content hash. Unsigned requests: capability token, bearer, then mTLS.
+%%% Decision order. A request presenting a signature is judged by it
+%%% alone and its body must hash to the signed content hash. Otherwise a
+%%% presented Authorization credential is judged alone: a capability
+%%% token, else a global bearer; a failing one, or a scheme not
+%%% understood, is a 401 (or the token's 403). mTLS applies only to
+%%% requests with no Authorization header at all.
 %%% A signed request reaches its handler with the headers its signature
 %%% covers in the request meta; handlers read them through header/2.
 %%% @end
@@ -158,17 +161,39 @@ signed_only(Req, Next, Auth, #{accept := Accept} = State) ->
             unauthorized()
     end.
 
-%% Capability tokens (bsp_...) are a scoped principal for the agent layer,
-%% independent of `accept'. Otherwise bearer, then mTLS.
+%% A presented credential is judged alone: capability token (bsp_...,
+%% independent of `accept'), else a global bearer. mTLS only without one.
 unsigned(Req, Next, Path, State) ->
-    case livery_ext:bearer_token(Req) of
-        <<"bsp_", _/binary>> = Token ->
+    case presented(Req) of
+        none -> transport(Req, Next, State);
+        {bearer, <<"bsp_", _/binary>> = Token} ->
             capability(Req, Next, Token, Path);
-        _ ->
-            case authorized(Req, State) of
-                true -> Next(Req);
-                false -> unauthorized()
+        {bearer, _Token} -> global_bearer(Req, Next, State);
+        unknown -> unauthorized()
+    end.
+
+%% No Authorization header at all, a bearer, or a scheme not understood.
+presented(Req) ->
+    case livery_req:header(<<"authorization">>, Req, undefined) of
+        undefined ->
+            none;
+        _Value ->
+            case livery_ext:bearer_token(Req) of
+                Token when is_binary(Token) -> {bearer, Token};
+                undefined -> unknown
             end
+    end.
+
+global_bearer(Req, Next, #{accept := Accept} = State) ->
+    case lists:member(bearer, Accept) andalso try_bearer(Req, State) of
+        true -> Next(Req);
+        false -> unauthorized()
+    end.
+
+transport(Req, Next, #{accept := Accept}) ->
+    case lists:member(mtls, Accept) andalso mtls_ok(Req) of
+        true -> Next(Req);
+        false -> unauthorized()
     end.
 
 %% The first Authorization value using the Signature scheme, whatever
@@ -199,11 +224,6 @@ header(Name, Req) ->
                 false -> livery_req:header(Name, Req, undefined)
             end
     end.
-
-%% Whether bearer or mTLS (when accepted) authenticates an unsigned request.
-authorized(Req, #{accept := Accept} = State) ->
-    (lists:member(bearer, Accept) andalso try_bearer(Req, State))
-        orelse (lists:member(mtls, Accept) andalso mtls_ok(Req)).
 
 %% Ed25519 signed request: verify the signature, then consume it against
 %% the replay cache. Any failure (malformed header, unknown key, bad

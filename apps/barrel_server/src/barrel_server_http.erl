@@ -568,16 +568,66 @@ bulk_get(Req) ->
         end)
     end).
 
+%% Body: `where' (conditions in the replication-filter wire form, e.g.
+%% `["path", ["type"], "user"]'), `limit', `offset', `include_docs',
+%% `id_prefix'. An invalid query is a 400, checked before the db runs it.
 find(Req) ->
     with_db(Req, fun(Db) ->
-        with_json(Req, fun(Query) ->
-            case barrel:find(Db, Query) of
-                {ok, Rows, Meta} ->
-                    json_resp(200, #{rows => Rows, meta => jsonable(Meta)});
-                Err -> error_resp(Err)
+        with_json(Req, fun(Body) ->
+            case find_spec(Body) of
+                {ok, Query} ->
+                    case barrel:find(Db, Query) of
+                        {ok, Rows, Meta} ->
+                            json_resp(200, #{rows => Rows,
+                                             meta => find_meta(Meta)});
+                        Err -> error_resp(Err)
+                    end;
+                Err ->
+                    error_resp(Err)
             end
         end)
     end).
+
+%% Binary cursors (continuation, last_seq) ride as base64url.
+find_meta(Meta) ->
+    Out = #{has_more => maps:get(has_more, Meta, false)},
+    Out1 = case maps:get(continuation, Meta, undefined) of
+        Token when is_binary(Token) ->
+            Out#{continuation => base64:encode(Token, #{mode => urlsafe})};
+        _ ->
+            Out
+    end,
+    observed(Meta, Out1).
+
+find_spec(Body) when is_map(Body) ->
+    try maps:fold(fun find_field/3, #{}, Body) of
+        Spec ->
+            case barrel_query:compile(Spec) of
+                {ok, _Plan} -> {ok, Spec};
+                {error, Reason} -> {error, {invalid_query, Reason}}
+            end
+    catch
+        throw:{invalid_query, _} = Invalid -> {error, Invalid}
+    end;
+find_spec(Body) ->
+    {error, {invalid_query, {not_an_object, Body}}}.
+
+find_field(<<"where">>, Where, Spec) ->
+    Wire = #{<<"query">> => #{<<"where">> => Where}},
+    case barrel_rep_filter:from_wire(Wire) of
+        {ok, #{query := #{where := Conds}}} -> Spec#{where => Conds};
+        {error, {bad_filter, Reason}} -> throw({invalid_query, Reason})
+    end;
+find_field(<<"limit">>, N, Spec) when is_integer(N), N > 0 ->
+    Spec#{limit => N};
+find_field(<<"offset">>, N, Spec) when is_integer(N), N >= 0 ->
+    Spec#{offset => N};
+find_field(<<"include_docs">>, B, Spec) when is_boolean(B) ->
+    Spec#{include_docs => B};
+find_field(<<"id_prefix">>, P, Spec) when is_binary(P) ->
+    Spec#{id_prefix => P};
+find_field(Key, Value, _Spec) ->
+    throw({invalid_query, {bad_field, Key, Value}}).
 
 %%====================================================================
 %% BQL query endpoint
@@ -1303,6 +1353,11 @@ error_resp({att_sync_pending, _}) -> json_resp(503, #{error => <<"att_sync_pendi
 error_resp(bad_since) -> json_resp(400, #{error => <<"bad_since">>});
 error_resp(bad_until) -> json_resp(400, #{error => <<"bad_until">>});
 error_resp(bad_limit) -> json_resp(400, #{error => <<"bad_limit">>});
+%% Every user query that fails to compile is a client error.
+error_resp({invalid_query, Reason}) ->
+    json_resp(400, #{error => <<"invalid_query">>,
+                     reason => iolist_to_binary(
+                                 io_lib:format("~p", [Reason]))});
 error_resp(Reason) ->
     json_resp(500, #{error => iolist_to_binary(io_lib:format("~p", [Reason]))}).
 
