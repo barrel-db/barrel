@@ -181,6 +181,7 @@
 -export([
     put_version/5,
     get_doc_state/2,
+    stub_stats/1,
     put_doc_state/4,
     diff_states/2,
     diff_versions/2,
@@ -1928,6 +1929,26 @@ set_doc_embedding(Db, DocId, ExpectedRev, Vector) ->
     {ok, map()} | {error, term()}.
 get_doc_state(Db, DocId) ->
     with_db(Db, fun(Pid) -> barrel_db_server:get_doc_state(Pid, DocId) end).
+
+%% @doc Deleted documents kept as stubs, and the bytes they hold (their
+%% state and change row): `#{stubs, bytes}'. Scans the change feed in
+%% the caller; the `barrel_db_stubs_*' gauges are refreshed the same way
+%% after each retention sweep.
+-spec stub_stats(binary() | pid()) -> {ok, #{stubs := non_neg_integer(),
+                                             bytes := non_neg_integer()}}
+                                      | {error, term()}.
+stub_stats(Db) ->
+    case resolve_db_name(Db) of
+        {ok, Name} ->
+            case persistent_term:get({barrel_store, Name}, undefined) of
+                undefined -> {error, not_found};
+                StoreRef ->
+                    {N, B} = barrel_db_server:stub_census(StoreRef, Name),
+                    {ok, #{stubs => N, bytes => B}}
+            end;
+        {error, _} = Err ->
+            Err
+    end.
 
 %% @doc Merge a peer's full document state into this database. Nothing
 %% is written when the merged state equals the current one.

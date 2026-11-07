@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- A deleted version read from history, or sent to a peer, carried the body it had deleted. It now has no body.
 - Replication lost conflicts. Only a document's winner was sent, so a concurrent version stayed on the replica that noticed the conflict, and after 8 later edits it was deleted from the only replica that held it. Replication now sends each document's whole state: every concurrent version reaches every replica and stays until someone resolves it, and a version that was replaced never comes back.
 - A document that failed to replicate was skipped for good: the checkpoint moved past it. Failed documents are now retried by id on the next run (and while a continuous task is idle). A run with more than 1000 failures stops with `too_many_failed_docs` without moving its checkpoint.
 - A checkpoint that could not be read made replication silently start over; the run now fails instead.
@@ -24,11 +25,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `conflict_resolver`: a function the database runs whenever a document has conflicts. Given an order-independent function, every replica writes the same resolution, so a conflict ends in one version everywhere.
 - `tombstone_purge_after`: remove delete stubs older than this many seconds. Off by default; a replica offline longer can bring a purged document back.
 - `get_doc_state/2`, `put_doc_state/4` and `diff_states/2` to read and merge whole document states.
+- `barrel_db_stubs_total` and `barrel_db_stubs_bytes` gauges, refreshed after each retention sweep, and `stub_stats/1` to read them on demand. A stub costs about 270 bytes, plus about 60 per writer and 40 per older peer's version in its history.
 
 ### Changed
 - Breaking: `conflict_merger` is replaced by `conflict_resolver`. A database still configured with `conflict_merger` logs a warning and no longer merges.
 - Breaking: an edit with `_rev` replaces only the winner; the document's other conflicts stay listed until resolved. Writing over a deleted document replaces every delete.
 - Breaking: resolving the same conflict on two replicas at once leaves the two resolutions in conflict.
+- A conflict resolution whose body cannot be stored returns an error instead of crashing the database process.
 - Peers that send one version at a time (servers and clients from before this release) never remove anything: their edits show as conflicts until resolved. Upgrade them to stop that.
 - Documents written by an earlier version are converted the first time they are touched; a version whose history was already pruned can show up once as a conflict.
 

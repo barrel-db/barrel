@@ -35,3 +35,19 @@ services:
       interval: 3s
       timeout: 5s
       retries: 20
+
+  # Third replica for the active-active scenarios (late joiner, relay,
+  # returning replica). replication.sh does not use it.
+  peer-c:
+    image: barrel-server-e2e
+    container_name: barrel-e2e-peer-c
+    depends_on:
+      peer-a:
+        condition: service_started
+    ports:
+      - "8093:8080"
+    healthcheck:
+      test: ["CMD", "barrel_server", "ping"]
+      interval: 3s
+      timeout: 5s
+      retries: 20

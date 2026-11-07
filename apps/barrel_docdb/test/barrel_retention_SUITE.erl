@@ -146,9 +146,19 @@ sweep_stubs_expired_deletes(Config) ->
         Db, #{<<"id">> => DocId, <<"v">> => 1}, Rev1,
         barrel_vv:encode(barrel_vv:bump(barrel_vv:new(), Old)), false),
 
-    %% The id is writable again, over the delete
+    %% The stub is counted, with the bytes it holds, and the sweep
+    %% refreshed the gauges
+    {ok, #{stubs := 1, bytes := Bytes}} = barrel_docdb:stub_stats(Db),
+    ?assert(Bytes > 0 andalso Bytes < 512),
+    ok = wait_for(fun() ->
+                      Text = barrel_metrics:export_text(),
+                      binary:match(Text, <<"barrel_db_stubs_total">>) =/= nomatch
+                  end, 50),
+
+    %% The id is writable again, over the delete; it is no longer a stub
     {ok, _} = barrel_docdb:put_doc(Db, #{<<"id">> => DocId, <<"v">> => <<"new">>}),
     {ok, []} = barrel_docdb:get_conflicts(Db, DocId),
+    {ok, #{stubs := 0, bytes := 0}} = barrel_docdb:stub_stats(Db),
     ok.
 
 %% With tombstone_purge_after set, a stub older than that is removed.
@@ -323,3 +333,10 @@ sweep_channels(Config) ->
     ?assertMatch([#{id := <<"a">>}, #{id := <<"c">>, deleted := true}], After),
     ?assertNot(maps:is_key(left, hd(After))),
     ok.
+
+wait_for(_Fun, 0) -> timeout;
+wait_for(Fun, N) ->
+    case Fun() of
+        true -> ok;
+        false -> timer:sleep(20), wait_for(Fun, N - 1)
+    end.

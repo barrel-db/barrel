@@ -381,6 +381,15 @@ Editing with `_rev` replaces only the winner; the conflicts stay. Editing with `
 
 A `_rev` that is not the winner returns `{error, conflict}`. Writing over a deleted document replaces every delete, with or without a rev.
 
+Over HTTP, read with `?conflicts=true` and send `_observed` back in the body:
+
+```console
+$ curl -s "$URL/db/notes/doc/doc1?conflicts=true"
+{"id":"doc1","v":"a","_rev":"...","_conflicts":["..."],"_observed":["...","..."]}
+$ curl -X PUT "$URL/db/notes/doc/doc1" -H 'content-type: application/json' \
+    -d '{"v":"merged","_observed":["...","..."]}'
+```
+
 ### Resolving a conflict
 
 ```erlang
