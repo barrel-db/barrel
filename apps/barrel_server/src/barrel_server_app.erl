@@ -18,6 +18,10 @@ start(_Type, _Args) ->
         {ok, Dir} -> application:set_env(barrel_docdb, data_dir, Dir);
         undefined -> ok
     end,
+    %% replication tasks restored after a restart open their databases
+    %% the way the server does
+    application:set_env(barrel_docdb, task_db_opener,
+                        {barrel_server_dbs, ensure}),
     barrel_server_sup:start_link().
 
 prep_stop(State) ->
@@ -29,4 +33,5 @@ prep_stop(State) ->
     State.
 
 stop(_State) ->
+    application:unset_env(barrel_docdb, task_db_opener),
     ok.
