@@ -34,6 +34,23 @@ against the running node, so it runs the real `barrel_rep` algorithm (or, for th
 continuous-task scenario, `barrel_rep_tasks:start_task/1`) against the other
 peer's `_sync` endpoints.
 
+## Active-active replication
+
+`active-active.sh` brings up three peers that all take writes and checks
+that they converge without losing a write:
+
+```console
+$ test/e2e/active-active.sh
+```
+
+It covers concurrent edits on two peers, nine edits over the winner (the
+losing write stays), a delete against an edit, resolving over HTTP with
+`_observed`, a new empty peer joining, a peer that stops and returns with
+its own edit (learning the others' through a relay), two peers resolving
+at once, a filtered replication carrying a delete, and a continuous task in
+both directions with concurrent writes. Each scenario compares the
+document state digest (`_sync/state`) on every peer.
+
 ## S3 attachment backend
 
 `attachments-s3.sh` brings up real RustFS and Garage containers plus two

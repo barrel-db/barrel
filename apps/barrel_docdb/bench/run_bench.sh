@@ -11,6 +11,7 @@
 #   ./run_bench.sh 1000 1000       # custom num_docs and iterations
 #   ./run_bench.sh doc_types       # document-type comparison
 #   ./run_bench.sh doc_types 500 200
+#   ./run_bench.sh stubs [docs]    # delete stub size and sweep time
 
 set -e
 
@@ -42,6 +43,11 @@ run_erl() {  # run_erl <erlang-expr>
 }
 
 case "$1" in
+    stubs)
+        NUM_DOCS=${2:-1000}
+        echo "Running delete stub size benchmark (docs per case=$NUM_DOCS)..."
+        run_erl "barrel_bench_stubs:run(#{docs => $NUM_DOCS})"
+        ;;
     doc_types)
         NUM_DOCS=${2:-1000}
         ITERATIONS=${3:-500}

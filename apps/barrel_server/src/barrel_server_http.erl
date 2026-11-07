@@ -413,7 +413,8 @@ put_doc(Req) ->
 get_doc(Req) ->
     with_db(Req, fun(Db) ->
         Id = livery_req:binding(<<"id">>, Req),
-        case barrel:get_doc(Db, Id, embedding_opts_qs(Req)) of
+        case barrel:get_doc(Db, Id, maps:merge(embedding_opts_qs(Req),
+                                               conflicts_opts_qs(Req))) of
             {ok, Doc} -> json_resp(200, encode_embedding_field(Doc));
             Err -> error_resp(Err)
         end
@@ -1158,6 +1159,14 @@ embedding_opts_qs(Req) ->
         undefined -> #{};
         <<"false">> -> #{};
         _ -> #{include_embedding => true}
+    end.
+
+%% ?conflicts=true adds _conflicts and _observed (hand _observed back on
+%% the next write to resolve them).
+conflicts_opts_qs(Req) ->
+    case param(<<"conflicts">>, Req) of
+        <<"true">> -> #{conflicts => true};
+        _ -> #{}
     end.
 
 embedding_opts_body(Body) ->

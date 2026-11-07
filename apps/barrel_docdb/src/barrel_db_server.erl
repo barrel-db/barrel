@@ -18,7 +18,7 @@
 -export([info/1, stop/1]).
 -export([get_store_ref/1, get_att_ref/1]).
 -export([sweep_ttl/1]).
--export([source_id/1, writer_id/1, alloc_hlc/1]).
+-export([source_id/1, writer_id/1, alloc_hlc/1, stub_census/2]).
 
 %% Document API
 -export([
@@ -747,7 +747,8 @@ handle_call_rw({resolve_conflict, DocId, BaseRev, Resolution}, _From,
     Result = try
         do_resolve_conflict(StoreRef, DbName, DocId, BaseRev, Resolution)
     catch
-        throw:{error, clock_skew} = Skew -> Skew
+        throw:{error, clock_skew} = Skew -> Skew;
+        error:Reason -> {error, {invalid_resolution, Reason}}
     end,
     {reply, Result, State};
 
@@ -1275,6 +1276,14 @@ do_retention_sweep(StoreRef, AttRef, DbName, RetentionPeriod, PurgeAfter,
         ok = barrel_store_rocksdb:write_batch(StoreRef,
                                               [FloorOp | LeaveOps ++ PurgeOps],
                                               #{}),
+        %% the stub gauges are measured off the writer: a feed scan
+        _ = spawn(fun() ->
+                      try stub_census(StoreRef, DbName) of
+                          {Stubs, StubBytes} ->
+                              barrel_metrics:set_db_stubs(DbName, Stubs, StubBytes)
+                      catch _:_ -> ok   % the database closed meanwhile
+                      end
+                  end),
         {ok, Stats#{floor => Cutoff, channel_leaves_swept => LeavesSwept,
                     att_tombstones_swept => AttSwept}}
     end,
@@ -1399,6 +1408,37 @@ chain_delete_ops(StoreRef, Ks, DocId) ->
                   | Acc]}
         end,
         []).
+
+%% @doc Count the delete stubs and the bytes they hold: a stub is a
+%% deleted document without a body; its bytes are its entity (state)
+%% and its change row.
+stub_census(StoreRef, DbName) ->
+    Ks = barrel_keyspace:resolve(DbName),
+    {ok, Census, _} = barrel_changes:fold_changes_compact(
+        StoreRef, DbName, first,
+        fun({DocId, Hlc, _Rev, true, _N}, {Count, Bytes} = Acc) ->
+               case barrel_store_rocksdb:body_get(
+                      StoreRef, barrel_store_keys:doc_body(Ks, DocId)) of
+                   not_found ->
+                       EntityKey = barrel_store_keys:doc_entity(Ks, DocId),
+                       FeedKey = barrel_store_keys:doc_hlc(Ks, Hlc),
+                       Size = raw_size(StoreRef, EntityKey) + byte_size(EntityKey)
+                           + raw_size(StoreRef, FeedKey) + byte_size(FeedKey),
+                       {ok, {Count + 1, Bytes + Size}};
+                   _ ->
+                       {ok, Acc}
+               end;
+           (_Change, Acc) ->
+               {ok, Acc}
+        end,
+        {0, 0}),
+    Census.
+
+raw_size(StoreRef, Key) ->
+    case barrel_store_rocksdb:get(StoreRef, Key) of
+        {ok, V} -> byte_size(V);
+        _ -> 0
+    end.
 
 %% @private Deleted documents whose feed row is older than the purge
 %% window (tombstone_purge_after seconds): read in the worker, re-checked
@@ -2431,6 +2471,8 @@ build_write_ops(StoreRef, DbName, DocRecord, Old, Opts, NextHlc0) ->
             OldVersionEnc = barrel_version:encode(OldVersion),
             Archive = case OldDocBodyCbor of
                 undefined -> [];
+                %% a delete's entity holds the body it replaced
+                _ when OldDeleted -> [];
                 OldCbor ->
                     [{body_put,
                       barrel_store_keys:doc_body_rev(Ks, DocId, OldVersionEnc),
@@ -2619,6 +2661,8 @@ build_prepared_ops(StoreRef, DbName, #prep{rec = DocRecord} = P, Old, Opts,
             OldVersionEnc = barrel_version:encode(OldVersion),
             Archive = case OldDocBodyCbor of
                 undefined -> [];
+                %% a delete's entity holds the body it replaced
+                _ when OldDeleted -> [];
                 OldCbor ->
                     [{body_put,
                       barrel_store_keys:doc_body_rev(Ks, DocId, OldVersionEnc),
@@ -2776,6 +2820,7 @@ build_delete_ops(StoreRef, DbName, DocId, Current, Opts) ->
             OldVersionEnc = barrel_version:encode(OldVersion),
             ArchiveOps = case OldDocBodyCbor of
                 undefined -> [];
+                _ when OldDeleted -> [];
                 OldCbor ->
                     [{body_put,
                       barrel_store_keys:doc_body_rev(Ks, DocId, OldVersionEnc),
@@ -2967,6 +3012,9 @@ canon(T) when is_tuple(T) -> [$t, canon(tuple_to_list(T))].
 
 %% @doc The body of a live version: the current body for the winner,
 %% the archived body for a conflict sibling; a delete has none.
+%% a delete keeps the replaced body in the entity; the delete has none
+version_body(_StoreRef, _DbName, _DocId, #{version := V, deleted := true}, V) ->
+    #{};
 version_body(_StoreRef, _DbName, _DocId, #{version := V, body := B}, V) ->
     case B of undefined -> #{}; _ -> B end;
 version_body(StoreRef, DbName, DocId, _Old, T) ->
@@ -3055,9 +3103,10 @@ do_write_state(StoreRef, DbName, DocId, Old, Live0, NewLive, BodyOf, Opts) ->
         false -> []
     end,
     %% the previous winner's body moves to the archive when it stops
-    %% being the winner
-    ArchiveOps = case {WinnerChanged, OldW, OldCbor} of
-        {true, OldV, Cbor} when OldV =/= undefined, Cbor =/= undefined ->
+    %% being the winner (a delete has none: its entity still holds the
+    %% body it replaced)
+    ArchiveOps = case {WinnerChanged, OldW, OldCbor, OldDeleted} of
+        {true, OldV, Cbor, false} when OldV =/= undefined, Cbor =/= undefined ->
             [{body_put, BodyRevKey(OldV), Cbor}];
         _ -> []
     end,

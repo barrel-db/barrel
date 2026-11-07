@@ -72,6 +72,10 @@ barrel_replication_errors{task_id="rep-123"} 2
 | `barrel_db_documents_total` | Gauge | db | Document count |
 | `barrel_db_size_bytes` | Gauge | db | Database size |
 | `barrel_db_attachments_total` | Gauge | db | Attachment count |
+| `barrel_db_stubs_total` | Gauge | db | Deleted documents kept as stubs |
+| `barrel_db_stubs_bytes` | Gauge | db | Bytes held by stubs (state and change row) |
+
+The stub gauges are measured after each retention sweep. `barrel_docdb:stub_stats/1` returns the same numbers on demand. A stub costs about 270 bytes, plus about 60 per writer id and 40 per older peer's version in its history (`bench/run_bench.sh stubs`). `tombstone_purge_after` removes old stubs.
 
 > #### HTTP request metrics
 >

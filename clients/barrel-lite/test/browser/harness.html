@@ -30,6 +30,9 @@
             .then((r) => (r ? new TextDecoder().decode(r.bytes) : null)),
         sync: () => window.__db.sync(),
         pull: () => window.__db.pull(),
+        push: () => window.__db.push(),
+        conflicts: (id) => window.__db.conflicts(id),
+        resolve: (id, body) => window.__db.resolve(id, body),
         syncEmbeddings: (opts) => window.__db.syncEmbeddings(opts ?? {}),
         searchLocal: (query, opts) => window.__db.searchLocal(query, opts ?? {}),
         live: (opts) => {

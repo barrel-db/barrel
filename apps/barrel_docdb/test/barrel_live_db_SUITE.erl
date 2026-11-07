@@ -22,7 +22,9 @@
          different_resolvers_terminate/1,
          filtered_peer_gets_delete/1,
          filtered_peer_gets_delete_by_query/1,
-         filter_matches_live_conflict/1]).
+         filter_matches_live_conflict/1,
+         bad_resolution_does_not_crash/1,
+         delete_ships_no_body/1]).
 
 all() ->
     [conflict_reaches_both_sides, loser_survives_many_edits,
@@ -31,7 +33,8 @@ all() ->
      relayed_version_keeps_sibling, converted_doc_keeps_history_seen,
      resolver_one_version_everywhere, resolver_three_writers,
      different_resolvers_terminate, filtered_peer_gets_delete,
-     filtered_peer_gets_delete_by_query, filter_matches_live_conflict].
+     filtered_peer_gets_delete_by_query, filter_matches_live_conflict,
+     bad_resolution_does_not_crash, delete_ships_no_body].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(barrel_docdb),
@@ -333,3 +336,32 @@ filter_matches_live_conflict(Config) ->
                                            attachments => false}),
     ?assertEqual(barrel_docdb:get_conflicts(A, <<"d">>),
                  barrel_docdb:get_conflicts(C, <<"d">>)).
+
+%% A resolution body the database cannot store is an error, not a crash.
+bad_resolution_does_not_crash(Config) ->
+    [A, B | _] = ?config(dbs, Config),
+    conflict(A, B),
+    {ok, Pid} = barrel_docdb:open_db(A),
+    {ok, #{<<"_observed">> := Seen}} = barrel_docdb:get_doc(A, <<"d">>, #{conflicts => true}),
+    ?assertMatch({error, {invalid_resolution, _}},
+                 barrel_docdb:resolve_conflict(A, <<"d">>, Seen,
+                                               {merge, #{<<"v">> => an_atom}})),
+    ?assert(is_process_alive(Pid)),
+    {ok, [_]} = barrel_docdb:get_conflicts(A, <<"d">>).
+
+%% A delete keeps the replaced body in its entity; the state must not ship
+%% it as the delete's body, or a replica would hold the deleted content.
+delete_ships_no_body(Config) ->
+    [A, B | _] = ?config(dbs, Config),
+    put(A, <<"d">>, 1),
+    sync(A, B),
+    {ok, _} = barrel_docdb:delete_doc(A, <<"d">>),
+    edit(B, <<"d">>, 2),
+    sync(A, B),
+    [begin
+         {ok, #{bodies := Bodies}} = barrel_docdb:get_doc_state(Db, <<"d">>),
+         ?assertEqual([2], lists:sort([V || #{<<"v">> := V} <- maps:values(Bodies)])),
+         {ok, [Del]} = barrel_docdb:get_conflicts(Db, <<"d">>),
+         ?assertEqual(#{}, maps:get(Del, Bodies))
+     end || Db <- [A, B]],
+    ok.

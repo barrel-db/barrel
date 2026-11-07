@@ -45,7 +45,8 @@
     %% Storage
     set_db_docs/2,
     set_db_size/2,
-    set_db_attachments/2
+    set_db_attachments/2,
+    set_db_stubs/3
 ]).
 
 %% Export function
@@ -120,7 +121,13 @@
 
     %% Database attachment count gauge
     {gauge, barrel_db_attachments_total,
-     <<"Total number of attachments in database">>}
+     <<"Total number of attachments in database">>},
+
+    %% Deleted documents kept as stubs (measured by the retention sweep)
+    {gauge, barrel_db_stubs_total,
+     <<"Deleted documents kept as stubs">>},
+    {gauge, barrel_db_stubs_bytes,
+     <<"Bytes held by delete stubs (state and change row)">>}
 ]).
 
 %%====================================================================
@@ -297,6 +304,20 @@ set_db_attachments(Db, Count) ->
     case instrument_meter:get_instrument(barrel_db_attachments_total) of
         undefined -> ok;
         Instrument -> instrument_meter:set(Instrument, Count, Attrs)
+    end,
+    ok.
+
+%% @doc Set the number of delete stubs and the bytes they hold.
+-spec set_db_stubs(binary(), non_neg_integer(), non_neg_integer()) -> ok.
+set_db_stubs(Db, Count, Bytes) ->
+    Attrs = #{db => Db},
+    case instrument_meter:get_instrument(barrel_db_stubs_total) of
+        undefined -> ok;
+        I1 -> instrument_meter:set(I1, Count, Attrs)
+    end,
+    case instrument_meter:get_instrument(barrel_db_stubs_bytes) of
+        undefined -> ok;
+        I2 -> instrument_meter:set(I2, Bytes, Attrs)
     end,
     ok.
 

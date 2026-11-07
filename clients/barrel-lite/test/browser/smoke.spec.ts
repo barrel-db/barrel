@@ -163,3 +163,34 @@ test("a live pull propagates a server doc to the leader tab", async ({ page }) =
     })
     .toMatchObject({ hello: "browser" });
 });
+
+test("a conflict from sync is kept in OPFS and resolves", async ({ page }) => {
+  const name = uniqueName();
+  const db = uniqueName();
+  await createDb(db);
+  await restPut(db, "note", { text: "seed" });
+
+  await open(page, name, db, false);
+  await call(page, "pull");
+  // the browser edits while the server copy is edited too
+  await call(page, "put", { id: "note", text: "browser" });
+  const cur = await fetch(`${SERVER}/db/${db}/doc/note`, {
+    headers: { authorization: `Bearer ${TOKEN}` },
+  }).then((r) => r.json() as Promise<{ _rev: string }>);
+  await restPut(db, "note", { text: "server", _rev: cur._rev });
+  await call(page, "sync");
+  await call(page, "pull");
+  expect(await call<unknown[]>(page, "conflicts", "note")).toHaveLength(1);
+  await call(page, "close");
+
+  // the conflict survives a reload, then a resolution clears it
+  await open(page, name, db, false);
+  expect(await call<unknown[]>(page, "conflicts", "note")).toHaveLength(1);
+  await call(page, "resolve", "note", { text: "both" });
+  await call(page, "push");
+  expect(await call<unknown[]>(page, "conflicts", "note")).toHaveLength(0);
+  const after = await fetch(`${SERVER}/db/${db}/doc/note`, {
+    headers: { authorization: `Bearer ${TOKEN}` },
+  }).then((r) => r.json() as Promise<{ text: string }>);
+  expect(after.text).toBe("both");
+});
