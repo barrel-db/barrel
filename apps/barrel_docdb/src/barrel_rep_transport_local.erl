@@ -30,7 +30,9 @@
 
 %% Attachment sync (optional callbacks)
 -export([att_changes/3, diff_attachments/2, get_attachment_stream/3,
-         put_attachment/5, delete_attachment/4]).
+         put_attachment/5, delete_attachment/4, touch_attachment/4,
+         att_state/3, att_list/2, flush_attachments/1,
+         att_capabilities/1]).
 
 %%====================================================================
 %% barrel_rep_transport callbacks
@@ -161,3 +163,19 @@ pump(ReadFun, Writer) ->
 delete_attachment(DbName, DocId, Name, Meta) ->
     barrel_docdb:delete_attachment(
         DbName, DocId, Name, maps:with([origin_hlc], Meta)).
+
+touch_attachment(DbName, DocId, Name, #{origin := Origin, digest := Digest}) ->
+    barrel_docdb:touch_attachment(DbName, DocId, Name,
+                                  #{origin_hlc => Origin, digest => Digest}).
+
+att_state(DbName, DocId, Name) ->
+    barrel_docdb:att_state(DbName, DocId, Name).
+
+att_list(DbName, DocIds) ->
+    barrel_docdb:att_list(DbName, DocIds).
+
+flush_attachments(DbName) ->
+    barrel_docdb:flush_attachments(DbName).
+
+att_capabilities(DbName) ->
+    barrel_docdb:att_capabilities(DbName).

@@ -20,7 +20,8 @@
     t_capability_write_scope/1,
     t_capability_wrong_space/1,
     t_capability_dead_tokens/1,
-    t_capability_fail_closed/1
+    t_capability_fail_closed/1,
+    t_capability_att_sync_routes/1
 ]).
 
 -include_lib("common_test/include/ct.hrl").
@@ -34,7 +35,8 @@ all() ->
      t_token_rotation_list, t_transport_endpoint_auth,
      t_transport_env_auth, t_conflict_409, t_capability_read_scope,
      t_capability_write_scope, t_capability_wrong_space,
-     t_capability_dead_tokens, t_capability_fail_closed].
+     t_capability_dead_tokens, t_capability_fail_closed,
+     t_capability_att_sync_routes].
 
 init_per_suite(Config) ->
     application:load(barrel_server),
@@ -220,6 +222,33 @@ t_capability_fail_closed(Config) ->
     {403, _} = req(put, Db, bearer(WToken), <<>>),
     {403, _} = req(get, Db ++ "/_timeline", bearer(WToken), <<>>),
     {403, _} = req(get, B ++ "/", bearer(WToken), <<>>),
+    ok.
+
+%% att_state and filtered att_changes read, att_flush writes; another
+%% space's token reaches neither.
+t_capability_att_sync_routes(Config) ->
+    B = ?config(base, Config),
+    {Sp, WToken, RToken} = space_with_grants(),
+    {_Other, OtherW, OtherR} = space_with_grants(),
+    Db = B ++ "/db/" ++ binary_to_list(Sp),
+    {201, _} = jreq(put, Db ++ "/doc/a", bearer(WToken), #{<<"v">> => 1}),
+    {S, _} = req(put, Db ++ "/doc/a/att/f",
+                 [{<<"content-type">>, <<"text/plain">>} | bearer(WToken)],
+                 <<"x">>),
+    true = S >= 200 andalso S < 300,
+    State = Db ++ "/_sync/att_state/a/f",
+    Flush = Db ++ "/_sync/att_flush",
+    Filter = base64:encode(iolist_to_binary(json:encode(#{<<"paths">> => [<<"v/#">>]})),
+                           #{mode => urlsafe, padding => false}),
+    Changes = Db ++ "/_sync/att_changes?since=first&filter="
+        ++ binary_to_list(Filter),
+    {200, _} = req(get, State, bearer(RToken), <<>>),
+    {200, _} = req(get, Changes, bearer(RToken), <<>>),
+    {403, _} = jreq(post, Flush, bearer(RToken), #{}),
+    {200, _} = jreq(post, Flush, bearer(WToken), #{}),
+    {403, _} = req(get, State, bearer(OtherR), <<>>),
+    {403, _} = jreq(post, Flush, bearer(OtherW), #{}),
+    {403, _} = req(get, Changes, bearer(OtherR), <<>>),
     ok.
 
 space_with_grants() ->

@@ -127,9 +127,9 @@ t_push_large_blob(Config) ->
                                          <<"blob.bin">>),
     ok.
 
-%% A push past the server's max_body fails for that attachment only
-%% (413 on the wire): the rep completes, smaller blobs still
-%% transfer, and nothing partial lands on the target.
+%% A push past the server's max_body (413 on the wire) stops the
+%% attachment phase at that attachment: the run fails, nothing partial
+%% lands on the target, and the checkpoint stays before it.
 t_oversized_push_degrades(Config) ->
     Local = ?config(local, Config),
     Served = ?config(served, Config),
@@ -138,14 +138,18 @@ t_oversized_push_degrades(Config) ->
     {_BigDigest, _} = write_chunked(Local, <<"o">>, <<"too-big">>, 40),
     {ok, _} = barrel_docdb:put_attachment(Local, <<"o">>, <<"small">>,
                                           <<"fits">>),
-    {ok, R} = barrel_rep:replicate(Local, Endpoint, push_opts()),
-    ?assertMatch(#{atts_written := 1, att_write_failures := 1},
-                 maps:get(att_sync, R)),
-    {ok, <<"fits">>} = barrel_docdb:get_attachment(Served, <<"o">>,
-                                                   <<"small">>),
+    ?assertMatch({error, {att_sync_failed,
+                          {att_transfer_failed, #{att_write_failures := 1}}}},
+                 barrel_rep:replicate(Local, Endpoint, push_opts())),
     ?assertEqual({error, not_found},
                  barrel_docdb:get_attachment_info(Served, <<"o">>,
                                                   <<"too-big">>)),
+    %% removing the blocker lets the rest through
+    ok = barrel_docdb:delete_attachment(Local, <<"o">>, <<"too-big">>),
+    {ok, R} = barrel_rep:replicate(Local, Endpoint, push_opts()),
+    ?assertMatch(#{atts_written := 1}, maps:get(att_sync, R)),
+    {ok, <<"fits">>} = barrel_docdb:get_attachment(Served, <<"o">>,
+                                                   <<"small">>),
     ok.
 
 write_chunked(Db, DocId, Name, Mibs) ->

@@ -11,6 +11,10 @@
 #   3. The same with a continuous task.
 #   4. A peer loses writes that had already reached the other peer; a
 #      two-way task brings them back.
+#   5. Attachments a run copied survive a power cut on the target: the
+#      target synced them before the checkpoint, nothing is sent again.
+#   6. With att_durability => best_effort the target may lose them; the
+#      next run sends them again.
 #
 # Usage: test/e2e/power-fail.sh
 # Requires: docker (privileged containers, for FUSE), docker compose,
@@ -50,6 +54,21 @@ start_task() {  # start_task <db> <direction>
 }
 
 has_count() { [ "$(count "$1" "$2")" = "$3" ]; }
+
+put_atts() {  # put_atts <peer> <db> <n>
+    on "$1" "[{ok, _} = barrel_docdb:put_attachment(<<\"$2\">>, <<\"d\", (integer_to_binary(I))/binary>>, <<\"f\">>, binary:copy(<<I:32>>, 1024)) || I <- lists:seq(1, $3)], ok." >/dev/null
+}
+
+att_count() {  # att_count <peer> <db> <n>: attachments present, read on the node
+    curl -fsS "$(url "$1")/db/$2" >/dev/null
+    on "$1" "length([I || I <- lists:seq(1, $3), {ok, _} <- [barrel_docdb:get_attachment(<<\"$2\">>, <<\"d\", (integer_to_binary(I))/binary>>, <<\"f\">>)]])." \
+        | tr -d '\r\n'
+}
+
+att_push() {  # att_push <from> <to> <db> [extra rep opts]: attachments written
+    on "$1" "{ok, R} = barrel_rep:replicate(<<\"$3\">>, $(endpoint "$2" "$3"), #{target_transport => barrel_rep_transport_http${4:-}}), maps:get(atts_written, maps:get(att_sync, R))." \
+        | tr -d '\r\n'
+}
 
 echo "--- building and starting two peers on LazyFS"
 $BASE build peer-a
@@ -120,5 +139,31 @@ wait_until 180 has_count a $DB 500 || true
 check "the two-way task brings the lost writes back" 500 "$(count a $DB)"
 for id in d1 d250 d500; do same_everywhere $DB $id a b; done
 on a "barrel_rep_tasks:stop_task(<<\"$T4\">>)." >/dev/null 2>&1 || true
+
+echo "--- 5. attachments a run copied survive a power cut on the target"
+DB=pa
+create_db a $DB
+create_db b $DB
+put_atts a $DB 200
+check "the run copied every attachment" 200 "$(att_push a b $DB)"
+power_cut b
+check "the target kept every attachment" 200 "$(att_count b $DB 200)"
+check "the next run sends nothing again" 0 "$(att_push a b $DB)"
+
+echo "--- 6. best effort: the target may lose them, the next run resends"
+DB=pe
+create_db a $DB
+create_db b $DB
+put_atts a $DB 200
+check "the run copied every attachment" 200 \
+    "$(att_push a b $DB ', att_durability => best_effort')"
+power_cut b
+LEFT=$(att_count b $DB 200)
+echo "  the target kept $LEFT of 200"
+check "the power cut lost part of them (the test is meaningful)" yes \
+    "$([ "$LEFT" -lt 200 ] && echo yes || echo no)"
+SENT=$(att_push a b $DB ', att_durability => best_effort')
+check "the next run sends the lost attachments again" $((200 - LEFT)) "$SENT"
+check "the target has every attachment" 200 "$(att_count b $DB 200)"
 
 finish

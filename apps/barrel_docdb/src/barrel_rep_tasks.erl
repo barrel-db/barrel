@@ -110,7 +110,8 @@
     filter => barrel_rep:filter_opts(),
     wait_for => [binary() | map()],       % Chain: wait for downstream targets
     attachments => boolean(),             % Replicate attachments (default: true)
-    att_batch_size => pos_integer()       % Attachment feed batch size (default: 100)
+    att_batch_size => pos_integer(),      % Attachment feed batch size (default: 100)
+    att_durability => required | best_effort  % Sync the target before checkpoints (default: required)
 }.
 
 -type task() :: #{
@@ -500,7 +501,8 @@ run_task(Parent, TaskId, Config, SourceTransport, TargetTransport) ->
                      || W <- maps:get(wait_for, Config, [])],
         attachments => maps:get(attachments, Config, true),
         att_batch_size => maps:get(att_batch_size, Config,
-                                   ?DEFAULT_ATT_BATCH_SIZE)
+                                   ?DEFAULT_ATT_BATCH_SIZE),
+        att_durability => maps:get(att_durability, Config, required)
     },
 
     ExtraAttrs = #{
@@ -674,20 +676,20 @@ idle_task_loop(#{task_id := TaskId, mode := one_shot} = Ctx, _Since) ->
         {{error, Reason}, _} ->
             report_done(Ctx, {task_error, TaskId, {att_sync_failed, Reason}})
     end;
-idle_task_loop(#{parent := Parent, task_id := TaskId} = Ctx, Since) ->
+idle_task_loop(Ctx, Since) ->
     %% Idle on the doc side. Attachments have their own feed, so a
     %% doc-only wake signal never fires for an attachment-only write:
-    %% catch those up here too, best-effort, before waiting again. Poll
+    %% catch those up here too before waiting again. Poll
     %% mode already revisits this branch on every sleep cycle; stream
     %% mode's bounded wake (see wait_for_wake/1) is what makes it revisit
     %% this branch when idle on a live stream.
     case sync_attachments(Ctx) of
-        ok -> ok;
+        ok ->
+            run_task_loop(wait_for_wake(retry_pending(Ctx, Since)), Since);
         {error, Reason} ->
-            gen_server:cast(Parent, {task_last_error, TaskId,
-                                     {att_sync_failed, Reason}})
-    end,
-    run_task_loop(wait_for_wake(retry_pending(Ctx, Since)), Since).
+            %% the attachment position stays; retry after a backoff
+            backoff(Ctx, Since, {att_sync_failed, Reason})
+    end.
 
 %% The task's position lives with the task. A target that loses power
 %% rolls back to a prefix of its writes, so the task also leaves a marker
@@ -748,7 +750,11 @@ replicate_batch(From, To, FromTransport, ToTransport, Changes, WaitFor,
                     %% If wait_for is specified, verify docs reached
                     %% downstream
                     case wait_for_downstream(Changes, WaitFor) of
-                        ok -> {ok, Ctx#{pending := Pending}};
+                        ok ->
+                            case batch_attachments(Ctx, Changes) of
+                                ok -> {ok, Ctx#{pending := Pending}};
+                                {error, _} = Error -> Error
+                            end;
                         {error, _} = Error -> Error
                     end
             end;
@@ -763,19 +769,42 @@ replicate_batch(From, To, FromTransport, ToTransport, Changes, WaitFor,
 %% sync_from/7). Skips entirely when the task config disabled it.
 sync_attachments(#{attachments := false}) ->
     ok;
-sync_attachments(#{task_id := TaskId, from := From, to := To,
+sync_attachments(#{task_id := TaskId, key := Key, from := From, to := To,
                    from_transport := FromTransport,
-                   to_transport := ToTransport,
-                   att_batch_size := AttBatchSize}) ->
-    AttSince = get_task_att_seq(TaskId),
-    CheckpointFun = fun(Seq) -> update_task_att_seq(TaskId, Seq) end,
+                   to_transport := ToTransport} = Ctx) ->
+    AttSince = get_task_att_seq(TaskId, Key),
+    CheckpointFun = fun(Seq) -> update_task_att_seq(TaskId, Key, Seq) end,
     case barrel_rep_att:sync_from(From, To, FromTransport, ToTransport,
-                                  AttSince, CheckpointFun,
-                                  #{att_batch_size => AttBatchSize}) of
+                                  AttSince, CheckpointFun, att_opts(Ctx)) of
         {ok, _Stats} -> ok;
         skipped -> ok;
         {error, _} = Error -> Error
     end.
+
+att_opts(#{att_batch_size := AttBatchSize, filter := Filter} = Ctx) ->
+    #{att_batch_size => AttBatchSize, filter => Filter,
+      att_durability => maps:get(att_durability, Ctx, required)}.
+
+%% A filtered task copies the attachments of the documents it copies:
+%% their feed rows may have been passed while they were out of scope.
+batch_attachments(#{attachments := true, filter := Filter} = Ctx, Changes)
+        when map_size(Filter) > 0 ->
+    #{from := From, to := To, from_transport := FromTransport,
+      to_transport := ToTransport} = Ctx,
+    Ids = [Id || #{id := Id} = C <- Changes, not maps:get(deleted, C, false)],
+    Prepared = barrel_rep_att:prepare(From, To, FromTransport, ToTransport,
+                                      att_opts(Ctx)),
+    Synced = case Prepared of
+        {ok, AttCtx} -> barrel_rep_att:sync_docs(AttCtx, Ids);
+        skipped -> {ok, #{}};
+        {error, _} = PrepError -> PrepError
+    end,
+    case Synced of
+        {ok, _} -> ok;
+        {error, Reason} -> {error, {att_sync_failed, Reason}}
+    end;
+batch_attachments(_Ctx, _Changes) ->
+    ok.
 
 %% Continuous tasks ride out transient errors: record last_error on
 %% the task doc (status stays running) and back off exponentially
@@ -1101,25 +1130,36 @@ get_dir_state(TaskId, Key) ->
     end.
 
 %% A `both' task saved before positions were split shares one last_seq
-%% across both feeds, which can skip either side's rows: both
-%% directions restart from first once.
+%% (and one att_seq) across both feeds, which can skip either side's
+%% rows: both directions restart from first once.
 split_both_positions(TaskId) ->
-    update_task_doc(TaskId, fun
-        (#{<<"pull_last_seq">> := _} = Doc) -> Doc;
-        (Doc) -> Doc#{<<"last_seq">> => format_seq(first),
-                      <<"pull_last_seq">> => format_seq(first)}
-    end),
+    update_task_doc(TaskId, fun(Doc) -> split_att(split_docs(Doc)) end),
     ok.
 
-update_task_att_seq(TaskId, Seq) ->
-    update_task_doc(TaskId, fun(Doc) ->
-        Doc#{<<"att_seq">> => format_seq(Seq)}
-    end).
+split_docs(#{<<"pull_last_seq">> := _} = Doc) -> Doc;
+split_docs(Doc) -> Doc#{<<"last_seq">> => format_seq(first),
+                        <<"pull_last_seq">> => format_seq(first)}.
 
-get_task_att_seq(TaskId) ->
+split_att(#{<<"pull_att_seq">> := _} = Doc) -> Doc;
+split_att(Doc) -> Doc#{<<"att_seq">> => format_seq(first),
+                       <<"pull_att_seq">> => format_seq(first)}.
+
+%% Attachment positions per direction, keyed like save_dir_state/2.
+update_task_att_seq(TaskId, Key, Seq) ->
+    case update_task_doc(TaskId, fun(Doc) ->
+             Doc#{<<Key/binary, "att_seq">> => format_seq(Seq)}
+         end) of
+        ok -> ok;
+        {error, _} = Error -> Error;
+        Other -> {error, Other}
+    end.
+
+get_task_att_seq(TaskId, Key) ->
     case barrel_docdb:get_local_doc(?TASKS_DB, task_doc_id(TaskId)) of
-        {ok, Doc} -> parse_seq(maps:get(<<"att_seq">>, Doc, <<"first">>));
-        {error, not_found} -> first
+        {ok, Doc} ->
+            parse_seq(maps:get(<<Key/binary, "att_seq">>, Doc, <<"first">>));
+        {error, not_found} ->
+            first
     end.
 
 update_task_last_error(TaskId, Reason) ->
@@ -1187,6 +1227,7 @@ doc_to_task(Doc) ->
     maps:fold(
         fun(<<"error">>, V, Acc) -> Acc#{error => V};
            (<<"last_error">>, V, Acc) -> Acc#{last_error => V};
+           (<<"pull_att_seq">>, V, Acc) -> Acc#{pull_att_seq => parse_seq(V)};
            (<<"paused_reason">>, V, Acc) -> Acc#{paused_reason => V};
            (_, _, Acc) -> Acc
         end,
@@ -1215,6 +1256,8 @@ config_to_map(Config) ->
                Acc#{<<"wait_for">> => [endpoint_to_doc(W) || W <- V]};
            (attachments, V, Acc) -> Acc#{<<"attachments">> => V};
            (att_batch_size, V, Acc) -> Acc#{<<"att_batch_size">> => V};
+           (att_durability, V, Acc) ->
+               Acc#{<<"att_durability">> => atom_to_binary(V, utf8)};
            (_, _, Acc) -> Acc
         end,
         #{},
@@ -1287,6 +1330,9 @@ map_to_config(Map) ->
            (<<"wait_for">>, V, Acc) -> Acc#{wait_for => V};
            (<<"attachments">>, V, Acc) -> Acc#{attachments => V};
            (<<"att_batch_size">>, V, Acc) -> Acc#{att_batch_size => V};
+           (<<"att_durability">>, V, Acc) ->
+               Acc#{att_durability => enum_from_doc(V, [required,
+                                                        best_effort])};
            (_, _, Acc) -> Acc
         end,
         #{},
@@ -1395,6 +1441,7 @@ check_option(direction, V) when V =:= push; V =:= pull; V =:= both -> ok;
 check_option(batch_size, V) when is_integer(V), V > 0 -> ok;
 check_option(att_batch_size, V) when is_integer(V), V > 0 -> ok;
 check_option(attachments, V) when is_boolean(V) -> ok;
+check_option(att_durability, V) when V =:= required; V =:= best_effort -> ok;
 check_option(source_transport, V) when is_atom(V) -> ok;
 check_option(target_transport, V) when is_atom(V) -> ok;
 check_option(filter, V) ->
@@ -1404,6 +1451,7 @@ check_option(filter, V) ->
     end;
 check_option(K, V) when K =:= mode; K =:= direction; K =:= batch_size;
                         K =:= att_batch_size; K =:= attachments;
+                        K =:= att_durability;
                         K =:= source_transport; K =:= target_transport ->
     throw({invalid, {invalid_option, {K, V}}});
 check_option(_K, _V) ->

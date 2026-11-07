@@ -19,7 +19,8 @@
     get_last_seq/2,  %% Returns opaque sequence (encoded HLC binary)
     get_last_hlc/2,  %% Returns decoded HLC timestamp
     count_changes_since/3,
-    has_changes_since/3  %% Fast O(1) check using buckets
+    has_changes_since/3,  %% Fast O(1) check using buckets
+    filter_doc_ids/4  %% Replication filter by id (attachment sync)
 ]).
 
 %% Internal - for use by barrel_db_writer
@@ -731,6 +732,75 @@ replication_passes(StoreRef, DbName, Change, PathMatcher, CompiledQuery) ->
                           fun(B) -> body_passes(PathMatcher, CompiledQuery, B) end,
                           live_conflict_bodies(StoreRef, DbName,
                                                maps:get(id, Change)))).
+
+%% @doc The ids among DocIds whose current document passes a replication
+%% filter (paths, query, channel): the winner or a live conflict must
+%% match, as for the changes feed. Missing and deleted documents do not
+%% pass. An unknown channel or a bad query is an error.
+-spec filter_doc_ids(barrel_store_rocksdb:db_ref(), db_name(), map(),
+                     [docid()]) -> {ok, [docid()]} | {error, term()}.
+filter_doc_ids(StoreRef, DbName, Filter, DocIds) ->
+    Ks = barrel_keyspace:resolve(DbName),
+    Paths = maps:get(paths, Filter, undefined),
+    Channel = maps:get(channel, Filter, undefined),
+    try
+        ok = check_channel(DbName, Channel, Paths),
+        Query = compile_query(maps:get(query, Filter, undefined)),
+        Matcher = path_matcher(Paths),
+        try
+            {ok, [Id || Id <- DocIds,
+                        doc_passes(StoreRef, DbName, Ks, Id, Matcher, Query,
+                                   Channel)]}
+        after
+            case Matcher of
+                undefined -> ok;
+                Trie -> match_trie:delete(Trie)
+            end
+        end
+    catch
+        throw:{invalid_query, _} = Invalid -> {error, Invalid};
+        throw:{filter, Reason} -> {error, Reason};
+        Class:Reason -> {error, {filter_failed, {Class, Reason}}}
+    end.
+
+check_channel(_DbName, undefined, _Paths) ->
+    ok;
+check_channel(_DbName, _Channel, Paths) when Paths =/= undefined ->
+    throw({filter, incompatible_filters});
+check_channel(DbName, Channel, _Paths) ->
+    case is_binary(Channel)
+         andalso lists:member(Channel, barrel_channel:names(DbName)) of
+        true -> ok;
+        false -> throw({filter, {unknown_channel, Channel}})
+    end.
+
+path_matcher(undefined) ->
+    undefined;
+path_matcher(Patterns) when is_list(Patterns) ->
+    Trie = match_trie:new(public),
+    lists:foreach(fun(P) -> match_trie:insert(Trie, P) end, Patterns),
+    Trie.
+
+doc_passes(StoreRef, DbName, Ks, DocId, Matcher, Query, Channel) ->
+    Winner = case barrel_docdb_reader:get_replication_doc(StoreRef, DbName,
+                                                          DocId) of
+        {ok, #{deleted := false, doc := Doc}} -> [Doc];
+        _ -> []
+    end,
+    Passes = fun(Body) ->
+        body_passes(Matcher, Query, Body) andalso in_channel(DbName, Channel,
+                                                             Body)
+    end,
+    lists:any(Passes, Winner)
+        orelse (Winner =/= []
+                andalso lists:any(Passes,
+                                  live_conflict_bodies(StoreRef, Ks, DocId))).
+
+in_channel(_DbName, undefined, _Body) ->
+    true;
+in_channel(DbName, Channel, Body) ->
+    lists:member(Channel, barrel_channel:match(barrel_channel:channels(DbName),
+                                               barrel_channel:topics(Body))).
 
 %% @private Bodies of a document's live, non-deleted conflict versions.
 live_conflict_bodies(StoreRef, DbName, DocId) ->

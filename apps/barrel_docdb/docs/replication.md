@@ -136,6 +136,19 @@ Tasks replicate attachments by default, same as `barrel_rep:replicate/2,3`. Atta
 
 Set `attachments => false` to replicate documents only. This is persisted with the rest of the task config, so it survives `pause_task`/`resume_task` and node restarts.
 
+A `both` task keeps one attachment position per direction (`att_seq` for push, `pull_att_seq` for pull).
+
+### Attachment durability
+
+By default (`att_durability => required`) the target makes its attachment writes durable before each attachment checkpoint, so a power cut on the target never loses attachments a run reported as copied. A target that cannot (a custom backend without `flush/1`, a server without `_sync/att_flush`) fails the run with `{error, att_flush_unsupported}` before anything is written.
+
+```erlang
+%% replicate to a target that cannot sync; a power cut there can lose the last batch
+{ok, _} = barrel_rep:replicate(Source, Target, #{att_durability => best_effort}).
+```
+
+A failed attachment transfer stops the attachment phase with `{error, {att_transfer_failed, Stats}}` (wrapped in `att_sync_failed` by `barrel_rep`); the checkpoint stays before it and the next run sends it again. A task records it as `last_error` and retries after a backoff.
+
 ### Attachment Storage Backends
 
 Where attachment bytes actually live is pluggable, via the `barrel_att_backend` behaviour: `barrel_att_store` picks a backend per database from `att_opts.backend` (default is `barrel_att_store_blob`, an embedded RocksDB instance with BlobDB enabled). `barrel_att_s3` (a separate sibling app, opt in with the `s3` rebar3 profile) is an S3-compatible backend for AWS S3, MinIO, or Garage -- see its [getting started](../../barrel_att_s3/docs/getting-started.md) guide.
@@ -225,6 +238,7 @@ When both `paths` and `query` are specified, documents must match **both** filte
 - A document edited out of the filter's scope stays on the peer as its last matching version. A filter chooses what to copy; it does not take back what was copied.
 - Changing a filter is a new stream with its own checkpoint, replayed from the start for the new scope.
 - Filters are not access control: a matching document travels with all its live versions.
+- Attachments follow the document: an attachment is copied when its document passes, an attachment delete always passes, and a document that enters the filter brings its existing attachments. Over HTTP the source applies the filter; a server that cannot (no `att_filter` in `_sync/info`) fails the run with `{error, att_filter_unsupported}`. An unknown channel or a filter error stops the run.
 
 ## How Replication Works
 
@@ -472,6 +486,8 @@ Stubs are kept for good unless you set `tombstone_purge_after` (seconds):
 ```erlang
 {ok, _} = barrel_docdb:create_db(<<"db">>, #{tombstone_purge_after => 90 * 86400}).
 ```
+
+Attachment deletes follow the same window: they stay in the attachment feed until `tombstone_purge_after`, and for good when it is 0.
 
 A purged document can come back if anything older than that reaches the database: a replica offline longer, a backup, or a message read before the delete and delivered late. Purge only when you accept that risk.
 

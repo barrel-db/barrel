@@ -159,6 +159,9 @@ group_routes(sync) ->
         {<<"DELETE">>, <<"/db/:db/_sync/local/:id">>,     {barrel_server_sync, delete_local}},
         {<<"GET">>,    <<"/db/:db/_sync/att_changes">>,   {barrel_server_sync, att_changes}},
         {<<"POST">>,   <<"/db/:db/_sync/att_diff">>,      {barrel_server_sync, att_diff}},
+        {<<"POST">>,   <<"/db/:db/_sync/att_list">>,      {barrel_server_sync, att_list}},
+        {<<"POST">>,   <<"/db/:db/_sync/att_flush">>,     {barrel_server_sync, att_flush}},
+        {<<"GET">>,    <<"/db/:db/_sync/att_state/:id/:name">>, {barrel_server_sync, att_state}},
         {<<"GET">>,    <<"/db/:db/_sync/att/:id/:name">>, {barrel_server_sync, get_att}},
         {<<"PUT">>,    <<"/db/:db/_sync/att/:id/:name">>, {barrel_server_sync, put_att}},
         {<<"DELETE">>, <<"/db/:db/_sync/att/:id/:name">>, {barrel_server_sync, delete_att}}

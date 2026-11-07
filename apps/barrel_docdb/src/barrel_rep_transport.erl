@@ -85,11 +85,40 @@
                       Opts :: map()) ->
     {ok, [map()], LastSeq :: seq() | first} | {error, term()}.
 
+%% Opts may carry `filter' (a replication filter, see barrel_rep):
+%% the source then returns only entries whose document passes, deletes
+%% always. A source that cannot filter must not export att_capabilities
+%% with `filter => true'.
+
+%% Entries carry `origin': `have' when the endpoint covers the offered
+%% state under last-write-wins, `touch' when it holds the same bytes
+%% under an older origin, `missing' otherwise.
 -callback diff_attachments(Endpoint :: term(),
                            [#{id := docid(), name := binary(),
-                              digest := binary()}]) ->
+                              digest := binary(), origin => term()}]) ->
     {ok, [#{id := docid(), name := binary(),
-            status := have | missing}]} | {error, term()}.
+            status := have | missing | touch}]} | {error, term()}.
+
+%% Record the entry's origin for bytes the endpoint already holds.
+%% `{error, bytes_needed}' asks for a full transfer instead.
+-callback touch_attachment(Endpoint :: term(), DocId :: docid(),
+                           Name :: binary(), Entry :: map()) ->
+    {ok, touched | ignored} | {error, term()}.
+
+%% Current state of one attachment (origin, op, digest).
+-callback att_state(Endpoint :: term(), DocId :: docid(), Name :: binary()) ->
+    {ok, map()} | {error, not_found} | {error, term()}.
+
+%% Current entries of the given documents' attachments.
+-callback att_list(Endpoint :: term(), [docid()]) ->
+    {ok, [map()]} | {error, term()}.
+
+%% Make every acknowledged attachment write durable.
+-callback flush_attachments(Endpoint :: term()) -> ok | {error, term()}.
+
+%% #{flush := boolean(), filter := boolean()}.
+-callback att_capabilities(Endpoint :: term()) ->
+    {ok, map()} | {error, term()}.
 
 -callback get_attachment_stream(Endpoint :: term(), DocId :: docid(),
                                 Name :: binary()) ->
@@ -114,4 +143,6 @@
 
 -optional_callbacks([att_changes/3, diff_attachments/2,
                      get_attachment_stream/3, put_attachment/5,
-                     delete_attachment/4, rep_id_term/1]).
+                     delete_attachment/4, touch_attachment/4, att_state/3,
+                     att_list/2, flush_attachments/1, att_capabilities/1,
+                     rep_id_term/1]).

@@ -476,9 +476,12 @@ http_target_reject_closes_source(Config) ->
                                 stall(S)
                         end),
     E = endpoint(Port, #{}),
-    {ok, Stats} = barrel_rep_att:sync_from(E, Db, barrel_rep_transport_http,
-                                           barrel_rep_transport_local, first,
-                                           fun(_) -> ok end, #{}),
+    %% the refused write stops the run; its checkpoint does not move
+    {error, {att_transfer_failed, Stats}} =
+        barrel_rep_att:sync_from(E, Db, barrel_rep_transport_http,
+                                 barrel_rep_transport_local, first,
+                                 fun(_) -> ok end,
+                                 #{att_durability => best_effort}),
     ?assertEqual(1, maps:get(att_write_failures, Stats)),
     receive download_started -> ok after 0 -> ct:fail(no_download) end,
     receive {stub_closed, _} -> ok after 2000 -> ct:fail(source_kept_open) end,
