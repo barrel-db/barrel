@@ -20,13 +20,20 @@
 %%% Global-token comparison is constant time: both sides are SHA-256
 %%% hashed (fixed length, no length oracle) and compared with
 %%% crypto:hash_equals/2.
+%%%
+%%% A signed request reaches its handler with the headers its signature
+%%% covers in the request meta; handlers read them through header/2.
 %%% @end
 %%%-------------------------------------------------------------------
 -module(barrel_server_auth).
 -behaviour(livery_middleware).
 
 -export([state_from_env/0, hashes/0, member_authorizer/1, is_global/1]).
+-export([header/2]).
 -export([call/3]).
+
+%% Request meta key holding the signature-covered header values.
+-define(SIGNED_META, barrel_signed_headers).
 
 %% @doc Middleware state from the app env; undefined = no auth.
 %%
@@ -136,25 +143,56 @@ call(Req, Next, State) ->
                     capability(Req, Next, Token, Path);
                 _ ->
                     case authorized(Req, State) of
-                        true -> Next(Req);
-                        false -> unauthorized()
+                        {true, Req2} -> Next(Req2);
+                        {false, Reason} -> unauthorized(Reason)
                     end
             end
     end.
 
-%% True if any accepted global method authenticates the request.
+%% @doc A request header as authenticated: on a signed request only the
+%% values its signature covers (absent otherwise), else the raw header
+%% (bearer, mTLS, open server: integrity comes from HTTPS).
+-spec header(binary(), term()) -> binary() | undefined.
+header(Name, Req) ->
+    case livery_req:meta(?SIGNED_META, Req) of
+        undefined ->
+            livery_req:header(Name, Req, undefined);
+        Signed ->
+            case lists:member(Name, barrel_sync_sig:signed_headers()) of
+                true -> maps:get(Name, Signed, undefined);
+                false -> livery_req:header(Name, Req, undefined)
+            end
+    end.
+
+%% `{true, Req}' if any accepted global method authenticates the request,
+%% else `{false, Reason}'.
 authorized(Req, #{accept := Accept} = State) ->
-    (lists:member(signed, Accept) andalso try_signed(Req, State))
-        orelse (lists:member(bearer, Accept) andalso try_bearer(Req, State))
-        orelse (lists:member(mtls, Accept) andalso mtls_ok(Req)).
+    Signed = case lists:member(signed, Accept) of
+        true -> try_signed(Req, State);
+        false -> {error, unauthorized}
+    end,
+    case Signed of
+        {ok, Req2} ->
+            {true, Req2};
+        {error, Reason} ->
+            case (lists:member(bearer, Accept)
+                  andalso try_bearer(Req, State))
+                 orelse (lists:member(mtls, Accept) andalso mtls_ok(Req)) of
+                true -> {true, Req};
+                false -> {false, Reason}
+            end
+    end.
 
 %% Ed25519 signed request: verify the signature, then consume it against
 %% the replay cache. Any failure (no header, unknown key, bad signature,
 %% stale timestamp, replay, or cache down) is a decline.
 try_signed(Req, #{signers := Signers, skew_ms := SkewMs} = State) ->
-    case barrel_sync_sig:parse_auth(
-             livery_req:header(<<"authorization">>, Req, undefined)) of
-        {ok, #{key_id := KeyId, ts := Ts, sig := Sig} = Parsed} ->
+    Picked = barrel_sync_sig:pick_headers(livery_req:headers(Req)),
+    case {barrel_sync_sig:parse_auth(
+              livery_req:header(<<"authorization">>, Req, undefined)),
+          Picked} of
+        {{ok, #{key_id := KeyId, ts := Ts, sig := Sig} = Parsed},
+         {ok, Headers}} ->
             Method = livery_req:method(Req),
             Path = livery_req:path(Req),
             %% raw query bytes as sent: part of the v2 signed target
@@ -164,19 +202,51 @@ try_signed(Req, #{signers := Signers, skew_ms := SkewMs} = State) ->
             Opts = #{skew_ms => SkewMs,
                      require_nonce => maps:get(require_nonce, State, false)},
             case barrel_sync_sig:verify(Method, Path, Query, ContentHash,
-                                          Parsed, Signers, Opts) of
+                                          Headers, Parsed, Signers, Opts) of
                 ok ->
-                    log_v1(Parsed, KeyId),
-                    %% Ed25519 is deterministic and the nonce is inside
-                    %% the signed string, so the sig alone keys replays
-                    barrel_server_sig_cache:check_and_insert(
-                        {KeyId, Ts, Sig}, 2 * SkewMs) =:= ok;
+                    case covered(Parsed, Method, Path, Headers) of
+                        {ok, Trusted} ->
+                            log_v1(Parsed, KeyId),
+                            %% Ed25519 is deterministic and the nonce is
+                            %% inside the signed string: the sig keys replays
+                            case barrel_server_sig_cache:check_and_insert(
+                                     {KeyId, Ts, Sig}, 2 * SkewMs) of
+                                ok ->
+                                    {ok, livery_req:set_meta(?SIGNED_META,
+                                                             Trusted, Req)};
+                                _ ->
+                                    {error, unauthorized}
+                            end;
+                        {error, _} = Refused ->
+                            Refused
+                    end;
                 {error, _} ->
-                    false
+                    {error, unauthorized}
             end;
         _ ->
-            false
+            {error, unauthorized}
     end.
+
+%% The header values a verified signature vouches for. v3 covers them all.
+%% v1/v2 cover none: they may not carry a header that changes a write, nor
+%% write attachments; their x-barrel-hlc is ignored and content-type only
+%% picks the decoding of a signed body.
+covered(#{version := 3}, _Method, _Path, Headers) ->
+    {ok, Headers};
+covered(_Parsed, Method, Path, Headers) ->
+    Writes = maps:without([<<"content-type">>, <<"x-barrel-hlc">>],
+                          Headers),
+    case map_size(Writes) =:= 0
+         andalso not attachment_write(Method, Path) of
+        true -> {ok, maps:with([<<"content-type">>], Headers)};
+        false -> {error, signature_v3_required}
+    end.
+
+attachment_write(Method, Path) when Method =:= <<"PUT">>;
+                                    Method =:= <<"DELETE">> ->
+    binary:match(Path, <<"/_sync/att/">>) =/= nomatch;
+attachment_write(_Method, _Path) ->
+    false.
 
 %% v1 (no nonce) acceptances at debug: shows when a fleet has rolled and
 %% `require_nonce' can be turned on.
@@ -370,11 +440,14 @@ live_capability(Token) ->
     end.
 
 unauthorized() ->
+    unauthorized(unauthorized).
+
+unauthorized(Reason) ->
     livery_resp:new(
         401,
         [{<<"www-authenticate">>, <<"Bearer">>},
          {<<"content-type">>, <<"application/json">>}],
-        {full, <<"{\"error\":\"unauthorized\"}">>}).
+        {full, json:encode(#{error => atom_to_binary(Reason)})}).
 
 forbidden() ->
     livery_resp:new(

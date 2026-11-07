@@ -10,6 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - A changes request whose query filter does not compile now answers 400 instead of returning every document.
 - Filtered replication from a server copied every attachment, including those of excluded documents. `_sync/att_changes` now applies the filter.
 - Replicating an attachment the server already held with the same bytes kept its older timestamp, so an older delete could remove it later. The server now records the newer timestamp without receiving the bytes again.
+- A signed request did not cover the headers that decide what a write does, such as an attachment's timestamp, digest, content type and touch marker, the replication clock or document preconditions. Someone able to alter requests in transit could change their effect, for example turn an ignored attachment delete into one that removes the attachment. The server now acts only on signed values and answers 401 when one was changed.
+
+### Changed
+- Breaking: requests signed with signature v1 or v2 can no longer write attachments or carry the headers above; they are refused with 401 `signature_v3_required`. They still replicate documents, but their clock header is ignored. Upgrade servers first, then clients. Bearer-token requests are unchanged; they rely on HTTPS for integrity.
 
 ### Added
 - `GET /db/:db/_sync/att_state/:id/:name` and `POST /db/:db/_sync/att_list` report attachment states (read grant); `POST /db/:db/_sync/att_flush` answers once attachment writes are durable (write grant). `_sync/info` reports `att_flush` and `att_filter`, `_sync/att_changes` takes a `filter`, and `_sync/att_diff` compares timestamps when the client sends them.

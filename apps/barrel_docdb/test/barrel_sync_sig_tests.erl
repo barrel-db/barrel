@@ -183,3 +183,81 @@ v1_through_verify7_test() ->
                                         Signers,
                                         #{skew_ms => 300000,
                                           require_nonce => true})).
+
+%%====================================================================
+%% v3: semantic headers bound
+%%====================================================================
+
+v3_sign(Priv, Headers) ->
+    {ok, Picked} = barrel_sync_sig:pick_headers(Headers),
+    barrel_sync_sig:sign_v3(<<"node1">>, Priv, ?METHOD, ?PATH, <<>>,
+                            barrel_sync_sig:content_sha256(<<>>), Picked,
+                            erlang:system_time(millisecond)).
+
+v3_verify(Auth, Pub, Headers) ->
+    {ok, Parsed} = barrel_sync_sig:parse_auth(Auth),
+    {ok, Picked} = barrel_sync_sig:pick_headers(Headers),
+    barrel_sync_sig:verify(?METHOD, ?PATH, <<>>,
+                           barrel_sync_sig:content_sha256(<<>>), Picked,
+                           Parsed, #{<<"node1">> => Pub},
+                           #{skew_ms => 300000}).
+
+v3_roundtrip_test() ->
+    {Pub, Priv} = keypair(),
+    Hs = [{<<"X-Barrel-Att-Origin">>, <<"AAA=">>},
+          {<<"content-type">>, <<"text/plain">>},
+          {<<"accept">>, <<"application/json">>}],
+    Auth = v3_sign(Priv, Hs),
+    {ok, #{version := 3}} = barrel_sync_sig:parse_auth(Auth),
+    ?assertEqual(ok, v3_verify(Auth, Pub, Hs)),
+    %% unsigned headers (accept) may change freely
+    ?assertEqual(ok, v3_verify(Auth, Pub, lists:keydelete(<<"accept">>, 1,
+                                                         Hs))).
+
+v3_header_tamper_test() ->
+    {Pub, Priv} = keypair(),
+    Hs = [{<<"x-barrel-att-origin">>, <<"AAA=">>},
+          {<<"x-barrel-digest">>, <<"sha256-00">>}],
+    Auth = v3_sign(Priv, Hs),
+    Bad = {error, bad_signature},
+    ?assertEqual(Bad, v3_verify(Auth, Pub,
+        lists:keystore(<<"x-barrel-att-origin">>, 1, Hs,
+                       {<<"x-barrel-att-origin">>, <<"BBB=">>}))),
+    ?assertEqual(Bad, v3_verify(Auth, Pub, tl(Hs))),
+    ?assertEqual(Bad, v3_verify(Auth, Pub,
+        [{<<"x-barrel-att-touch">>, <<"1">>} | Hs])).
+
+%% A header sent empty is not the same as one not sent.
+v3_absent_vs_empty_test() ->
+    {Pub, Priv} = keypair(),
+    Auth = v3_sign(Priv, []),
+    ?assertEqual(ok, v3_verify(Auth, Pub, [])),
+    ?assertEqual({error, bad_signature},
+                 v3_verify(Auth, Pub, [{<<"x-barrel-att-touch">>, <<>>}])),
+    {ok, Empty} = barrel_sync_sig:pick_headers(
+        [{<<"x-barrel-att-touch">>, <<>>}]),
+    ?assertNotEqual(
+        barrel_sync_sig:canonical_v3(<<"1">>, <<"k">>, <<"n">>, ?METHOD,
+                                     ?PATH, <<"h">>, #{}),
+        barrel_sync_sig:canonical_v3(<<"1">>, <<"k">>, <<"n">>, ?METHOD,
+                                     ?PATH, <<"h">>, Empty)).
+
+v3_duplicate_header_test() ->
+    ?assertEqual({error, duplicate_header},
+                 barrel_sync_sig:pick_headers(
+                     [{<<"x-barrel-att-origin">>, <<"A">>},
+                      {<<"X-Barrel-Att-Origin">>, <<"B">>}])).
+
+%% Dropping the version marker does not turn a v3 signature into a valid
+%% v2 one, and an unknown version is malformed.
+v3_no_downgrade_test() ->
+    {Pub, Priv} = keypair(),
+    <<"Signature v=\"3\",", Rest/binary>> = v3_sign(Priv, []),
+    {ok, Parsed} = barrel_sync_sig:parse_auth(<<"Signature ", Rest/binary>>),
+    ?assertEqual({error, bad_signature},
+                 barrel_sync_sig:verify(?METHOD, ?PATH, <<>>,
+                     barrel_sync_sig:content_sha256(<<>>), Parsed,
+                     #{<<"node1">> => Pub}, #{skew_ms => 300000})),
+    ?assertEqual({error, malformed},
+                 barrel_sync_sig:parse_auth(
+                     <<"Signature v=\"4\",", Rest/binary>>)).

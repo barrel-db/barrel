@@ -365,7 +365,7 @@ get_att(Req) ->
 
 get_att_decision(Req) ->
     ok = barrel_hlc:maybe_sync_from_header(
-        livery_req:header(?HLC_HEADER, Req, undefined)),
+        signed_header(?HLC_HEADER, Req)),
     case ensure_existing(livery_req:binding(<<"db">>, Req)) of
         {ok, Handle} ->
             DbBin = maps:get(docdb, Handle),
@@ -434,9 +434,11 @@ put_att(Req) ->
     with_sync_db(Req, fun(DbBin) ->
         DocId = binding(<<"id">>, Req),
         AttName = binding(<<"name">>, Req),
-        ContentType = livery_req:header(<<"content-type">>, Req,
-                                        <<"application/octet-stream">>),
-        Touch = livery_req:header(?TOUCH_HEADER, Req, undefined),
+        ContentType = case signed_header(<<"content-type">>, Req) of
+            undefined -> <<"application/octet-stream">>;
+            CT -> CT
+        end,
+        Touch = signed_header(?TOUCH_HEADER, Req),
         case att_write_opts(Req) of
             {ok, #{origin_hlc := _, expected_digest := _} = Opts}
                     when Touch =/= undefined ->
@@ -482,14 +484,14 @@ att_write_opts(Req) ->
     %% fallback only applies to unsigned (bearer) requests.
     Digest = case livery_req:header(<<"x-barrel-content-sha256">>, Req,
                                     undefined) of
-        undefined -> livery_req:header(?DIGEST_HEADER, Req, undefined);
+        undefined -> signed_header(?DIGEST_HEADER, Req);
         Signed -> Signed
     end,
     Opts0 = case Digest of
         undefined -> #{};
         _ -> #{expected_digest => Digest}
     end,
-    case livery_req:header(?ORIGIN_HEADER, Req, undefined) of
+    case signed_header(?ORIGIN_HEADER, Req) of
         undefined ->
             {ok, Opts0};
         OriginB64 ->
@@ -728,7 +730,7 @@ with_origin(_, Entry) ->
 %% with our current clock on the way out.
 with_sync_db(Req, Fun) ->
     ok = barrel_hlc:maybe_sync_from_header(
-        livery_req:header(?HLC_HEADER, Req, undefined)),
+        signed_header(?HLC_HEADER, Req)),
     Name = livery_req:binding(<<"db">>, Req),
     case ensure_existing(Name) of
         {ok, Handle} -> Fun(maps:get(docdb, Handle));
@@ -804,7 +806,14 @@ decode_body(_ContentType, Bin) ->
     end.
 
 content_type(Req) ->
-    string:lowercase(livery_req:header(<<"content-type">>, Req, <<>>)).
+    case signed_header(<<"content-type">>, Req) of
+        undefined -> <<>>;
+        CT -> string:lowercase(CT)
+    end.
+
+%% A request header as authenticated (the signed value on a signed request).
+signed_header(Name, Req) ->
+    barrel_server_auth:header(Name, Req).
 
 request_cbor(Req) ->
     case content_type(Req) of
