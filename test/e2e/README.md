@@ -51,6 +51,34 @@ at once, a filtered replication carrying a delete, and a continuous task in
 both directions with concurrent writes. Each scenario compares the
 document state digest (`_sync/state`) on every peer.
 
+## Mixed versions
+
+`mixed-version.sh` builds a peer from the previous release (`OLD_REF`,
+default `main`) and replicates it with two upgraded peers, both ways, with
+the replicator on either side:
+
+```console
+$ test/e2e/mixed-version.sh
+```
+
+The old peer receives each document's winner. Its edits and deletes reach
+upgraded peers as new versions next to the ones they replaced, so they show
+as conflicts there and nothing is lost; a resolution made on an upgraded
+peer reaches the old peer and is not undone by it.
+
+## Crashes
+
+`crash.sh` kills peers with SIGKILL during replication:
+
+```console
+$ test/e2e/crash.sh
+```
+
+It kills the target of a continuous push mid-batch, then the peer running
+the task (acknowledged writes must survive and the restored task must
+finish), then one of two peers writing the same ids while a two-way task
+runs. Every acknowledged write must be on both peers once they converge.
+
 ## S3 attachment backend
 
 `attachments-s3.sh` brings up real RustFS and Garage containers plus two

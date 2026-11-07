@@ -7,11 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 - `GET` and `PUT /db/:db/_sync/state/:id` send and merge a document's whole state, so replication between servers keeps every conflict and never brings a replaced version back. `_sync/info` reports `full_state`; replicators fall back to one version at a time with older servers. JSON clients get the state in base64, as version vectors. Fetching a state needs a read grant, merging one a write grant.
-
 - `GET /db/:db/doc/:id?conflicts=true` lists a document's conflicts and the versions to send back as `_observed` to resolve them.
 
 ### Changed
 - `_sync/changes` with a filter now includes deletes and documents whose conflicts match, so a filtered peer receives the delete of a document it holds.
+
+### Fixed
+- Continuous replication tasks resume after a server restart. They used to stay paused until their database was used.
 
 ## [1.11.1] - 2026-10-26
 

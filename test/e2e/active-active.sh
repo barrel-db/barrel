@@ -17,87 +17,13 @@
 set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-COMPOSE="docker compose -f $DIR/docker-compose.yml"
-
-pass=0
-fail=0
-check() {  # check <description> <expected> <actual>
-    if [ "$2" = "$3" ]; then
-        echo "  ok   $1"
-        pass=$((pass + 1))
-    else
-        echo "  FAIL $1: expected [$2], got [$3]"
-        fail=$((fail + 1))
-    fi
-}
+. "$DIR/lib.sh"
 
 cleanup() {
     echo "--- tearing down"
     $COMPOSE down -v --remove-orphans >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
-
-url() {  # url <a|b|c>
-    case "$1" in a) echo http://127.0.0.1:8091 ;;
-                 b) echo http://127.0.0.1:8092 ;;
-                 c) echo http://127.0.0.1:8093 ;; esac
-}
-
-wait_healthy() {  # wait_healthy <peer>
-    for _ in $(seq 1 60); do
-        if curl -fsS "$(url "$1")/health" >/dev/null 2>&1; then
-            echo "  peer-$1 is up"; return 0
-        fi
-        sleep 2
-    done
-    echo "  peer-$1 did not become healthy"; return 1
-}
-
-create_db() { curl -fsS -X PUT "$(url "$1")/db/$2" >/dev/null; }
-
-put() {  # put <peer> <db> <id> <json>
-    curl -fsS -X PUT "$(url "$1")/db/$2/doc/$3" \
-        -H 'content-type: application/json' -d "$4" >/dev/null
-}
-
-del() { curl -fsS -X DELETE "$(url "$1")/db/$2/doc/$3" >/dev/null; }
-
-doc() { curl -sS "$(url "$1")/db/$2/doc/$3?conflicts=true"; }
-rev() { doc "$@" | jq -r '._rev'; }
-nconf() { doc "$@" | jq '(._conflicts // []) | length'; }
-code() { curl -s -o /dev/null -w '%{http_code}' "$(url "$1")/db/$2/doc/$3"; }
-
-state() { curl -fsS "$(url "$1")/db/$2/_sync/state/$3"; }
-digest() { state "$@" | jq -r '.digest'; }
-# the live bodies' "v" fields, sorted, one line
-values() { state "$@" | jq -c '[.bodies[] | objects | select(has("v")) | .v] | sort'; }
-
-# Push to and pull from another peer, from inside <from>, over HTTP.
-sync() {  # sync <from> <to> <db> [extra rep opts]
-    local opts="${4:-}"
-    local expr="E = barrel_rep_transport_http:endpoint(<<\"http://peer-$2:8080/db/$3\">>),
-        {ok, _} = barrel_rep:replicate(<<\"$3\">>, E, #{target_transport => barrel_rep_transport_http$opts}),
-        {ok, _} = barrel_rep:replicate(E, <<\"$3\">>, #{source_transport => barrel_rep_transport_http$opts}),
-        ok."
-    $COMPOSE exec -T "peer-$1" barrel_server eval "$expr" >/dev/null \
-        || { echo "  FAIL sync $1 <-> $2 ($3)"; fail=$((fail + 1)); }
-}
-
-push() {  # push <from> <to> <db> <extra rep opts>
-    local expr="E = barrel_rep_transport_http:endpoint(<<\"http://peer-$2:8080/db/$3\">>),
-        {ok, _} = barrel_rep:replicate(<<\"$3\">>, E, #{target_transport => barrel_rep_transport_http$4}),
-        ok."
-    $COMPOSE exec -T "peer-$1" barrel_server eval "$expr" >/dev/null \
-        || { echo "  FAIL push $1 -> $2 ($3)"; fail=$((fail + 1)); }
-}
-
-same_everywhere() {  # same_everywhere <db> <id> <peers...>
-    local db=$1 id=$2; shift 2
-    local first; first=$(digest "$1" "$db" "$id")
-    for p in "$@"; do
-        check "$id: peer-$p has the same state as peer-$1" "$first" "$(digest "$p" "$db" "$id")"
-    done
-}
 
 echo "--- building and starting three peers"
 $COMPOSE up -d --build
@@ -208,7 +134,7 @@ CONT=cont
 create_db a $CONT
 create_db b $CONT
 START='{ok, T} = barrel_rep_tasks:start_task(#{source => <<"cont">>, target => barrel_rep_transport_http:endpoint(<<"http://peer-b:8080/db/cont">>), target_transport => barrel_rep_transport_http, mode => continuous, direction => both}), binary_to_list(T).'
-TASK=$($COMPOSE exec -T peer-a barrel_server eval "$START" | tr -d '\r\n' | sed -E 's/^"//; s/"$//')
+TASK=$(on a "$START" | tr -d '\r\n' | sed -E 's/^"//; s/"$//')
 echo "  task $TASK"
 put a $CONT k1 '{"v":"0"}'
 for _ in $(seq 1 30); do [ "$(code b $CONT k1)" = 200 ] && break; sleep 1; done
@@ -223,9 +149,6 @@ for _ in $(seq 1 30); do
 done
 same_everywhere $CONT k1 a b
 check "k1: both concurrent writes kept" '["a","b"]' "$(values b $CONT k1)"
-$COMPOSE exec -T peer-a barrel_server eval \
-    "barrel_rep_tasks:stop_task(<<\"$TASK\">>)." >/dev/null 2>&1 || true
+on a "barrel_rep_tasks:stop_task(<<\"$TASK\">>)." >/dev/null 2>&1 || true
 
-echo
-echo "=== $pass passed, $fail failed"
-[ "$fail" -eq 0 ]
+finish

@@ -127,7 +127,9 @@
 -export_type([task_id/0, task_config/0, task/0, task_status/0, task_mode/0]).
 
 -record(state, {
-    running = #{} :: #{task_id() => pid()}
+    running = #{} :: #{task_id() => pid()},
+    %% tasks restored at boot: their local databases are not open yet
+    restored = #{} :: #{task_id() => true}
 }).
 
 %%====================================================================
@@ -906,14 +908,48 @@ resume_reopened(#{id := TaskId, paused_reason := <<"db_closed">>,
     case locals_open_config(Config) of
         true ->
             case do_resume_task(TaskId, State) of
-                {ok, NewState} -> NewState;
-                {error, _} -> State
+                {ok, NewState} ->
+                    Restored = maps:remove(TaskId, NewState#state.restored),
+                    NewState#state{restored = Restored};
+                {error, _} ->
+                    State
             end;
         false ->
+            _ = maps:is_key(TaskId, State#state.restored)
+                andalso open_locals(Config),
             State
     end;
 resume_reopened(_Task, State) ->
     State.
+
+%% After a restart a task's databases are closed until something opens
+%% them. The `task_db_opener' env, `{M, F}' called as `M:F(Name)', opens
+%% one the way the application does (barrel_server sets it). Only a
+%% database still on disk is opened.
+open_locals(Config) ->
+    case application:get_env(barrel_docdb, task_db_opener) of
+        {ok, {M, F}} ->
+            [open_local(M, F, E) || E <- [maps:get(source, Config),
+                                          maps:get(target, Config)],
+                                    not local_open(E)],
+            true;
+        undefined ->
+            true
+    end.
+
+open_local(M, F, Name) when is_binary(Name) ->
+    case barrel_docdb:db_exists(Name, #{}) of
+        true ->
+            try M:F(Name)
+            catch C:R ->
+                logger:warning("barrel_rep_tasks: opening ~s failed: ~p",
+                               [Name, {C, R}])
+            end;
+        false ->
+            ok
+    end;
+open_local(_M, _F, _Endpoint) ->
+    ok.
 
 local_open(Endpoint) ->
     case is_remote(Endpoint) of
@@ -943,9 +979,10 @@ restore_tasks(State) ->
     case do_list_tasks(#{status => running}, State) of
         {ok, Tasks} ->
             lists:foldl(
-                fun(Task, AccState) ->
+                fun(#{id := Id} = Task, AccState) ->
                     {ok, NewState} = start_task_process(Task, AccState),
-                     NewState
+                    Restored = NewState#state.restored,
+                    NewState#state{restored = Restored#{Id => true}}
                 end,
                 State,
                 Tasks

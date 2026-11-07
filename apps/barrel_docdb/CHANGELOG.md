@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- A continuous replication task restored after a restart stayed paused until something else opened its database. An application can now give the task manager a way to open it (`task_db_opener`), and the task resumes on its own.
 - A deleted version read from history, or sent to a peer, carried the body it had deleted. It now has no body.
 - Replication lost conflicts. Only a document's winner was sent, so a concurrent version stayed on the replica that noticed the conflict, and after 8 later edits it was deleted from the only replica that held it. Replication now sends each document's whole state: every concurrent version reaches every replica and stays until someone resolves it, and a version that was replaced never comes back.
 - A document that failed to replicate was skipped for good: the checkpoint moved past it. Failed documents are now retried by id on the next run (and while a continuous task is idle). A run with more than 1000 failures stops with `too_many_failed_docs` without moving its checkpoint.

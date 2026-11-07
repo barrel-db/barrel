@@ -87,6 +87,13 @@ Tasks = barrel_rep_tasks:list_tasks().
 
 Tasks move through `pending`, `running`, `paused`, `completed` (one-shot), and `failed`. Task config is persisted in a system database, so a task resumes from its checkpoint after a restart.
 
+A task whose local database closes pauses until the database is open again. After a restart, databases open on first use, so tell the task manager how your application opens one; barrel_server does this for you:
+
+```erlang
+%% called as my_app:open_db(Name) for a task database still on disk
+application:set_env(barrel_docdb, task_db_opener, {my_app, open_db}).
+```
+
 ### Attachments
 
 Tasks replicate attachments by default, same as `barrel_rep:replicate/2,3`. Attachments live on their own feed (independent of the document changes feed), so they have their own checkpoint (`att_seq`, persisted alongside `last_seq`) and their own idle-wake handling: a continuous task periodically re-checks attachments even when no document change occurs, so an attachment added to an already-replicated document still converges without any further doc write.

@@ -78,6 +78,7 @@ groups() ->
             task_attachments_disabled_survives_restart,
             task_resumes_after_source_reopen,
             task_user_pause_not_resumed,
+            task_restored_opens_source,
             task_survives_stream_end,
             task_stop_ends_stream
         ]}
@@ -1011,6 +1012,47 @@ task_user_pause_not_resumed(Config) ->
     ok = barrel_rep_tasks:delete_task(Paused),
     ok = barrel_rep_tasks:delete_task(Witness),
     ok = barrel_docdb:delete_db(Src).
+
+%% A node restart: the task is restored while its source is still
+%% closed. It waits, and opens the source through `task_db_opener' once
+%% one is set.
+task_restored_opens_source(Config) ->
+    Src = <<"restored_src">>,
+    Dir = ?config(data_dir, Config) ++ "_" ++ binary_to_list(Src),
+    persistent_term:put({?MODULE, task_dir}, Dir),
+    _ = open_source(Config, Src),
+    {ok, TaskId} = continuous_push(Src),
+    {ok, _} = barrel_docdb:put_doc(Src, #{<<"id">> => <<"r_before">>}),
+    ok = wait_until(doc_in(<<"test_target">>, <<"r_before">>), 50, 600),
+    %% the manager dies before it records the close, as in a crash
+    Manager = whereis(barrel_rep_tasks),
+    ok = sys:suspend(Manager),
+    ok = barrel_docdb:close_db(Src),
+    exit(Manager, kill),
+    ok = wait_until(fun() ->
+        case whereis(barrel_rep_tasks) of
+            undefined -> false;
+            Pid -> Pid =/= Manager
+        end
+    end, 50, 100),
+    ok = wait_until(paused_for(TaskId, <<"db_closed">>), 50, 600),
+    timer:sleep(6000),
+    {ok, #{status := paused}} = barrel_rep_tasks:get_task(TaskId),
+    ok = application:set_env(barrel_docdb, task_db_opener,
+                             {?MODULE, open_for_task}),
+    try
+        ok = wait_until(task_status(TaskId, running), 100, 300),
+        {ok, _} = barrel_docdb:put_doc(Src, #{<<"id">> => <<"r_after">>}),
+        ok = wait_until(doc_in(<<"test_target">>, <<"r_after">>), 50, 600)
+    after
+        application:unset_env(barrel_docdb, task_db_opener)
+    end,
+    ok = barrel_rep_tasks:delete_task(TaskId),
+    ok = barrel_docdb:delete_db(Src).
+
+open_for_task(Name) ->
+    barrel_docdb:create_db(Name, #{data_dir =>
+                                       persistent_term:get({?MODULE, task_dir})}).
 
 %% The task's changes stream dies: the task keeps running and falls back
 %% to polling, so a document written afterwards still replicates.
