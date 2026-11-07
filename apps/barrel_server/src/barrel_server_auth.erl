@@ -417,6 +417,7 @@ sync_right(<<"doc/", _/binary>>, <<"GET">>) -> read;
 sync_right(<<"doc/", _/binary>>, <<"PUT">>) -> write;
 sync_right(<<"state/", _/binary>>, <<"GET">>) -> read;
 sync_right(<<"state/", _/binary>>, <<"PUT">>) -> write;
+sync_right(<<"repair/", _/binary>>, <<"PUT">>) -> write;
 sync_right(<<"local/", _/binary>>, <<"GET">>) -> read;
 sync_right(<<"local/", _/binary>>, <<"PUT">>) -> write;
 sync_right(<<"local/", _/binary>>, <<"DELETE">>) -> write;

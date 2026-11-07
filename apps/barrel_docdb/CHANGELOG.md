@@ -40,9 +40,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Breaking: attachment replication now waits for the target to make its writes durable before each checkpoint (`att_durability => required`, the default), so a power loss on the target can no longer lose attachments a run reported as copied. A target that cannot do this fails the run with `att_flush_unsupported`; set `att_durability => best_effort` to replicate to it anyway, without that guarantee.
 - A filtered replication from a server that cannot filter attachments now fails with `att_filter_unsupported` instead of copying them all.
 - Breaking: signed replication requests use signature v3, which older servers refuse. Upgrade servers before clients.
+- Filtered document checkpoints, every attachment checkpoint and the matching task positions written by 2.0.0 may sit past documents or attachments that were never copied. The first run after upgrading resets them once and walks the feed from the start; what the target already holds is compared, not sent again. Unfiltered document checkpoints are kept. Upgrading alone does not repair damaged replicas: see `barrel_rep:reconcile/3`.
 
 ### Added
 - `barrel_docdb:reopen_db/1` restarts a failed database with its last config.
+- `barrel_rep:reconcile/3` repairs a replica once from a healthy copy, locally or over HTTP: it restores bodies stored wrong or empty for live versions, copies missing documents and resends missing or different attachments. `barrel_docdb:repair_doc_bodies/3` is the call it uses on the target. The replication guide has an "Upgrading from 2.0" section.
 - The `att_upload_timeout` database option (seconds, default 3600): uploads left unfinished for longer are removed when the database opens and every `retention_check_interval`, also when retention is off. Finishing one afterwards returns `{error, upload_expired}`.
 - The `sync_auth`, `sync_signing` and `sync_ssl` settings accept a database URL as key, in addition to an origin, so each remote database can have its own credentials.
 - The `att_durability` replication and task option (`required` or `best_effort`).

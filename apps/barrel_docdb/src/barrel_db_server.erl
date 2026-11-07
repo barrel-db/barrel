@@ -57,6 +57,7 @@
     put_version/5,
     get_doc_state/2,
     put_doc_state/4,
+    repair_doc_bodies/3,
     diff_states/2,
     diff_versions/2
 ]).
@@ -383,6 +384,13 @@ get_doc_state(Pid, DocId) ->
 put_doc_state(Pid, DocId, StateBin, Bodies) ->
     gen_server:call(Pid, {put_doc_state, DocId, StateBin, Bodies}).
 
+%% @doc Rewrite the bodies of live versions this database stores
+%% differently (a token names one body); the state does not change.
+-spec repair_doc_bodies(pid(), binary(), #{binary() => map()}) ->
+    {ok, binary(), [binary()]} | {error, term()}.
+repair_doc_bodies(Pid, DocId, Bodies) ->
+    gen_server:call(Pid, {repair_doc_bodies, DocId, Bodies}).
+
 %% @doc Which offered states differ: #{DocId => Digest} in,
 %% #{DocId => missing | have} out.
 -spec diff_states(pid(), #{binary() => binary()}) ->
@@ -667,6 +675,7 @@ write_request(ttl_sweep) -> true;
 write_request({resolve_conflict, _, _, _}) -> true;
 write_request({put_version, _, _, _, _}) -> true;
 write_request({put_doc_state, _, _, _}) -> true;
+write_request({repair_doc_bodies, _, _}) -> true;
 write_request({put_local_doc, _, _}) -> true;
 write_request({put_local_doc, _, _, _}) -> true;
 write_request({delete_local_doc, _}) -> true;
@@ -840,6 +849,16 @@ handle_call_rw({put_doc_state, DocId, StateBin, Bodies}, _From,
         do_put_state(StoreRef, DbName, Config, DocId, StateBin, Bodies)
     catch
         throw:{error, clock_skew} -> {error, clock_skew};
+        Class:Reason -> {error, {invalid_state, {Class, Reason}}}
+    end,
+    {reply, Result, State};
+
+handle_call_rw({repair_doc_bodies, DocId, Bodies}, _From,
+               #state{name = DbName, store_ref = StoreRef,
+                      config = Config} = State) ->
+    Result = try
+        do_repair_bodies(StoreRef, DbName, Config, DocId, Bodies)
+    catch
         Class:Reason -> {error, {invalid_state, {Class, Reason}}}
     end,
     {reply, Result, State};
@@ -3043,6 +3062,42 @@ do_get_state(StoreRef, DbName, DocId) ->
                    digest => barrel_live:digest(Live), bodies => Bodies}}
     end.
 
+%% @doc Rewrite live versions stored with another body (never to `#{}'),
+%% in one write: the winner is re-indexed and moves in the feed.
+do_repair_bodies(StoreRef, DbName, Config, DocId, RemoteBodies)
+        when is_map(RemoteBodies) ->
+    case read_current(StoreRef, DbName, DocId) of
+        undefined ->
+            {error, not_found};
+        Old ->
+            Live = load_live(StoreRef, DbName, DocId, Old),
+            Info = barrel_live:live(Live),
+            Fix = maps:from_list(
+                    [{T, B} || {Tok, B} <- maps:to_list(RemoteBodies),
+                               is_map(B), map_size(B) > 0,
+                               T <- [barrel_version:from_token(Tok)],
+                               live_body(Info, T),
+                               version_body(StoreRef, DbName, DocId, Old,
+                                            T) =/= B]),
+            case map_size(Fix) of
+                0 ->
+                    {ok, DocId, []};
+                _ ->
+                    BodyOf = fun(T) -> maps:get(T, Fix) end,
+                    {ok, DocId, _} = do_write_state(
+                        StoreRef, DbName, DocId, Old, Live, Live, BodyOf,
+                        (replication_opts(Config))#{repair => Fix}),
+                    {ok, DocId, lists:sort([barrel_version:to_token(T)
+                                            || T <- maps:keys(Fix)])}
+            end
+    end.
+
+live_body(Info, T) ->
+    case Info of
+        #{T := #{deleted := false}} -> true;
+        _ -> false
+    end.
+
 replication_opts(Config) ->
     #{cause => replicated,
       outbox => maps:get(outbox_tags_on_replication, Config, [])}.
@@ -3204,7 +3259,9 @@ do_write_state(StoreRef, DbName, DocId, Old, Live0, NewLive, BodyOf, Opts) ->
               deleted := OD, created_at := OCA, expires_at := OEA, tier := OT} ->
                 {OV, OH, OB, OBC, OD, OCA, OEA, OT}
         end,
-    WinnerChanged = W =/= OldW,
+    %% a body repair rewrites the winner like a new one, same version
+    Repair = maps:get(repair, Opts, #{}),
+    WinnerChanged = W =/= OldW orelse maps:is_key(W, Repair),
     WBody = case WinnerChanged of
         true -> BodyOf(W);
         false -> OldBody
@@ -3230,7 +3287,7 @@ do_write_state(StoreRef, DbName, DocId, Old, Live0, NewLive, BodyOf, Opts) ->
         fun(T) ->
             #{deleted := D, vv := VV} = maps:get(T, Info1),
             Row = {put, ChainKey(T), sibling_entry(conflict, D, VV)},
-            case maps:is_key(T, Info0) of
+            case maps:is_key(T, Info0) andalso not maps:is_key(T, Repair) of
                 true -> [Row];
                 false -> [Row, {body_put, BodyRevKey(T),
                                 barrel_docdb_codec_cbor:encode_cbor(BodyOf(T))}]
@@ -3242,7 +3299,7 @@ do_write_state(StoreRef, DbName, DocId, Old, Live0, NewLive, BodyOf, Opts) ->
                || {T, #{deleted := D, vv := VV}} <- maps:to_list(Info0),
                   not maps:is_key(T, Info1)],
     %% the winner lives in the entity, not in the chain
-    WinnerRowOps = case maps:is_key(W, Info0) andalso WinnerChanged of
+    WinnerRowOps = case maps:is_key(W, Info0) andalso W =/= OldW of
         true -> [{delete, ChainKey(W)}];
         false -> []
     end,
@@ -3250,7 +3307,8 @@ do_write_state(StoreRef, DbName, DocId, Old, Live0, NewLive, BodyOf, Opts) ->
     %% being the winner (a delete has none: its entity still holds the
     %% body it replaced)
     ArchiveOps = case {WinnerChanged, OldW, OldCbor, OldDeleted} of
-        {true, OldV, Cbor, false} when OldV =/= undefined, Cbor =/= undefined ->
+        {true, OldV, Cbor, false} when OldV =/= undefined, OldV =/= W,
+                                       Cbor =/= undefined ->
             [{body_put, BodyRevKey(OldV), Cbor}];
         _ -> []
     end,

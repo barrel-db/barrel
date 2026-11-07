@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Breaking: requests signed with signature v1 or v2 can no longer write attachments or carry the headers above; they are refused with 401 `signature_v3_required`. They still replicate documents, but their clock header is ignored. Upgrade servers first, then clients. Bearer-token requests are unchanged; they rely on HTTPS for integrity.
 
 ### Added
+- `PUT /db/:db/_sync/repair/:id` restores the stored bodies of a document's live versions from a healthy copy, without changing its state (write grant). `barrel_rep:reconcile/3` uses it. `_sync/info` reports `read_only` for a read-only database.
 - `GET /db/:db/_sync/att_state/:id/:name` and `POST /db/:db/_sync/att_list` report attachment states (read grant); `POST /db/:db/_sync/att_flush` answers once attachment writes are durable (write grant). `_sync/info` reports `att_flush` and `att_filter`, `_sync/att_changes` takes a `filter`, and `_sync/att_diff` compares timestamps when the client sends them.
 
 ## [1.12.0] - 2026-11-07

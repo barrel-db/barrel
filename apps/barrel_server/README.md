@@ -119,6 +119,7 @@ GET    /db/:db/_sync/doc/:id            fetch one version
 PUT    /db/:db/_sync/doc/:id            push one version (older peers)
 GET    /db/:db/_sync/state/:id          fetch a document's whole state
 PUT    /db/:db/_sync/state/:id          merge a document's whole state
+PUT    /db/:db/_sync/repair/:id         rewrite stored bodies from a healthy copy
 GET    /db/:db/_sync/local/:id          replication checkpoints
 PUT    /db/:db/_sync/local/:id
 DELETE /db/:db/_sync/local/:id

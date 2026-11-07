@@ -22,6 +22,7 @@
     put_version/1,
     get_state/1,
     put_state/1,
+    repair_bodies/1,
     get_local/1,
     put_local/1,
     delete_local/1,
@@ -52,7 +53,11 @@ info(Req) ->
             {ok, Info} ->
                 %% full_state: this server replicates whole document
                 %% states (GET/PUT _sync/state/:id)
-                Base = #{db => DbBin, full_state => true},
+                Base0 = #{db => DbBin, full_state => true},
+                Base = case maps:get(read_only, Info, false) of
+                    true -> Base0#{read_only => true};
+                    false -> Base0
+                end,
                 WithHist = maybe_put(history_floor,
                                      maps:get(history_floor, Info,
                                               undefined), Base),
@@ -215,6 +220,28 @@ put_state(Req) ->
                 end;
             (_) ->
                 json_resp(Req, 400, #{error => <<"bad_state">>})
+        end)
+    end).
+
+%% Rewrite stored bodies from a healthy copy (barrel_rep:reconcile/3):
+%% `bodies' maps version tokens to bodies; the state does not change.
+repair_bodies(Req) ->
+    with_sync_db(Req, fun(DbBin) ->
+        DocId = binding(<<"id">>, Req),
+        with_json(Req, fun
+            (#{<<"bodies">> := Bodies}) when is_map(Bodies) ->
+                case barrel_docdb:repair_doc_bodies(DbBin, DocId, Bodies) of
+                    {ok, Id, Tokens} ->
+                        json_resp(Req, 200, #{id => Id, repaired => Tokens});
+                    {error, read_only} ->
+                        json_resp(Req, 403, #{error => <<"read_only">>});
+                    {error, {invalid_state, _}} ->
+                        json_resp(Req, 400, #{error => <<"bad_bodies">>});
+                    {error, Reason} ->
+                        error_resp(Req, Reason)
+                end;
+            (_) ->
+                json_resp(Req, 400, #{error => <<"bad_bodies">>})
         end)
     end).
 

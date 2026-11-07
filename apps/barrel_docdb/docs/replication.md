@@ -493,6 +493,44 @@ Attachment deletes follow the same window: they stay in the attachment feed unti
 
 A purged document can come back if anything older than that reaches the database: a replica offline longer, a backup, or a message read before the delete and delivered late. Purge only when you accept that risk.
 
+## Upgrading from 2.0
+
+Read this when you upgrade replicas that ran barrel_docdb 2.0.0. Upgrading stops new damage: filtered runs copy every match, a failed attachment holds its checkpoint, a state without its bodies is refused, and each direction of a two-way task keeps its own attachment position. It repairs nothing by itself. A replica may still miss documents a filtered run skipped, attachments whose transfer failed, or hold an empty body for a live version; resending that state changes nothing because the state is the same.
+
+What the first run after upgrading does on its own:
+
+- Filtered document checkpoints and every attachment checkpoint written by 2.0 are reset once, and that run walks the feed from the start. Documents and attachments the target already holds are compared, not sent again. Pending ids are kept. Unfiltered document checkpoints stay valid.
+- Replication tasks reset the same positions once (`att_seq`, and `last_seq` for filtered tasks, for each direction).
+- The log says which replication was reset and why. Checkpoints written from now on carry `vsn => 2` and are kept.
+
+Then repair each damaged replica once, from a copy you trust:
+
+```erlang
+{ok, _} = barrel_rep:replicate(<<"healthy">>, <<"replica">>),
+{ok, #{docs_checked := Checked,
+       bodies_repaired := Repaired,
+       atts_resent := Resent,
+       doc_failures := [],
+       att_failures := []}} =
+    barrel_rep:reconcile(<<"healthy">>, <<"replica">>, #{}).
+```
+
+`reconcile/3` walks the whole source feed, with no checkpoint. For each document, a version both sides hold but the target stores with another body gets the source's body (a version names one body; an empty body is never written). Then the source state is merged as in a normal run. Every source attachment the target lacks, or holds with other bytes, is sent again. Failures are listed and the walk goes on; run it again once they are fixed.
+
+To repair a remote replica, pass the transport as for `replicate/3`. The target needs a write grant (or a signing key): the repair is a signed write, `PUT /db/:db/_sync/repair/:id`.
+
+```erlang
+Replica = barrel_rep_transport_http:endpoint(<<"https://node2:8080/db/orders">>),
+{ok, _} = barrel_rep:reconcile(<<"orders">>, Replica,
+                               #{target_transport => barrel_rep_transport_http}).
+```
+
+Notes:
+
+- Pass the same `filter` you replicate with to repair only that scope.
+- A read-only target is refused with `{error, read_only}`.
+- To restore only one document or attachment, reconcile from a healthy copy that holds it, or rewrite it on the healthy side so the next run sends it.
+
 ## Best Practices
 
 1. **Resolve conflicts** or set a `conflict_resolver`; conflicts stay until something resolves them.
@@ -505,7 +543,7 @@ A purged document can come back if anything older than that reaches the database
 
 See the [API reference](api-reference.html) for complete function documentation.
 
-- `barrel_rep` - Replication public API (`replicate/2,3`, `replicate_one_shot/1,2`)
+- `barrel_rep` - Replication public API (`replicate/2,3`, `replicate_one_shot/1,2`, `reconcile/3`)
 - `barrel_rep_tasks` - Continuous / persistent replication tasks
 - `barrel_rep_transport` - Transport behaviour
 - `barrel_docdb:get_doc_state/2`, `put_doc_state/4`, `diff_states/2` - Whole document states

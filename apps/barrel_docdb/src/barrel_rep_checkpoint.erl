@@ -58,6 +58,8 @@
 -export_type([checkpoint/0]).
 
 -define(CHECKPOINT_SIZE, 10).
+%% format of the checkpoints this version writes (2.0.0 wrote none)
+-define(VSN, 2).
 -define(MAX_CHECKPOINT_HISTORY, 20).
 
 %%====================================================================
@@ -76,17 +78,29 @@ new(RepConfig) ->
     } = RepConfig,
 
     Options = maps:get(options, RepConfig, #{}),
+    %% pre-2.1 positions of this stream may sit past rows never copied
+    Reset = maps:get(reset_legacy, RepConfig, false),
 
     %% Get start sequence from existing checkpoints
     %% Start from the lower position of both sides and the union of
     %% their pending ids: the two writes are not atomic, and reading
     %% lower only ships again
     {StartSeq, Pending, ReadError} =
-        case {read_entry(Source, SourceTransport, RepId),
-              read_entry(Target, TargetTransport, RepId)} of
+        case {read_entry(Source, SourceTransport, RepId, Reset),
+              read_entry(Target, TargetTransport, RepId, Reset)} of
             {{error, R}, _} -> {first, [], {source, R}};
             {_, {error, R}} -> {first, [], {target, R}};
-            {{S1, P1}, {S2, P2}} ->
+            {{S1, P1, L1}, {S2, P2, L2}} ->
+                case L1 orelse L2 of
+                    true ->
+                        logger:warning(
+                            "replication ~s: pre-2.1 checkpoint reset, "
+                            "replaying from the start once (2.0 could "
+                            "checkpoint past rows it never copied)",
+                            [RepId]);
+                    false ->
+                        ok
+                end,
                 {min_seq(S1, S2), lists:usort(P1 ++ P2), undefined}
         end,
 
@@ -190,6 +204,7 @@ write_checkpoint(#checkpoint{
     HistorySize = maps:get(checkpoint_max_history, Options, ?MAX_CHECKPOINT_HISTORY),
 
     Checkpoint = #{
+        <<"vsn">> => ?VSN,
         <<"source_last_seq">> => encode_seq(LastSeq),
         <<"source_start_seq">> => encode_seq(StartSeq),
         <<"pending">> => Pending,
@@ -268,23 +283,32 @@ update_history(History, SessionId, HistorySize, Checkpoint) ->
             end
     end.
 
-%% The newest entry of one side: {Seq, Pending}, or the read error.
-read_entry(Db, Transport, RepId) ->
+%% The newest entry of one side: {Seq, Pending, Reset}, or the read
+%% error. With `Reset', a pre-2.1 entry reads as `first'; its pending
+%% ids are kept.
+read_entry(Db, Transport, RepId, Reset) ->
     case read_checkpoint_doc(Db, Transport, RepId) of
         {ok, Doc} ->
             case newest(maps:get(<<"history">>, Doc, [])) of
                 undefined ->
-                    {first, []};
+                    {first, [], false};
                 Entry ->
-                    {decode_seq(maps:get(<<"source_last_seq">>, Entry)),
-                     [Id || Id <- maps:get(<<"pending">>, Entry, []),
-                            is_binary(Id)]}
+                    Pending = [Id || Id <- maps:get(<<"pending">>, Entry, []),
+                                     is_binary(Id)],
+                    Seq = decode_seq(maps:get(<<"source_last_seq">>, Entry)),
+                    case Reset andalso legacy(Entry) of
+                        true -> {first, Pending, Seq =/= first};
+                        false -> {Seq, Pending, false}
+                    end
             end;
         {error, not_found} ->
-            {first, []};
+            {first, [], false};
         {error, _} = Err ->
             Err
     end.
+
+legacy(#{<<"vsn">> := V}) when is_integer(V), V >= ?VSN -> false;
+legacy(_Entry) -> true.
 
 newest([]) ->
     undefined;
