@@ -83,6 +83,7 @@
     create_db/1,
     create_db/2,
     open_db/1,
+    reopen_db/1,
     db_exists/2,
     close_db/1,
     delete_db/1,
@@ -327,7 +328,9 @@ create_db(Name, Opts) when is_binary(Name) ->
                             Ok;
                         Err ->
                             Err
-                    end
+                    end;
+                {error, {db_failed, _}} = Failed ->
+                    Failed
             end;
         {error, _} = Err ->
             Err
@@ -367,11 +370,44 @@ validate_db_name_chars(_) ->
 %% {ok, Pid} = barrel_docdb:open_db(<<"mydb">>).
 %% '''
 %%
+%% A database whose writer kept crashing past its restart budget is
+%% failed: this returns `{error, {db_failed, Reason}}' until
+%% {@link reopen_db/1} or {@link delete_db/1}.
+%%
 %% @param Name The database name as a binary
 %% @returns `{ok, Pid}' if database is open, `{error, not_found}' otherwise
 -spec open_db(binary()) -> {ok, pid()} | {error, term()}.
 open_db(Name) when is_binary(Name) ->
     get_db(Name).
+
+%% @doc Restart a failed database with the config it last ran with.
+%%
+%% A crashed writer restarts on its own (3 times within 60 seconds);
+%% past that the database is failed and stays down. Fix the cause, then:
+%%
+%% ```
+%% {error, {db_failed, _Reason}} = barrel_docdb:open_db(<<"mydb">>),
+%% {ok, Pid} = barrel_docdb:reopen_db(<<"mydb">>).
+%% '''
+%%
+%% Returns `{ok, Pid}' for a database already running and
+%% `{error, not_found}' for one that is neither running nor failed.
+-spec reopen_db(binary()) -> {ok, pid()} | {error, term()}.
+reopen_db(Name) when is_binary(Name) ->
+    case get_db(Name) of
+        {ok, _Pid} = Ok ->
+            Ok;
+        {error, {db_failed, _}} ->
+            case barrel_db_watch:clear_failure(Name) of
+                {ok, Config} ->
+                    ok = barrel_db_server:release_stale_refs(Name),
+                    barrel_db_sup:start_db(Name, Config);
+                not_found ->
+                    get_db(Name)
+            end;
+        {error, _} = Err ->
+            Err
+    end.
 
 %% @doc Whether `Name' is open or has files on disk, under the
 %% `data_dir' option, else its remembered or the default data dir.
@@ -490,6 +526,17 @@ do_delete_db(Name, Opts) ->
             destroy_att_store(AttRef, Name, DbPath),
             barrel_db_server:stop(Pid),
             %% Remove data directory via stdlib (no shell, no injection).
+            del_db_dir(DbPath);
+        {error, {db_failed, _}} ->
+            %% its handles are released; locate it with its last config
+            Opts1 = case barrel_db_watch:clear_failure(Name) of
+                {ok, Config} -> maps:merge(Config, Opts);
+                not_found -> Opts
+            end,
+            ok = barrel_db_server:release_stale_refs(Name),
+            DataDir = closed_db_data_dir(Name, Opts1),
+            DbPath = filename:join(DataDir, binary_to_list(Name)),
+            maybe_destroy_closed_att_store(Name, DbPath, Opts1),
             del_db_dir(DbPath);
         {error, not_found} ->
             %% Not open: resolve the on-disk location from the option,
@@ -644,6 +691,8 @@ system_db_available() ->
     case get_db(?SYSTEM_DB) of
         {ok, _} ->
             true;
+        {error, {db_failed, _}} ->
+            false;
         {error, not_found} ->
             SysPath = filename:join(default_data_dir(),
                                     binary_to_list(?SYSTEM_DB)),
@@ -683,7 +732,7 @@ db_info(Pid) when is_pid(Pid) ->
 %%
 %% @param Name Database name
 %% @returns `{ok, Pid}' if database exists, `{error, not_found}' otherwise
--spec db_pid(binary()) -> {ok, pid()} | {error, not_found}.
+-spec db_pid(binary()) -> {ok, pid()} | {error, not_found | {db_failed, term()}}.
 db_pid(Name) when is_binary(Name) ->
     get_db(Name).
 
@@ -2263,7 +2312,7 @@ fold_system_docs(Prefix, Fun, Acc0) ->
     case db_pid(?SYSTEM_DB) of
         {ok, Pid} ->
             barrel_db_server:fold_local_docs(Pid, Prefix, Fun, Acc0);
-        {error, not_found} ->
+        {error, _} ->
             {ok, Acc0}
     end.
 
@@ -2582,19 +2631,25 @@ find_db_name(Pid, [{{barrel_db, Name}, Pid} | _]) when is_binary(Name) ->
 find_db_name(Pid, [_ | Rest]) ->
     find_db_name(Pid, Rest).
 
-%% @private Get database pid by name
--spec get_db(binary()) -> {ok, pid()} | {error, not_found}.
+%% @private Get database pid by name. A writer restarted by its
+%% supervisor is found through barrel_db_watch until it registers.
+-spec get_db(binary()) -> {ok, pid()} | {error, not_found | {db_failed, term()}}.
 get_db(Name) when is_binary(Name) ->
     case persistent_term:get({barrel_db, Name}, undefined) of
-        undefined ->
-            {error, not_found};
         Pid when is_pid(Pid) ->
             case is_process_alive(Pid) of
                 true -> {ok, Pid};
-                false ->
-                    persistent_term:erase({barrel_db, Name}),
-                    {error, not_found}
-            end
+                false -> watched_db(Name)
+            end;
+        undefined ->
+            watched_db(Name)
+    end.
+
+watched_db(Name) ->
+    case barrel_db_watch:lookup(Name) of
+        {ok, Pid} -> {ok, Pid};
+        {failed, Reason} -> {error, {db_failed, Reason}};
+        not_found -> {error, not_found}
     end.
 
 %% @private Execute function with database pid
@@ -2642,7 +2697,7 @@ att_call(Fun, AttRef, DbName) ->
     catch
         error:badarg:Stack ->
             case get_db(DbName) of
-                {error, not_found} -> {error, not_found};
+                {error, _} = Err -> Err;
                 {ok, _Pid} -> erlang:raise(error, badarg, Stack)
             end
     end.

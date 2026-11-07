@@ -14,7 +14,7 @@
 -include("barrel_docdb.hrl").
 
 %% API
--export([start_link/2]).
+-export([start_link/2, start_link/3, release_stale_refs/1]).
 -export([info/1, stop/1]).
 -export([get_store_ref/1, get_att_ref/1]).
 -export([sweep_ttl/1]).
@@ -193,6 +193,11 @@
 -spec start_link(binary(), map()) -> {ok, pid()} | {error, term()}.
 start_link(Name, Config) ->
     gen_server:start_link(?MODULE, [Name, Config], []).
+
+%% @doc Start the writer under its database supervisor `Sup'.
+-spec start_link(binary(), map(), pid()) -> {ok, pid()} | {error, term()}.
+start_link(Name, Config, Sup) ->
+    gen_server:start_link(?MODULE, [Name, Config, Sup], []).
 
 %% @doc Get database info
 -spec info(pid()) -> {ok, map()} | {error, term()}.
@@ -408,6 +413,14 @@ fold_local_docs(Pid, Prefix, Fun, Acc) ->
 %%====================================================================
 
 %% @doc Initialize the database server
+init([Name, Config, Sup]) ->
+    case init([Name, Config]) of
+        {ok, _} = Ok ->
+            ok = barrel_db_watch:writer_started(Name, Config, Sup),
+            Ok;
+        Other ->
+            Other
+    end;
 init([Name, Config]) ->
     process_flag(trap_exit, true),
 
@@ -429,8 +442,8 @@ init(Name, Config, CompiledChannels) ->
     DbPath = filename:join([DataDir, binary_to_list(Name)]),
 
     %% A previous instance that crashed without terminate leaves its
-    %% store handle in persistent_term: the RocksDB LOCK stays held and
-    %% the database cannot reopen. Release it when its owner is gone.
+    %% store handles in persistent_term: the RocksDB LOCKs stay held and
+    %% the database cannot reopen. Release them when their owner is gone.
     ok = release_stale_refs(Name),
 
     %% Branch identity comes from the TIMELINE sidecar file: it must be
@@ -511,6 +524,7 @@ init(Name, Config, CompiledChannels, DbPath, Keyspace, Parent, ForkHlc, Env) ->
                     end,
                     persistent_term:put({barrel_db, Name}, self()),
                     persistent_term:put({barrel_store, Name}, StoreRef),
+                    persistent_term:put({barrel_att_ref, Name}, AttRef),
                     persistent_term:put({barrel_source, Name},
                                         source_id(ReadOnly, StoreRef, Name,
                                                   DbPath)),
@@ -890,6 +904,12 @@ handle_info({committed, Ref, _MoreSeg},
 handle_info({'EXIT', Pid, Reason}, #state{committer = Pid} = State) ->
     {stop, {committer_down, Reason}, State#state{committer = undefined,
                                                  inflight = []}};
+handle_info({'EXIT', Pid, Reason}, #state{name = Name, filter_pid = Pid} = State) ->
+    %% A pass-through: without it RocksDB keeps every entry
+    logger:warning("Database ~s: compaction filter exited: ~p; compaction "
+                   "keeps all entries until the database reopens",
+                   [Name, Reason]),
+    {noreply, State#state{filter_pid = undefined}};
 
 handle_info(_Info, State) ->
     {noreply, State}.
@@ -940,6 +960,7 @@ terminate(_Reason, #state{name = Name, store_ref = StoreRef, att_ref = AttRef,
     %% hold the ref are handled by the reader's badarg guard.
     persistent_term:erase({barrel_db, Name}),
     persistent_term:erase({barrel_store, Name}),
+    persistent_term:erase({barrel_att_ref, Name}),
     persistent_term:erase({barrel_source, Name}),
     persistent_term:erase({barrel_writer, Name}),
     ok = barrel_keyspace:uninstall(Name),
@@ -1055,12 +1076,13 @@ start_sweep(Kind, Fun, From, Periodic, #state{sweep_workers = Workers} = State) 
             State#state{sweep_workers = Workers1};
         error ->
             Server = self(),
-            {Pid, _MRef} = spawn_monitor(fun() ->
+            %% linked so it dies with a killed writer; DOWN reports it
+            {Pid, _MRef} = spawn_opt(fun() ->
                 Result = try Fun()
                          catch C:E:St -> {error, {sweep_failed, C, E, St}}
                          end,
                 Server ! {sweep_done, Kind, Result}
-            end),
+            end, [link, monitor]),
             Workers1 = Workers#{Kind => {Pid, add_waiter(From, []), Periodic}},
             State#state{sweep_workers = Workers1}
     end.
@@ -1155,33 +1177,44 @@ do_check_compaction(StoreRef, Threshold, Name) ->
             {error, Reason}
     end.
 
-%% @private Release the store handle and registrations leaked by a
-%% crashed instance. A live owner keeps everything (the open below then
-%% fails on the RocksDB lock, which is the correct answer for a
-%% double open).
+%% @private Release the store handles and registrations leaked by a
+%% crashed instance, even if callers still hold them (their next call
+%% fails as on a closed database). Its helpers are linked and died with
+%% it. A live owner keeps everything (the open then fails on the
+%% RocksDB lock, the correct answer for a double open).
+-spec release_stale_refs(binary()) -> ok.
 release_stale_refs(Name) ->
     Owner = persistent_term:get({barrel_db, Name}, undefined),
-    OwnerAlive = is_pid(Owner) andalso is_process_alive(Owner),
-    case persistent_term:get({barrel_store, Name}, undefined) of
-        undefined ->
+    case is_pid(Owner) andalso is_process_alive(Owner) of
+        true ->
             ok;
-        _StoreRef when OwnerAlive ->
-            ok;
-        StoreRef ->
-            logger:warning(
-                "Database ~s: releasing store handle leaked by a crashed "
-                "instance", [Name]),
-            _ = try barrel_store_rocksdb:close(StoreRef)
-                catch _:_ -> ok
-                end,
-            persistent_term:erase({barrel_store, Name}),
-            persistent_term:erase({barrel_db, Name}),
-            persistent_term:erase({barrel_source, Name}),
-            persistent_term:erase({barrel_writer, Name}),
-            ok = barrel_keyspace:uninstall(Name),
-            ok = barrel_channel:uninstall(Name),
-            ok
+        false ->
+            StoreRef = persistent_term:get({barrel_store, Name}, undefined),
+            AttRef = persistent_term:get({barrel_att_ref, Name}, undefined),
+            case {StoreRef, AttRef} of
+                {undefined, undefined} ->
+                    ok;
+                _ ->
+                    logger:warning(
+                        "Database ~s: releasing store handles leaked by a "
+                        "crashed instance", [Name]),
+                    persistent_term:erase({barrel_db, Name}),
+                    persistent_term:erase({barrel_store, Name}),
+                    persistent_term:erase({barrel_att_ref, Name}),
+                    persistent_term:erase({barrel_source, Name}),
+                    persistent_term:erase({barrel_writer, Name}),
+                    ok = barrel_keyspace:uninstall(Name),
+                    ok = barrel_channel:uninstall(Name),
+                    close_stale(fun barrel_att_store:close/1, AttRef),
+                    close_stale(fun barrel_store_rocksdb:close/1, StoreRef)
+            end
     end.
+
+close_stale(_Close, undefined) ->
+    ok;
+close_stale(Close, Ref) ->
+    _ = try Close(Ref) catch _:_ -> ok end,
+    ok.
 
 %%====================================================================
 %% Retention Sweep

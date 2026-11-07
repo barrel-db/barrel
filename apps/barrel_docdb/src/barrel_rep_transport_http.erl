@@ -10,12 +10,20 @@
 %% explicit sync_hlc exchange).
 %%
 %% Auth: `auth => #{token => Bin}' on the endpoint, else the app env
-%% `{barrel_docdb, sync_auth, #{Origin => Token}}' keyed by
-%% `<<"scheme://host:port">>' (no secrets in persisted task configs).
+%% `{barrel_docdb, sync_auth, #{Key => Token}}'. Likewise `signing' and
+%% `sync_signing', `ssl_options' and `sync_ssl'. `Key' is the full
+%% database URL (normalized: lowercase scheme and host, no trailing
+%% slash), looked up first, or the origin `<<"scheme://host:port">>'.
+%% Persisted tasks only use the app env. A URL with user info is
+%% rejected so credentials never reach logs or replication ids.
+%%
+%% Every request runs in a worker linked to the caller, killed at the
+%% endpoint's `request_timeout' (whole request, attachment streams
+%% included), which then returns `{error, request_timeout}'.
 -module(barrel_rep_transport_http).
 -behaviour(barrel_rep_transport).
 
--export([endpoint/1]).
+-export([endpoint/1, has_userinfo/1]).
 
 %% barrel_rep_transport callbacks
 -export([
@@ -86,6 +94,10 @@ normalize_url(Url0) ->
             Host = string:lowercase(to_bin(Host0)),
             Path = strip_trailing_slash(to_bin(Path0)),
             SchemeOk = lists:member(Scheme, [<<"http">>, <<"https">>]),
+            case maps:is_key(userinfo, Parsed) of
+                true -> erlang:error({invalid_sync_url, userinfo});
+                false -> ok
+            end,
             Clean = not (maps:is_key(query, Parsed)
                          orelse maps:is_key(fragment, Parsed)),
             PathOk = case Path of
@@ -105,6 +117,16 @@ normalize_url(Url0) ->
             end;
         _ ->
             erlang:error({invalid_sync_url, Url})
+    end.
+
+%% @doc Whether a URL carries user info (`user:pass@host').
+-spec has_userinfo(term()) -> boolean().
+has_userinfo(Url) ->
+    try uri_string:parse(unicode:characters_to_binary(Url)) of
+        #{userinfo := _} -> true;
+        _ -> false
+    catch
+        _:_ -> false
     end.
 
 strip_trailing_slash(Path) ->
@@ -332,8 +354,40 @@ diff_attachments(Endpoint, Entries) ->
 
 %% hackney's sync request/5 always buffers the response body, so the
 %% streamed read goes through connect + send_request, which leaves the
-%% body on the connection for stream_body/1.
+%% body on the connection for stream_body/1. A linked worker owns the
+%% connection until EOF, an error, the deadline or close (Info's
+%% `close' fun, for a consumer that stops early).
 get_attachment_stream(Endpoint, DocId, Name) ->
+    Deadline = deadline(Endpoint),
+    Caller = self(),
+    Tag = make_ref(),
+    Pid = spawn_link(fun() ->
+        download(Caller, Tag, Deadline, Endpoint, DocId, Name)
+    end),
+    receive
+        {Tag, {ok, Info}} ->
+            {ok, Info#{close => fun() -> close_download(Pid, Tag) end},
+             download_read_fun(Pid, Tag, Deadline)};
+        {Tag, {error, _} = Error} ->
+            ok = forget_worker(Pid),
+            Error
+    after remaining(Deadline) ->
+        ok = kill_worker(Pid),
+        receive {Tag, _} -> ok after 0 -> ok end,
+        {error, request_timeout}
+    end.
+
+download(Caller, Tag, Deadline, Endpoint, DocId, Name) ->
+    CallerRef = erlang:monitor(process, Caller),
+    case guarded(fun() -> open_download(Endpoint, DocId, Name) end) of
+        {ok, Info, Conn} ->
+            Caller ! {Tag, {ok, Info}},
+            download_loop(Conn, Tag, CallerRef, Deadline);
+        {error, _} = Error ->
+            Caller ! {Tag, Error}
+    end.
+
+open_download(Endpoint, DocId, Name) ->
     Url = att_url(Endpoint, DocId, Name),
     case hackney:connect(Url, stream_opts(Endpoint)) of
         {ok, ConnPid} ->
@@ -352,15 +406,15 @@ get_attachment_stream(Endpoint, DocId, Name) ->
                              digest =>
                                  header_value(?DIGEST_HEADER,
                                               RespHeaders)},
-                    {ok, Info, att_read_fun(ConnPid2)};
+                    {ok, Info, ConnPid2};
                 {ok, Status, RespHeaders, ConnPid2} ->
-                    %% drain so the pooled connection is reusable
                     Body = case hackney:body(ConnPid2) of
                         {ok, B} -> decode_body(
                               header_value(<<"content-type">>, RespHeaders),
                               B);
                         _ -> #{}
                     end,
+                    _ = hackney:close(ConnPid2),
                     error_of({ok, Status, Body});
                 {error, Reason} ->
                     _ = hackney:close(ConnPid),
@@ -369,6 +423,61 @@ get_attachment_stream(Endpoint, DocId, Name) ->
         {error, Reason} ->
             {error, {transport, Reason}}
     end.
+
+%% Serves one chunk per request, to whichever process reads the stream.
+download_loop(Conn, Tag, CallerRef, Deadline) ->
+    receive
+        {Tag, next, From, Ref} ->
+            case guarded(fun() -> hackney:stream_body(Conn) end) of
+                {ok, Chunk} ->
+                    From ! {Ref, {ok, Chunk}},
+                    download_loop(Conn, Tag, CallerRef, Deadline);
+                done ->
+                    From ! {Ref, eof},
+                    close_conn(Conn);
+                {error, Reason} ->
+                    From ! {Ref, {error, {transport, Reason}}},
+                    close_conn(Conn)
+            end;
+        {Tag, close} ->
+            close_conn(Conn);
+        {'DOWN', CallerRef, process, _, _} ->
+            close_conn(Conn)
+    after remaining(Deadline) ->
+        close_conn(Conn)
+    end.
+
+download_read_fun(Pid, Tag, Deadline) ->
+    fun() ->
+        MRef = erlang:monitor(process, Pid),
+        Pid ! {Tag, next, self(), MRef},
+        receive
+            {MRef, {ok, Chunk}} ->
+                erlang:demonitor(MRef, [flush]),
+                {ok, Chunk, download_read_fun(Pid, Tag, Deadline)};
+            {MRef, Last} ->
+                erlang:demonitor(MRef, [flush]),
+                Last;
+            {'DOWN', MRef, process, Pid, _} ->
+                %% closed, or gone at the deadline
+                case remaining(Deadline) of
+                    0 -> {error, request_timeout};
+                    _ -> {error, {transport, closed}}
+                end
+        after remaining(Deadline) ->
+            erlang:demonitor(MRef, [flush]),
+            ok = kill_worker(Pid),
+            {error, request_timeout}
+        end
+    end.
+
+close_download(Pid, Tag) ->
+    Pid ! {Tag, close},
+    forget_worker(Pid).
+
+close_conn(Conn) ->
+    _ = guarded(fun() -> hackney:close(Conn) end),
+    ok.
 
 url_path(Url) ->
     #{path := Path} = uri_string:parse(Url),
@@ -379,15 +488,6 @@ url_path(Url) ->
 url_target(Url) ->
     Parsed = uri_string:parse(Url),
     {maps:get(path, Parsed), maps:get(query, Parsed, <<>>)}.
-
-att_read_fun(ClientRef) ->
-    fun() ->
-        case hackney:stream_body(ClientRef) of
-            {ok, Chunk} -> {ok, Chunk, att_read_fun(ClientRef)};
-            done -> eof;
-            {error, Reason} -> {error, {transport, Reason}}
-        end
-    end.
 
 put_attachment(Endpoint, DocId, Name, Meta, ReadFun) ->
     #{content_type := ContentType, digest := Digest,
@@ -401,13 +501,16 @@ put_attachment(Endpoint, DocId, Name, Meta, ReadFun) ->
                {?ORIGIN_HEADER,
                 base64:encode(barrel_hlc:encode(Origin))}
                | base_headers(Endpoint, <<"PUT">>, url_target(AttUrl), Digest)],
-    case hackney:request(put, AttUrl, Headers,
-                         stream, stream_opts(Endpoint)) of
-        {ok, ClientRef} ->
-            att_send_loop(ReadFun, ClientRef);
-        {error, Reason} ->
-            {error, {transport, Reason}}
-    end.
+    %% connect, every chunk and the final response share one deadline
+    bounded(fun() ->
+        case hackney:request(put, AttUrl, Headers,
+                             stream, stream_opts(Endpoint)) of
+            {ok, ClientRef} ->
+                att_send_loop(ReadFun, ClientRef);
+            {error, Reason} ->
+                {error, {transport, Reason}}
+        end
+    end, deadline(Endpoint)).
 
 att_content_type(<<>>) -> <<"application/octet-stream">>;
 att_content_type(ContentType) -> ContentType.
@@ -453,6 +556,7 @@ att_put_response(ClientRef) ->
                 _ -> error_of({ok, Status, Body})
             end;
         {error, Reason} ->
+            _ = hackney:close(ClientRef),
             {error, {transport, Reason}}
     end.
 
@@ -514,36 +618,65 @@ req_typed(#{url := BaseUrl} = Endpoint, Method, PathSuffix, BodyTerm,
               ++ base_headers(Endpoint, method_bin(Method), url_target(Url),
                               ContentHash),
     HttpOpts = [with_body | stream_opts(Endpoint)],
-    Deadline = maps:get(request_timeout, Endpoint, ?REQUEST_TIMEOUT),
-    case bounded_request(Method, Url, Headers, Body, HttpOpts, Deadline) of
+    case bounded(fun() ->
+                     hackney:request(Method, Url, Headers, Body, HttpOpts)
+                 end, deadline(Endpoint)) of
         {ok, Status, RespHeaders, RespBody} ->
             ok = barrel_hlc:maybe_sync_from_header(
                 header_value(?HLC_HEADER, RespHeaders)),
             RespType = header_value(<<"content-type">>, RespHeaders),
             {ok, Status, encoding(RespType), decode_body(RespType, RespBody)};
+        {error, request_timeout} = Timeout ->
+            Timeout;
+        {error, {transport, _}} = Err ->
+            Err;
         {error, Reason} ->
             {error, {transport, Reason}}
     end.
 
-%% Run hackney:request under an overall wall-clock deadline. hackney
-%% reclaims the pooled connection when the request process is killed, so a
-%% stalled peer cannot pin the calling task indefinitely.
-bounded_request(Method, Url, Headers, Body, HttpOpts, Deadline) ->
-    Parent = self(),
-    {Pid, Ref} = spawn_monitor(fun() ->
-        Parent ! {self(), hackney:request(Method, Url, Headers, Body, HttpOpts)}
-    end),
+%% Run `Fun' in a worker linked to the caller, so it dies with it. The
+%% worker always exits normally; past the deadline the caller kills it
+%% (its hackney connection closes with it).
+bounded(Fun, Deadline) ->
+    Caller = self(),
+    Tag = make_ref(),
+    Pid = spawn_link(fun() -> Caller ! {Tag, guarded(Fun)} end),
     receive
-        {Pid, Result} ->
-            erlang:demonitor(Ref, [flush]),
-            Result;
-        {'DOWN', Ref, process, Pid, Reason} ->
-            {error, Reason}
-    after Deadline ->
-        exit(Pid, kill),
-        receive {'DOWN', Ref, process, Pid, _} -> ok after 0 -> ok end,
+        {Tag, Result} ->
+            ok = forget_worker(Pid),
+            Result
+    after remaining(Deadline) ->
+        ok = kill_worker(Pid),
+        receive {Tag, _} -> ok after 0 -> ok end,
         {error, request_timeout}
     end.
+
+guarded(Fun) ->
+    try Fun()
+    catch C:R -> {error, {transport, {C, R}}}
+    end.
+
+%% Drop the link and its EXIT (a caller trapping exits gets one).
+forget_worker(Pid) ->
+    unlink(Pid),
+    receive {'EXIT', Pid, _} -> ok after 0 -> ok end.
+
+kill_worker(Pid) ->
+    unlink(Pid),
+    exit(Pid, kill),
+    receive {'EXIT', Pid, _} -> ok after 0 -> ok end.
+
+%% The request_timeout budget as a monotonic deadline.
+deadline(Endpoint) ->
+    case maps:get(request_timeout, Endpoint, ?REQUEST_TIMEOUT) of
+        infinity -> infinity;
+        Ms -> erlang:monotonic_time(millisecond) + Ms
+    end.
+
+remaining(infinity) ->
+    infinity;
+remaining(Deadline) ->
+    max(0, Deadline - erlang:monotonic_time(millisecond)).
 
 %% HLC + auth + endpoint headers. `Method' is the uppercase verb, `Path'
 %% the request target `{Path, Query}' (matching what the server signs),
@@ -582,28 +715,36 @@ auth_headers(Endpoint, Method, {Path, Query}, ContentHash) ->
 bearer_headers(#{auth := #{token := Token}}) ->
     [{<<"authorization">>, <<"Bearer ", Token/binary>>}];
 bearer_headers(#{url := Url}) ->
-    Tokens = application:get_env(barrel_docdb, sync_auth, #{}),
-    case maps:get(origin(Url), Tokens, undefined) of
+    case env_setting(sync_auth, Url) of
         undefined -> [];
         Token -> [{<<"authorization">>, <<"Bearer ", Token/binary>>}]
     end.
 
 %% Signing config from the endpoint, else the app env
-%% `{barrel_docdb, sync_signing, #{Origin => #{key_id, priv_key}}}'
+%% `{barrel_docdb, sync_signing, #{UrlOrOrigin => #{key_id, priv_key}}}'
 %% (mirrors sync_auth; private keys never persist in task configs).
 signing_config(#{signing := Signing}) when is_map(Signing) ->
     Signing;
 signing_config(#{url := Url}) ->
-    Cfg = application:get_env(barrel_docdb, sync_signing, #{}),
-    maps:get(origin(Url), Cfg, undefined).
+    env_setting(sync_signing, Url).
 
 %% ssl_options from the endpoint, else app env
-%% `{barrel_docdb, sync_ssl, #{Origin => SslOptions}}'.
+%% `{barrel_docdb, sync_ssl, #{UrlOrOrigin => SslOptions}}'.
 ssl_options(#{ssl_options := Opts}) ->
     Opts;
 ssl_options(#{url := Url}) ->
-    Cfg = application:get_env(barrel_docdb, sync_ssl, #{}),
-    maps:get(origin(Url), Cfg, []).
+    case env_setting(sync_ssl, Url) of
+        undefined -> [];
+        Opts -> Opts
+    end.
+
+%% An app env credential map entry: the database URL, else its origin.
+env_setting(Key, Url) ->
+    Cfg = application:get_env(barrel_docdb, Key, #{}),
+    case Cfg of
+        #{Url := V} -> V;
+        _ -> maps:get(origin(Url), Cfg, undefined)
+    end.
 
 method_bin(get) -> <<"GET">>;
 method_bin(post) -> <<"POST">>;

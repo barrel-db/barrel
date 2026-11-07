@@ -198,9 +198,22 @@ replicate(Source, Target, Opts) ->
 -spec replicate_one_shot(rep_config(), map()) -> {ok, rep_result()} | {error, term()}.
 replicate_one_shot(Config, Opts) ->
     case barrel_rep_filter:check(maps:get(filter, Opts, #{})) of
-        ok -> replicate_checked(Config, Opts);
+        ok -> replicate_urls_checked(Config, Opts);
         {error, _} = Invalid -> Invalid
     end.
+
+%% Inline credentials are fine here (nothing is persisted), but not in
+%% a URL: it would reach logs and the replication id.
+replicate_urls_checked(#{source := Source, target := Target} = Config, Opts) ->
+    case lists:any(fun has_userinfo/1, [Source, Target]) of
+        true -> {error, {invalid_sync_url, userinfo}};
+        false -> replicate_checked(Config, Opts)
+    end.
+
+has_userinfo(#{url := Url}) -> barrel_rep_transport_http:has_userinfo(Url);
+has_userinfo(Url) when is_binary(Url) ->
+    barrel_rep_transport_http:has_userinfo(Url);
+has_userinfo(_Endpoint) -> false.
 
 replicate_checked(Config, Opts) ->
     #{

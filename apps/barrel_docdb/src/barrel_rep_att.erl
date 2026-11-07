@@ -157,11 +157,14 @@ transfer(Source, Target, SourceTransport, TargetTransport, Entry, Stats) ->
     #{id := Id, name := Name, digest := Digest, length := Length,
       content_type := ContentType, origin := Origin} = Entry,
     case SourceTransport:get_attachment_stream(Source, Id, Name) of
-        {ok, _Info, ReadFun} ->
+        {ok, Info, ReadFun} ->
             Meta = #{content_type => ContentType, digest => Digest,
                      length => Length, origin_hlc => Origin},
-            case TargetTransport:put_attachment(Target, Id, Name, Meta,
-                                                ReadFun) of
+            Put = TargetTransport:put_attachment(Target, Id, Name, Meta,
+                                                 ReadFun),
+            %% a target that stopped early leaves the stream open
+            ok = close_stream(Info),
+            case Put of
                 {ok, ignored} ->
                     bump(atts_ignored, Stats);
                 {ok, _} ->
@@ -181,6 +184,12 @@ transfer(Source, Target, SourceTransport, TargetTransport, Entry, Stats) ->
                            [Id, Name, Reason]),
             bump(att_read_failures, Stats)
     end.
+
+close_stream(#{close := Close}) when is_function(Close, 0) ->
+    _ = Close(),
+    ok;
+close_stream(_Info) ->
+    ok.
 
 %% A checkpoint below the source's attachment floor may predate
 %% forgotten tombstones: restart from the beginning (put rows are never
