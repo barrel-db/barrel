@@ -180,6 +180,13 @@ than barrel_docdb 2.0.0 send v3 only. Rolling to it:
 A proxy must forward these headers unchanged and must not send a signed
 header twice.
 
+On every signed request with a body, on any route, the server checks the body
+against the signed `x-barrel-content-sha256` before the handler runs and
+answers 401 `{"error":"content_hash_mismatch"}` when it is missing or does not
+match. A request that presents a signature is judged by it alone: a failing
+signature answers 401 even when a bearer token or an accepted client
+certificate would have let the request in.
+
 What signing gives you: it authenticates the client and protects the
 integrity of each request. It does not hide the request or the response, and
 it does not authenticate the server's responses. Run the sync endpoint over

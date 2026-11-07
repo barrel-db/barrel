@@ -34,7 +34,15 @@
     t_bearer_att_headers_accepted/1,
     t_legacy_semantic_header_rejected/1,
     t_legacy_att_write_rejected/1,
-    t_reconcile_over_signed/1
+    t_reconcile_over_signed/1,
+    t_rest_doc_body_swap_rejected/1,
+    t_rest_missing_hash_rejected/1,
+    t_rest_bulk_body_swap_rejected/1,
+    t_rest_context_body_swap_rejected/1,
+    t_rest_att_stream_swap_rejected/1,
+    t_rest_signed_write_accepted/1,
+    t_bearer_write_accepted/1,
+    t_bearer_with_bad_signature_rejected/1
 ]).
 
 -include_lib("common_test/include/ct.hrl").
@@ -55,7 +63,11 @@ all() ->
      t_att_put_content_type_tamper_rejected, t_att_touch_tamper_rejected,
      t_sync_hlc_and_type_tamper_rejected, t_signed_v3_writes_accepted,
      t_bearer_att_headers_accepted, t_legacy_semantic_header_rejected,
-     t_legacy_att_write_rejected, t_reconcile_over_signed].
+     t_legacy_att_write_rejected, t_reconcile_over_signed,
+     t_rest_doc_body_swap_rejected, t_rest_missing_hash_rejected,
+     t_rest_bulk_body_swap_rejected, t_rest_context_body_swap_rejected,
+     t_rest_att_stream_swap_rejected, t_rest_signed_write_accepted,
+     t_bearer_write_accepted, t_bearer_with_bad_signature_rejected].
 
 init_per_suite(Config) ->
     {Pub, Priv} = crypto:generate_key(eddsa, ed25519),
@@ -127,15 +139,16 @@ t_replay_rejected(Config) ->
     ok.
 
 %% Signature is valid (over the declared content hash) but the body does
-%% not hash to it: the handler rejects. Tampering the header instead would
-%% break the signature (401); tampering the body alone is 400.
+%% not hash to it: refused before the handler (401). Tampering the header
+%% instead breaks the signature (401).
 t_tampered_body_rejected(Config) ->
     B = current_base(),
     Path = <<"/db/", ?DB, "/_sync/changes">>,
     Signed = <<"{\"since\":\"first\"}">>,
     Sent = <<"{\"since\":\"tampered\"}">>,
     H = build_signed(post, Path, Signed, ?config(priv, Config), now_ms()),
-    {400, _} = send(post, B, Path, H, Sent),
+    {401, Resp} = send(post, B, Path, H, Sent),
+    #{<<"error">> := <<"content_hash_mismatch">>} = json:decode(Resp),
     ok.
 
 %% Two v2 requests in the same millisecond carry different nonces, so
@@ -405,6 +418,104 @@ t_reconcile_over_signed(Config) ->
     end,
     ok.
 
+%% REST writes bind the body to the signed hash like the sync wire.
+t_rest_doc_body_swap_rejected(Config) ->
+    B = current_base(),
+    Path = <<"/db/", ?DB, "/doc/swap1">>,
+    H = signed_v3(put, Path, <<"{\"v\":1}">>, json_ct(), Config),
+    {401, Resp} = send(put, B, Path, H, <<"{\"v\":666}">>),
+    #{<<"error">> := <<"content_hash_mismatch">>} = json:decode(Resp),
+    {404, _} = send(get, B, Path, bearer(), <<>>),
+    ok.
+
+%% Signed over no hash at all, yet carrying a body.
+t_rest_missing_hash_rejected(Config) ->
+    B = current_base(),
+    Path = <<"/db/", ?DB, "/doc/swap2">>,
+    H0 = signed_v3(put, Path, {hash, <<>>}, json_ct(), Config),
+    H = lists:keydelete(<<"x-barrel-content-sha256">>, 1, H0),
+    {401, Resp} = send(put, B, Path, H, <<"{\"v\":666}">>),
+    #{<<"error">> := <<"content_hash_mismatch">>} = json:decode(Resp),
+    {404, _} = send(get, B, Path, bearer(), <<>>),
+    ok.
+
+t_rest_bulk_body_swap_rejected(Config) ->
+    B = current_base(),
+    Path = <<"/db/", ?DB, "/_bulk_docs">>,
+    Signed = <<"{\"docs\":[{\"id\":\"bk1\"}]}">>,
+    Sent = <<"{\"docs\":[{\"id\":\"bk2\"}]}">>,
+    H = signed_v3(post, Path, Signed, json_ct(), Config),
+    {401, _} = send(post, B, Path, H, Sent),
+    {404, _} = send(get, B, <<"/db/", ?DB, "/doc/bk1">>, bearer(), <<>>),
+    {404, _} = send(get, B, <<"/db/", ?DB, "/doc/bk2">>, bearer(), <<>>),
+    ok.
+
+%% A non-db route: registering a context card.
+t_rest_context_body_swap_rejected(Config) ->
+    B = current_base(),
+    Path = <<"/contexts">>,
+    Card = fun(Name) ->
+        iolist_to_binary(json:encode(
+            #{<<"name">> => Name,
+              <<"locations">> => [#{<<"kind">> => <<"local">>,
+                                    <<"db">> => <<?DB>>}]}))
+    end,
+    H = signed_v3(post, Path, Card(<<"signed/a">>), json_ct(), Config),
+    {401, Resp} = send(post, B, Path, H, Card(<<"signed/b">>)),
+    #{<<"error">> := <<"content_hash_mismatch">>} = json:decode(Resp),
+    {200, List} = send(get, B, <<"/contexts?prefix=signed/">>, bearer(), <<>>),
+    #{<<"contexts">> := []} = json:decode(List),
+    ok.
+
+%% A chunked upload whose bytes differ from the signed hash: nothing stored.
+t_rest_att_stream_swap_rejected(Config) ->
+    B = current_base(),
+    DocPath = <<"/db/", ?DB, "/doc/att1">>,
+    {201, _} = send(put, B, DocPath, bearer() ++ json_ct(), <<"{}">>),
+    Path = <<DocPath/binary, "/att/f">>,
+    H = signed_v3(put, Path, <<"signed bytes">>,
+                  [{<<"content-type">>, <<"application/octet-stream">>}],
+                  Config),
+    {401, Resp} = send_chunked(put, B, Path, H,
+                               [<<"swapped ">>, <<"bytes">>]),
+    #{<<"error">> := <<"content_hash_mismatch">>} = json:decode(Resp),
+    {404, _} = send(get, B, Path, bearer(), <<>>),
+    H2 = signed_v3(put, Path, <<"signed bytes">>,
+                   [{<<"content-type">>, <<"application/octet-stream">>}],
+                   Config),
+    {201, _} = send_chunked(put, B, Path, H2, [<<"signed ">>, <<"bytes">>]),
+    {200, <<"signed bytes">>} = send(get, B, Path, bearer(), <<>>),
+    ok.
+
+t_rest_signed_write_accepted(Config) ->
+    B = current_base(),
+    Path = <<"/db/", ?DB, "/doc/good1">>,
+    Body = <<"{\"v\":1}">>,
+    H = signed_v3(put, Path, Body, json_ct(), Config),
+    {201, _} = send(put, B, Path, H, Body),
+    {200, Got} = send(get, B, Path, bearer(), <<>>),
+    #{<<"v">> := 1} = json:decode(Got),
+    ok.
+
+t_bearer_write_accepted(_Config) ->
+    B = current_base(),
+    Path = <<"/db/", ?DB, "/doc/bearer1">>,
+    {201, _} = send(put, B, Path, bearer() ++ json_ct(), <<"{\"v\":2}">>),
+    {200, Got} = send(get, B, Path, bearer(), <<>>),
+    #{<<"v">> := 2} = json:decode(Got),
+    ok.
+
+%% A valid bearer does not rescue a failing signature on the same request.
+t_bearer_with_bad_signature_rejected(Config) ->
+    B = current_base(),
+    Path = <<"/db/", ?DB, "/doc/mixed1">>,
+    {_, OtherPriv} = crypto:generate_key(eddsa, ed25519),
+    H = signed_v3(put, Path, <<"{}">>, json_ct(),
+                  lists:keystore(priv, 1, Config, {priv, OtherPriv})),
+    {401, _} = send(put, B, Path, bearer() ++ H, <<"{}">>),
+    {404, _} = send(get, B, Path, bearer(), <<>>),
+    ok.
+
 %%====================================================================
 %% Helpers
 %%====================================================================
@@ -490,6 +601,18 @@ build_signed_as(KeyId, Method, Path, Query, SignBody, Priv, Ts) ->
     [{<<"authorization">>, Auth},
      {<<"x-barrel-content-sha256">>, CH},
      {<<"content-type">>, <<"application/json">>}].
+
+json_ct() -> [{<<"content-type">>, <<"application/json">>}].
+
+%% Chunked request body (no content-length): the server reads a stream.
+send_chunked(Method, Base, Path, Headers, Chunks) ->
+    Url = iolist_to_binary([Base, Path]),
+    {ok, Ref} = hackney:request(Method, Url, Headers, stream, []),
+    lists:foreach(fun(C) -> ok = hackney:send_body(Ref, C) end, Chunks),
+    ok = hackney:finish_send_body(Ref),
+    {ok, S, _H, Ref2} = hackney:start_response(Ref),
+    {ok, RB} = hackney:body(Ref2),
+    {S, RB}.
 
 send(Method, Base, Path, Headers, Body) ->
     Url = iolist_to_binary([Base, Path]),
