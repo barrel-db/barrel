@@ -779,10 +779,17 @@ fold_posting_loop_reverse({ok, Key, Value}, Iter, Fun, Acc) ->
 %% Body Column Family Operations (BlobDB enabled)
 %%====================================================================
 
-%% @doc Build column family options for default CF (document entities)
+%% @doc Build column family options for default CF (document entities,
+%% changes feed, history, stubs). Retention, TTL and stub purge delete
+%% long runs of consecutive keys here; a flush or compaction turns a run of
+%% at least `min_tombstones_for_range_conversion' deletes (64 by default,
+%% 0 turns it off) into one range delete, so reads no longer step over
+%% each deleted key.
 -spec build_default_cf_options(map()) -> list().
-build_default_cf_options(_Options) ->
-    [{merge_operator, counter_merge_operator}].
+build_default_cf_options(Options) ->
+    [{merge_operator, counter_merge_operator},
+     {min_tombstones_for_range_conversion,
+      maps:get(min_tombstones_for_range_conversion, Options, 64)}].
 
 %% @doc Build column family options for document bodies with BlobDB enabled
 %% Bodies are stored as blobs for values larger than min_blob_size (4KB default).
