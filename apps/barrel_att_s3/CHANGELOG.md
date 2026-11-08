@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [0.1.5] - 2026-11-08
 
+### Fixed
+- On a new branch, an attachment deleted while the branch was still copying its attachments in the background could come back with the parent's content, and a write could be replaced by the parent's version. The copy now takes the same per-attachment lock as writes and deletes, so whatever the branch does wins.
+- A streamed attachment read failed when the store closed the connection partway through, which an overloaded S3 server does now and then. The read now asks again for the bytes it has not received yet. If the attachment was replaced in the meantime, the read fails instead of mixing two versions.
+- A new branch copies its attachments in the background. One failed copy used to stop that copy until the database was opened again, and until then the branch answered that its attachments were still syncing. The copy now retries failed attachments itself for about a minute.
+
 ### Changed
 - Requires rocksdb 3.2.1 (RocksDB 11.13). The build no longer downloads anything, so it works offline and behind a proxy, and it fixes rocksdb crashes, for example when a database handle is closed while another process still uses it, or when a handle is used after it was released.
 

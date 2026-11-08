@@ -80,13 +80,18 @@
 %%% reaching `open/2' leaves nothing spawned, and crash recovery is just
 %%% `open/2' finding the marker again on a later open.
 %%%
-%%% The sweep skips a destination key that already exists (a branch write
-%%% wins regardless of ordering, since it always lands eventually) and any
-%%% key the branch's own feed shows as deleted since the fork -- rechecked
-%%% right after the copy lands too, since a delete (unlike a put) does not
-%%% self-heal a lost race: nothing else would remove an object the sweep
-%%% just created. The marker only clears once every key succeeds; a
-%%% partial failure retries on the next open.
+%%% The sweep skips a destination key that already exists and any key the
+%%% branch's own feed shows as deleted since the fork. Each key is checked
+%%% and copied under the attachment lock that put and delete take, so a
+%%% branch write or delete lands either before the check (the copy is
+%%% skipped) or after the copy (it replaces or removes it); the feed is
+%%% still rechecked after the copy as a second guard. The marker only clears once every key succeeds. A
+%%% failed copy or listing is retried by the sweep itself, with backoff
+%%% (about a minute in all); only then is it left to the next open.
+%%%
+%%% A streamed read (`get_stream/4') whose connection drops mid-body asks
+%%% again from its offset, if the object's ETag has not changed; a changed
+%%% object fails the read with `{changed_during_read, Key}'.
 %%%
 %%% Reads (`get/4', `get_stream/4', `get_info/4') check the local feed
 %%% first: a row whose object isn't copied yet returns
@@ -179,6 +184,13 @@
 -define(META_ORIGIN, <<"origin-hlc">>).
 -define(FORK_PENDING, "fork_pending").
 -define(DELETE_BATCH, 1000). %% S3 DeleteObjects cap per request
+%% Fork copy sweep: attempts before leaving it to the next open, and the
+%% first backoff (doubles, capped at 30 s): about a minute in all.
+-define(SWEEP_ATTEMPTS, 8).
+-define(SWEEP_BACKOFF_MS, 500).
+%% A streamed read whose connection drops resumes from its offset this
+%% many times before failing.
+-define(READ_RESUMES, 3).
 
 -spec open(string(), map()) -> {ok, map()} | {error, term()}.
 open(Path, Options) ->
@@ -388,36 +400,66 @@ fork_pending_path(Path) ->
 %% already there (branch write or a prior partial run) or deleted since
 %% the fork. Clears fork_pending only once every key succeeds.
 run_copy_sweep(Path, FeedRef, DbName, Client, Bucket, OldPrefix, NewPrefix) ->
+    copy_sweep(Path, FeedRef, DbName, Client, Bucket, OldPrefix, NewPrefix, 1).
+
+%% A failed copy or listing is retried here with backoff (a slow or
+%% overloaded store fails a request now and then); only after
+%% ?SWEEP_ATTEMPTS does it wait for the next open. Every pass is
+%% idempotent: copy_if_absent skips what already landed. A cleared marker
+%% (destroy/2) stops the retries.
+copy_sweep(Path, FeedRef, DbName, Client, Bucket, OldPrefix, NewPrefix, Attempt) ->
+    case copy_sweep_once(FeedRef, DbName, Client, Bucket, OldPrefix, NewPrefix) of
+        ok ->
+            ok = clear_fork_pending(Path);
+        {error, Why} when Attempt < ?SWEEP_ATTEMPTS ->
+            timer:sleep(min(30000, ?SWEEP_BACKOFF_MS bsl (Attempt - 1))),
+            case read_fork_pending(Path) of
+                {ok, _} ->
+                    copy_sweep(Path, FeedRef, DbName, Client, Bucket,
+                               OldPrefix, NewPrefix, Attempt + 1);
+                _ ->
+                    logger:info("attachment fork copy sweep for ~s stopped: "
+                                "marker gone after ~p", [Path, Why])
+            end;
+        {error, Why} ->
+            logger:warning(
+                "attachment fork copy sweep for ~s incomplete after ~b "
+                "attempts (~p); will retry on next open",
+                [Path, Attempt, Why])
+    end.
+
+copy_sweep_once(FeedRef, DbName, Client, Bucket, OldPrefix, NewPrefix) ->
     ListPrefix = <<OldPrefix/binary, "/">>,
     case livery_s3:list_objects_all(Client, Bucket, #{prefix => ListPrefix}) of
         {ok, #{objects := Objects}} ->
             Results = [copy_one(FeedRef, DbName, Client, Bucket, OldPrefix, NewPrefix, Key)
                       || #{key := Key} <- Objects],
-            case lists:all(fun(Ok) -> Ok end, Results) of
-                true ->
-                    ok = clear_fork_pending(Path);
-                false ->
-                    logger:warning(
-                        "attachment fork copy sweep for ~s incomplete; "
-                        "will retry on next open", [Path])
+            case length([R || R <- Results, R =/= true]) of
+                0 -> ok;
+                Failed -> {error, {failed_copies, Failed}}
             end;
         {error, Reason} ->
-            logger:warning(
-                "attachment fork copy sweep for ~s failed to list ~s: ~p; "
-                "will retry on next open", [Path, OldPrefix, Reason])
+            {error, {list_failed, Reason}}
     end.
 
+%% Each key is copied under the attachment's lock, the one put/5 and
+%% delete/5 take: a branch delete or write either lands before the check
+%% (the copy is skipped) or after the copy (it replaces or removes it).
+%% Without it, a delete between its S3 delete and its feed row let the
+%% copy bring the attachment back.
 copy_one(FeedRef, DbName, Client, Bucket, OldPrefix, NewPrefix, SrcKey) ->
     case key_to_doc_att(OldPrefix, SrcKey) of
         {ok, DocId, AttName} ->
-            case deleted_since_fork(FeedRef, DbName, DocId, AttName) of
-                true ->
-                    true;
-                false ->
-                    DstKey = swap_prefix(OldPrefix, NewPrefix, SrcKey),
-                    copy_if_absent(FeedRef, DbName, DocId, AttName, Client, Bucket,
-                                   SrcKey, DstKey)
-            end;
+            with_att_lock(#{}, DbName, DocId, AttName, fun() ->
+                case deleted_since_fork(FeedRef, DbName, DocId, AttName) of
+                    true ->
+                        true;
+                    false ->
+                        DstKey = swap_prefix(OldPrefix, NewPrefix, SrcKey),
+                        copy_if_absent(FeedRef, DbName, DocId, AttName, Client,
+                                       Bucket, SrcKey, DstKey)
+                end
+            end);
         error ->
             true
     end.
@@ -1301,9 +1343,12 @@ get_stream(#{prefix := Prefix} = AttRef, DbName, DocId, AttName) ->
 
 do_get_stream(#{client := Client, bucket := Bucket} = AttRef, DbName, DocId, AttName, Key) ->
     case livery_s3:get_object(Client, Bucket, Key, #{stream => true}) of
-        {ok, #{body := {stream, Reader}}} ->
+        {ok, #{body := {stream, Reader}} = Resp} ->
             {ok, #{type => read, att_ref => AttRef, key => Key,
-                   att_name => AttName, reader => Reader}};
+                   att_name => AttName, reader => Reader, offset => 0,
+                   etag => maps:get(etag, Resp, undefined),
+                   length => maps:get(content_length, Resp, undefined),
+                   resumes => 0}};
         {error, {s3, _Code, _Msg, #{status := 404}}} ->
             not_found_or_sync_pending(AttRef, DbName, DocId, AttName);
         {error, _} = Err ->
@@ -1316,9 +1361,37 @@ do_get_stream(#{client := Client, bucket := Bucket} = AttRef, DbName, DocId, Att
 -spec read_chunk(map()) -> {ok, binary(), map()} | eof | {error, term()}.
 read_chunk(#{type := read, reader := Reader} = Stream) ->
     case livery_client:read(Reader, 30000) of
-        {ok, Data, NextReader} -> {ok, Data, Stream#{reader => NextReader}};
+        {ok, Data, NextReader} ->
+            Offset = maps:get(offset, Stream, 0) + byte_size(Data),
+            {ok, Data, Stream#{reader => NextReader, offset => Offset}};
         {done, _NextReader} -> eof;
-        {error, _} = Err -> Err
+        {error, Reason} -> resume_read(Stream, Reason)
+    end.
+
+%% @private The connection dropped mid-body (the store closed it, a
+%% timeout): ask again for the bytes not read yet, only if the object is
+%% still the one this read started on (same ETag). A changed object fails
+%% the read rather than splicing two versions.
+resume_read(#{offset := Offset, length := Length}, _Reason)
+  when is_integer(Length), Offset >= Length ->
+    eof;
+resume_read(#{resumes := N, etag := ETag}, Reason)
+  when N >= ?READ_RESUMES; ETag =:= undefined ->
+    {error, Reason};
+resume_read(#{att_ref := #{client := Client, bucket := Bucket}, key := Key,
+              offset := Offset, etag := ETag, resumes := N} = Stream, Reason) ->
+    Opts = #{stream => true, range => {Offset, eof}, if_match => ETag},
+    case livery_s3:get_object(Client, Bucket, Key, Opts) of
+        {ok, #{body := {stream, Reader}} = Resp} ->
+            %% Garage ignores If-Match: compare the ETag ourselves too
+            case maps:get(etag, Resp, ETag) of
+                ETag -> read_chunk(Stream#{reader => Reader, resumes => N + 1});
+                _ -> {error, {changed_during_read, Key}}
+            end;
+        {error, precondition_failed} ->
+            {error, {changed_during_read, Key}};
+        {error, _} ->
+            {error, Reason}
     end.
 
 %% @doc No-op, matching the RocksDB backend: an abandoned (not fully
