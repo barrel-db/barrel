@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Requires rocksdb 3.2.0 (RocksDB 11.13). The build no longer downloads anything, so it works offline and behind a proxy, and it fixes rocksdb crashes, for example when a database handle is closed while another process still uses it.
+
 ## [2.1.0] - 2026-11-07
 
 ### Fixed
