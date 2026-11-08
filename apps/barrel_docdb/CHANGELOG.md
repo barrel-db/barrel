@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- The database size metric is now filled in, and three new metrics show the compaction backlog: bytes still to compact, compactions running and compactions queued. They refresh every minute (`stats_interval`), and `db_info` returns the same numbers under `storage`. A backlog that keeps growing means compaction is falling behind the writes.
+
 ### Changed
 - A database no longer recompacts all of its data every hour once it passes 1 GiB. That forced compaction existed to run a revision filter that no longer removes anything, so it only cost disk I/O. RocksDB still compacts on its own. The `compaction_interval`, `compaction_size_threshold` and `prune_depth` options have no effect any more; a database given them logs a warning.
 - Requires rocksdb 3.2.0 (RocksDB 11.13). The build no longer downloads anything, so it works offline and behind a proxy, and it fixes rocksdb crashes, for example when a database handle is closed while another process still uses it.

@@ -44,7 +44,7 @@
 -export([decode_entity/1, encode_entity/1]).  %% Decode/encode entity binary
 
 %% Stats and capacity monitoring
--export([get_stats/1, get_db_size/1, get_property/2]).
+-export([get_stats/1, get_db_size/1, get_property/2, storage_stats/1]).
 
 %%====================================================================
 %% Types
@@ -1194,6 +1194,35 @@ get_stats(#{ref := Ref}) ->
 -spec get_property(db_ref(), binary()) -> {ok, binary()} | {error, term()}.
 get_property(#{ref := Ref}, Property) when is_binary(Property) ->
     rocksdb:get_property(Ref, Property).
+
+%% @doc Disk use and compaction backlog of the store, from RocksDB
+%% properties: SST and blob file bytes summed over the column families,
+%% bytes compaction still has to rewrite, and compactions running or
+%% waiting for a thread. Cheap: no data is read.
+-spec storage_stats(db_ref()) -> #{size_bytes := non_neg_integer(),
+                                   pending_compaction_bytes := non_neg_integer(),
+                                   compactions_running := non_neg_integer(),
+                                   compactions_queued := non_neg_integer()}.
+storage_stats(#{ref := Ref} = DbRef) ->
+    CFs = [CF || {K, CF} <- maps:to_list(DbRef),
+                 lists:suffix("_cf", atom_to_list(K))],
+    Sum = fun(Prop) ->
+              lists:sum([int_property(rocksdb:get_property(Ref, CF, Prop))
+                         || CF <- CFs])
+          end,
+    #{size_bytes => Sum(<<"rocksdb.total-sst-files-size">>)
+                    + Sum(<<"rocksdb.total-blob-file-size">>),
+      pending_compaction_bytes =>
+          Sum(<<"rocksdb.estimate-pending-compaction-bytes">>),
+      compactions_running =>
+          int_property(rocksdb:get_property(Ref, <<"rocksdb.num-running-compactions">>)),
+      compactions_queued =>
+          int_property(rocksdb:get_property(Ref, <<"rocksdb.num-unscheduled-compactions">>))}.
+
+int_property({ok, V}) when is_binary(V) ->
+    try binary_to_integer(V) catch error:badarg -> 0 end;
+int_property({ok, V}) when is_integer(V) -> V;
+int_property(_) -> 0.
 
 %% @doc Get estimated database size in bytes
 %% Uses RocksDB's estimate-live-data-size property as primary metric,

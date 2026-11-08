@@ -1,5 +1,5 @@
 %%% @doc Recovery defects from the 2.0.0 review: writer restarts and
-%%% failed databases, stale store handles, compaction filter death,
+%%% failed databases, stale store handles, removed compaction options,
 %%% task credentials and config validation, HTTP request lifetime and
 %%% wait_for versions.
 -module(barrel_review_recovery_SUITE).
