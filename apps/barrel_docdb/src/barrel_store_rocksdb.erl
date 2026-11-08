@@ -54,7 +54,6 @@
     ref := rocksdb:db_handle(),
     path := string(),
     default_cf := rocksdb:cf_handle(),
-    bitmap_cf := rocksdb:cf_handle(),
     posting_cf := rocksdb:cf_handle(),
     body_cf := rocksdb:cf_handle(),
     local_cf := rocksdb:cf_handle(),
@@ -75,7 +74,9 @@
 -export_type([db_ref/0, snapshot/0, read_profile/0]).
 
 %% Column family names
--define(BITMAP_CF_NAME, "bitmap").
+%% Column family of older stores, never written; dropped at the next
+%% writable open (see drop_legacy_cfs/2).
+-define(LEGACY_BITMAP_CF, "bitmap").
 -define(POSTING_CF_NAME, "posting").
 -define(BODY_CF_NAME, "bodies").
 -define(LOCAL_CF_NAME, "local").
@@ -96,21 +97,18 @@ open(Path, Options) ->
         undefined -> DbOpts0;
         _ -> [{env, Env} | DbOpts0]
     end,
-    BitmapSize = maps:get(bitmap_size, Options, 1048576),  %% 1M bits default
-
     %% Column family descriptors with their options
     CFDescriptors = [
         {"default", build_default_cf_options(Options)},
-        {?BITMAP_CF_NAME, [{merge_operator, {bitset_merge_operator, BitmapSize}}]},
         {?POSTING_CF_NAME, build_posting_cf_options()},
         {?BODY_CF_NAME, build_body_cf_options(Options)},
         {?LOCAL_CF_NAME, []}  %% Simple KV storage for local docs (no merge operator)
     ],
 
     case open_store(ReadOnly, Path, DbOpts, CFDescriptors) of
-        {ok, Ref, [DefaultCF, BitmapCF, PostingCF, BodyCF, LocalCF]} ->
+        {ok, Ref, [DefaultCF, PostingCF, BodyCF, LocalCF]} ->
             DbRef = #{ref => Ref, path => Path,
-                      default_cf => DefaultCF, bitmap_cf => BitmapCF,
+                      default_cf => DefaultCF,
                       posting_cf => PostingCF, body_cf => BodyCF,
                       local_cf => LocalCF},
             case Env of
@@ -128,8 +126,55 @@ open(Path, Options) ->
 ensure_store_dir(true, _Path) -> ok;
 ensure_store_dir(_, Path) -> filelib:ensure_dir(Path ++ "/").
 
+%% A read-only open may leave column families out; a writable open must
+%% name every one on disk, so a legacy one is opened, then dropped.
 open_store(true, Path, DbOpts, CFs) -> barrel_rocksdb_ro:open(Path, DbOpts, CFs);
-open_store(_, Path, DbOpts, CFs) -> rocksdb:open(Path, DbOpts, CFs).
+open_store(_, Path, DbOpts, CFs) ->
+    Legacy = [{Name, []} || Name <- existing_cfs(Path, DbOpts),
+                            Name =:= ?LEGACY_BITMAP_CF],
+    case rocksdb:open(Path, DbOpts, CFs ++ Legacy) of
+        {ok, Ref, Handles} ->
+            {Wanted, LegacyHandles} = lists:split(length(CFs), Handles),
+            ok = drop_legacy_cfs(Ref, lists:zip([N || {N, _} <- Legacy],
+                                                LegacyHandles)),
+            {ok, Ref, Wanted};
+        {error, _} = Err ->
+            Err
+    end.
+
+existing_cfs(Path, DbOpts) ->
+    case filelib:is_regular(filename:join(Path, "CURRENT")) of
+        false -> [];
+        true ->
+            case rocksdb:list_column_families(Path, DbOpts) of
+                {ok, Names} -> Names;
+                {error, _} -> []
+            end
+    end.
+
+%% The bitmap column family was created by every store and never written.
+%% Drop it when it is empty; keep it, untouched, otherwise.
+drop_legacy_cfs(_Ref, []) -> ok;
+drop_legacy_cfs(Ref, [{Name, CF} | Rest]) ->
+    case cf_is_empty(Ref, CF) of
+        true ->
+            ok = rocksdb:drop_column_family(Ref, CF),
+            _ = rocksdb:destroy_column_family(Ref, CF),
+            ok;
+        false ->
+            logger:warning("legacy column family ~s is not empty; kept",
+                           [Name])
+    end,
+    drop_legacy_cfs(Ref, Rest).
+
+cf_is_empty(Ref, CF) ->
+    {ok, It} = rocksdb:iterator(Ref, CF, []),
+    try rocksdb:iterator_move(It, first) of
+        {ok, _, _} -> false;
+        _ -> true
+    after
+        rocksdb:iterator_close(It)
+    end.
 
 %% @doc Close the database
 -spec close(db_ref()) -> ok.
