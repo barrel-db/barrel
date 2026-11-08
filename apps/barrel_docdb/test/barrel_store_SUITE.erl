@@ -14,7 +14,8 @@
 -export([all/0, groups/0, init_per_suite/1, end_per_suite/1,
          init_per_group/2, end_per_group/2,
          init_per_testcase/2, end_per_testcase/2]).
--export([rocksdb_deleted_run_reads/1]).
+-export([rocksdb_deleted_run_reads/1, legacy_bitmap_cf_dropped/1,
+         legacy_bitmap_cf_read_only/1]).
 
 %% Test cases
 -export([
@@ -73,7 +74,9 @@ groups() ->
             rocksdb_fold,
             rocksdb_fold_range,
             rocksdb_snapshot,
-            rocksdb_deleted_run_reads
+            rocksdb_deleted_run_reads,
+            legacy_bitmap_cf_dropped,
+            legacy_bitmap_cf_read_only
         ]}
     ].
 
@@ -568,3 +571,44 @@ rocksdb_deleted_run_reads(Config) ->
           ok = rocksdb:release_snapshot(SnapRef),
           ok = barrel_store_rocksdb:close(DbRef)
       end, [0, 64]).
+
+%% A store created before this release has a "bitmap" column family.
+legacy_store(Path, BitmapRows) ->
+    {ok, Ref, [_, BitmapCF | _]} =
+        rocksdb:open(Path, [{create_if_missing, true},
+                            {create_missing_column_families, true}],
+                     [{"default", []}, {"bitmap", []}, {"posting", []},
+                      {"bodies", []}, {"local", []}]),
+    ok = rocksdb:put(Ref, <<"doc">>, <<"v">>, []),
+    [ok = rocksdb:put(Ref, BitmapCF, K, <<"x">>, []) || K <- BitmapRows],
+    ok = rocksdb:close(Ref).
+
+legacy_bitmap_cf_dropped(Config) ->
+    TestDir = proplists:get_value(test_dir, Config),
+    Empty = TestDir ++ "/legacy_empty",
+    ok = legacy_store(Empty, []),
+    {ok, DbRef} = barrel_store_rocksdb:open(Empty, #{}),
+    ?assertEqual({ok, <<"v">>}, barrel_store_rocksdb:get(DbRef, <<"doc">>)),
+    ok = barrel_store_rocksdb:close(DbRef),
+    {ok, Cfs} = rocksdb:list_column_families(Empty, []),
+    ?assertNot(lists:member("bitmap", Cfs)),
+    %% reopens without it
+    {ok, DbRef2} = barrel_store_rocksdb:open(Empty, #{}),
+    ok = barrel_store_rocksdb:close(DbRef2),
+    %% a non-empty one (never written by barrel) is kept
+    Full = TestDir ++ "/legacy_full",
+    ok = legacy_store(Full, [<<"k">>]),
+    {ok, DbRef3} = barrel_store_rocksdb:open(Full, #{}),
+    ok = barrel_store_rocksdb:close(DbRef3),
+    {ok, Cfs3} = rocksdb:list_column_families(Full, []),
+    ?assert(lists:member("bitmap", Cfs3)).
+
+legacy_bitmap_cf_read_only(Config) ->
+    TestDir = proplists:get_value(test_dir, Config),
+    Path = TestDir ++ "/legacy_ro",
+    ok = legacy_store(Path, []),
+    {ok, DbRef} = barrel_store_rocksdb:open(Path, #{read_only => true}),
+    ?assertEqual({ok, <<"v">>}, barrel_store_rocksdb:get(DbRef, <<"doc">>)),
+    ok = barrel_store_rocksdb:close(DbRef),
+    {ok, Cfs} = rocksdb:list_column_families(Path, []),
+    ?assert(lists:member("bitmap", Cfs)).
