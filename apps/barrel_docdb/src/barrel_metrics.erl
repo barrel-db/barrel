@@ -46,7 +46,8 @@
     set_db_docs/2,
     set_db_size/2,
     set_db_attachments/2,
-    set_db_stubs/3
+    set_db_stubs/3,
+    set_db_storage/2
 ]).
 
 %% Export function
@@ -127,7 +128,15 @@
     {gauge, barrel_db_stubs_total,
      <<"Deleted documents kept as stubs">>},
     {gauge, barrel_db_stubs_bytes,
-     <<"Bytes held by delete stubs (state and change row)">>}
+     <<"Bytes held by delete stubs (state and change row)">>},
+
+    %% Compaction backlog of the document store, from RocksDB properties
+    {gauge, barrel_db_pending_compaction_bytes,
+     <<"Bytes compaction still has to rewrite">>},
+    {gauge, barrel_db_compactions_running,
+     <<"Compactions running now">>},
+    {gauge, barrel_db_compactions_queued,
+     <<"Compactions waiting for a background thread">>}
 ]).
 
 %%====================================================================
@@ -306,6 +315,25 @@ set_db_attachments(Db, Count) ->
         Instrument -> instrument_meter:set(Instrument, Count, Attrs)
     end,
     ok.
+
+%% @doc Set the size and compaction gauges from
+%% barrel_store_rocksdb:storage_stats/1.
+-spec set_db_storage(binary(), map()) -> ok.
+set_db_storage(Db, #{size_bytes := Size, pending_compaction_bytes := Pending,
+                     compactions_running := Running,
+                     compactions_queued := Queued}) ->
+    ok = set_db_size(Db, Size),
+    Attrs = #{db => Db},
+    lists:foreach(
+      fun({Name, Value}) ->
+          case instrument_meter:get_instrument(Name) of
+              undefined -> ok;
+              Instrument -> instrument_meter:set(Instrument, Value, Attrs)
+          end
+      end,
+      [{barrel_db_pending_compaction_bytes, Pending},
+       {barrel_db_compactions_running, Running},
+       {barrel_db_compactions_queued, Queued}]).
 
 %% @doc Set the number of delete stubs and the bytes they hold.
 -spec set_db_stubs(binary(), non_neg_integer(), non_neg_integer()) -> ok.

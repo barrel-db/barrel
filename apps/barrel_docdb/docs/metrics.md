@@ -15,7 +15,7 @@ Text = barrel_metrics:export_text().
 %% Prometheus exposition format, ready to serve or log
 ```
 
-To expose metrics over HTTP for a Prometheus scrape, run the `barrel_server` app, which serves this output on its metrics endpoint. See the umbrella REST server guide (`docs/guides/rest-server.md`). Metrics can also be pushed to an OTLP collector; see [Observability](observability.md).
+Neither barrel_docdb nor `barrel_server` serves a metrics route. To get them to Prometheus, push them to an OTLP collector (see [Observability](observability.md)), or serve `barrel_metrics:export_text()` from a route of your own.
 
 ## Available Metrics
 
@@ -69,17 +69,27 @@ barrel_replication_errors{task_id="rep-123"} 2
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
-| `barrel_db_documents_total` | Gauge | db | Document count |
-| `barrel_db_size_bytes` | Gauge | db | Database size |
-| `barrel_db_attachments_total` | Gauge | db | Attachment count |
+| `barrel_db_size_bytes` | Gauge | db | Document store size on disk: SST and blob files of every column family |
+| `barrel_db_pending_compaction_bytes` | Gauge | db | Bytes compaction still has to rewrite |
+| `barrel_db_compactions_running` | Gauge | db | Compactions running now |
+| `barrel_db_compactions_queued` | Gauge | db | Compactions waiting for a background thread |
 | `barrel_db_stubs_total` | Gauge | db | Deleted documents kept as stubs |
 | `barrel_db_stubs_bytes` | Gauge | db | Bytes held by stubs (state and change row) |
+| `barrel_db_documents_total` | Gauge | db | Not recorded yet: always 0 |
+| `barrel_db_attachments_total` | Gauge | db | Not recorded yet: always 0 |
+
+The size and compaction gauges are read from RocksDB properties every
+`stats_interval` milliseconds (60000 by default, `0` turns the refresh off),
+and the first time within a second of opening. `barrel_docdb:db_info/1` returns
+the same numbers under `storage`. A pending compaction backlog that keeps
+growing, or queued compactions that stay above zero, means compaction is
+falling behind the writes.
 
 The stub gauges are measured after each retention sweep. `barrel_docdb:stub_stats/1` returns the same numbers on demand. A stub costs about 270 bytes, plus about 60 per writer id and 40 per older peer's version in its history (`bench/run_bench.sh stubs`). `tombstone_purge_after` removes old stubs.
 
 > #### HTTP request metrics
 >
-> Metrics for HTTP requests (method, path, status, latency) are produced by `barrel_server`, not barrel_docdb, since barrel_docdb has no HTTP surface of its own.
+> No component records HTTP request metrics yet: barrel_docdb has no HTTP surface, and `barrel_server` does not instrument its routes.
 
 ## Grafana Dashboard
 

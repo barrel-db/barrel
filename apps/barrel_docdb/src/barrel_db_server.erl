@@ -101,6 +101,9 @@
     %% referenced for the whole db lifetime (also carried in the store
     %% and att refs).
     env :: rocksdb:env_handle() | undefined,
+    %% Refreshes the storage gauges (size, compaction backlog)
+    stats_timer :: reference() | undefined,
+    stats_interval = 60000 :: non_neg_integer(),
     retention_period :: non_neg_integer(),  %% Retention window in seconds (0 = infinite)
     retention_timer :: reference() | undefined,  %% Timer for periodic retention sweeps
     retention_interval :: pos_integer(),  %% Interval between sweeps in ms
@@ -174,6 +177,9 @@
 
 %% Options of the removed compaction check and revision filter; still
 %% accepted, and reported once at open.
+%% Storage gauges refresh every minute; `stats_interval => 0' turns it off.
+-define(DEFAULT_STATS_INTERVAL, 60000).
+
 -define(OBSOLETE_OPTIONS, [compaction_interval, compaction_size_threshold,
                            prune_depth]).
 
@@ -541,6 +547,16 @@ init(Name, Config, CompiledChannels, DbPath, Keyspace, Parent, ForkHlc, Env) ->
                     _ = gc_att_uploads(ReadOnly, AttRef, Name, Config),
                     ok = barrel_channel:install(Name, CompiledChannels),
 
+                    StatsInterval = maps:get(stats_interval, Config,
+                                             ?DEFAULT_STATS_INTERVAL),
+                    %% A read-only store does not change: db_info reads its
+                    %% numbers on demand, no refresh runs.
+                    StatsTimer = case ReadOnly of
+                        true -> undefined;
+                        false -> arm_stats(StatsInterval,
+                                           min(StatsInterval, 1000))
+                    end,
+
                     %% Retention settings; the sweeper only runs for a
                     %% finite window
                     RetentionPeriod = maps:get(retention_period, Config,
@@ -594,6 +610,8 @@ init(Name, Config, CompiledChannels, DbPath, Keyspace, Parent, ForkHlc, Env) ->
                         store_ref = StoreRef,
                         att_ref = AttRef,
                         env = Env,
+                        stats_timer = StatsTimer,
+                        stats_interval = StatsInterval,
                         retention_period = RetentionPeriod,
                         retention_timer = RetentionTimer,
                         retention_interval = RetentionInterval,
@@ -676,7 +694,8 @@ handle_call_rw(info, _From, #state{name = Name, keyspace = Keyspace,
         retention_period => RetentionPeriod,
         history_floor => barrel_history:history_floor(StoreRef, Name),
         att_floor => AttFloor,
-        write_groups => WriteGroups
+        write_groups => WriteGroups,
+        storage => barrel_store_rocksdb:storage_stats(StoreRef)
     },
     Info = case Parent of
         undefined -> Info0;
@@ -888,6 +907,12 @@ handle_cast(_Msg, State) ->
     {noreply, State}.
 
 %% @doc Handle other messages
+handle_info(stats_tick, #state{name = Name, store_ref = StoreRef,
+                               stats_interval = Interval} = State) ->
+    ok = barrel_metrics:set_db_storage(Name,
+                                       barrel_store_rocksdb:storage_stats(StoreRef)),
+    {noreply, State#state{stats_timer = arm_stats(Interval)}};
+
 %% The periodic retention/ttl work runs in a monitored worker so it never
 %% blocks the writer loop. The periodic timer is re-armed when the worker
 %% finishes.
@@ -955,6 +980,7 @@ terminate(Reason, #state{committer = Committer} = State) when is_pid(Committer) 
     terminate(Reason, State#state{committer = undefined});
 terminate(_Reason, #state{name = Name, store_ref = StoreRef, att_ref = AttRef,
                           retention_timer = RetentionTimer,
+                          stats_timer = StatsTimer,
                           upload_gc_timer = UploadGcTimer,
                           ttl_timer = TtlTimer,
                           sweep_workers = Workers}) ->
@@ -963,6 +989,10 @@ terminate(_Reason, #state{name = Name, store_ref = StoreRef, att_ref = AttRef,
     _ = case TtlTimer of
             undefined -> ok;
             _ -> erlang:cancel_timer(TtlTimer)
+        end,
+    _ = case StatsTimer of
+            undefined -> ok;
+            _ -> erlang:cancel_timer(StatsTimer)
         end,
     _ = case UploadGcTimer of
             undefined -> ok;
@@ -1163,6 +1193,13 @@ reschedule_sweep(ttl, Result, #state{ttl_sweep_interval = Interval,
         _ -> Interval
     end,
     State#state{ttl_timer = erlang:send_after(NextIn, self(), ttl_sweep)}.
+
+%% Re-arm the storage gauge refresh. The first refresh after open comes
+%% within a second, so a new database reports its size right away.
+arm_stats(Interval) -> arm_stats(Interval, Interval).
+
+arm_stats(0, _Delay) -> undefined;
+arm_stats(_Interval, Delay) -> erlang:send_after(Delay, self(), stats_tick).
 
 sweep_kind_of_pid(Pid, Workers) ->
     Match = [K || {K, {P, _, _}} <- maps:to_list(Workers), P =:= Pid],

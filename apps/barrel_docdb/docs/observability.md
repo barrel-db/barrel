@@ -174,13 +174,12 @@ Barrel DocDB automatically propagates trace context using W3C Trace Context head
 
 **Outgoing requests:** During replication, trace context is injected into HTTP headers for cross-node correlation.
 
-**Incoming HTTP requests:** When barrel_docdb runs behind `barrel_server`, that layer extracts trace context from request headers and adds the `traceparent` header to responses.
+**Incoming HTTP requests:** `barrel_server` does not read or return trace headers yet, so a trace starts inside barrel_docdb.
 
 ### Instrumented Operations
 
 | Component | Span Name | Kind | Attributes |
 |-----------|-----------|------|------------|
-| HTTP Handler (via `barrel_server`) | `{METHOD} {PATH}` | server | http.request.method, url.path, http.response.status_code |
 | Document Put | `put {db}` | internal | db.system.name, db.namespace, db.operation.name, db.document.id |
 | Document Get | `get {db}` | internal | db.system.name, db.namespace, db.operation.name, db.document.id |
 | Document Delete | `delete {db}` | internal | db.system.name, db.namespace, db.operation.name, db.document.id |
@@ -237,7 +236,7 @@ Metrics are always recorded in-process regardless of push configuration. Render 
 Text = barrel_metrics:export_text().
 ```
 
-Run `barrel_server` to serve this output on its metrics endpoint for a Prometheus scrape.
+Neither barrel_docdb nor `barrel_server` serves a metrics route: push the metrics over OTLP (below), or serve this text from a route of your own.
 
 ### Available Metrics
 
@@ -277,27 +276,23 @@ barrel_doc_operation_duration_seconds_bucket{db="mydb",operation="get",le="0.01"
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
-| `barrel_db_documents_total` | Gauge | db | Document count |
-| `barrel_db_size_bytes` | Gauge | db | Database size |
-| `barrel_db_attachments_total` | Gauge | db | Attachment count |
+| `barrel_db_size_bytes` | Gauge | db | Document store size on disk |
+| `barrel_db_pending_compaction_bytes` | Gauge | db | Bytes compaction still has to rewrite |
+| `barrel_db_compactions_running` | Gauge | db | Compactions running now |
+| `barrel_db_compactions_queued` | Gauge | db | Compactions waiting for a thread |
+| `barrel_db_documents_total` | Gauge | db | Not recorded yet: always 0 |
+| `barrel_db_attachments_total` | Gauge | db | Not recorded yet: always 0 |
 
 > #### HTTP request metrics
 >
-> Metrics for HTTP requests (method, path, status, latency) are produced by `barrel_server`, not barrel_docdb, since barrel_docdb has no HTTP surface of its own.
+> No component records HTTP request metrics yet: barrel_docdb has no HTTP surface, and `barrel_server` does not instrument its routes.
 
 ### Prometheus Configuration (Pull)
 
-Point Prometheus at the `barrel_server` listener that exposes the metrics:
-
-```yaml
-# prometheus.yml
-scrape_configs:
-  - job_name: 'barrel'
-    static_configs:
-      - targets: ['localhost:8080']
-    metrics_path: /metrics
-    scrape_interval: 15s
-```
+There is no metrics route to scrape. Push the metrics to an OpenTelemetry
+Collector (below) and let Prometheus scrape the collector's Prometheus
+exporter, or serve `barrel_metrics:export_text()` from a route in your own
+application.
 
 ### Push Model (OTLP)
 
@@ -742,13 +737,7 @@ global:
   scrape_interval: 15s
 
 scrape_configs:
-  # Scrape the barrel_server listener (pull model)
-  - job_name: 'barrel'
-    static_configs:
-      - targets: ['barrel:8080']
-    metrics_path: /metrics
-
-  # Or scrape from OTEL collector (if using push model)
+  # Barrel pushes over OTLP; scrape the collector's Prometheus exporter
   - job_name: 'otel-collector'
     static_configs:
       - targets: ['otel-collector:8889']
