@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-11-08
+
 ### Added
 - `use_direct_io_for_compaction_reads` in `store_opts` and `att_opts`: compactions read their input with direct I/O, so a large compaction no longer pushes the data your reads use out of the page cache. Off by default; it needs a file system that supports direct I/O.
 - The database size metric is now filled in, and three new metrics show the compaction backlog: bytes still to compact, compactions running and compactions queued. They refresh every minute (`stats_interval`), and `db_info` returns the same numbers under `storage`. A backlog that keeps growing means compaction is falling behind the writes.
