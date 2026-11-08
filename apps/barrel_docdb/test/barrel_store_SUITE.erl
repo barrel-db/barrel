@@ -14,6 +14,7 @@
 -export([all/0, groups/0, init_per_suite/1, end_per_suite/1,
          init_per_group/2, end_per_group/2,
          init_per_testcase/2, end_per_testcase/2]).
+-export([rocksdb_deleted_run_reads/1]).
 
 %% Test cases
 -export([
@@ -71,7 +72,8 @@ groups() ->
             rocksdb_batch,
             rocksdb_fold,
             rocksdb_fold_range,
-            rocksdb_snapshot
+            rocksdb_snapshot,
+            rocksdb_deleted_run_reads
         ]}
     ].
 
@@ -536,3 +538,33 @@ path_index_key_structure(_Config) ->
     ?assert(is_binary(DocPathsKey)),
 
     ok.
+
+%% A long run of deletes becomes one range delete at flush
+%% (min_tombstones_for_range_conversion). Reads must see exactly the
+%% live keys, with the option on (the default) and off, and a snapshot
+%% taken before the deletes still sees every key.
+rocksdb_deleted_run_reads(Config) ->
+    TestDir = proplists:get_value(test_dir, Config),
+    lists:foreach(
+      fun(Min) ->
+          DbPath = TestDir ++ "/deleted_run_" ++ integer_to_list(Min),
+          {ok, DbRef} = barrel_store_rocksdb:open(
+                          DbPath, #{min_tombstones_for_range_conversion => Min}),
+          #{ref := Ref} = DbRef,
+          Key = fun(I) -> <<"hist:", I:32>> end,
+          [ok = barrel_store_rocksdb:put(DbRef, Key(I), <<"v">>) || I <- lists:seq(1, 1000)],
+          ok = rocksdb:flush(Ref, [{wait, true}]),
+          Snap = rocksdb:snapshot(Ref),
+          {ok, SnapRef} = Snap,
+          [ok = barrel_store_rocksdb:delete(DbRef, Key(I)) || I <- lists:seq(1, 900)],
+          ok = rocksdb:flush(Ref, [{wait, true}]),
+          Live = barrel_store_rocksdb:fold_range(
+                   DbRef, <<"hist:">>, <<"hist;">>,
+                   fun(K, _V, Acc) -> {ok, [K | Acc]} end, []),
+          ?assertEqual([Key(I) || I <- lists:seq(1000, 901, -1)], Live),
+          ?assertEqual(not_found, barrel_store_rocksdb:get(DbRef, Key(500))),
+          ?assertEqual({ok, <<"v">>},
+                       rocksdb:get(Ref, Key(500), [{snapshot, SnapRef}])),
+          ok = rocksdb:release_snapshot(SnapRef),
+          ok = barrel_store_rocksdb:close(DbRef)
+      end, [0, 64]).
