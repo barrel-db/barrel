@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - New stores no longer create the `bitmap` column family, which nothing ever wrote. An existing store drops it, when empty, the next time it opens for writing; read-only opens leave it in place. The `bitmap_size` store option is gone.
 - Reading past a long run of deleted entries is much faster. Retention, TTL and stub purge delete long runs of consecutive keys; a run of 64 or more now becomes a single range delete when it is flushed, so the changes feed and history no longer step over each deleted key. In a benchmark, finding the first live key after 90,000 deletes went from about 8.5 ms to 0.1 ms. Set `min_tombstones_for_range_conversion` in `store_opts` to tune it, 0 to turn it off.
 - A database no longer recompacts all of its data every hour once it passes 1 GiB. That forced compaction existed to run a revision filter that no longer removes anything, so it only cost disk I/O. RocksDB still compacts on its own. The `compaction_interval`, `compaction_size_threshold` and `prune_depth` options have no effect any more; a database given them logs a warning.
-- Requires rocksdb 3.2.0 (RocksDB 11.13). The build no longer downloads anything, so it works offline and behind a proxy, and it fixes rocksdb crashes, for example when a database handle is closed while another process still uses it.
+- Requires rocksdb 3.2.1 (RocksDB 11.13). The build no longer downloads anything, so it works offline and behind a proxy, and it fixes rocksdb crashes, for example when a database handle is closed while another process still uses it, or when a handle is used after it was released.
 
 ## [2.1.0] - 2026-11-07
 
