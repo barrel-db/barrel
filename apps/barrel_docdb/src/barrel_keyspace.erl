@@ -14,9 +14,8 @@
 %%% again.
 %%%
 %%% Branch identity (keyspace, parent, fork_hlc) persists in a sidecar
-%%% file `TIMELINE' inside the database directory, NOT in db_meta: the
-%%% compaction filter starts before RocksDB opens, so identity must be
-%%% readable without the store. The file is written atomically at fork
+%%% file `TIMELINE' inside the database directory, NOT in db_meta, so
+%%% identity is readable before RocksDB opens. The file is written atomically at fork
 %%% (temp + rename) and never rewritten.
 %%% @end
 %%%-------------------------------------------------------------------

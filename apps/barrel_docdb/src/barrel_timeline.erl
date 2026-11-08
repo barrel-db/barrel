@@ -286,8 +286,7 @@ max_seq(Hlc, Other) ->
 %%
 %% Runs on the branch's directly-opened store BEFORE the branch is
 %% registered: no persistent_term context exists, so everything takes
-%% explicit arguments (keyspace, compiled channels) and the store is
-%% opened without the compaction filter (its absence drops nothing).
+%% explicit arguments (keyspace, compiled channels).
 %% Any error aborts the fork, which deletes the branch directory.
 %%
 %% Semantics: every doc changed after T is restored to its latest

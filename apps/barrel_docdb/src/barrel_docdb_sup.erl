@@ -123,7 +123,6 @@ init([]) ->
     },
 
     %% Database supervisor for managing individual database processes
-    %% Note: Each database starts its own compaction filter handler in barrel_db_server
     %% Finds restarted writers and records failed databases; starts
     %% before the databases and stops after them
     DbWatch = #{

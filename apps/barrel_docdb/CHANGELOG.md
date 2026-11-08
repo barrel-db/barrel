@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- A database no longer recompacts all of its data every hour once it passes 1 GiB. That forced compaction existed to run a revision filter that no longer removes anything, so it only cost disk I/O. RocksDB still compacts on its own. The `compaction_interval`, `compaction_size_threshold` and `prune_depth` options have no effect any more; a database given them logs a warning.
 - Requires rocksdb 3.2.0 (RocksDB 11.13). The build no longer downloads anything, so it works offline and behind a proxy, and it fixes rocksdb crashes, for example when a database handle is closed while another process still uses it.
 
 ## [2.1.0] - 2026-11-07

@@ -11,12 +11,12 @@
          init_per_testcase/2, end_per_testcase/2]).
 -export([log/2]).
 -export([writer_crash_restarts/1,
+         obsolete_compaction_options_reported/1,
          closed_db_stays_closed/1,
          restart_budget_fails_db/1,
          failed_db_deletes/1,
          crash_loop_spares_siblings/1,
          killed_with_attachment_stream_reopens/1,
-         compaction_filter_exit_logged/1,
          inline_credentials_rejected/1,
          userinfo_rejected_one_shot/1,
          env_token_survives_resume/1,
@@ -39,7 +39,7 @@ all() ->
      failed_db_deletes,
      crash_loop_spares_siblings,
      killed_with_attachment_stream_reopens,
-     compaction_filter_exit_logged,
+     obsolete_compaction_options_reported,
      inline_credentials_rejected,
      userinfo_rejected_one_shot,
      env_token_survives_resume,
@@ -190,24 +190,27 @@ killed_with_attachment_stream_reopens(Config) ->
     end.
 
 %%====================================================================
-%% Compaction filter
+%% Removed compaction options
 %%====================================================================
 
-compaction_filter_exit_logged(Config) ->
+%% The hourly forced compaction and the revision filter are gone; their
+%% options are still accepted and reported once.
+obsolete_compaction_options_reported(Config) ->
     Db = ?config(db, Config),
-    {ok, Pid} = create(Db),
     ok = logger:add_handler(review_capture, ?MODULE,
                             #{level => warning, config => #{pid => self()}}),
-    {links, Links} = process_info(Pid, links),
-    [Filter] = [L || L <- Links, initial_module(L) =:= barrel_compaction_filter],
-    kill(Filter),
+    {ok, Pid} = barrel_docdb:create_db(Db, #{compaction_interval => 100,
+                                             compaction_size_threshold => 1,
+                                             prune_depth => 3}),
     receive
-        {log, warning, Msg} -> ?assertNotEqual(nomatch, string:find(Msg, "killed"))
+        {log, warning, Msg} ->
+            ?assertNotEqual(nomatch, string:find(Msg, "no longer have an effect"))
     after 5000 ->
         ct:fail(no_warning)
     end,
-    ?assert(is_process_alive(Pid)),
-    ?assertEqual({ok, Pid}, barrel_docdb:open_db(Db)),
+    {links, Links} = process_info(Pid, links),
+    ?assertEqual([], [L || L <- Links, is_pid(L),
+                           initial_module(L) =:= barrel_compaction_filter]),
     {ok, _} = barrel_docdb:put_doc(Db, #{<<"id">> => <<"d">>}, #{sync => true}),
     ?assertMatch({ok, _}, barrel_docdb:get_doc(Db, <<"d">>)),
     ok = barrel_docdb:close_db(Db).
