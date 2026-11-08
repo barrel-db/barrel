@@ -69,8 +69,7 @@ profile(Case, Type, Opts) ->
     teardown(Db),
     {Docs, Profiles}.
 
-%% Processes linked to the server that it started (not its supervisor
-%% nor the compaction filter handler, which runs no write path).
+%% Processes linked to the server that it started (not its supervisor).
 spawned(Pid) ->
     {links, Links} = erlang:process_info(Pid, links),
     [L || L <- Links, is_pid(L), not is_supervisor(L),

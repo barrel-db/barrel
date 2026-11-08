@@ -55,7 +55,7 @@
 -export([value_posting_bucket_key/4, value_posting_bucket_prefix/3, value_posting_bucket_end/3]).
 -export([docid_bucket/1]).
 
-%% Key parsing (for compaction filter)
+%% Key parsing
 -export([parse_key/1]).
 
 %% Value-first index keys (for iterable equality queries with early termination)
@@ -1080,11 +1080,11 @@ change_bucket_end(DbName) ->
       16#FF, 16#FF, 16#FF, 16#FF, 16#FF, 16#FF, 16#FF, 16#FF>>.
 
 %%====================================================================
-%% Key Parsing (for compaction filter)
+%% Key Parsing
 %%====================================================================
 
 %% @doc Parse a key to determine its type and extract components.
-%% Used by compaction filter to identify doc_entity keys.
+%% Identifies doc_entity and doc_body_rev keys.
 -spec parse_key(binary()) ->
     {doc_entity, DbName :: binary(), DocId :: binary()} |
     {doc_body_rev, DbName :: binary(), DocId :: binary(), Rev :: binary()} |

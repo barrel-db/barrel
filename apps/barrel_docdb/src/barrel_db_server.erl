@@ -101,10 +101,6 @@
     %% referenced for the whole db lifetime (also carried in the store
     %% and att refs).
     env :: rocksdb:env_handle() | undefined,
-    filter_pid :: pid() | undefined,  %% Compaction filter handler for this database
-    compaction_timer :: reference() | undefined,  %% Timer for periodic compaction checks
-    compaction_interval :: pos_integer(),  %% Interval between checks in ms (default: 1 hour)
-    compaction_size_threshold :: pos_integer(),  %% Size threshold in bytes to trigger compaction
     retention_period :: non_neg_integer(),  %% Retention window in seconds (0 = infinite)
     retention_timer :: reference() | undefined,  %% Timer for periodic retention sweeps
     retention_interval :: pos_integer(),  %% Interval between sweeps in ms
@@ -113,7 +109,7 @@
     ttl_sweep_interval = 0 :: non_neg_integer(),  %% Doc TTL sweep interval in ms (0 = off)
     ttl_sweep_batch = 512 :: pos_integer(),  %% Max expired docs per sweep pass
     ttl_timer :: reference() | undefined,  %% Timer for periodic TTL sweeps
-    %% In-flight compaction/retention/ttl workers, one per kind, run off the
+    %% In-flight retention/ttl workers, one per kind, run off the
     %% writer loop. #{Kind => {Pid, Waiters, Periodic}}: Waiters are the
     %% gen_server Froms to reply to; Periodic marks a worker that a timer
     %% contributed to, so its completion re-arms the periodic timer.
@@ -123,7 +119,7 @@
     %% the writer builds the next group while this one is written
     write_chunk = ?DEFAULT_WRITE_CHUNK :: pos_integer(),
     %% read_only => true in the config: writes are refused and no
-    %% compaction, retention or TTL timer runs
+    %% retention or TTL timer runs
     read_only = false :: boolean(),
     write_groups = #{groups => 0, requests => 0, max_size => 0} :: map(),
     %% Writes the groups' batches and answers their callers while the
@@ -176,9 +172,10 @@
     ref :: reference() | undefined
 }).
 
-%% Default compaction settings
--define(DEFAULT_COMPACTION_INTERVAL, 3600000).  %% 1 hour in ms
--define(DEFAULT_COMPACTION_SIZE_THRESHOLD, 1073741824).  %% 1 GB in bytes
+%% Options of the removed compaction check and revision filter; still
+%% accepted, and reported once at open.
+-define(OBSOLETE_OPTIONS, [compaction_interval, compaction_size_threshold,
+                           prune_depth]).
 
 %% Default retention settings: 30 days, swept every 10 minutes.
 %% retention_period 0 means infinite (no sweeper started).
@@ -474,8 +471,7 @@ init(Name, Config, CompiledChannels) ->
     ok = release_stale_refs(Name),
 
     %% Branch identity comes from the TIMELINE sidecar file: it must be
-    %% readable BEFORE the compaction filter starts (the filter matches
-    %% key-embedded names) and before RocksDB opens.
+    %% readable before RocksDB opens.
     case barrel_keyspace:read_meta(DbPath) of
         {ok, #{keyspace := SidecarKs, kind := import}} ->
             %% an imported copy: source keyspace, no timeline parent
@@ -508,28 +504,15 @@ init(Name, Config, CompiledChannels, DbPath, Keyspace, Parent, ForkHlc) ->
     end.
 
 init(Name, Config, CompiledChannels, DbPath, Keyspace, Parent, ForkHlc, Env) ->
-    %% Start compaction filter handler BEFORE opening RocksDB
-    %% (handler pid is passed to CF options). The filter matches the
-    %% name embedded in keys, i.e. the keyspace.
-    PruneDepth = maps:get(prune_depth, Config, 1000),
-    {ok, FilterPid} = barrel_compaction_filter:start_link(#{
-        db_name => Keyspace,
-        prune_depth => PruneDepth
-    }),
-
     %% Open document store (RocksDB with column families including body CF with BlobDB)
     DocStorePath = filename:join(DbPath, "docs"),
     StoreOpts0 = maps:get(store_opts, Config, #{}),
-    %% Pass the filter handler to the store options
     ReadOnly = maps:get(read_only, Config, false) =:= true,
-    StoreOpts = add_env_opt(StoreOpts0#{compaction_filter_handler => FilterPid,
-                                        read_only => ReadOnly},
-                            Env),
+    StoreOpts = add_env_opt(StoreOpts0#{read_only => ReadOnly}, Env),
     case barrel_store_rocksdb:open(DocStorePath, StoreOpts) of
         {ok, StoreRef} ->
             %% Open attachment store (separate RocksDB with BlobDB). db_name
-            %% (the resolved keyspace, same value the compaction filter
-            %% above uses) lets a backend that needs a stable identity at
+            %% (the resolved keyspace, the name embedded in keys) lets a backend that needs a stable identity at
             %% open time -- e.g. barrel_att_s3, seeding its S3 key prefix on
             %% first open -- derive one without every backend needing its
             %% own convention for it.
@@ -541,8 +524,7 @@ init(Name, Config, CompiledChannels, DbPath, Keyspace, Parent, ForkHlc, Env) ->
             case barrel_att_store:open(AttStorePath, AttOpts) of
                 {ok, AttRef} ->
                     %% Register in persistent_term for lookup
-                    %% barrel_store is used by barrel_doc_body_store for body CF access
-                    %% and by compaction filter handler for body deletion.
+                    %% barrel_store is used by barrel_doc_body_store for body CF access.
                     %% The keyspace installs BEFORE the store ref so no
                     %% reader ever sees a store without its keyspace.
                     case Keyspace of
@@ -558,16 +540,6 @@ init(Name, Config, CompiledChannels, DbPath, Keyspace, Parent, ForkHlc, Env) ->
                     ok = init_writer(ReadOnly, StoreRef, AttRef, Name, Keyspace),
                     _ = gc_att_uploads(ReadOnly, AttRef, Name, Config),
                     ok = barrel_channel:install(Name, CompiledChannels),
-
-                    %% Compaction settings from config (or defaults)
-                    CompactionInterval = maps:get(compaction_interval, Config,
-                                                  ?DEFAULT_COMPACTION_INTERVAL),
-                    CompactionThreshold = maps:get(compaction_size_threshold, Config,
-                                                   ?DEFAULT_COMPACTION_SIZE_THRESHOLD),
-
-                    %% Start periodic compaction check timer
-                    TimerRef = arm_unless(ReadOnly, CompactionInterval,
-                                          compaction_check),
 
                     %% Retention settings; the sweeper only runs for a
                     %% finite window
@@ -595,6 +567,14 @@ init(Name, Config, CompiledChannels, DbPath, Keyspace, Parent, ForkHlc, Env) ->
                         _ -> arm_unless(ReadOnly, TtlInterval, ttl_sweep)
                     end,
 
+                    case [K || K <- ?OBSOLETE_OPTIONS, maps:is_key(K, Config)] of
+                        [] -> ok;
+                        Obsolete ->
+                            logger:warning(
+                              "Database ~s: ~p no longer have an effect: "
+                              "RocksDB compacts on its own and no compaction "
+                              "filter runs", [Name, Obsolete])
+                    end,
                     case maps:is_key(conflict_merger, Config) of
                         true ->
                             logger:warning(
@@ -614,10 +594,6 @@ init(Name, Config, CompiledChannels, DbPath, Keyspace, Parent, ForkHlc, Env) ->
                         store_ref = StoreRef,
                         att_ref = AttRef,
                         env = Env,
-                        filter_pid = FilterPid,
-                        compaction_timer = TimerRef,
-                        compaction_interval = CompactionInterval,
-                        compaction_size_threshold = CompactionThreshold,
                         retention_period = RetentionPeriod,
                         retention_timer = RetentionTimer,
                         retention_interval = RetentionInterval,
@@ -634,11 +610,9 @@ init(Name, Config, CompiledChannels, DbPath, Keyspace, Parent, ForkHlc, Env) ->
                 {error, AttReason} ->
                     %% Close document store if attachment store fails
                     barrel_store_rocksdb:close(StoreRef),
-                    exit(FilterPid, shutdown),
                     {stop, {att_store_open_failed, AttReason}}
             end;
         {error, Reason} ->
-            exit(FilterPid, shutdown),
             {stop, {store_open_failed, Reason}}
     end.
 
@@ -914,15 +888,9 @@ handle_cast(_Msg, State) ->
     {noreply, State}.
 
 %% @doc Handle other messages
-%% The periodic compaction/retention/ttl work runs in a monitored worker so
-%% it never blocks the writer loop (a long compaction used to make concurrent
-%% writes time out). The periodic timer is re-armed when the worker finishes.
-handle_info(compaction_check, #state{store_ref = StoreRef, name = Name,
-                                     compaction_size_threshold = Threshold}
-                              = State) ->
-    Fun = fun() -> do_check_compaction(StoreRef, Threshold, Name) end,
-    {noreply, start_sweep(compaction, Fun, none, true, State)};
-
+%% The periodic retention/ttl work runs in a monitored worker so it never
+%% blocks the writer loop. The periodic timer is re-armed when the worker
+%% finishes.
 handle_info(retention_sweep, #state{name = DbName, store_ref = StoreRef,
                                     att_ref = AttRef,
                                     retention_period = RetentionPeriod}
@@ -976,13 +944,6 @@ handle_info({committed, Ref, _MoreSeg},
 handle_info({'EXIT', Pid, Reason}, #state{committer = Pid} = State) ->
     {stop, {committer_down, Reason}, State#state{committer = undefined,
                                                  inflight = []}};
-handle_info({'EXIT', Pid, Reason}, #state{name = Name, filter_pid = Pid} = State) ->
-    %% A pass-through: without it RocksDB keeps every entry
-    logger:warning("Database ~s: compaction filter exited: ~p; compaction "
-                   "keeps all entries until the database reopens",
-                   [Name, Reason]),
-    {noreply, State#state{filter_pid = undefined}};
-
 handle_info(_Info, State) ->
     {noreply, State}.
 
@@ -993,8 +954,6 @@ terminate(Reason, #state{committer = Committer} = State) when is_pid(Committer) 
     exit(Committer, kill),
     terminate(Reason, State#state{committer = undefined});
 terminate(_Reason, #state{name = Name, store_ref = StoreRef, att_ref = AttRef,
-                          filter_pid = FilterPid,
-                          compaction_timer = CompactionTimer,
                           retention_timer = RetentionTimer,
                           upload_gc_timer = UploadGcTimer,
                           ttl_timer = TtlTimer,
@@ -1009,26 +968,11 @@ terminate(_Reason, #state{name = Name, store_ref = StoreRef, att_ref = AttRef,
             undefined -> ok;
             _ -> erlang:cancel_timer(UploadGcTimer)
         end,
-    %% Cancel compaction timer
-    _ =
-      case CompactionTimer of
-          undefined -> ok;
-          _ -> erlang:cancel_timer(CompactionTimer)
-      end,
     %% Cancel retention timer
     _ =
       case RetentionTimer of
           undefined -> ok;
           _ -> erlang:cancel_timer(RetentionTimer)
-      end,
-    %% Stop compaction filter handler
-    _ = 
-      case FilterPid of
-          undefined -> ok;
-          _ ->
-              try exit(FilterPid, shutdown)
-              catch _:_ -> ok
-              end
       end,
     %% Unregister BEFORE closing either store so caller-side readers
     %% (barrel_docdb_reader, barrel_doc_body_store) stop picking up a ref
@@ -1209,9 +1153,6 @@ run_apply(Kind, Apply, State) ->
 
 %% Re-arm the periodic timer for a kind. A full TTL batch comes back quickly
 %% to drain the backlog; everything else waits the configured interval.
-reschedule_sweep(compaction, _Result, #state{compaction_interval = I} = State) ->
-    State#state{compaction_timer =
-                    erlang:send_after(I, self(), compaction_check)};
 reschedule_sweep(retention, _Result, #state{retention_interval = I} = State) ->
     State#state{retention_timer =
                     erlang:send_after(I, self(), retention_sweep)};
@@ -1228,30 +1169,6 @@ sweep_kind_of_pid(Pid, Workers) ->
     case Match of
         [Kind | _] -> {ok, Kind};
         [] -> error
-    end.
-
-%% @doc Check database size and trigger compaction if threshold exceeded
-%% Called periodically by the compaction_check timer.
-do_check_compaction(StoreRef, Threshold, Name) ->
-    case barrel_store_rocksdb:get_db_size(StoreRef) of
-        {ok, Size} when Size >= Threshold ->
-            logger:info("Database ~s size ~p bytes exceeds threshold ~p, triggering compaction",
-                        [Name, Size, Threshold]),
-            case barrel_store_rocksdb:compact_default_cf(StoreRef) of
-                ok ->
-                    logger:info("Database ~s compaction completed", [Name]),
-                    ok;
-                {error, Reason} ->
-                    logger:warning("Database ~s compaction failed: ~p", [Name, Reason]),
-                    {error, Reason}
-            end;
-        {ok, Size} ->
-            logger:debug("Database ~s size ~p bytes below threshold ~p, skipping compaction",
-                         [Name, Size, Threshold]),
-            ok;
-        {error, Reason} ->
-            logger:warning("Failed to get database ~s size: ~p", [Name, Reason]),
-            {error, Reason}
     end.
 
 %% @private Release the store handles and registrations leaked by a
