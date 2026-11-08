@@ -272,6 +272,7 @@ Both stores share a common LRU block cache managed by `barrel_cache`:
 | `level0_file_num_compaction_trigger` | 4 | Trigger L0→L1 compaction |
 | `max_background_jobs` | schedulers | Parallel compaction threads |
 | `min_tombstones_for_range_conversion` | 64 | Default column family: a run of this many deletes becomes one range delete at flush, so reads skip it at once (0 turns it off) |
+| `use_direct_io_for_compaction_reads` | false | Compactions read with direct I/O and leave the page cache to your reads. Opt-in, in `store_opts` and `att_opts`; needs a file system that supports direct I/O (not tmpfs) |
 
 **Attachment Store Optimizations:**
 | Setting | Default | Purpose |

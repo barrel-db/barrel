@@ -674,6 +674,10 @@ build_blob_options(Options) ->
 
         %% Background jobs for compaction/GC
         {max_background_jobs, maps:get(max_background_jobs, Options, erlang:max(2, Schedulers div 2))},
+        %% Opt-in: compactions read their input with direct I/O so they
+        %% do not push hot data out of the page cache
+        {use_direct_io_for_compaction_reads,
+            maps:get(use_direct_io_for_compaction_reads, Options, false)},
 
         %% Block-based table with bloom filters and shared cache
         {block_based_table_options, BlockOpts}
