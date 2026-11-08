@@ -549,6 +549,10 @@ build_db_options(Options) ->
         {level0_stop_writes_trigger, maps:get(l0_stop_trigger, Options, 36)},
         {max_background_jobs, maps:get(max_background_jobs, Options, Schedulers)},
         {max_subcompactions, maps:get(max_subcompactions, Options, 4)},
+        %% Opt-in: compactions read their input with direct I/O so a large
+        %% compaction does not push hot data out of the page cache
+        {use_direct_io_for_compaction_reads,
+            maps:get(use_direct_io_for_compaction_reads, Options, false)},
 
         %% Prefix extractor for prefix bloom filters
         %% Enables O(1) existence check for key prefixes (up to 64 bytes)

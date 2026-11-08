@@ -9,12 +9,14 @@
          init_per_testcase/2, end_per_testcase/2]).
 -export([info_reports_storage/1,
          gauges_follow_the_store/1,
-         stats_interval_zero_disables_refresh/1]).
+         stats_interval_zero_disables_refresh/1,
+         direct_io_compaction_reads/1]).
 
 all() ->
     [info_reports_storage,
      gauges_follow_the_store,
-     stats_interval_zero_disables_refresh].
+     stats_interval_zero_disables_refresh,
+     direct_io_compaction_reads].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(barrel_docdb),
@@ -59,6 +61,25 @@ stats_interval_zero_disables_refresh(Config) ->
     {messages, Msgs} = process_info(Pid, messages),
     ?assertNot(lists:member(stats_tick, Msgs)),
     ?assertEqual(undefined, gauge(<<"barrel_db_size_bytes">>, Db)).
+
+%% Opt-in direct I/O for compaction reads: both stores open with it, the
+%% data reads back after a forced compaction, and the option reaches
+%% RocksDB (its OPTIONS file records it).
+direct_io_compaction_reads(Config) ->
+    Db = ?config(db, Config),
+    Opts = #{store_opts => #{use_direct_io_for_compaction_reads => true},
+             att_opts => #{use_direct_io_for_compaction_reads => true}},
+    {ok, _} = barrel_docdb:create_db(Db, Opts),
+    ok = write_and_flush(Db, 50),
+    #{ref := Ref} = persistent_term:get({barrel_store, Db}),
+    ok = rocksdb:compact_range(Ref, undefined, undefined, []),
+    ?assertMatch({ok, #{<<"id">> := <<"7">>}}, barrel_docdb:get_doc(Db, <<"7">>)),
+    {ok, #{db_path := Path}} = barrel_docdb:db_info(Db),
+    [OptionsFile | _] = lists:reverse(lists:sort(
+                          filelib:wildcard(filename:join([Path, "docs", "OPTIONS-*"])))),
+    {ok, Text} = file:read_file(OptionsFile),
+    ?assertNotEqual(nomatch,
+                    binary:match(Text, <<"use_direct_io_for_compaction_reads=true">>)).
 
 %% helpers
 
