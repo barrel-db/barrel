@@ -60,6 +60,10 @@
     stream_digest_mismatch_small/1,
     stream_digest_mismatch_multipart_aborts_upload/1,
     stream_read_roundtrip/1,
+    stream_read_resumes_after_dropped_connection/1,
+    stream_read_fails_when_object_changes/1,
+    checkpoint_sweep_retries_failed_copies/1,
+    checkpoint_delete_racing_copy_not_resurrected/1,
     stream_read_not_found/1,
     stream_small_part_size_accepted_by_garage/1,
     conditional_writes_capability_reflects_store/1,
@@ -129,6 +133,8 @@
     stream_digest_mismatch_small,
     stream_digest_mismatch_multipart_aborts_upload,
     stream_read_roundtrip,
+    stream_read_resumes_after_dropped_connection,
+    stream_read_fails_when_object_changes,
     stream_read_not_found,
     conditional_writes_capability_reflects_store,
     default_put_stays_unconditional,
@@ -150,6 +156,8 @@
     checkpoint_open_sweeps_and_converges,
     checkpoint_branch_write_not_clobbered_by_sweep,
     checkpoint_branch_delete_not_resurrected_by_sweep,
+    checkpoint_sweep_retries_failed_copies,
+    checkpoint_delete_racing_copy_not_resurrected,
     checkpoint_refuses_still_syncing_source,
     destroy_removes_all_objects_under_prefix,
     destroy_clears_fork_pending_marker,
@@ -279,6 +287,23 @@ wait_until(Fun, TimeoutMs, IntervalMs) ->
         false ->
             timer:sleep(IntervalMs),
             wait_until(Fun, TimeoutMs - IntervalMs, IntervalMs)
+    end.
+
+%% The fork copy sweep is done when it removes its marker. Wait on that,
+%% against the clock, instead of polling reads that answer
+%% att_sync_pending until then.
+wait_fork_synced(BranchPath) ->
+    Deadline = erlang:monotonic_time(millisecond) + 90000,
+    wait_fork_synced(filename:join(BranchPath, "fork_pending"), Deadline).
+
+wait_fork_synced(Marker, Deadline) ->
+    case filelib:is_regular(Marker) of
+        false -> ok;
+        true ->
+            case erlang:monotonic_time(millisecond) > Deadline of
+                true -> ct:fail({fork_sync_not_done, Marker});
+                false -> timer:sleep(50), wait_fork_synced(Marker, Deadline)
+            end
     end.
 
 %% @private Builds a branch's att_ref by hand from checkpoint/2's own
@@ -704,16 +729,10 @@ checkpoint_open_sweeps_and_converges(Config) ->
     {ok, Branch} = barrel_att_s3_store:open(BranchPath,
         #{s3 => S3Opts#{part_size => ?PART_SIZE}, db_name => DbName}),
 
-    ok = wait_until(
-        fun() ->
-            lists:all(
-                fun(Name) ->
-                    barrel_att_s3_store:get(Branch, DbName, DocId, Name) =:=
-                        {ok, <<"data-", Name/binary>>}
-                end,
-                Names)
-        end,
-        10000),
+    ok = wait_fork_synced(BranchPath),
+    [?assertEqual({ok, <<"data-", Name/binary>>},
+                  barrel_att_s3_store:get(Branch, DbName, DocId, Name))
+     || Name <- Names],
 
     ok = barrel_att_s3_store:close(Branch),
     ok = file:del_dir_r(BranchPath),
@@ -751,23 +770,14 @@ checkpoint_branch_write_not_clobbered_by_sweep(Config) ->
     {ok, _} = barrel_att_s3_store:put(Branch, DbName, DocId, Target,
                                       <<"branch-owns-this">>),
 
-    ok = wait_until(
-        fun() ->
-            lists:all(
-                fun(Name) when Name =:= Target ->
-                        barrel_att_s3_store:get(Branch, DbName, DocId, Name) =:=
-                            {ok, <<"branch-owns-this">>};
-                   (Name) ->
-                        barrel_att_s3_store:get(Branch, DbName, DocId, Name) =:=
-                            {ok, <<"parent-", Name/binary>>}
-                end,
-                Names)
-        end,
-        10000),
-
-    %% and it is still the branch's value, not clobbered after convergence
+    %% once the sweep is done, the branch's write is still there and every
+    %% other attachment has the parent's bytes
+    ok = wait_fork_synced(BranchPath),
     ?assertEqual({ok, <<"branch-owns-this">>},
                  barrel_att_s3_store:get(Branch, DbName, DocId, Target)),
+    [?assertEqual({ok, <<"parent-", Name/binary>>},
+                  barrel_att_s3_store:get(Branch, DbName, DocId, Name))
+     || Name <- Names, Name =/= Target],
 
     ok = barrel_att_s3_store:close(Branch),
     ok = file:del_dir_r(BranchPath),
@@ -802,22 +812,12 @@ checkpoint_branch_delete_not_resurrected_by_sweep(Config) ->
     Target = lists:nth(1, Names),
     ok = barrel_att_s3_store:delete(Branch, DbName, DocId, Target),
 
-    ok = wait_until(
-        fun() ->
-            lists:all(
-                fun(Name) when Name =:= Target ->
-                        barrel_att_s3_store:get(Branch, DbName, DocId, Name) =:=
-                            {error, not_found};
-                   (Name) ->
-                        barrel_att_s3_store:get(Branch, DbName, DocId, Name) =:=
-                            {ok, <<"parent-", Name/binary>>}
-                end,
-                Names)
-        end,
-        10000),
-
+    ok = wait_fork_synced(BranchPath),
     ?assertEqual({error, not_found},
                  barrel_att_s3_store:get(Branch, DbName, DocId, Target)),
+    [?assertEqual({ok, <<"parent-", Name/binary>>},
+                  barrel_att_s3_store:get(Branch, DbName, DocId, Name))
+     || Name <- Names, Name =/= Target],
 
     ok = barrel_att_s3_store:close(Branch),
     ok = file:del_dir_r(BranchPath),
@@ -1418,6 +1418,171 @@ stream_small_part_size_accepted_by_garage(Config) ->
                  barrel_att_s3_store:get(AttRef, DbName, DocId, <<"garage-small.bin">>)),
     ok = barrel_att_s3_store:delete(AttRef, DbName, DocId, <<"garage-small.bin">>),
     ok = barrel_att_s3_store:close(AttRef).
+
+%% The store drops the connection in the middle of the body: the read asks
+%% again from where it stopped and returns every byte once.
+stream_read_resumes_after_dropped_connection(Config) ->
+    AttRef = ?config(att_ref, Config),
+    DbName = ?config(db_name, Config),
+    DocId = <<"doc1">>,
+    Expected = big_object(),
+    {ok, _} = barrel_att_s3_store:put(AttRef, DbName, DocId, <<"resume.bin">>, Expected),
+    {ok, R1} = barrel_att_s3_store:get_stream(AttRef, DbName, DocId, <<"resume.bin">>),
+    {ok, First, R2} = barrel_att_s3_store:read_chunk(R1),
+    drop_next_read(),
+    try
+        Rest = drain(R2, []),
+        ?assertEqual(Expected, <<First/binary, Rest/binary>>),
+        ?assert(meck:num_calls(livery_s3, get_object, '_') >= 1)
+    after
+        meck:unload([livery_client, livery_s3])
+    end,
+    ok = barrel_att_s3_store:delete(AttRef, DbName, DocId, <<"resume.bin">>).
+
+%% The object is replaced while it is read, then the connection drops: the
+%% read fails instead of splicing the new object's bytes onto the old ones.
+stream_read_fails_when_object_changes(Config) ->
+    AttRef = ?config(att_ref, Config),
+    DbName = ?config(db_name, Config),
+    DocId = <<"doc1">>,
+    Old = big_object(),
+    {ok, _} = barrel_att_s3_store:put(AttRef, DbName, DocId, <<"change.bin">>, Old),
+    {ok, R1} = barrel_att_s3_store:get_stream(AttRef, DbName, DocId, <<"change.bin">>),
+    {ok, _First, R2} = barrel_att_s3_store:read_chunk(R1),
+    {ok, _} = barrel_att_s3_store:put(AttRef, DbName, DocId, <<"change.bin">>,
+                                      binary:copy(<<"n">>, byte_size(Old))),
+    drop_next_read(),
+    try
+        ?assertMatch({error, {changed_during_read, _}}, drain_result(R2))
+    after
+        meck:unload([livery_client, livery_s3])
+    end,
+    ok = barrel_att_s3_store:delete(AttRef, DbName, DocId, <<"change.bin">>).
+
+%% A copy that fails is retried by the sweep itself, without a reopen.
+checkpoint_sweep_retries_failed_copies(Config) ->
+    AttRef = ?config(att_ref, Config),
+    DbName = ?config(db_name, Config),
+    Path = ?config(path, Config),
+    S3Opts = ?config(s3_opts, Config),
+    DocId = <<"doc1">>,
+    Names = [integer_to_binary(N) || N <- lists:seq(1, 4)],
+    [{ok, _} = barrel_att_s3_store:put(AttRef, DbName, DocId, N, <<"p-", N/binary>>)
+     || N <- Names],
+    BranchPath = Path ++ "-branch-retry",
+    ?assertEqual(ok, barrel_att_s3_store:checkpoint(AttRef, BranchPath)),
+    Fails = atomics:new(1, []),
+    atomics:put(Fails, 1, 2),
+    ok = meck:new(livery_s3, [passthrough]),
+    ok = meck:expect(livery_s3, copy_object,
+                     fun(C, B, Src, B2, Dst) ->
+                             case atomics:sub_get(Fails, 1, 1) >= 0 of
+                                 true -> {error, simulated_overload};
+                                 false -> meck:passthrough([C, B, Src, B2, Dst])
+                             end
+                     end),
+    try
+        {ok, Branch} = barrel_att_s3_store:open(BranchPath,
+            #{s3 => S3Opts#{part_size => ?PART_SIZE}, db_name => DbName}),
+        ok = wait_fork_synced(BranchPath),
+        [?assertEqual({ok, <<"p-", N/binary>>},
+                      barrel_att_s3_store:get(Branch, DbName, DocId, N)) || N <- Names],
+        ok = barrel_att_s3_store:close(Branch)
+    after
+        meck:unload(livery_s3)
+    end,
+    ok = file:del_dir_r(BranchPath),
+    [ok = barrel_att_s3_store:delete(AttRef, DbName, DocId, N) || N <- Names].
+
+%% The exact interleaving that brought deleted attachments back: the sweep
+%% is about to copy "victim" when the branch deletes it, and the delete is
+%% held between its S3 delete and its feed row. The copy must not land
+%% after the S3 delete unseen by the feed check.
+checkpoint_delete_racing_copy_not_resurrected(Config) ->
+    AttRef = ?config(att_ref, Config),
+    DbName = ?config(db_name, Config),
+    Path = ?config(path, Config),
+    S3Opts = ?config(s3_opts, Config),
+    DocId = <<"doc1">>,
+    Victim = <<"victim">>,
+    {ok, _} = barrel_att_s3_store:put(AttRef, DbName, DocId, Victim, <<"parent">>),
+    BranchPath = Path ++ "-branch-race",
+    ?assertEqual(ok, barrel_att_s3_store:checkpoint(AttRef, BranchPath)),
+    Test = self(),
+    Tab = ets:new(race, [public, set]),
+    IsVictim = fun(Key) -> binary:longest_common_suffix([Key, Victim]) =:= byte_size(Victim) end,
+    ok = meck:new(livery_s3, [passthrough]),
+    %% the copy of the victim waits for the delete's S3 call (at most 3 s:
+    %% with the lock, the delete cannot start until the copy is done)
+    ok = meck:expect(livery_s3, copy_object,
+                     fun(C, B, Src, B2, Dst) ->
+                             case IsVictim(Dst) of
+                                 true ->
+                                     ets:insert(Tab, {copier, self()}),
+                                     Test ! copy_starting,
+                                     receive s3_deleted -> ok after 3000 -> ok end;
+                                 false -> ok
+                             end,
+                             meck:passthrough([C, B, Src, B2, Dst])
+                     end),
+    %% the delete tells the waiting copy its object is gone, then holds
+    %% back its feed row for a while
+    ok = meck:expect(livery_s3, delete_object,
+                     fun(C, B, Key) ->
+                             R = meck:passthrough([C, B, Key]),
+                             case IsVictim(Key) of
+                                 true ->
+                                     [{copier, Pid}] = ets:lookup(Tab, copier),
+                                     Pid ! s3_deleted,
+                                     timer:sleep(1000);
+                                 false -> ok
+                             end,
+                             R
+                     end),
+    try
+        {ok, Branch} = barrel_att_s3_store:open(BranchPath,
+            #{s3 => S3Opts#{part_size => ?PART_SIZE}, db_name => DbName}),
+        receive copy_starting -> ok after 30000 -> ct:fail(no_copy) end,
+        Deleter = spawn_link(fun() ->
+            ok = barrel_att_s3_store:delete(Branch, DbName, DocId, Victim),
+            Test ! deleted
+        end),
+        receive deleted -> ok after 30000 -> ct:fail({no_delete, Deleter}) end,
+        ok = wait_fork_synced(BranchPath),
+        ?assertEqual({error, not_found},
+                     barrel_att_s3_store:get(Branch, DbName, DocId, Victim)),
+        ok = barrel_att_s3_store:close(Branch)
+    after
+        meck:unload(livery_s3),
+        ets:delete(Tab)
+    end,
+    ok = file:del_dir_r(BranchPath),
+    ok = barrel_att_s3_store:delete(AttRef, DbName, DocId, Victim).
+
+%% Several chunks: larger than one socket read.
+big_object() ->
+    binary:copy(<<"0123456789abcdef">>, 256 * 1024).
+
+%% The next livery_client:read/2 fails as if the store closed the
+%% connection; later reads pass through. get_object is observed so a test
+%% can see the resume.
+drop_next_read() ->
+    Dropped = atomics:new(1, []),
+    ok = meck:new(livery_client, [passthrough]),
+    ok = meck:expect(livery_client, read,
+                     fun(Reader, Timeout) ->
+                             case atomics:exchange(Dropped, 1, 1) of
+                                 0 -> {error, closed};
+                                 _ -> meck:passthrough([Reader, Timeout])
+                             end
+                     end),
+    ok = meck:new(livery_s3, [passthrough]).
+
+drain_result(Stream) ->
+    case barrel_att_s3_store:read_chunk(Stream) of
+        {ok, _Data, Next} -> drain_result(Next);
+        Other -> Other
+    end.
 
 %%====================================================================
 %% Streaming helpers
