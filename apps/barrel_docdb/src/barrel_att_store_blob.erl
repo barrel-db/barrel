@@ -657,13 +657,15 @@ build_blob_options(Options) ->
     [
         {create_if_missing, true},
         {max_open_files, maps:get(max_open_files, Options, 256)},
-        {compression, maps:get(compression, Options, snappy)},
+        %% zstd: the one codec rocksdb always builds (bundled when the system has none)
+        {compression, maps:get(compression, Options, zstd)},
+        {bottommost_compression, maps:get(bottommost_compression, Options, zstd)},
 
         %% BlobDB settings for large attachments
         {enable_blob_files, true},
         {min_blob_size, maps:get(min_blob_size, Options, 4096)},  % 4KB threshold
         {blob_file_size, BlobFileSize},
-        {blob_compression_type, maps:get(blob_compression, Options, snappy)},
+        {blob_compression_type, maps:get(blob_compression, Options, zstd)},
 
         %% Blob garbage collection
         {enable_blob_garbage_collection, true},

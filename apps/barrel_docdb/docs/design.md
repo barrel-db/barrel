@@ -267,8 +267,8 @@ Both stores share a common LRU block cache managed by `barrel_cache`:
 | `bloom_filter` | 10 bits/key | Reduce disk reads for point lookups |
 | `write_buffer_size` | 64MB | Memtable size before flush |
 | `max_write_buffer_number` | 3 | Concurrent memtables |
-| `compression` | snappy | Fast compression for all levels |
-| `bottommost_compression` | snappy | Configurable (zstd if available) |
+| `compression` | zstd | All levels. rocksdb always builds zstd (bundled when the system has none); `snappy` and `lz4` need the system library at build time |
+| `bottommost_compression` | zstd | Last level |
 | `level0_file_num_compaction_trigger` | 4 | Trigger L0→L1 compaction |
 | `max_background_jobs` | schedulers | Parallel compaction threads |
 | `min_tombstones_for_range_conversion` | 64 | Default column family: a run of this many deletes becomes one range delete at flush, so reads skip it at once (0 turns it off) |
@@ -280,7 +280,7 @@ Both stores share a common LRU block cache managed by `barrel_cache`:
 | `enable_blob_files` | true | Store large values in blob files |
 | `min_blob_size` | 4KB | Threshold for blob storage |
 | `blob_file_size` | 256MB | Maximum blob file size |
-| `blob_compression_type` | snappy | Blob compression (zstd if available) |
+| `blob_compression_type` | zstd | Blob files |
 | `blob_garbage_collection_age_cutoff` | 0.25 | GC blobs older than 25% |
 | `blob_garbage_collection_force_threshold` | 0.5 | Force GC at 50% garbage |
 

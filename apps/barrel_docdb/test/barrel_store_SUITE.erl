@@ -15,7 +15,7 @@
          init_per_group/2, end_per_group/2,
          init_per_testcase/2, end_per_testcase/2]).
 -export([rocksdb_deleted_run_reads/1, legacy_bitmap_cf_dropped/1,
-         legacy_bitmap_cf_read_only/1]).
+         legacy_bitmap_cf_read_only/1, default_compression_zstd/1]).
 
 %% Test cases
 -export([
@@ -76,7 +76,8 @@ groups() ->
             rocksdb_snapshot,
             rocksdb_deleted_run_reads,
             legacy_bitmap_cf_dropped,
-            legacy_bitmap_cf_read_only
+            legacy_bitmap_cf_read_only,
+            default_compression_zstd
         ]}
     ].
 
@@ -602,6 +603,34 @@ legacy_bitmap_cf_dropped(Config) ->
     ok = barrel_store_rocksdb:close(DbRef3),
     {ok, Cfs3} = rocksdb:list_column_families(Full, []),
     ?assert(lists:member("bitmap", Cfs3)).
+
+%% zstd is the codec rocksdb always builds; snappy needs the system library.
+default_compression_zstd(Config) ->
+    TestDir = proplists:get_value(test_dir, Config),
+    ?assert(lists:member(zstd, rocksdb:supported_compressions())),
+    Store = TestDir ++ "/zstd_store",
+    {ok, DbRef} = barrel_store_rocksdb:open(Store, #{}),
+    ok = barrel_store_rocksdb:close(DbRef),
+    assert_zstd_only(Store),
+    Att = TestDir ++ "/zstd_att",
+    {ok, AttRef} = barrel_att_store_blob:open(Att, #{}),
+    ok = barrel_att_store_blob:close(AttRef),
+    assert_zstd_only(Att).
+
+assert_zstd_only(Dir) ->
+    [Opts | _] = lists:reverse(lists:sort(filelib:wildcard(Dir ++ "/OPTIONS-*"))),
+    {ok, Bin} = file:read_file(Opts),
+    Pairs = [{string:trim(K), string:trim(V)}
+             || L <- binary:split(Bin, <<"\n">>, [global]),
+                [K, V] <- [binary:split(L, <<"=">>)]],
+    Codecs = [V || {K, V} <- Pairs,
+                   K =:= <<"compression">> orelse K =:= <<"bottommost_compression">>],
+    ?assertNotEqual([], Codecs),
+    ?assertEqual([<<"kZSTD">>], lists:usort(Codecs)),
+    %% blob files exist only where enabled; those compress with zstd
+    Blobs = lists:usort([V || {<<"blob_compression_type">>, V} <- Pairs]),
+    ?assert(lists:member(<<"kZSTD">>, Blobs)),
+    ?assertEqual([], Blobs -- [<<"kZSTD">>, <<"kNoCompression">>]).
 
 legacy_bitmap_cf_read_only(Config) ->
     TestDir = proplists:get_value(test_dir, Config),
