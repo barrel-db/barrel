@@ -10,7 +10,7 @@
 -module(barrel_server_SUITE).
 
 -export([all/0, init_per_suite/1, end_per_suite/1]).
--export([t_db_names/1, t_missing_db/1, 
+-export([t_db_names/1, t_missing_db/1, t_find_pages/1, 
     t_db_lifecycle/1,
     t_doc_crud/1,
     t_bulk/1,
@@ -64,7 +64,7 @@ all() ->
      t_create_db_att_opts_redacts_secrets, t_create_db_att_opts_blob_explicit,
      t_attachment_conditional_headers_unenforced_on_blob,
      t_attachment_bad_if_none_match,
-     t_attachment_disabled_internal_db, t_db_names, t_missing_db].
+     t_attachment_disabled_internal_db, t_db_names, t_missing_db, t_find_pages].
 
 init_per_suite(Config) ->
     %% Load first, then override env (application:load resets to .app defaults).
@@ -141,6 +141,30 @@ t_missing_db(Config) ->
 req_raw_post_json(Url, Bql) ->
     {S, Body} = req_raw_post(Url, [], Bql),
     {S, json:decode(Body)}.
+
+%% A find page's continuation, sent back with the same query, returns
+%% the next page; together the pages hold every match once.
+t_find_pages(Config) ->
+    B = base(Config),
+    Ids = [<<"page", (integer_to_binary(I))/binary>> || I <- lists:seq(1, 5)],
+    [{201, _} = req_json(put, url("/doc/" ++ binary_to_list(Id), B),
+                         #{<<"kind">> => <<"paged">>}) || Id <- Ids],
+    Query = #{where => [[<<"path">>, [<<"kind">>], <<"paged">>]], limit => 2},
+    Got = find_all(url("/find", B), Query, []),
+    ?assertEqual(lists:sort(Ids), lists:sort(Got)),
+    ?assertMatch({400, #{<<"error">> := <<"invalid_query">>}},
+                 req_json(post, url("/find", B), Query#{continuation => <<"%%">>})),
+    ok.
+
+find_all(Url, Query, Acc) ->
+    {200, #{<<"rows">> := Rows, <<"meta">> := Meta}} = req_json(post, Url, Query),
+    Acc1 = Acc ++ [maps:get(<<"id">>, R) || R <- Rows],
+    case Meta of
+        #{<<"has_more">> := true, <<"continuation">> := C} ->
+            find_all(Url, Query#{continuation => C}, Acc1);
+        _ ->
+            Acc1
+    end.
 
 t_doc_crud(Config) ->
     B = base(Config),
