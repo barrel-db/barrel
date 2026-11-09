@@ -475,22 +475,7 @@ handle_read({delete, Id}, State) ->
 handle_read({update, Id, Text, Metadata}, State) ->
     case do_get(Id, State) of
         {ok, _Existing} ->
-            case do_delete(Id, State) of
-                {ok, State1} ->
-                    case do_embed(Text, State1) of
-                        {ok, Vector} ->
-                            case do_add(Id, Text, Metadata, Vector, State1) of
-                                {ok, NewState} ->
-                                    {ok, NewState};
-                                {error, Reason, NewState} ->
-                                    {{error, Reason}, NewState}
-                            end;
-                        {error, _} = Error ->
-                            {Error, State1}
-                    end;
-                {error, Reason, State1} ->
-                    {{error, Reason}, State1}
-            end;
+            replace_entry(Id, Text, Metadata, State);
         not_found ->
             {not_found, State};
         {error, _} = Error ->
@@ -500,22 +485,7 @@ handle_read({update, Id, Text, Metadata}, State) ->
 handle_read({upsert, Id, Text, Metadata}, State) ->
     case do_get(Id, State) of
         {ok, _Existing} ->
-            case do_delete(Id, State) of
-                {ok, State1} ->
-                    case do_embed(Text, State1) of
-                        {ok, Vector} ->
-                            case do_add(Id, Text, Metadata, Vector, State1) of
-                                {ok, NewState} ->
-                                    {ok, NewState};
-                                {error, Reason, NewState} ->
-                                    {{error, Reason}, NewState}
-                            end;
-                        {error, _} = Error ->
-                            {Error, State1}
-                    end;
-                {error, Reason, State1} ->
-                    {{error, Reason}, State1}
-            end;
+            replace_entry(Id, Text, Metadata, State);
         not_found ->
             case do_embed(Text, State) of
                 {ok, Vector} ->
@@ -1404,6 +1374,27 @@ do_add(Id, Text, Metadata, Vector, #state{db = Db, cf_vectors = CfV,
     end.
 
 %% Get a document
+
+%% Embed the new text before touching the old entry, so a failed embed
+%% leaves the entry as it was.
+replace_entry(Id, Text, Metadata, State) ->
+    case do_embed(Text, State) of
+        {ok, Vector} ->
+            case do_delete(Id, State) of
+                {ok, State1} ->
+                    case do_add(Id, Text, Metadata, Vector, State1) of
+                        {ok, NewState} ->
+                            {ok, NewState};
+                        {error, Reason, NewState} ->
+                            {{error, Reason}, NewState}
+                    end;
+                {error, Reason, State1} ->
+                    {{error, Reason}, State1}
+            end;
+        {error, _} = Error ->
+            {Error, State}
+    end.
+
 do_get(Id, #state{db = Db, cf_vectors = CfV, cf_metadata = CfM, cf_text = CfT,
                   docstore = Docstore}) ->
     case rocksdb:get(Db, CfV, Id, []) of
