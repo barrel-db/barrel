@@ -43,7 +43,8 @@ Existing databases open lazily on first use through Barrel's database lifecycle 
 
 ```
 GET    /                          liveness text
-GET    /health                    {"status":"ok"}
+GET    /health                    {"status":"ok"} when the listener answers
+GET    /ready                     200 {"status":"ready"}, or 503 with the failed checks
 
 PUT    /db/:db                     open/create a database
 GET    /db/:db                     database info

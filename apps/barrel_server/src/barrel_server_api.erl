@@ -110,7 +110,8 @@ validate_group(Group) ->
 group_routes(meta) ->
     [
         {<<"GET">>, <<"/">>,       {barrel_server_http, root}},
-        {<<"GET">>, <<"/health">>, {barrel_server_http, health}}
+        {<<"GET">>, <<"/health">>, {barrel_server_http, health}},
+        {<<"GET">>, <<"/ready">>,  {barrel_server_http, ready}}
     ];
 group_routes(db) ->
     [

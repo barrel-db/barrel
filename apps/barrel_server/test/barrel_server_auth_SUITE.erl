@@ -89,6 +89,7 @@ t_sync_routes_locked(Config) ->
 t_health_open(Config) ->
     B = ?config(base, Config),
     {200, _} = req(get, B ++ "/health", [], <<>>),
+    {200, _} = req(get, B ++ "/ready", [], <<>>),
     ok.
 
 t_token_rotation_list(Config) ->

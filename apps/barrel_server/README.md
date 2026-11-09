@@ -74,7 +74,8 @@ first use and are cached by name.
 
 ```
 GET    /                               liveness text
-GET    /health                         {"status":"ok"}
+GET    /health                         {"status":"ok"} when the listener answers
+GET    /ready                          200 when databases and replication run, else 503
 
 PUT    /db/:db                          open/create a database
 GET    /db/:db                          database info

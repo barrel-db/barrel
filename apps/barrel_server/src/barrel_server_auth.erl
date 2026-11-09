@@ -134,6 +134,8 @@ call(Req, Next, State) ->
     case livery_req:path(Req) of
         <<"/health">> ->
             Next(Req);
+        <<"/ready">> ->
+            Next(Req);
         <<"/mcp">> ->
             %% the MCP endpoint authenticates through its own provider
             %% (barrel_server_mcp_auth), which covers the same server
