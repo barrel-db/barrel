@@ -276,6 +276,7 @@ barrel_doc_operation_duration_seconds_bucket{db="mydb",operation="get",le="0.01"
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
+| `barrel_db_documents_total` | Gauge | db | Live documents (deleted ones are not counted); exact, kept by every write. A database written before 2.4.0 is counted once after it opens |
 | `barrel_db_size_bytes` | Gauge | db | Document store size on disk |
 | `barrel_db_pending_compaction_bytes` | Gauge | db | Bytes compaction still has to rewrite |
 | `barrel_db_compactions_running` | Gauge | db | Compactions running now |

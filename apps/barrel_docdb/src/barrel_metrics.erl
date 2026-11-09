@@ -43,6 +43,7 @@
     set_rep_active/2,
 
     %% Storage
+    set_db_docs/2,
     set_db_size/2,
     set_db_stubs/3,
     set_db_storage/2
@@ -109,6 +110,10 @@
     %% Active replications gauge
     {gauge, barrel_replication_active,
      <<"Whether replication is active (1) or not (0)">>},
+
+    %% Live documents (exact, kept by every write)
+    {gauge, barrel_db_documents_total,
+     <<"Live documents in the database">>},
 
     %% Database size gauge
     {gauge, barrel_db_size_bytes,
@@ -275,6 +280,16 @@ set_rep_active(TaskId, Active) ->
 %%====================================================================
 %% Storage
 %%====================================================================
+
+%% @doc Set the live document count
+-spec set_db_docs(binary(), non_neg_integer()) -> ok.
+set_db_docs(Db, Count) ->
+    Attrs = #{db => Db},
+    case instrument_meter:get_instrument(barrel_db_documents_total) of
+        undefined -> ok;
+        Instrument -> instrument_meter:set(Instrument, Count, Attrs)
+    end,
+    ok.
 
 %% @doc Set database size in bytes
 -spec set_db_size(binary(), non_neg_integer()) -> ok.

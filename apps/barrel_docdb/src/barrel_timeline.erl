@@ -348,9 +348,13 @@ rewind(StoreRef, Ks, Compiled, T) ->
         _ ->
             Targets = resolve_targets(StoreRef, Ks, T, PostT),
             rewind_docs(StoreRef, Ks, Compiled, maps:to_list(Targets)),
+            %% the rewind bypasses the writer: forget the document count
+            %% so the branch counts itself again when it opens
             GlobalOps = PostTHistDels
                 ++ outbox_rewind_ops(StoreRef, Ks, T)
-                ++ bucket_drop_ops(StoreRef, Ks),
+                ++ bucket_drop_ops(StoreRef, Ks)
+                ++ [{delete, barrel_store_keys:db_docs_count(Ks)},
+                    {delete, barrel_store_keys:db_docs_counted(Ks)}],
             ok = barrel_store_rocksdb:write_batch(StoreRef, GlobalOps,
                                                   #{}),
             ok = rewrite_last_hlc(StoreRef, Ks)
