@@ -42,7 +42,9 @@
     att_changes/4,
     att_floor/2,
     last_hlc/2,
-    sweep/3
+    sweep/3,
+    att_count/2,
+    count_atts/2
 ]).
 
 %% Codec (exposed for tests)
@@ -68,6 +70,8 @@
 -define(META, $M).
 -define(FLOOR_NAME, <<"att_floor">>).
 -define(HIGH_NAME, <<"att_hlc_high">>).
+-define(COUNT_NAME, <<"att_count">>).
+-define(COUNTED_NAME, <<"att_counted">>).
 
 %%====================================================================
 %% Ops (called from the blob store's commit points)
@@ -92,12 +96,17 @@ ops(Ref, DbName, DocId, AttName, Op, OriginHlc, Info) ->
           barrel_hlc:timestamp(), barrel_hlc:timestamp(), map()) -> [term()].
 ops(Ref, DbName, DocId, AttName, Op, OriginHlc, LocalHlc, Info) ->
     IndexKey = index_key(DbName, DocId, AttName),
-    DeleteOld = case rocksdb:get(Ref, IndexKey, []) of
+    {DeleteOld, OldOp} = case rocksdb:get(Ref, IndexKey, []) of
         {ok, OldIdxBin} ->
-            #{seq := OldLocal} = decode_index(OldIdxBin),
-            [{delete, feed_key(DbName, OldLocal)}];
+            #{seq := OldLocal, op := OOp} = decode_index(OldIdxBin),
+            {[{delete, feed_key(DbName, OldLocal)}], OOp};
         _ ->
-            []
+            {[], none}
+    end,
+    %% the attachment count moves in the same batch as the index row
+    CountOps = case is_put(Op) - is_put(OldOp) of
+        0 -> [];
+        Delta -> [{merge, count_key(DbName), Delta}]
     end,
     Entry = #{
         origin => OriginHlc,
@@ -111,7 +120,72 @@ ops(Ref, DbName, DocId, AttName, Op, OriginHlc, LocalHlc, Info) ->
     DeleteOld ++
         [{put, feed_key(DbName, LocalHlc), encode_feed(Op, Entry)},
          {put, IndexKey, encode_index(Entry#{seq => LocalHlc})},
-         {put, high_key(DbName), barrel_hlc:encode(LocalHlc)}].
+         {put, high_key(DbName), barrel_hlc:encode(LocalHlc)}] ++ CountOps.
+
+is_put(put) -> 1;
+is_put(_) -> 0.
+
+%% @doc The number of attachments (index rows that are puts), exact once
+%% the feed has been counted; `not_counted' before.
+-spec att_count(rocksdb:db_handle(), db_name()) -> {ok, non_neg_integer()} | not_counted.
+att_count(Ref, DbName) ->
+    case rocksdb:get(Ref, counted_key(DbName), []) of
+        {ok, _} ->
+            case rocksdb:get(Ref, count_key(DbName), []) of
+                {ok, Bin} -> {ok, max(0, binary_to_integer(Bin))};
+                _ -> {ok, 0}
+            end;
+        _ ->
+            not_counted
+    end.
+
+%% @doc Count the attachments of a feed written before the counter: from
+%% a snapshot, adding the difference to the counter as it was there, so
+%% writes made meanwhile (merges) are kept.
+-spec count_atts(rocksdb:db_handle(), db_name()) -> ok | {error, term()}.
+count_atts(Ref, DbName) ->
+    {ok, Snap} = rocksdb:snapshot(Ref),
+    try
+        Prefix = <<?TAG, ?INDEX, (byte_size(DbName)):16, DbName/binary>>,
+        {ok, It} = rocksdb:iterator(Ref, [{snapshot, Snap}, {total_order_seek, true}]),
+        Live = try count_puts(rocksdb:iterator_move(It, {seek, Prefix}), It, Prefix, 0)
+               after rocksdb:iterator_close(It)
+               end,
+        C0 = case rocksdb:get(Ref, count_key(DbName), [{snapshot, Snap}]) of
+            {ok, Bin} -> binary_to_integer(Bin);
+            _ -> 0
+        end,
+        {ok, Batch} = rocksdb:batch(),
+        try
+            ok = rocksdb:batch_merge(Batch, count_key(DbName), integer_to_binary(Live - C0)),
+            ok = rocksdb:batch_put(Batch, counted_key(DbName), <<>>),
+            rocksdb:write_batch(Ref, Batch, [{sync, true}])
+        after
+            rocksdb:release_batch(Batch)
+        end
+    after
+        rocksdb:release_snapshot(Snap)
+    end.
+
+count_puts({ok, K, V}, It, Prefix, N) ->
+    case binary:longest_common_prefix([K, Prefix]) =:= byte_size(Prefix) of
+        true ->
+            N1 = case decode_index(V) of
+                #{op := put} -> N + 1;
+                _ -> N
+            end,
+            count_puts(rocksdb:iterator_move(It, next), It, Prefix, N1);
+        false ->
+            N
+    end;
+count_puts(_, _It, _Prefix, N) ->
+    N.
+
+count_key(DbName) ->
+    <<?TAG, ?META, (byte_size(DbName)):16, DbName/binary, ?COUNT_NAME/binary>>.
+
+counted_key(DbName) ->
+    <<?TAG, ?META, (byte_size(DbName)):16, DbName/binary, ?COUNTED_NAME/binary>>.
 
 %% @doc A fresh HLC above Floor; throws {error, clock_skew} when the
 %% clock refuses to move past it.

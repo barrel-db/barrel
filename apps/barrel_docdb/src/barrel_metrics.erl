@@ -45,6 +45,7 @@
     %% Storage
     set_db_docs/2,
     set_db_size/2,
+    set_db_attachments/2,
     set_db_stubs/3,
     set_db_storage/2
 ]).
@@ -114,6 +115,10 @@
     %% Live documents (exact, kept by every write)
     {gauge, barrel_db_documents_total,
      <<"Live documents in the database">>},
+
+    %% Attachments (exact, kept by every attachment write)
+    {gauge, barrel_db_attachments_total,
+     <<"Attachments in the database">>},
 
     %% Database size gauge
     {gauge, barrel_db_size_bytes,
@@ -286,6 +291,16 @@ set_rep_active(TaskId, Active) ->
 set_db_docs(Db, Count) ->
     Attrs = #{db => Db},
     case instrument_meter:get_instrument(barrel_db_documents_total) of
+        undefined -> ok;
+        Instrument -> instrument_meter:set(Instrument, Count, Attrs)
+    end,
+    ok.
+
+%% @doc Set the attachment count
+-spec set_db_attachments(binary(), non_neg_integer()) -> ok.
+set_db_attachments(Db, Count) ->
+    Attrs = #{db => Db},
+    case instrument_meter:get_instrument(barrel_db_attachments_total) of
         undefined -> ok;
         Instrument -> instrument_meter:set(Instrument, Count, Attrs)
     end,

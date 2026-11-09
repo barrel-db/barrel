@@ -701,7 +701,8 @@ handle_call_rw(info, _From, #state{name = Name, keyspace = Keyspace,
         att_floor => AttFloor,
         write_groups => WriteGroups,
         storage => (barrel_store_rocksdb:storage_stats(StoreRef))#{
-                       documents => doc_count_value(StoreRef, Name)}
+                       documents => doc_count_value(StoreRef, Name),
+                       attachments => att_count_value(AttRef, Name)}
     },
     Info = case Parent of
         undefined -> Info0;
@@ -917,7 +918,7 @@ handle_info(stats_tick, #state{name = Name, store_ref = StoreRef,
                                stats_interval = Interval} = State) ->
     ok = barrel_metrics:set_db_storage(Name,
                                        barrel_store_rocksdb:storage_stats(StoreRef)),
-    State1 = publish_doc_count(State),
+    State1 = publish_att_count(publish_doc_count(State)),
     {noreply, State1#state{stats_timer = arm_stats(Interval)}};
 
 %% The periodic retention/ttl work runs in a monitored worker so it never
@@ -3222,6 +3223,27 @@ publish_doc_count(#state{name = Name, store_ref = StoreRef,
         not_counted ->
             start_sweep(doc_count, fun() -> count_docs(StoreRef, Ks) end,
                         none, false, State)
+    end.
+
+publish_att_count(#state{att_ref = undefined} = State) ->
+    State;
+publish_att_count(#state{name = Name, att_ref = AttRef, read_only = ReadOnly} = State) ->
+    case barrel_att_store:att_count(AttRef, Name) of
+        {ok, N} ->
+            ok = barrel_metrics:set_db_attachments(Name, N),
+            State;
+        not_counted when not ReadOnly ->
+            start_sweep(att_count, fun() -> barrel_att_store:count_atts(AttRef, Name) end,
+                        none, false, State);
+        _ ->
+            State
+    end.
+
+att_count_value(undefined, _Name) -> undefined;
+att_count_value(AttRef, Name) ->
+    case barrel_att_store:att_count(AttRef, Name) of
+        {ok, N} -> N;
+        _ -> undefined
     end.
 
 doc_count_value(StoreRef, Name) ->

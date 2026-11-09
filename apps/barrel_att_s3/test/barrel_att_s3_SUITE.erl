@@ -40,7 +40,7 @@
 
 -export([
     encrypted_feed_hides_names/1, plaintext_feed_encrypted_on_open/1,
-    encrypted_object_roundtrip/1, encrypted_multipart_roundtrip/1, encrypted_object_tamper_detected/1, encrypted_object_needs_key/1, encrypted_branch_reads_parent/1, legacy_objects_reencrypted/1,
+    encrypted_object_roundtrip/1, encrypted_multipart_roundtrip/1, encrypted_object_tamper_detected/1, encrypted_object_needs_key/1, encrypted_branch_reads_parent/1, legacy_objects_reencrypted/1, att_count_follows_writes/1,
     open_missing_bucket/1,
     put_get_roundtrip/1,
     get_returns_not_found_for_missing/1,
@@ -182,7 +182,8 @@
     encrypted_object_tamper_detected,
     encrypted_object_needs_key,
     encrypted_branch_reads_parent,
-    legacy_objects_reencrypted
+    legacy_objects_reencrypted,
+    att_count_follows_writes
 ]).
 
 %% Need a store enforcing If-Match/If-None-Match: RustFS, or Garage behind
@@ -1930,3 +1931,28 @@ legacy_objects_reencrypted(Config) ->
     ?assertEqual({error, unencrypted_object},
                  barrel_att_s3_store:get(Ref, Name, <<"d">>, <<"planted">>)),
     ok = barrel_att_s3_store:close(Ref).
+
+%% The attachment count follows puts, overwrites (no change), deletes
+%% and streamed writes; a feed written before the counter is counted once.
+att_count_follows_writes(Config) ->
+    Ref = ?config(att_ref, Config),
+    Db = ?config(db_name, Config),
+    ?assertEqual(not_counted, barrel_att_s3_store:att_count(Ref, Db)),
+    ok = barrel_att_s3_store:count_atts(Ref, Db),
+    ?assertEqual({ok, 0}, barrel_att_s3_store:att_count(Ref, Db)),
+    {ok, _} = barrel_att_s3_store:put(Ref, Db, <<"d">>, <<"a">>, <<"1">>),
+    {ok, _} = barrel_att_s3_store:put(Ref, Db, <<"d">>, <<"b">>, <<"2">>),
+    {ok, _} = barrel_att_s3_store:put(Ref, Db, <<"d">>, <<"a">>, <<"3">>),
+    {ok, W0} = barrel_att_s3_store:put_stream(Ref, Db, <<"d">>, <<"c">>, <<"text/plain">>),
+    {ok, W1} = barrel_att_s3_store:write_chunk(W0, <<"streamed">>),
+    {ok, _} = barrel_att_s3_store:finish_stream(W1),
+    ?assertEqual({ok, 3}, barrel_att_s3_store:att_count(Ref, Db)),
+    ok = barrel_att_s3_store:delete(Ref, Db, <<"d">>, <<"b">>),
+    ?assertEqual({ok, 2}, barrel_att_s3_store:att_count(Ref, Db)),
+    #{feed_ref := Feed} = Ref,
+    Meta = fun(Name) -> <<16#FF, $M, (byte_size(Db)):16, Db/binary, Name/binary>> end,
+    ok = rocksdb:delete(Feed, Meta(<<"att_count">>), []),
+    ok = rocksdb:delete(Feed, Meta(<<"att_counted">>), []),
+    ?assertEqual(not_counted, barrel_att_s3_store:att_count(Ref, Db)),
+    ok = barrel_att_s3_store:count_atts(Ref, Db),
+    ?assertEqual({ok, 2}, barrel_att_s3_store:att_count(Ref, Db)).

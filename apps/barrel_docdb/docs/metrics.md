@@ -70,6 +70,7 @@ barrel_replication_errors{task_id="rep-123"} 2
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
 | `barrel_db_documents_total` | Gauge | db | Live documents (deleted ones are not counted); exact, kept by every write. A database written before 2.4.0 is counted once after it opens |
+| `barrel_db_attachments_total` | Gauge | db | Attachments; exact, kept by every attachment write (blob and S3 backends). A database written before 2.4.0 is counted once after it opens |
 | `barrel_db_size_bytes` | Gauge | db | Document store size on disk: SST and blob files of every column family |
 | `barrel_db_pending_compaction_bytes` | Gauge | db | Bytes compaction still has to rewrite |
 | `barrel_db_compactions_running` | Gauge | db | Compactions running now |
@@ -80,7 +81,7 @@ barrel_replication_errors{task_id="rep-123"} 2
 The size and compaction gauges are read from RocksDB properties every
 `stats_interval` milliseconds (60000 by default, `0` turns the refresh off),
 and the first time within a second of opening. `barrel_docdb:db_info/1` returns
-the same numbers under `storage`, with `documents` (undefined until a
+the same numbers under `storage`, with `documents` and `attachments` (undefined until a
 database written before 2.4.0 has been counted). A pending compaction backlog that keeps
 growing, or queued compactions that stay above zero, means compaction is
 falling behind the writes.

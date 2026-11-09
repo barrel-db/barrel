@@ -14,7 +14,8 @@
          doc_count_follows_writes/1,
          doc_count_counts_existing_db/1,
          doc_count_after_replication/1,
-         doc_count_on_branches/1]).
+         doc_count_on_branches/1,
+         att_count_follows_writes/1]).
 
 all() ->
     [info_reports_storage,
@@ -24,7 +25,8 @@ all() ->
      doc_count_follows_writes,
      doc_count_counts_existing_db,
      doc_count_after_replication,
-     doc_count_on_branches].
+     doc_count_on_branches,
+     att_count_follows_writes].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(barrel_docdb),
@@ -181,6 +183,50 @@ doc_count_on_branches(Config) ->
     ?assertEqual(8, docs(Now)),
     {ok, _} = barrel_docdb:branch_db(Db, Then, #{at => T}),
     ok = wait_docs(Then, 5).
+
+%% The attachment count follows puts, overwrites (no change) and deletes,
+%% follows replication, and a database written before the counter is
+%% counted once.
+att_count_follows_writes(Config) ->
+    Db = ?config(db, Config),
+    Tgt = <<Db/binary, "_tgt">>,
+    {ok, _} = barrel_docdb:create_db(Db, #{stats_interval => 50}),
+    {ok, _} = barrel_docdb:create_db(Tgt, #{stats_interval => 50}),
+    ok = wait_atts(Db, 0),
+    {ok, _} = barrel_docdb:put_doc(Db, #{<<"id">> => <<"d">>}),
+    {ok, _} = barrel_docdb:put_attachment(Db, <<"d">>, <<"a.txt">>, <<"a">>),
+    {ok, _} = barrel_docdb:put_attachment(Db, <<"d">>, <<"b.txt">>, <<"b">>),
+    ?assertEqual(2, atts(Db)),
+    {ok, _} = barrel_docdb:put_attachment(Db, <<"d">>, <<"a.txt">>, <<"a2">>),
+    ?assertEqual(2, atts(Db)),
+    ok = barrel_docdb:delete_attachment(Db, <<"d">>, <<"b.txt">>),
+    ?assertEqual(1, atts(Db)),
+    ok = wait_atts(Tgt, 0),
+    {ok, _} = barrel_rep:replicate(Db, Tgt),
+    ?assertEqual(1, atts(Tgt)),
+    {ok, _} = barrel_rep:replicate(Db, Tgt),
+    ?assertEqual(1, atts(Tgt)),
+    1 = wait_gauge_value(<<"barrel_db_attachments_total">>, Db, 1, 200),
+    %% forget the count: the database is counted again
+    #{ref := Ref} = persistent_term:get({barrel_att_ref, Db}),
+    Ks = barrel_keyspace:resolve(Db),
+    Meta = fun(Name) -> <<16#FF, $M, (byte_size(Ks)):16, Ks/binary, Name/binary>> end,
+    ok = rocksdb:delete(Ref, Meta(<<"att_count">>), []),
+    ok = rocksdb:delete(Ref, Meta(<<"att_counted">>), []),
+    ?assertEqual(undefined, atts(Db)),
+    ok = wait_atts(Db, 1).
+
+atts(Db) ->
+    {ok, #{storage := #{attachments := N}}} = barrel_docdb:db_info(Db),
+    N.
+
+wait_atts(Db, Want) -> wait_atts(Db, Want, 200).
+wait_atts(Db, Want, 0) -> ct:fail({att_count, Db, atts(Db), Want});
+wait_atts(Db, Want, N) ->
+    case atts(Db) of
+        Want -> ok;
+        _ -> timer:sleep(20), wait_atts(Db, Want, N - 1)
+    end.
 
 docs(Db) ->
     {ok, #{storage := #{documents := N}}} = barrel_docdb:db_info(Db),
