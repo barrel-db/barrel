@@ -30,6 +30,7 @@ api_test_() ->
         {"update returns not_found", fun test_update_not_found/0},
         {"upsert inserts new", fun test_upsert_insert/0},
         {"upsert updates existing", fun test_upsert_update/0},
+        {"failed embed keeps the entry", fun test_update_failed_embed/0},
         {"peek returns documents", fun test_peek/0},
         {"count returns correct number", fun test_count/0},
         {"stats returns store info", fun test_stats/0},
@@ -268,6 +269,20 @@ test_upsert_update() ->
     {ok, Doc} = barrel_vectordb:get(test_store, <<"ups2">>),
     ?assertEqual(<<"v2">>, maps:get(text, Doc)),
     ?assertEqual(#{v => 2}, maps:get(metadata, Doc)).
+
+%% A failed re-embed leaves the old entry in place, for update and upsert.
+test_update_failed_embed() ->
+    ok = barrel_vectordb:add_vector(test_store, <<"keep">>, <<"original">>, #{v => 1}, [1.0, 0.0, 0.0]),
+    meck:expect(barrel_embed, embed, fun(_Text, _State) -> {error, embedder_down} end),
+    ?assertEqual({error, embedder_down},
+                 barrel_vectordb:update(test_store, <<"keep">>, <<"new">>, #{v => 2})),
+    ?assertEqual({error, embedder_down},
+                 barrel_vectordb:upsert(test_store, <<"keep">>, <<"new">>, #{v => 2})),
+    {ok, Doc} = barrel_vectordb:get(test_store, <<"keep">>),
+    ?assertEqual(<<"original">>, maps:get(text, Doc)),
+    ?assertEqual(#{v => 1}, maps:get(metadata, Doc)),
+    {ok, [Hit | _]} = barrel_vectordb:search_vector(test_store, [1.0, 0.0, 0.0], #{k => 1}),
+    ?assertEqual(<<"keep">>, maps:get(key, Hit)).
 
 test_peek() ->
     %% Add some documents
