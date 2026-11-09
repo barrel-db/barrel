@@ -208,10 +208,11 @@ open(Path, Options) ->
             ConditionalWrites = probe_conditional_writes(Client, Bucket),
             case open_feed_and_prefix(Path, Options) of
                 {ok, FeedRef, Prefix} ->
-                    AttRef = #{client => Client, bucket => Bucket, part_size => PartSize,
+                    AttRef0 = #{client => Client, bucket => Bucket, part_size => PartSize,
                               conditional_writes => ConditionalWrites,
                               feed_ref => FeedRef, prefix => Prefix, path => Path,
                               endpoint => Endpoint},
+                    AttRef = with_crypto(AttRef0, Options),
                     ok = maybe_resume_fork_sync(AttRef, Path, Options),
                     ok = barrel_att_s3_multipart_gc:register_target(
                              Endpoint, Bucket, Prefix, Client),
@@ -269,7 +270,7 @@ do_maybe_resume_fork_sync(#{client := Client, bucket := Bucket, prefix := Prefix
 open_feed_and_prefix(Path, Options) ->
     FeedPath = filename:join(Path, "feed.db"),
     ok = filelib:ensure_dir(FeedPath ++ "/"),
-    case rocksdb:open(FeedPath, [{create_if_missing, true}]) of
+    case open_feed(Path, FeedPath, maps:get(env, Options, undefined)) of
         {ok, FeedRef} ->
             case read_or_derive_prefix(Path, Options) of
                 {ok, Prefix} ->
@@ -281,6 +282,99 @@ open_feed_and_prefix(Path, Options) ->
         {error, _} = Err ->
             Err
     end.
+
+%% An encrypted database keeps its feed under the database's encrypted
+%% env, marked by `Path/feed.enc'. A plaintext feed found next to a key
+%% (written before attachments were encrypted) is copied once into an
+%% encrypted one; `feed.db.plain' is the old feed while that runs, so a
+%% crash at any step is finished or redone on the next open.
+open_feed(Path, FeedPath, undefined) ->
+    case filelib:is_regular(feed_enc_marker(Path)) of
+        true -> {error, db_is_encrypted};
+        false -> rocksdb:open(FeedPath, [{create_if_missing, true}])
+    end;
+open_feed(Path, FeedPath, Env) ->
+    Marker = feed_enc_marker(Path),
+    Plain = FeedPath ++ ".plain",
+    %% a feed exists once RocksDB wrote its CURRENT file; the directory
+    %% alone is created before this runs
+    case {filelib:is_regular(Marker), is_feed(FeedPath), is_feed(Plain)} of
+        {true, _, _} ->
+            _ = file:del_dir_r(Plain),
+            rocksdb:open(FeedPath, [{create_if_missing, true}, {env, Env}]);
+        {false, true, true} ->
+            %% the encrypted copy was moved in; only the marker is missing
+            ok = file:write_file(Marker, <<>>),
+            open_feed(Path, FeedPath, Env);
+        {false, false, true} ->
+            _ = file:del_dir_r(FeedPath),
+            ok = file:rename(Plain, FeedPath),
+            open_feed(Path, FeedPath, Env);
+        {false, true, false} ->
+            case encrypt_feed(FeedPath, Env) of
+                ok -> open_feed(Path, FeedPath, Env);
+                {error, _} = Err -> Err
+            end;
+        {false, false, false} ->
+            ok = file:write_file(Marker, <<>>),
+            open_feed(Path, FeedPath, Env)
+    end.
+
+encrypt_feed(FeedPath, Env) ->
+    Tmp = FeedPath ++ ".enc.tmp",
+    _ = file:del_dir_r(Tmp),
+    {ok, Old} = rocksdb:open(FeedPath, []),
+    try
+        {ok, New} = rocksdb:open(Tmp, [{create_if_missing, true}, {env, Env}]),
+        try copy_rows(Old, New)
+        after rocksdb:close(New)
+        end
+    after
+        rocksdb:close(Old)
+    end,
+    ok = file:rename(FeedPath, FeedPath ++ ".plain"),
+    file:rename(Tmp, FeedPath).
+
+copy_rows(Old, New) ->
+    {ok, It} = rocksdb:iterator(Old, []),
+    try copy_rows(rocksdb:iterator_move(It, first), It, New, [])
+    after rocksdb:iterator_close(It)
+    end.
+
+copy_rows({ok, K, V}, It, New, Acc) when length(Acc) >= 1000 ->
+    ok = write_rows(New, Acc),
+    copy_rows({ok, K, V}, It, New, []);
+copy_rows({ok, K, V}, It, New, Acc) ->
+    copy_rows(rocksdb:iterator_move(It, next), It, New, [{put, K, V} | Acc]);
+copy_rows({error, _}, _It, New, Acc) ->
+    write_rows(New, Acc).
+
+write_rows(_New, []) -> ok;
+write_rows(New, Ops) ->
+    {ok, Batch} = rocksdb:batch(),
+    try
+        [ok = rocksdb:batch_put(Batch, K, V) || {put, K, V} <- Ops],
+        rocksdb:write_batch(New, Batch, [{sync, true}])
+    after
+        rocksdb:release_batch(Batch)
+    end.
+
+feed_enc_marker(Path) ->
+    filename:join(Path, "feed.enc").
+
+is_feed(Dir) ->
+    filelib:is_regular(filename:join(Dir, "CURRENT")).
+
+%% A branch's feed is a checkpoint of its parent's: encrypted alike.
+copy_feed_enc_marker(SourcePath, BranchPath) ->
+    case filelib:is_regular(feed_enc_marker(SourcePath)) of
+        true -> file:write_file(feed_enc_marker(BranchPath), <<>>);
+        false -> ok
+    end.
+
+%% The database key, kept for the objects (barrel_att_s3_crypto).
+with_crypto(AttRef, #{crypto := #{key := Key}}) -> AttRef#{crypto => #{key => Key}};
+with_crypto(AttRef, _Options) -> AttRef.
 
 %% @private See the moduledoc's "Key scheme" section for why this exists.
 read_or_derive_prefix(Path, Options) ->
@@ -345,18 +439,19 @@ checkpoint(#{feed_ref := FeedRef, bucket := Bucket, prefix := OldPrefix,
         {ok, _} ->
             {error, {fork_sync_pending, retry}};
         not_found ->
-            do_checkpoint(FeedRef, Bucket, OldPrefix, BranchPath);
+            do_checkpoint(FeedRef, Bucket, OldPrefix, SourcePath, BranchPath);
         {error, _} = Err ->
             Err
     end.
 
 %% ensure_path(BranchPath), not ensure_dir(FeedPath ++ "/"): checkpoint's
 %% target must not already exist, unlike rocksdb:open's create_if_missing.
-do_checkpoint(FeedRef, Bucket, OldPrefix, BranchPath) ->
+do_checkpoint(FeedRef, Bucket, OldPrefix, SourcePath, BranchPath) ->
     ok = filelib:ensure_path(BranchPath),
     FeedPath = filename:join(BranchPath, "feed.db"),
     case rocksdb:checkpoint(FeedRef, FeedPath) of
         ok ->
+            ok = copy_feed_enc_marker(SourcePath, BranchPath),
             NewPrefix = binary:encode_hex(crypto:strong_rand_bytes(16), lowercase),
             case file:write_file(filename:join(BranchPath, "s3_prefix"), NewPrefix) of
                 ok -> write_fork_pending(BranchPath, Bucket, OldPrefix);

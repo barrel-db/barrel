@@ -39,6 +39,7 @@
          init_per_testcase/2, end_per_testcase/2]).
 
 -export([
+    encrypted_feed_hides_names/1, plaintext_feed_encrypted_on_open/1,
     open_missing_bucket/1,
     put_get_roundtrip/1,
     get_returns_not_found_for_missing/1,
@@ -172,7 +173,9 @@
     multipart_gc_survives_bad_target,
     multipart_gc_bad_interval_does_not_crash_app,
     multipart_gc_periodic_timer_fires,
-    multipart_gc_ignores_list_uploads_prefix
+    multipart_gc_ignores_list_uploads_prefix,
+    encrypted_feed_hides_names,
+    plaintext_feed_encrypted_on_open
 ]).
 
 %% Need a store enforcing If-Match/If-None-Match: RustFS, or Garage behind
@@ -1725,3 +1728,54 @@ garage_expected_etag_fails_fast(Config) ->
 
 s3_key(DbName, DocId, AttName) ->
     <<DbName/binary, "/", (binary:encode_hex(DocId, lowercase))/binary, "/", AttName/binary>>.
+
+%%====================================================================
+%% Encryption
+%%====================================================================
+
+-define(SENTINEL, <<"s3ntinel-7d1c-feed-encryption-9e2b">>).
+
+enc_opts(Config, Name) ->
+    Key = crypto:hash(sha256, Name),
+    {ok, Env} = rocksdb:new_env({encrypted, Key}),
+    #{s3 => (?config(s3_opts, Config))#{part_size => ?PART_SIZE},
+      db_name => Name, env => Env, crypto => #{key => Key}}.
+
+own_path(Config, Suffix) ->
+    Name = <<(?config(db_name, Config))/binary, Suffix/binary>>,
+    {Name, filename:join(?config(priv_dir, Config), binary_to_list(Name))}.
+
+on_disk(Dir, Bin) ->
+    filelib:fold_files(Dir, ".*", true,
+                       fun(F, Acc) ->
+                           {ok, B} = file:read_file(F),
+                           Acc orelse binary:match(B, Bin) =/= nomatch
+                       end, false).
+
+%% An encrypted database's feed keeps doc ids and attachment names out
+%% of its files, and refuses an open without the key.
+encrypted_feed_hides_names(Config) ->
+    {Name, Path} = own_path(Config, <<"-encfeed">>),
+    Opts = enc_opts(Config, Name),
+    {ok, Ref} = barrel_att_s3_store:open(Path, Opts),
+    {ok, _} = barrel_att_s3_store:put(Ref, Name, ?SENTINEL, <<"a.txt">>, <<"hello">>),
+    ok = barrel_att_s3_store:close(Ref),
+    ?assertNot(on_disk(filename:join(Path, "feed.db"), ?SENTINEL)),
+    ?assertEqual({error, db_is_encrypted},
+                 barrel_att_s3_store:open(Path, maps:without([env, crypto], Opts))).
+
+%% A feed written before attachments were encrypted is copied into an
+%% encrypted one at the first open with the key, rows intact.
+plaintext_feed_encrypted_on_open(Config) ->
+    {Name, Path} = own_path(Config, <<"-plainfeed">>),
+    Opts = enc_opts(Config, Name),
+    {ok, Plain} = barrel_att_s3_store:open(Path, maps:without([env, crypto], Opts)),
+    {ok, _} = barrel_att_s3_store:put(Plain, Name, ?SENTINEL, <<"a.txt">>, <<"hello">>),
+    ok = barrel_att_s3_store:close(Plain),
+    ?assert(on_disk(filename:join(Path, "feed.db"), ?SENTINEL)),
+    {ok, Ref} = barrel_att_s3_store:open(Path, Opts),
+    ?assertMatch([#{name := <<"a.txt">>}],
+                 barrel_att_s3_store:att_list(Ref, Name, ?SENTINEL)),
+    ok = barrel_att_s3_store:close(Ref),
+    ?assertNot(on_disk(filename:join(Path, "feed.db"), ?SENTINEL)),
+    ?assertNot(filelib:is_dir(filename:join(Path, "feed.db.plain"))).
