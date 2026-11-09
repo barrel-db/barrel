@@ -502,14 +502,15 @@ init(Name, Config, CompiledChannels, DbPath, Keyspace, Parent, ForkHlc) ->
     %% wrong key or an encrypted/plaintext mismatch fails cleanly
     %% instead of surfacing as corruption.
     case init_encryption(Config, Keyspace, DbPath) of
-        {ok, Env} ->
+        {ok, Crypto} ->
             init(Name, Config, CompiledChannels, DbPath, Keyspace,
-                 Parent, ForkHlc, Env);
+                 Parent, ForkHlc, Crypto);
         {error, EncReason} ->
             {stop, EncReason}
     end.
 
-init(Name, Config, CompiledChannels, DbPath, Keyspace, Parent, ForkHlc, Env) ->
+init(Name, Config, CompiledChannels, DbPath, Keyspace, Parent, ForkHlc, Crypto) ->
+    Env = crypto_env(Crypto),
     %% Open document store (RocksDB with column families including body CF with BlobDB)
     DocStorePath = filename:join(DbPath, "docs"),
     StoreOpts0 = maps:get(store_opts, Config, #{}),
@@ -523,10 +524,14 @@ init(Name, Config, CompiledChannels, DbPath, Keyspace, Parent, ForkHlc, Env) ->
             %% first open -- derive one without every backend needing its
             %% own convention for it.
             AttStorePath = filename:join(DbPath, "attachments"),
-            AttOpts = add_env_opt((maps:get(att_opts, Config, #{}))#{
-                                      db_name => Keyspace,
-                                      read_only => ReadOnly},
-                                  Env),
+            %% A backend that writes outside RocksDB (S3) cannot use the
+            %% env; it gets the key itself.
+            AttOpts = add_crypto_opt(
+                        add_env_opt((maps:get(att_opts, Config, #{}))#{
+                                        db_name => Keyspace,
+                                        read_only => ReadOnly},
+                                    Env),
+                        Crypto),
             case barrel_att_store:open(AttStorePath, AttOpts) of
                 {ok, AttRef} ->
                     %% Register in persistent_term for lookup
@@ -1094,9 +1099,11 @@ check_crypto_marker(DbPath, Key, ReadOnly) ->
             {error, {crypto_marker_read_failed, Reason}}
     end.
 
-%% rocksdb:new_env/1 cannot fail per its contract
+%% rocksdb:new_env/1 cannot fail per its contract. The key travels with
+%% the env for backends that encrypt outside RocksDB.
 new_encrypted_env(Key) ->
-    rocksdb:new_env({encrypted, Key}).
+    {ok, Env} = rocksdb:new_env({encrypted, Key}),
+    {ok, #{env => Env, key => Key}}.
 
 %% Written atomically (temp + rename) once, at the first encrypted open.
 write_crypto_marker(MarkerPath, Key) ->
@@ -1113,6 +1120,12 @@ crypto_marker_path(DbPath) ->
 
 add_env_opt(Opts, undefined) -> Opts;
 add_env_opt(Opts, Env) -> Opts#{env => Env}.
+
+crypto_env(undefined) -> undefined;
+crypto_env(#{env := Env}) -> Env.
+
+add_crypto_opt(Opts, undefined) -> Opts;
+add_crypto_opt(Opts, #{key := Key}) -> Opts#{crypto => #{key => Key}}.
 
 %% @doc Start (or join) the single worker for a sweep kind. `From' is a
 %% gen_server From to reply to (or `none' for a timer-driven run); `Periodic'

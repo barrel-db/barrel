@@ -22,7 +22,8 @@
     t_branch_pitr_encrypted/1,
     t_merge_encrypted/1,
     t_branch_reopen_wrong_key/1,
-    t_branch_encryption_mismatch/1
+    t_branch_encryption_mismatch/1,
+    t_att_backend_gets_key/1
 ]).
 
 -include_lib("common_test/include/ct.hrl").
@@ -38,7 +39,8 @@ all() ->
      t_plaintext_open_of_encrypted, t_encrypt_existing_plaintext,
      t_key_provider_error, t_gc_env_retained,
      t_branch_encrypted, t_branch_pitr_encrypted, t_merge_encrypted,
-     t_branch_reopen_wrong_key, t_branch_encryption_mismatch].
+     t_branch_reopen_wrong_key, t_branch_encryption_mismatch,
+     t_att_backend_gets_key].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(barrel_docdb),
@@ -63,6 +65,26 @@ end_per_testcase(_Case, Config) ->
     _ = barrel_docdb:delete_db(<<(?config(db, Config))/binary, "_b">>),
     _ = barrel_docdb:delete_db(?config(db, Config)),
     ok.
+
+%% A backend that stores outside RocksDB (S3) gets the key with the env;
+%% a plaintext database passes neither.
+t_att_backend_gets_key(Config) ->
+    Db = ?config(db, Config),
+    ok = meck:new(barrel_att_store, [passthrough, no_link]),
+    try
+        {ok, _} = barrel_docdb:create_db(Db, enc_opts(Config)),
+        [EncOpts] = [O || {_, {barrel_att_store, open, [_, O]}, _} <- meck:history(barrel_att_store)],
+        ?assertMatch(#{env := _, crypto := #{key := <<_:256>>}}, EncOpts),
+        ok = barrel_docdb:delete_db(Db),
+        meck:reset(barrel_att_store),
+        Plain = <<Db/binary, "_b">>,
+        {ok, _} = barrel_docdb:create_db(Plain, plain_opts(Config)),
+        [PlainOpts] = [O || {_, {barrel_att_store, open, [_, O]}, _} <- meck:history(barrel_att_store)],
+        ?assertNot(maps:is_key(crypto, PlainOpts)),
+        ?assertNot(maps:is_key(env, PlainOpts))
+    after
+        meck:unload(barrel_att_store)
+    end.
 
 enc_opts(Config) ->
     #{data_dir => ?config(data_dir, Config),
