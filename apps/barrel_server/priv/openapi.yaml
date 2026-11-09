@@ -22,7 +22,8 @@ info:
       per method through the capability layer (reads need `read`, mutations
       need `write`, grant administration needs `admin`).
 
-    `GET /`, `GET /health` and `GET /ready` are always public.
+    `GET /health` and `GET /ready` are always public. `GET /` needs a token
+    like any other route when auth is configured.
 
     ## Databases
 
@@ -71,8 +72,7 @@ paths:
     get:
       tags: [Health]
       summary: Server info
-      description: Public. Returns a short text banner.
-      security: []
+      description: Returns a short text banner. Needs a token when auth is configured.
       responses:
         '200':
           description: Server banner.
