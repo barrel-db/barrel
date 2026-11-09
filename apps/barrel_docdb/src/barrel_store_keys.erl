@@ -10,7 +10,7 @@
 -include("barrel_docdb.hrl").
 
 %% Database metadata keys
--export([db_meta/2, db_uid/1, db_docs_count/1, db_del_count/1, db_last_hlc/1]).
+-export([db_meta/2, db_uid/1, db_docs_count/1, db_docs_counted/1, db_del_count/1, db_last_hlc/1]).
 
 %% Document keys (legacy)
 -export([doc_info/2, doc_info_prefix/1, doc_info_end/1]).
@@ -182,6 +182,11 @@ db_uid(DbName) ->
 -spec db_docs_count(db_name()) -> binary().
 db_docs_count(DbName) ->
     db_meta(DbName, ?META_DOCS_COUNT).
+
+%% @doc Set once the documents count is exact (the database was counted)
+-spec db_docs_counted(db_name()) -> binary().
+db_docs_counted(DbName) ->
+    db_meta(DbName, <<"docs_counted">>).
 
 %% @doc Deleted documents count key
 -spec db_del_count(db_name()) -> binary().

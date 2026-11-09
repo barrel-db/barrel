@@ -700,7 +700,8 @@ handle_call_rw(info, _From, #state{name = Name, keyspace = Keyspace,
         history_floor => barrel_history:history_floor(StoreRef, Name),
         att_floor => AttFloor,
         write_groups => WriteGroups,
-        storage => barrel_store_rocksdb:storage_stats(StoreRef)
+        storage => (barrel_store_rocksdb:storage_stats(StoreRef))#{
+                       documents => doc_count_value(StoreRef, Name)}
     },
     Info = case Parent of
         undefined -> Info0;
@@ -916,7 +917,8 @@ handle_info(stats_tick, #state{name = Name, store_ref = StoreRef,
                                stats_interval = Interval} = State) ->
     ok = barrel_metrics:set_db_storage(Name,
                                        barrel_store_rocksdb:storage_stats(StoreRef)),
-    {noreply, State#state{stats_timer = arm_stats(Interval)}};
+    State1 = publish_doc_count(State),
+    {noreply, State1#state{stats_timer = arm_stats(Interval)}};
 
 %% The periodic retention/ttl work runs in a monitored worker so it never
 %% blocks the writer loop. The periodic timer is re-armed when the worker
@@ -2619,7 +2621,7 @@ build_write_ops(StoreRef, DbName, DocRecord, Old, Opts, NextHlc0) ->
     BodyOp = {body_put, BodyKey, CborBody},
     AllOps = DocOps ++ HlcDeleteOps ++ PathIndexOps ++ ChangeOps ++ PathHlcOps
         ++ ArchiveOps ++ ChainOps ++ OutboxOps ++ HistoryOps ++ ChannelOps
-        ++ ExpiryOps ++ [BodyOp],
+        ++ ExpiryOps ++ [BodyOp] ++ doc_count_ops(Ks, Old, Deleted),
     {AllOps, {DocId, NewToken, NextHlc, Deleted, DocBody}}.
 
 %% @doc Prepare a document write for a database (runs in the caller).
@@ -2804,7 +2806,7 @@ build_prepared_ops(StoreRef, DbName, #prep{rec = DocRecord} = P, Old, Opts,
     BodyOp = {body_put, barrel_store_keys:doc_body(Ks, DocId), CborBody},
     AllOps = DocOps ++ HlcDeleteOps ++ PathIndexOps ++ ChangeOps ++ PathHlcOps
         ++ ArchiveOps ++ ChainOps ++ OutboxOps ++ HistoryOps ++ ChannelOps
-        ++ ExpiryOps ++ [BodyOp],
+        ++ ExpiryOps ++ [BodyOp] ++ doc_count_ops(Ks, Old, Deleted),
     {AllOps, {DocId, NewToken, NextHlc, Deleted, DocBody, Topics}}.
 
 %% @doc Store a computed embedding in the doc entity (CAS on revision).
@@ -2963,7 +2965,7 @@ build_delete_ops(StoreRef, DbName, DocId, Current, Opts) ->
 
             AllOps = DocOps ++ HlcDeleteOps ++ PathIndexOps ++ ChangeOps ++ PathHlcOps
                 ++ ArchiveOps ++ ChainOps ++ OutboxOps ++ HistoryOps
-                ++ ChannelOps ++ ExpiryOps,
+                ++ ChannelOps ++ ExpiryOps ++ doc_count_ops(Ks, Current, true),
             {ok, AllOps, {DocId, NewToken, NextHlc, true, #{}}}
     end.
 
@@ -3205,6 +3207,85 @@ write_state(StoreRef, DbName, DocId, Old, Live0, NewLive, BodyOf, Opts) ->
                            BodyOf, Opts)
     end.
 
+%% The live-document count is exact once a database has been counted
+%% (marker set): a database written before the counter existed is counted
+%% once, in a worker, then kept by every write. Until then it is unknown.
+publish_doc_count(#state{name = Name, store_ref = StoreRef,
+                         read_only = ReadOnly} = State) ->
+    Ks = barrel_keyspace:resolve(Name),
+    case doc_count(StoreRef, Ks) of
+        {ok, N} ->
+            ok = barrel_metrics:set_db_docs(Name, N),
+            State;
+        not_counted when ReadOnly ->
+            State;
+        not_counted ->
+            start_sweep(doc_count, fun() -> count_docs(StoreRef, Ks) end,
+                        none, false, State)
+    end.
+
+doc_count_value(StoreRef, Name) ->
+    case doc_count(StoreRef, barrel_keyspace:resolve(Name)) of
+        {ok, N} -> N;
+        not_counted -> undefined
+    end.
+
+doc_count(StoreRef, Ks) ->
+    case barrel_store_rocksdb:get(StoreRef, docs_counted_key(Ks)) of
+        {ok, _} ->
+            case barrel_store_rocksdb:get(StoreRef, barrel_store_keys:db_docs_count(Ks)) of
+                {ok, Bin} -> {ok, max(0, binary_to_integer(Bin))};
+                not_found -> {ok, 0}
+            end;
+        not_found ->
+            not_counted
+    end.
+
+docs_counted_key(Ks) ->
+    barrel_store_keys:db_docs_counted(Ks).
+
+%% Count the live documents of a snapshot and add the difference to the
+%% counter as it was in that snapshot. Writes after the snapshot already
+%% moved the counter; merges add up in any order, so none is lost.
+count_docs(StoreRef, Ks) ->
+    {ok, Snap} = barrel_store_rocksdb:snapshot(StoreRef),
+    try
+        Live = barrel_store_rocksdb:fold_range_with_snapshot(
+                 StoreRef, barrel_store_keys:doc_entity_prefix(Ks),
+                 barrel_store_keys:doc_entity_end(Ks),
+                 fun(_K, V, N) -> {ok, N + entity_live(V)} end, 0, Snap),
+        C0 = case barrel_store_rocksdb:get_with_snapshot(
+                    StoreRef, barrel_store_keys:db_docs_count(Ks), Snap) of
+            {ok, Bin} -> binary_to_integer(Bin);
+            not_found -> 0
+        end,
+        barrel_store_rocksdb:write_batch(
+          StoreRef, [{merge, barrel_store_keys:db_docs_count(Ks), Live - C0},
+                     {put, docs_counted_key(Ks), <<>>}], #{sync => true})
+    after
+        barrel_store_rocksdb:release_snapshot(Snap)
+    end.
+
+%% The deleted byte follows the version in an encoded entity.
+entity_live(<<VerLen:16, _:VerLen/binary, 0:8, _/binary>>) -> 1;
+entity_live(_) -> 0.
+
+%% The live-document counter moves in the batch that changes the document:
+%% +1 when it becomes live (new, or put back after a delete), -1 when its
+%% winner becomes a delete. An absent document is not live.
+doc_count_ops(Ks, Old, NewDeleted) ->
+    case is_live(NewDeleted) - was_live(Old) of
+        0 -> [];
+        Delta -> [{merge, barrel_store_keys:db_docs_count(Ks), Delta}]
+    end.
+
+was_live(undefined) -> 0;
+was_live(#{deleted := true}) -> 0;
+was_live(_) -> 1.
+
+is_live(true) -> 0;
+is_live(_) -> 1.
+
 do_write_state(StoreRef, DbName, DocId, Old, Live0, NewLive, BodyOf, Opts) ->
     Ks = barrel_keyspace:resolve(DbName),
     case barrel_live:view(NewLive) of
@@ -3331,7 +3412,7 @@ do_write_state(StoreRef, DbName, DocId, Old, Live0, NewLive, BodyOf, Opts) ->
     end,
     AllOps = DocOps ++ HlcDeleteOps ++ IndexOps ++ ChangeOps ++ PathHlcOps
         ++ ArchiveOps ++ SibOps ++ GoneOps ++ WinnerRowOps ++ HistoryOps
-        ++ OutboxOps ++ ChannelOps ++ BodyOps,
+        ++ OutboxOps ++ ChannelOps ++ BodyOps ++ doc_count_ops(Ks, Old, WDel),
     ok = barrel_store_rocksdb:write_batch(StoreRef, AllOps, #{}),
     notify_subscribers(DbName, DocId, Token, ChangeHlc, WDel, WBody),
     {ok, DocId, Token}.
