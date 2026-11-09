@@ -24,9 +24,9 @@ Each change is a map with these fields:
 #{
     id => <<"doc123">>,           %% Document ID
     hlc => #timestamp{...},       %% HLC timestamp
-    rev => <<"2-abc123">>,        %% Current revision
+    rev => <<"000001a1ba3fd05d00000000@w4f0cb98700ad5ffc">>, %% Current revision
     deleted => false,             %% Deletion flag
-    changes => [<<"2-abc123">>]   %% List of new revisions
+    changes => [<<"000001a1ba3fd05d00000000@w4f0cb98700ad5ffc">>]
 }
 ```
 
