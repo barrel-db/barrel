@@ -10,7 +10,7 @@
 -module(barrel_server_SUITE).
 
 -export([all/0, init_per_suite/1, end_per_suite/1]).
--export([
+-export([t_db_names/1, 
     t_db_lifecycle/1,
     t_doc_crud/1,
     t_bulk/1,
@@ -64,7 +64,7 @@ all() ->
      t_create_db_att_opts_redacts_secrets, t_create_db_att_opts_blob_explicit,
      t_attachment_conditional_headers_unenforced_on_blob,
      t_attachment_bad_if_none_match,
-     t_attachment_disabled_internal_db].
+     t_attachment_disabled_internal_db, t_db_names].
 
 init_per_suite(Config) ->
     %% Load first, then override env (application:load resets to .app defaults).
@@ -109,6 +109,17 @@ t_db_lifecycle(Config) ->
     {200, #{<<"ok">> := true}} = req(delete, B ++ "/db/tmpdb", <<>>),
     ok.
 
+%% A name the store refuses is a client error, and the system database
+%% is not reachable over REST.
+t_db_names(Config) ->
+    B = base(Config),
+    {400, #{<<"error">> := <<"invalid_name">>}} = req(put, B ++ "/db/MyDb", <<>>),
+    {400, #{<<"error">> := <<"invalid_name">>}} =
+        req(put, B ++ "/db/" ++ lists:duplicate(64, $a), <<>>),
+    {400, #{<<"error">> := <<"invalid_name">>}} =
+        req(get, B ++ "/db/_barrel_system", <<>>),
+    ok.
+
 t_doc_crud(Config) ->
     B = base(Config),
     {201, _} = req_json(put, url("/doc/a", B), #{<<"title">> => <<"hello">>}),
@@ -142,10 +153,16 @@ t_attachment(Config) ->
     ok.
 
 %% Internal dbs use the `none' attachment backend: a clean 501, not a 500.
+%% A database opened without attachments (as the internal ones are)
+%% answers 501 to an attachment write. The internal databases themselves
+%% are not reachable over REST.
 t_attachment_disabled_internal_db(Config) ->
     B = base(Config),
     ok = barrel_docdb:put_system_doc(<<"srv_test">>, #{<<"v">> => 1}),
-    Db = B ++ "/db/_barrel_system",
+    ?assertMatch({400, _}, req_json(put, B ++ "/db/_barrel_system/doc/x", #{})),
+    {ok, _} = barrel_server_dbs:ensure(<<"no_att">>,
+                                       #{docdb => #{att_opts => #{backend => none}}}),
+    Db = B ++ "/db/no_att",
     {201, _} = req_json(put, Db ++ "/doc/att-doc", #{}),
     ?assertMatch({501, #{<<"error">> := <<"attachments_disabled">>}},
                  req(put, Db ++ "/doc/att-doc/att/f.bin", <<"raw-bytes">>)),

@@ -11,7 +11,6 @@
 -export([ensure/1, ensure/2, close/1, branch/3, destroy/1, list/0,
          ensure_opts/0]).
 
--define(MAX_NAME_LEN, 128).
 
 %%====================================================================
 %% API
@@ -113,10 +112,11 @@ open_opts() ->
     Opts = application:get_env(barrel_server, open_opts, #{}),
     Opts#{owner => barrel_server}.
 
-%% @private Accept only short, filesystem-safe names.
+%% @private The database rule of barrel_docdb (lowercase letters, digits,
+%% `_' and `-', 1 to 63 bytes), minus the leading `_' it keeps for its
+%% own system databases, which clients must not reach.
 -spec valid_name(binary()) -> boolean().
+valid_name(<<"_", _/binary>>) ->
+    false;
 valid_name(Name) ->
-    Size = byte_size(Name),
-    Size >= 1 andalso Size =< ?MAX_NAME_LEN
-        andalso match =:= re:run(Name, "^[A-Za-z0-9_-]+$",
-                                 [{capture, none}]).
+    barrel_docdb:validate_db_name(Name) =:= ok.
