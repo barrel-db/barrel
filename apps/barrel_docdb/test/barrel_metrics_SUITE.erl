@@ -267,9 +267,7 @@ all_metrics_registered(_Config) ->
         barrel_replication_errors,
         barrel_replication_lag_seconds,
         barrel_replication_active,
-        barrel_db_documents_total,
-        barrel_db_size_bytes,
-        barrel_db_attachments_total
+        barrel_db_size_bytes
     ],
 
     lists:foreach(fun(Name) ->
@@ -330,13 +328,8 @@ counter_replication(_Config) ->
 
 gauge_db_stats(_Config) ->
     %% Test database stat gauges
-    barrel_metrics:set_db_docs(<<"testdb">>, 1000),
     barrel_metrics:set_db_size(<<"testdb">>, 1048576),
-    barrel_metrics:set_db_attachments(<<"testdb">>, 50),
-
-    assert_gauge_with_attrs(barrel_db_documents_total, 1000.0, #{db => <<"testdb">>}),
     assert_gauge_with_attrs(barrel_db_size_bytes, 1048576.0, #{db => <<"testdb">>}),
-    assert_gauge_with_attrs(barrel_db_attachments_total, 50.0, #{db => <<"testdb">>}),
     ok.
 
 gauge_replication(_Config) ->
@@ -398,7 +391,7 @@ histogram_query_latency(_Config) ->
 export_format(_Config) ->
     %% Record some metrics
     barrel_metrics:inc_doc_ops(<<"exportdb">>, put),
-    barrel_metrics:set_db_docs(<<"exportdb">>, 500),
+    barrel_metrics:set_db_size(<<"exportdb">>, 500),
     barrel_metrics:observe_doc_latency(<<"exportdb">>, put, 5.0),
 
     %% Export as binary
@@ -425,7 +418,7 @@ export_format(_Config) ->
 export_values(_Config) ->
     %% Record metrics with known values
     barrel_metrics:inc_doc_ops(<<"db">>, put, 5),
-    barrel_metrics:set_db_docs(<<"db">>, 42),
+    barrel_metrics:set_db_size(<<"db">>, 42),
 
     %% Export
     Output = barrel_metrics:export_text(),
@@ -435,7 +428,7 @@ export_values(_Config) ->
     ?assertNotEqual(nomatch, binary:match(Output, <<"5">>)),
 
     %% Verify gauge name and value in export
-    ?assertNotEqual(nomatch, binary:match(Output, <<"barrel_db_documents_total">>)),
+    ?assertNotEqual(nomatch, binary:match(Output, <<"barrel_db_size_bytes">>)),
     ?assertNotEqual(nomatch, binary:match(Output, <<"42">>)),
 
     ok.

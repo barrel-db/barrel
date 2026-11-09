@@ -80,6 +80,7 @@ groups() ->
             task_user_pause_not_resumed,
             task_restored_opens_source,
             task_replays_to_rolled_back_target,
+            task_gauges,
             task_survives_stream_end,
             task_stop_ends_stream
         ]}
@@ -1134,6 +1135,41 @@ open_source(Config, Name) ->
     Open = fun() -> {ok, _} = barrel_docdb:create_db(Name, #{data_dir => Dir}) end,
     Open(),
     Open.
+
+%% The replication gauges follow a task: active while it runs, lag back
+%% to 0 once it has caught up, inactive after a pause and a delete.
+task_gauges(Config) ->
+    Src = <<"gauge_src">>,
+    _ = open_source(Config, Src),
+    {ok, TaskId} = continuous_push(Src),
+    ok = wait_until(task_status(TaskId, running), 50, 200),
+    ?assert(rep_gauge(<<"barrel_replication_active">>, TaskId) == 1),
+    {ok, _} = barrel_docdb:put_doc(Src, #{<<"id">> => <<"g1">>}),
+    ok = wait_until(doc_in(<<"test_target">>, <<"g1">>), 50, 600),
+    ok = wait_until(fun() ->
+        rep_gauge(<<"barrel_replication_lag_seconds">>, TaskId) == 0
+    end, 50, 200),
+    ok = barrel_rep_tasks:pause_task(TaskId),
+    ?assert(rep_gauge(<<"barrel_replication_active">>, TaskId) == 0),
+    ok = barrel_rep_tasks:delete_task(TaskId),
+    ?assert(rep_gauge(<<"barrel_replication_active">>, TaskId) == 0),
+    ok = barrel_docdb:delete_db(Src).
+
+rep_gauge(Name, TaskId) ->
+    N = byte_size(Name),
+    Points = [DP || #{type := gauge, name := <<Prefix:N/binary, _/binary>>} = M
+                        <- instrument_metrics_exporter:collect(),
+                    Prefix =:= Name,
+                    DP <- maps:get(data_points, M, []),
+                    task_attr(maps:get(attributes, DP, #{})) =:= TaskId],
+    case Points of
+        [#{value := V} | _] -> float(V);
+        [] -> undefined
+    end.
+
+task_attr(#{task_id := T}) -> T;
+task_attr(#{<<"task_id">> := T}) -> T;
+task_attr(_) -> undefined.
 
 continuous_push(Src) ->
     barrel_rep_tasks:start_task(#{source => Src,

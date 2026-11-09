@@ -56,8 +56,8 @@ barrel_query_duration_seconds_bucket{db="mydb",le="0.01"} 450
 |--------|------|--------|-------------|
 | `barrel_replication_docs` | Counter | direction | Documents replicated |
 | `barrel_replication_errors` | Counter | task_id | Replication errors |
-| `barrel_replication_lag_seconds` | Gauge | task_id | Replication lag |
-| `barrel_replication_active` | Gauge | task_id | Active status (1/0) |
+| `barrel_replication_lag_seconds` | Gauge | task_id | Seconds between the source write of the last copied change and its copy; 0 once caught up |
+| `barrel_replication_active` | Gauge | task_id | 1 while the task runs, 0 when paused, failed, completed or deleted |
 
 **Example:**
 ```
@@ -75,8 +75,6 @@ barrel_replication_errors{task_id="rep-123"} 2
 | `barrel_db_compactions_queued` | Gauge | db | Compactions waiting for a background thread |
 | `barrel_db_stubs_total` | Gauge | db | Deleted documents kept as stubs |
 | `barrel_db_stubs_bytes` | Gauge | db | Bytes held by stubs (state and change row) |
-| `barrel_db_documents_total` | Gauge | db | Not recorded yet: always 0 |
-| `barrel_db_attachments_total` | Gauge | db | Not recorded yet: always 0 |
 
 The size and compaction gauges are read from RocksDB properties every
 `stats_interval` milliseconds (60000 by default, `0` turns the refresh off),

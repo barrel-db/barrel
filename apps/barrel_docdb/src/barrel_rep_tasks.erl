@@ -269,6 +269,8 @@ handle_call({resume_task, TaskId}, _From, State) ->
 handle_call({delete_task, TaskId}, _From, State) ->
     case do_delete_task(TaskId, State) of
         {ok, NewState} ->
+            ok = barrel_metrics:set_rep_active(TaskId, false),
+            ok = barrel_metrics:set_rep_lag(TaskId, 0),
             {reply, ok, NewState};
         {error, _} = Error ->
             {reply, Error, State}
@@ -614,10 +616,12 @@ run_task_loop(Ctx, Since0) ->
             case barrel_rep_checkpoint:empty_page_advanced(Since, LastSeq) of
                 true ->
                     %% a filtered page with nothing to copy: move on
+                    ok = set_lag(Ctx, caught_up),
                     ok = mark_target(Ctx, LastSeq),
                     _ = save_dir_state(Ctx, LastSeq),
                     run_task_loop(Ctx, LastSeq);
                 false ->
+                    ok = set_lag(Ctx, caught_up),
                     idle_task_loop(Ctx, Since)
             end;
 
@@ -636,6 +640,7 @@ run_task_loop(Ctx, Since0) ->
                             %% in the task process, off the manager loop.
                             ok = mark_target(Ctx1, LastSeq),
                             _ = save_dir_state(Ctx1, LastSeq),
+                            ok = set_lag(Ctx1, LastSeq),
                             Ctx2 = Ctx1,
                             case Mode of
                                 continuous ->
@@ -666,6 +671,17 @@ run_task_loop(Ctx, Since0) ->
     end.
 
 %% No progress on the doc side: one-shot finishes, continuous waits.
+%% Replication lag: 0 once caught up, else how long ago the last copied
+%% change was written on the source.
+set_lag(#{task_id := TaskId}, caught_up) ->
+    barrel_metrics:set_rep_lag(TaskId, 0);
+set_lag(#{task_id := TaskId}, Seq) ->
+    Lag = try barrel_hlc:wall_time(Seq) of
+              Wall -> max(0, erlang:system_time(millisecond) - Wall) / 1000
+          catch _:_ -> 0
+          end,
+    barrel_metrics:set_rep_lag(TaskId, Lag).
+
 idle_task_loop(#{task_id := TaskId, mode := one_shot} = Ctx, _Since) ->
     %% No more doc changes: run the attachment phase to completion once
     %% (mirrors barrel_rep:replicate_one_shot/2's "doc phase to
@@ -1107,6 +1123,7 @@ update_task_status(TaskId, Status) ->
 
 %% A status change drops the pause reason unless Extra sets it again.
 update_task_status(TaskId, Status, Extra) ->
+    ok = barrel_metrics:set_rep_active(TaskId, Status =:= running),
     update_task_doc(TaskId, fun(Doc) ->
         Doc1 = maps:remove(<<"paused_reason">>, Doc),
         maps:merge(Doc1#{<<"status">> => atom_to_binary(Status)}, Extra)

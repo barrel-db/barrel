@@ -269,8 +269,8 @@ barrel_doc_operation_duration_seconds_bucket{db="mydb",operation="get",le="0.01"
 |--------|------|--------|-------------|
 | `barrel_replication_docs` | Counter | direction | Documents replicated |
 | `barrel_replication_errors` | Counter | task_id | Replication errors |
-| `barrel_replication_lag_seconds` | Gauge | task_id | Replication lag |
-| `barrel_replication_active` | Gauge | task_id | Active status (1/0) |
+| `barrel_replication_lag_seconds` | Gauge | task_id | Seconds between the source write of the last copied change and its copy; 0 once caught up |
+| `barrel_replication_active` | Gauge | task_id | 1 while the task runs, 0 when paused, failed, completed or deleted |
 
 #### Storage
 
@@ -280,8 +280,6 @@ barrel_doc_operation_duration_seconds_bucket{db="mydb",operation="get",le="0.01"
 | `barrel_db_pending_compaction_bytes` | Gauge | db | Bytes compaction still has to rewrite |
 | `barrel_db_compactions_running` | Gauge | db | Compactions running now |
 | `barrel_db_compactions_queued` | Gauge | db | Compactions waiting for a thread |
-| `barrel_db_documents_total` | Gauge | db | Not recorded yet: always 0 |
-| `barrel_db_attachments_total` | Gauge | db | Not recorded yet: always 0 |
 
 > #### HTTP request metrics
 >
@@ -801,5 +799,5 @@ barrel_metrics:inc_doc_ops(<<"mydb">>, put),
 barrel_metrics:observe_doc_latency(<<"mydb">>, get, 15),  %% 15ms
 
 %% Set a gauge
-barrel_metrics:set_db_docs(<<"mydb">>, 1000).
+barrel_metrics:set_db_size(<<"mydb">>, 1048576).
 ```
