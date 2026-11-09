@@ -40,7 +40,7 @@
 
 -export([
     encrypted_feed_hides_names/1, plaintext_feed_encrypted_on_open/1,
-    encrypted_object_roundtrip/1, encrypted_multipart_roundtrip/1, encrypted_object_tamper_detected/1, encrypted_object_needs_key/1, encrypted_branch_reads_parent/1,
+    encrypted_object_roundtrip/1, encrypted_multipart_roundtrip/1, encrypted_object_tamper_detected/1, encrypted_object_needs_key/1, encrypted_branch_reads_parent/1, legacy_objects_reencrypted/1,
     open_missing_bucket/1,
     put_get_roundtrip/1,
     get_returns_not_found_for_missing/1,
@@ -181,7 +181,8 @@
     encrypted_multipart_roundtrip,
     encrypted_object_tamper_detected,
     encrypted_object_needs_key,
-    encrypted_branch_reads_parent
+    encrypted_branch_reads_parent,
+    legacy_objects_reencrypted
 ]).
 
 %% Need a store enforcing If-Match/If-None-Match: RustFS, or Garage behind
@@ -1896,4 +1897,36 @@ encrypted_branch_reads_parent(Config) ->
     ?assertEqual({ok, Data}, barrel_att_s3_store:get(Branch, Name, <<"d">>, <<"b.txt">>)),
     ?assertMatch(#{metadata := #{<<"enc">> := _}}, raw_get(Branch, <<"d">>, <<"b.txt">>)),
     ok = barrel_att_s3_store:close(Branch),
+    ok = barrel_att_s3_store:close(Ref).
+
+%% Objects written before the database's attachments were encrypted are
+%% readable at once and rewritten encrypted in the background; once that
+%% is done, a plaintext object is refused.
+legacy_objects_reencrypted(Config) ->
+    {Name, Path} = own_path(Config, <<"-legacy">>),
+    Opts = enc_opts(Config, Name),
+    {ok, Plain} = barrel_att_s3_store:open(Path, maps:without([env, crypto], Opts)),
+    Small = secret_payload(1000),
+    Big = secret_payload(?PART_SIZE + 4321),
+    {ok, _} = barrel_att_s3_store:put(Plain, Name, <<"d">>, <<"small">>, Small),
+    {ok, W0} = barrel_att_s3_store:put_stream(Plain, Name, <<"d">>, <<"big">>,
+                                              <<"application/octet-stream">>),
+    {ok, W1} = barrel_att_s3_store:write_chunk(W0, Big),
+    {ok, _} = barrel_att_s3_store:finish_stream(W1),
+    ok = barrel_att_s3_store:close(Plain),
+    {ok, Ref} = barrel_att_s3_store:open(Path, Opts),
+    Marker = filename:join(Path, "enc_migrated"),
+    ok = wait_until(fun() -> filelib:is_regular(Marker) end, 120000),
+    [?assertMatch(#{metadata := #{<<"enc">> := _}}, raw_get(Ref, <<"d">>, N))
+     || N <- [<<"small">>, <<"big">>]],
+    ?assertEqual(nomatch, binary:match(maps:get(body, raw_get(Ref, <<"d">>, <<"big">>)),
+                                       ?SENTINEL)),
+    ?assertEqual({ok, Small}, barrel_att_s3_store:get(Ref, Name, <<"d">>, <<"small">>)),
+    {ok, R} = barrel_att_s3_store:get_stream(Ref, Name, <<"d">>, <<"big">>),
+    ?assertEqual(Big, drain(R, [])),
+    #{client := Client, bucket := Bucket} = Ref,
+    {ok, _} = livery_s3:put_object(Client, Bucket, raw_key(Ref, <<"d">>, <<"planted">>),
+                                   <<"plain">>, #{}),
+    ?assertEqual({error, unencrypted_object},
+                 barrel_att_s3_store:get(Ref, Name, <<"d">>, <<"planted">>)),
     ok = barrel_att_s3_store:close(Ref).

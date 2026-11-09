@@ -215,6 +215,7 @@ open(Path, Options) ->
                               endpoint => Endpoint},
                     AttRef = with_crypto(AttRef0, Options),
                     ok = maybe_resume_fork_sync(AttRef, Path, Options),
+                    ok = maybe_start_encrypt_sweep(AttRef, Options),
                     ok = barrel_att_s3_multipart_gc:register_target(
                              Endpoint, Bucket, Prefix, Client),
                     {ok, AttRef};
@@ -1144,6 +1145,198 @@ att_name_from_key(Prefix, Key) ->
 %%--------------------------------------------------------------------
 %% Object encryption (barrel_att_s3_crypto)
 %%--------------------------------------------------------------------
+
+%%--------------------------------------------------------------------
+%% Re-encrypting objects written before encryption
+%%--------------------------------------------------------------------
+
+%% An encrypted database whose objects have not all been checked yet (the
+%% prefix may hold plaintext objects written before attachments were
+%% encrypted, or a branch copied them from such a parent) rewrites them
+%% in the background, after any fork copy. Until it is done, plaintext
+%% objects stay readable; then `enc_migrated' is written and they are
+%% refused.
+maybe_start_encrypt_sweep(#{crypto := _} = AttRef, Options) ->
+    Skip = objects_encrypted(AttRef)
+        orelse maps:get(read_only, Options, false) =:= true
+        orelse maps:get(resume_fork_sync, Options, true) =:= false,
+    case {Skip, maps:get(db_name, Options, undefined)} of
+        {false, DbName} when is_binary(DbName) ->
+            _ = spawn(fun() -> run_encrypt_sweep(AttRef, DbName) end),
+            ok;
+        _ ->
+            ok
+    end;
+maybe_start_encrypt_sweep(_AttRef, _Options) ->
+    ok.
+
+run_encrypt_sweep(#{path := Path} = AttRef, DbName) ->
+    case wait_fork_done(Path, 1200) of
+        ok -> encrypt_sweep(AttRef, DbName, 1);
+        timeout -> logger:info("attachment re-encryption at ~s waits for the "
+                               "fork copy; will retry on next open", [Path])
+    end.
+
+wait_fork_done(_Path, 0) ->
+    timeout;
+wait_fork_done(Path, Tries) ->
+    case read_fork_pending(Path) of
+        {ok, _} -> timer:sleep(500), wait_fork_done(Path, Tries - 1);
+        _ -> ok
+    end.
+
+encrypt_sweep(#{path := Path} = AttRef, DbName, Attempt) ->
+    case encrypt_sweep_once(AttRef, DbName) of
+        ok ->
+            case filelib:is_dir(Path) of
+                true -> ok = file:write_file(filename:join(Path, "enc_migrated"), <<>>);
+                false -> ok
+            end;
+        {error, _Why} when Attempt < ?SWEEP_ATTEMPTS ->
+            timer:sleep(min(30000, ?SWEEP_BACKOFF_MS bsl (Attempt - 1))),
+            case filelib:is_dir(Path) of
+                true -> encrypt_sweep(AttRef, DbName, Attempt + 1);
+                false -> ok
+            end;
+        {error, Why} ->
+            logger:warning("attachment re-encryption at ~s incomplete after ~b "
+                           "attempts (~p); will retry on next open",
+                           [Path, Attempt, Why])
+    end.
+
+encrypt_sweep_once(#{client := Client, bucket := Bucket, prefix := Prefix} = AttRef,
+                   DbName) ->
+    case livery_s3:list_objects_all(Client, Bucket, #{prefix => <<Prefix/binary, "/">>}) of
+        {ok, #{objects := Objects}} ->
+            Failed = [K || #{key := K} <- Objects,
+                           encrypt_one(AttRef, DbName, K) =/= true],
+            case Failed of
+                [] -> ok;
+                _ -> {error, {failed, length(Failed)}}
+            end;
+        {error, Reason} ->
+            {error, {list_failed, Reason}}
+    end.
+
+%% Under the attachment's lock, like any write: a concurrent put either
+%% lands first (already encrypted, skipped) or after (replaces ours).
+encrypt_one(#{prefix := Prefix} = AttRef, DbName, Key) ->
+    case key_to_doc_att(Prefix, Key) of
+        {ok, DocId, AttName} ->
+            with_att_lock(AttRef, DbName, DocId, AttName,
+                          fun() -> encrypt_object(AttRef, Key) end);
+        error ->
+            true
+    end.
+
+encrypt_object(#{client := Client, bucket := Bucket} = AttRef, Key) ->
+    case livery_s3:get_object(Client, Bucket, Key, #{stream => true}) of
+        {ok, #{body := {stream, Reader}} = Resp} ->
+            Meta = maps:get(metadata, Resp, #{}),
+            case maps:is_key(?META_ENC, Meta) of
+                true ->
+                    true;
+                false ->
+                    rewrite_encrypted(AttRef, Key, Reader, Resp, Meta)
+            end;
+        {error, {s3, _Code, _Msg, #{status := 404}}} ->
+            true;
+        {error, _} ->
+            false
+    end.
+
+%% Stream the plaintext in, write it back encrypted under the same key,
+%% conditional on the version read when the store supports it.
+rewrite_encrypted(#{client := Client, bucket := Bucket, part_size := PartSize,
+                    conditional_writes := CW, crypto := #{key := DbKey}} = AttRef,
+                  Key, Reader, Resp, Meta) ->
+    {Salt, _} = ObjCrypto = new_obj_crypto(AttRef),
+    ContentType = maps:get(content_type, Resp, <<"application/octet-stream">>),
+    Cond = case {CW, maps:get(etag, Resp, undefined)} of
+        {supported, ETag} when ETag =/= undefined -> #{if_match => ETag};
+        _ -> #{}
+    end,
+    Digest = maps:get(?META_DIGEST, Meta, undefined),
+    NewMeta = Meta#{?META_ENC => barrel_att_s3_crypto:enc_meta(Salt)},
+    NewMeta1 = case Digest of
+        undefined -> NewMeta;
+        _ -> NewMeta#{?META_DIGEST => barrel_att_s3_crypto:seal_digest(DbKey, Digest)}
+    end,
+    W = #{client => Client, bucket => Bucket, key => Key, part_size => PartSize,
+          obj_crypto => ObjCrypto, content_type => ContentType, meta => NewMeta1,
+          conditions => Cond, buffer => <<>>, offset => 0, upload => undefined},
+    case pump(Reader, W) of
+        {ok, _} -> true;
+        {error, precondition_failed} -> true;
+        {error, conditional_request_conflict} -> true;
+        {error, not_found} -> true;
+        {error, _} -> false
+    end.
+
+pump(Reader, #{obj_crypto := ObjCrypto, buffer := Buf, offset := Off} = W) ->
+    case livery_client:read(Reader, 30000) of
+        {ok, Data, Next} ->
+            Enc = obj_crypt(ObjCrypto, Off, Data),
+            W1 = W#{buffer => <<Buf/binary, Enc/binary>>, offset => Off + byte_size(Data)},
+            case byte_size(maps:get(buffer, W1)) >= maps:get(part_size, W1) of
+                true ->
+                    case rewrite_part(W1) of
+                        {ok, W2} -> pump(Next, W2);
+                        {error, _} = Err -> Err
+                    end;
+                false ->
+                    pump(Next, W1)
+            end;
+        {done, _} ->
+            rewrite_finish(W);
+        {error, _} = Err ->
+            abort_rewrite(W),
+            Err
+    end.
+
+rewrite_part(#{upload := undefined, client := Client, bucket := Bucket, key := Key,
+               content_type := CT, meta := Meta} = W) ->
+    case livery_s3:create_multipart_upload(Client, Bucket, Key,
+                                           #{content_type => CT, metadata => Meta}) of
+        {ok, UploadId} -> rewrite_part(W#{upload => {UploadId, 1, []}});
+        {error, _} = Err -> Err
+    end;
+rewrite_part(#{upload := {UploadId, N, Parts}, client := Client, bucket := Bucket,
+               key := Key, buffer := Buf} = W) ->
+    case livery_s3:upload_part(Client, Bucket, Key, UploadId, N, Buf) of
+        {ok, #{etag := ETag}} ->
+            {ok, W#{upload => {UploadId, N + 1, Parts ++ [{N, ETag}]}, buffer => <<>>}};
+        {error, _} = Err ->
+            abort_rewrite(W),
+            Err
+    end.
+
+rewrite_finish(#{upload := undefined, client := Client, bucket := Bucket, key := Key,
+                 buffer := Buf, content_type := CT, meta := Meta, conditions := Cond}) ->
+    livery_s3:put_object(Client, Bucket, Key, Buf,
+                         maps:merge(#{content_type => CT, metadata => Meta}, Cond));
+rewrite_finish(#{buffer := Buf} = W) ->
+    W1 = case Buf of
+        <<>> -> {ok, W};
+        _ -> rewrite_part(W)
+    end,
+    case W1 of
+        {ok, #{upload := {UploadId, _, Parts}, client := Client, bucket := Bucket,
+               key := Key, conditions := Cond} = W2} ->
+            case livery_s3:complete_multipart_upload(Client, Bucket, Key, UploadId,
+                                                     Parts, Cond) of
+                {ok, _} = Ok -> Ok;
+                {error, _} = Err -> abort_rewrite(W2), Err
+            end;
+        {error, _} = Err ->
+            Err
+    end.
+
+abort_rewrite(#{upload := {UploadId, _, _}, client := Client, bucket := Bucket, key := Key}) ->
+    _ = livery_s3:abort_multipart_upload(Client, Bucket, Key, UploadId),
+    ok;
+abort_rewrite(_W) ->
+    ok.
 
 %% A new object's salt and key; `none' for a plaintext database.
 new_obj_crypto(#{crypto := #{key := Key}}) ->
