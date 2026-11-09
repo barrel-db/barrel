@@ -192,8 +192,9 @@ granted space: `read` opens the pull leg (GETs, `changes`, `query`,
 leg (`_sync/doc` PUT, `_sync/local` and `_sync/att` writes). Database
 lifecycle (`PUT`/`DELETE /db/:db`), `_timeline`, and any unmapped route stay
 off-limits to capability tokens (403, fail closed); for the contexts routes
-see [Contexts and working sets](#contexts-and-working-sets); dead or wrong-space
-tokens answer 401. `/mcp` authenticates through its own provider covering
+see [Contexts and working sets](#contexts-and-working-sets). A dead or unknown
+token answers 401; a live token used on another space, or without the right
+the route needs, answers 403. `/mcp` authenticates through its own provider covering
 both kinds. See [spaces](spaces.md), [mcp](mcp.md), and
 [barrel-lite](barrel-lite.md).
 
@@ -234,14 +235,14 @@ $ curl -X PUT localhost:8080/db/mydb/doc/a \
 {"id":"a","ok":true,...}
 
 $ curl localhost:8080/db/mydb/doc/a
-{"_rev":"1-...","id":"a","title":"hello"}
+{"_rev":"000001a1ba3fd05d00000000@w4f0cb98700ad5ffc","id":"a","title":"hello"}
 
 $ curl -X POST localhost:8080/db/mydb/_bulk_docs \
     -H 'content-type: application/json' -d '{"docs":[{"id":"b"},{"id":"c"}]}'
 {"results":[{"id":"b",...},{"id":"c",...}]}
 
 $ curl localhost:8080/db/mydb/changes
-{"changes":[{"id":"a","rev":"1-...","hlc":"..."}],"last":"..."}
+{"changes":[{"id":"a","rev":"000001a1ba3fd05d00000000@w4f0cb98700ad5ffc","hlc":"..."}],"last":"..."}
 ```
 
 ## Notes

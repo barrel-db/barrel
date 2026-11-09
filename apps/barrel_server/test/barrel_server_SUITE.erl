@@ -10,7 +10,7 @@
 -module(barrel_server_SUITE).
 
 -export([all/0, init_per_suite/1, end_per_suite/1]).
--export([t_db_names/1, t_missing_db/1, t_find_pages/1, t_ready/1, 
+-export([t_db_names/1, t_missing_db/1, t_find_pages/1, t_ready/1, t_openapi_matches_routes/1, 
     t_db_lifecycle/1,
     t_doc_crud/1,
     t_bulk/1,
@@ -64,7 +64,8 @@ all() ->
      t_create_db_att_opts_redacts_secrets, t_create_db_att_opts_blob_explicit,
      t_attachment_conditional_headers_unenforced_on_blob,
      t_attachment_bad_if_none_match,
-     t_attachment_disabled_internal_db, t_db_names, t_missing_db, t_find_pages, t_ready].
+     t_attachment_disabled_internal_db, t_db_names, t_missing_db, t_find_pages, t_ready,
+     t_openapi_matches_routes].
 
 init_per_suite(Config) ->
     %% Load first, then override env (application:load resets to .app defaults).
@@ -180,6 +181,40 @@ t_ready(Config) ->
     end,
     {200, _} = req(get, B ++ "/ready", <<>>),
     ok.
+
+%% priv/openapi.yaml lists every REST route the server serves, and only
+%% those. The sync wire and /mcp are separate protocols, left out.
+t_openapi_matches_routes(_Config) ->
+    Served = lists:usort(
+               [{M, re:replace(P, ":([a-z_]+)", "{\\1}", [global, {return, binary}])}
+                || {M, P, _} <- barrel_server_api:routes(#{groups => all}),
+                   binary:match(P, <<"/_sync/">>) =:= nomatch,
+                   P =/= <<"/mcp">>]),
+    File = filename:join(code:priv_dir(barrel_server), "openapi.yaml"),
+    {ok, Yaml} = file:read_file(File),
+    Documented = lists:usort(openapi_ops(binary:split(Yaml, <<"\n">>, [global]),
+                                         undefined, false, [])),
+    ?assertEqual({[], []}, {Served -- Documented, Documented -- Served}).
+
+openapi_ops([], _Path, _In, Acc) -> Acc;
+openapi_ops([<<"paths:">> | Rest], _Path, _In, Acc) ->
+    openapi_ops(Rest, undefined, true, Acc);
+openapi_ops([<<"components:">> | _], _Path, _In, Acc) -> Acc;
+openapi_ops([Line | Rest], Path, true, Acc) ->
+    case re:run(Line, "^  (/\\S*):\\s*$", [{capture, all_but_first, binary}]) of
+        {match, [P]} ->
+            openapi_ops(Rest, P, true, Acc);
+        nomatch ->
+            case re:run(Line, "^    (get|put|post|delete|patch):\\s*$",
+                        [{capture, all_but_first, binary}]) of
+                {match, [M]} when Path =/= undefined ->
+                    openapi_ops(Rest, Path, true, [{string:uppercase(M), Path} | Acc]);
+                _ ->
+                    openapi_ops(Rest, Path, true, Acc)
+            end
+    end;
+openapi_ops([_ | Rest], Path, In, Acc) ->
+    openapi_ops(Rest, Path, In, Acc).
 
 t_doc_crud(Config) ->
     B = base(Config),

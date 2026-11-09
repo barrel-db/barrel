@@ -82,7 +82,7 @@ With a specific ID:
 
 ```erlang
 {ok, Doc} = barrel_docdb:get_doc(<<"myapp">>, <<"user-alice">>).
-%% Doc = #{<<"id">> => <<"user-alice">>, <<"_rev">> => <<"1-...">>, ...}
+%% Doc = #{<<"id">> => <<"user-alice">>, <<"_rev">> => <<"000001a1ba3fd05d00000000@w4f0cb98700ad5ffc">>, ...}
 ```
 
 ### Update a Document

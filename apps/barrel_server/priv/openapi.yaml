@@ -22,7 +22,14 @@ info:
       per method through the capability layer (reads need `read`, mutations
       need `write`, grant administration needs `admin`).
 
-    `GET /` and `GET /health` are always public.
+    `GET /`, `GET /health` and `GET /ready` are always public.
+
+    ## Databases
+
+    Create a database with `PUT /db/{db}` before using it. Every other
+    `/db/{db}` route answers 404 `{"error":"db_not_found"}` when the database
+    does not exist. Names are lowercase letters, digits, `_` and `-`, 1 to 63
+    bytes, not starting with `_`; others answer 400 `{"error":"invalid_name"}`.
 
     ## Not covered here
 
@@ -57,6 +64,8 @@ tags:
     description: Per-space working memory sessions.
   - name: Handoffs
     description: Agent-to-agent task handoffs.
+  - name: Contexts
+    description: Context cards, federated queries and working sets.
 paths:
   /:
     get:
@@ -89,6 +98,38 @@ paths:
                   status:
                     type: string
                     example: ok
+  /ready:
+    get:
+      tags: [Health]
+      summary: Readiness check
+      description: Public. 200 when the database and replication processes run, 503 with the failed checks otherwise.
+      security: []
+      responses:
+        '200':
+          description: Ready to serve.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ready
+        '503':
+          description: A serving process is down.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: not_ready
+                  failed:
+                    type: array
+                    items:
+                      type: string
+                      enum: [databases, stores, replication]
 
   /db/{db}:
     parameters:
@@ -122,7 +163,7 @@ paths:
                 type: object
                 additionalProperties: true
         '404':
-          $ref: '#/components/responses/NotFound'
+          $ref: '#/components/responses/DbNotFound'
     delete:
       tags: [Databases]
       summary: Drop database
@@ -149,7 +190,7 @@ paths:
                   purged:
                     type: boolean
         '404':
-          $ref: '#/components/responses/NotFound'
+          $ref: '#/components/responses/DbNotFound'
 
   /db/{db}/_timeline:
     parameters:
@@ -207,6 +248,8 @@ paths:
                   format: date-time
                   description: RFC3339 wall time to fork at.
       responses:
+        '404':
+          $ref: '#/components/responses/DbNotFound'
         '201':
           description: Branch created.
           content:
@@ -281,6 +324,8 @@ paths:
             schema:
               $ref: '#/components/schemas/Document'
       responses:
+        '404':
+          $ref: '#/components/responses/DbNotFound'
         '201':
           description: Written. Returns the new revision.
           content:
@@ -441,6 +486,8 @@ paths:
             schema:
               $ref: '#/components/schemas/BulkDocsRequest'
       responses:
+        '404':
+          $ref: '#/components/responses/DbNotFound'
         '201':
           description: Per-document results, in request order.
           content:
@@ -477,6 +524,8 @@ paths:
                 include_embedding:
                   type: boolean
       responses:
+        '404':
+          $ref: '#/components/responses/DbNotFound'
         '200':
           description: Per-id results, in request order.
           content:
@@ -512,8 +561,16 @@ paths:
                     type: object
                     additionalProperties: true
                   description: Structured predicates.
+                limit:
+                  type: integer
+                  minimum: 1
+                continuation:
+                  type: string
+                  description: The `meta.continuation` of the previous page, sent back with the same query to read the next page.
               additionalProperties: true
       responses:
+        '404':
+          $ref: '#/components/responses/DbNotFound'
         '200':
           description: Matching rows and query metadata.
           content:
@@ -570,6 +627,8 @@ paths:
               type: string
               description: Raw BQL text.
       responses:
+        '404':
+          $ref: '#/components/responses/DbNotFound'
         '200':
           description: |
             NDJSON stream (one JSON object per line). For a `SUBSCRIBE`
@@ -598,6 +657,8 @@ paths:
             type: string
           description: The BQL statement.
       responses:
+        '404':
+          $ref: '#/components/responses/DbNotFound'
         '200':
           description: NDJSON stream, or `text/event-stream` for a subscription.
           content:
@@ -674,6 +735,8 @@ paths:
               type: string
               format: binary
       responses:
+        '404':
+          $ref: '#/components/responses/DbNotFound'
         '201':
           description: Stored. Returns the attachment revision.
           content:
@@ -741,6 +804,8 @@ paths:
                   items:
                     type: number
       responses:
+        '404':
+          $ref: '#/components/responses/DbNotFound'
         '201':
           description: Indexed.
           content:
@@ -778,6 +843,8 @@ paths:
                   type: integer
                   default: 10
       responses:
+        '404':
+          $ref: '#/components/responses/DbNotFound'
         '200':
           description: Ranked hits.
           content:
@@ -807,6 +874,8 @@ paths:
                   type: integer
                   default: 10
       responses:
+        '404':
+          $ref: '#/components/responses/DbNotFound'
         '200':
           description: Ranked hits.
           content:
@@ -837,6 +906,8 @@ paths:
                   type: integer
                   default: 10
       responses:
+        '404':
+          $ref: '#/components/responses/DbNotFound'
         '200':
           description: Ranked hits.
           content:
@@ -1500,6 +1571,335 @@ paths:
         '409':
           $ref: '#/components/responses/Conflict'
 
+  /contexts:
+    post:
+      tags: [Contexts]
+      summary: Register a context card
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '201':
+          description: The registered card.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+    get:
+      tags: [Contexts]
+      summary: List or discover context cards
+      parameters:
+        - name: prefix
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: unlisted
+          in: query
+          required: false
+          schema:
+            type: boolean
+        - name: q
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The cards.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+  /contexts/_capabilities:
+    get:
+      tags: [Contexts]
+      summary: Query shapes, merges, limits and budgets the node accepts
+      responses:
+        '200':
+          description: The capabilities.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+  /contexts/_offline:
+    get:
+      tags: [Contexts]
+      summary: Whether the node is offline
+      responses:
+        '200':
+          description: 'The offline flag, {"offline": bool}.'
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+    put:
+      tags: [Contexts]
+      summary: Switch the node offline or online
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200':
+          description: 'The offline flag, {"offline": bool}.'
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+  /contexts/_query:
+    post:
+      tags: [Contexts]
+      summary: Run one BQL statement over several contexts
+      description: >-
+        A context that did not answer is reported in its source, not as a
+        request error. Errors use one shape with an HTTP status per code:
+        400, 404 unknown_context, 409 ambiguous_context, 413 over_budget,
+        403 forbidden, 502 source_unavailable, 500 internal.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200':
+          description: execution, rows or groups, sources, coverage and summary.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+  /contexts/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      tags: [Contexts]
+      summary: One card, by id or URL-encoded name
+      responses:
+        '200':
+          description: The card.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [Contexts]
+      summary: Unregister a card
+      responses:
+        '200':
+          description: Unregistered.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /worksets:
+    post:
+      tags: [Contexts]
+      summary: Create a working set
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '201':
+          description: The working set.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+    get:
+      tags: [Contexts]
+      summary: List working sets
+      responses:
+        '200':
+          description: The working sets.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+  /worksets/{ws}:
+    parameters:
+      - name: ws
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      tags: [Contexts]
+      summary: Read a working set
+      responses:
+        '200':
+          description: The working set.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [Contexts]
+      summary: Delete a working set and its slices
+      responses:
+        '200':
+          description: Deleted.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /worksets/{ws}/members:
+    parameters:
+      - name: ws
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      tags: [Contexts]
+      summary: Attach a context
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200':
+          description: The updated working set.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /worksets/{ws}/members/{ctx}:
+    parameters:
+      - name: ws
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: ctx
+        in: path
+        required: true
+        schema:
+          type: string
+    delete:
+      tags: [Contexts]
+      summary: Detach a context
+      responses:
+        '200':
+          description: The updated working set.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /worksets/{ws}/_materialize:
+    parameters:
+      - name: ws
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      tags: [Contexts]
+      summary: Save a query's documents as slices
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200':
+          description: The slices written.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /worksets/{ws}/_import:
+    parameters:
+      - name: ws
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      tags: [Contexts]
+      summary: Import an exported snapshot
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200':
+          description: The imported slice.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
 components:
   securitySchemes:
     bearerAuth:
@@ -1566,6 +1966,14 @@ components:
         type: string
       description: Session data key.
   responses:
+    DbNotFound:
+      description: The database does not exist. Create it with PUT /db/{db}.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: db_not_found
     BadRequest:
       description: Bad request.
       content:
