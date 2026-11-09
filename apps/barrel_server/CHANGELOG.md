@@ -5,6 +5,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.14.0] - 2026-11-09
+
+### Breaking
+- `/db/:db` routes no longer create the database. A mistyped name used to leave an empty database behind while the request seemed to work. Data routes, MCP tools and resources now answer 404 `db_not_found` for a database that does not exist; create it first with `PUT /db/:db` (or the `db_create` MCP tool).
+
+### Added
+- `GET /ready`: 200 when the database and replication processes run, 503 with the failed checks otherwise, for load balancers and orchestrators. Like `/health` it needs no token.
+
+### Fixed
+- `POST /db/:db/find` accepts the continuation it returns, so you can read past the first page.
+- A database name the store refuses answers 400 `invalid_name` instead of 500. Names follow the store's rule (lowercase letters, digits, `_` and `-`, 1 to 63 bytes) and may not start with `_`, which also keeps the internal `_barrel_system` database out of reach over REST.
+- The OpenAPI file lists the contexts and worksets routes, `/ready`, the find continuation and the `db_not_found` answer; a test now fails when it and the server's routes differ.
+
 ## [1.13.0] - 2026-11-07
 
 ### Fixed

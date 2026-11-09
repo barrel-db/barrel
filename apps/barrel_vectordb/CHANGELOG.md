@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.5.3] - 2026-11-09
+
+### Fixed
+- A failed re-embed no longer removes the entry. `update/4` and `upsert` deleted the old entry before embedding the new text, so an embedder error left the document out of the index; the old entry now stays until the new vector exists.
+
 ## [2.5.2] - 2026-11-08
 
 ### Changed
