@@ -5,6 +5,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-11-09
+
+### Added
+- The attachment count of a database on S3, for barrel_docdb 2.4.0's `barrel_db_attachments_total` and `db_info`. Every attachment write updates it with the feed row it already writes. Needs barrel_docdb 2.4.0 or later.
+
 ## [0.2.0] - 2026-11-09
 
 ### Changed
