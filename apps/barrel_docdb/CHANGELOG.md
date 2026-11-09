@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.4.0] - 2026-11-09
+
+### Added
+- Exact document and attachment counts. `barrel_db_documents_total` counts live documents and `barrel_db_attachments_total` counts attachments, and `db_info` reports both under `storage`. Every write that adds or removes a document or an attachment updates the count in the same atomic write, so it never drifts from the data, including for replicated writes, conflict resolution, branch merges and both attachment backends. A branch starts with its parent's counts; a branch of a past instant counts itself. A database written before this release is counted once in the background after it opens, and its counts read as undefined until then.
+
 ## [2.3.1] - 2026-11-09
 
 ### Fixed
