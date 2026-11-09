@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.3 (2026-11-09)
+
+- The Python venv is created in `priv/.venv` again. The shipped `venv_path` setting of `undefined` was taken as a path, so the venv landed in a directory named `undefined` under the working directory.
+
 ## 1.0.2 (2026-08-23)
 
 - The venv shell commands (venv creation, pip install, uvloop check) run

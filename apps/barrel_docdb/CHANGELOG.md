@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.3.0] - 2026-11-09
+
+### Fixed
+- The replication gauges report real values. `barrel_replication_active` is 1 while a task runs and 0 once it is paused, failed, completed or deleted; `barrel_replication_lag_seconds` is how long ago the last copied change was written on the source, 0 once the task has caught up. Both used to read 0 always.
+- Replication over HTTP reports a 409 as clock skew only when the server says so. Any other 409, from another route or a proxy, now keeps its status and body in the error instead of being logged as a clock problem.
+
+### Removed
+- `barrel_db_documents_total` and `barrel_db_attachments_total`. Nothing ever set them, so they always read 0. A correct document count needs a counter kept on every write path; until then the database size gauges are the measure.
+
 ## [2.2.1] - 2026-11-09
 
 ### Fixed

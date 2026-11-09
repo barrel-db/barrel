@@ -3,6 +3,11 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.13.0] - 2026-11-09
+
+### Changed
+- Without a `db_path`, a database's vector store now lives next to its documents, as `<data_dir>/<name>.vectordb`, instead of `priv/barrel_vectordb_<name>` under the working directory. Backing up or moving the data directory now carries the vectors too. A store already in the old place keeps being used there, with a notice in the log; set `vectordb => #{db_path => ...}` to choose where it lives.
+
 ## [1.12.0] - 2026-11-07
 
 ### Changed
