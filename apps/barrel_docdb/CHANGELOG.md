@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.1] - 2026-11-09
+
+### Fixed
+- A database no longer fails to open when rocksdb was built on a machine without the Snappy library ("blob compression type Snappy is not available"). Stores now compress with zstd, which rocksdb always includes, using its own copy when the system has none. Existing data stays readable: rocksdb records the compression of each block, and new writes and compactions use zstd. Blocks already written with Snappy or LZ4 still need a rocksdb built with that library to be read. Set `compression` back to `snappy` in `store_opts` if you prefer it and your build has it.
+- The store tuning now takes effect. The block cache, bloom filter, write buffer and level 0 settings were set where rocksdb ignores them, so every database ran on rocksdb's defaults: no bloom filter, and a private cache per column family instead of the shared 512 MB one. They now apply to every column family. In a benchmark, reading an existing document went from 4.6 to 7.7 µs down to 2.9 µs, and looking up a missing one from about 4 µs to 1.4 µs. With many databases on a node, the memory used for cached blocks is now bounded by the shared cache instead of growing with each database. `compression`, `bottommost_compression`, `bloom_bits`, `block_size`, `write_buffer_size`, `max_write_buffer_number` and the level 0 triggers in `store_opts` also take effect now. `max_write_buffer_number` defaults to 2, what stores already used.
+
 ## [2.2.0] - 2026-11-08
 
 ### Added
