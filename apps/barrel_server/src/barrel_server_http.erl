@@ -574,9 +574,9 @@ bulk_get(Req) ->
 find(Req) ->
     with_db(Req, fun(Db) ->
         with_json(Req, fun(Body) ->
-            case find_spec(Body) of
-                {ok, Query} ->
-                    case barrel:find(Db, Query) of
+            case find_input(Body) of
+                {ok, Query, FindOpts} ->
+                    case barrel:find(Db, Query, FindOpts) of
                         {ok, Rows, Meta} ->
                             json_resp(200, #{rows => Rows,
                                              meta => find_meta(Meta)});
@@ -598,6 +598,24 @@ find_meta(Meta) ->
             Out
     end,
     observed(Meta, Out1).
+
+%% The continuation a page returned comes back as base64url in the body,
+%% next to the same query; it is an option of the run, not a query field.
+find_input(#{<<"continuation">> := Token} = Body) when is_binary(Token) ->
+    try base64:decode(Token, #{mode => urlsafe}) of
+        Cont ->
+            case find_spec(maps:remove(<<"continuation">>, Body)) of
+                {ok, Query} -> {ok, Query, #{continuation => Cont}};
+                Err -> Err
+            end
+    catch
+        _:_ -> {error, {invalid_query, bad_continuation}}
+    end;
+find_input(Body) ->
+    case find_spec(Body) of
+        {ok, Query} -> {ok, Query, #{}};
+        Err -> Err
+    end.
 
 find_spec(Body) when is_map(Body) ->
     try maps:fold(fun find_field/3, #{}, Body) of
