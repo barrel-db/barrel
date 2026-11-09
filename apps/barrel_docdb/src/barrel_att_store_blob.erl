@@ -41,6 +41,7 @@
 
 %% Replication support
 -export([att_state/4, att_list/3, touch/5, flush/1]).
+-export([att_count/2, count_atts/2]).
 
 %% Streaming API
 -export([put_stream/5, put_stream/6]).
@@ -120,6 +121,11 @@ ensure_store_dir(_, Path) -> filelib:ensure_dir(Path ++ "/").
 
 open_store(true, Path, DbOpts) -> barrel_rocksdb_ro:open(Path, DbOpts);
 open_store(_, Path, DbOpts) -> rocksdb:open(Path, DbOpts).
+
+%% @doc The attachment count kept by the feed (barrel_att_feed).
+att_count(#{ref := Ref}, DbName) -> barrel_att_feed:att_count(Ref, DbName).
+
+count_atts(#{ref := Ref}, DbName) -> barrel_att_feed:count_atts(Ref, DbName).
 
 %% @doc Close the attachment store
 -spec close(att_ref()) -> ok.
@@ -657,6 +663,8 @@ build_blob_options(Options) ->
     [
         {create_if_missing, true},
         {max_open_files, maps:get(max_open_files, Options, 256)},
+        %% the attachment count (barrel_att_feed) is a merged counter
+        {merge_operator, counter_merge_operator},
         %% zstd: the one codec rocksdb always builds (bundled when the system has none)
         {compression, maps:get(compression, Options, zstd)},
         {bottommost_compression, maps:get(bottommost_compression, Options, zstd)},
@@ -751,6 +759,7 @@ apply_batch(Ref, Ops, Sync) ->
         lists:foreach(
             fun({put, K, V}) -> ok = rocksdb:batch_put(Batch, K, V);
                ({delete, K}) -> ok = rocksdb:batch_delete(Batch, K);
+               ({merge, K, D}) -> ok = rocksdb:batch_merge(Batch, K, integer_to_binary(D));
                ({delete_range, S, E}) ->
                     ok = rocksdb:batch_delete_range(Batch, S, E)
             end,

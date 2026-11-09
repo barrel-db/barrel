@@ -36,6 +36,7 @@
 -export([put/5, put/6, get/4, delete/4]).
 -export([delete_all/3]).
 -export([fold/5]).
+-export([att_count/2, count_atts/2]).
 
 %% Streaming API
 -export([put_stream/5, put_stream/6]).
@@ -394,6 +395,25 @@ att_state(AttRef, DbName, DocId, AttName) ->
         true -> B:att_state(AttRef, barrel_keyspace:resolve(DbName), DocId,
                             AttName);
         false -> unsupported
+    end.
+
+%% @doc The attachment count of a database: exact once counted,
+%% `not_counted' before, `unsupported' for a backend without one.
+-spec att_count(att_ref(), binary()) -> {ok, non_neg_integer()} | not_counted | unsupported.
+att_count(AttRef, DbName) ->
+    B = backend(AttRef),
+    case exported(B, att_count, 2) of
+        true -> B:att_count(AttRef, barrel_keyspace:resolve(DbName));
+        false -> unsupported
+    end.
+
+%% @doc Count the attachments of a database written before the counter.
+-spec count_atts(att_ref(), binary()) -> ok | {error, term()}.
+count_atts(AttRef, DbName) ->
+    B = backend(AttRef),
+    case exported(B, count_atts, 2) of
+        true -> B:count_atts(AttRef, barrel_keyspace:resolve(DbName));
+        false -> {error, unsupported}
     end.
 
 %% @doc Current feed index entries of one document's attachments.

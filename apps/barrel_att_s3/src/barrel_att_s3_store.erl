@@ -177,6 +177,7 @@
 -export([get_stream/4, read_chunk/1, close_stream/1]).
 -export([att_changes/4, att_floor/2, sweep_att_feed/3, rebuild_feed/2]).
 -export([att_state/4, att_list/3, flush/1]).
+-export([att_count/2, count_atts/2]).
 
 -define(DEFAULT_PART_SIZE, 8 * 1024 * 1024). %% 8 MiB; used starting Step 3
 -define(MAX_KEY_SIZE, 1024).
@@ -293,7 +294,7 @@ open_feed_and_prefix(Path, Options) ->
 open_feed(Path, FeedPath, undefined) ->
     case filelib:is_regular(feed_enc_marker(Path)) of
         true -> {error, db_is_encrypted};
-        false -> rocksdb:open(FeedPath, [{create_if_missing, true}])
+        false -> rocksdb:open(FeedPath, feed_opts([]))
     end;
 open_feed(Path, FeedPath, Env) ->
     Marker = feed_enc_marker(Path),
@@ -303,7 +304,7 @@ open_feed(Path, FeedPath, Env) ->
     case {filelib:is_regular(Marker), is_feed(FeedPath), is_feed(Plain)} of
         {true, _, _} ->
             _ = file:del_dir_r(Plain),
-            rocksdb:open(FeedPath, [{create_if_missing, true}, {env, Env}]);
+            rocksdb:open(FeedPath, feed_opts([{env, Env}]));
         {false, true, true} ->
             %% the encrypted copy was moved in; only the marker is missing
             ok = file:write_file(Marker, <<>>),
@@ -325,9 +326,9 @@ open_feed(Path, FeedPath, Env) ->
 encrypt_feed(FeedPath, Env) ->
     Tmp = FeedPath ++ ".enc.tmp",
     _ = file:del_dir_r(Tmp),
-    {ok, Old} = rocksdb:open(FeedPath, []),
+    {ok, Old} = rocksdb:open(FeedPath, [{merge_operator, counter_merge_operator}]),
     try
-        {ok, New} = rocksdb:open(Tmp, [{create_if_missing, true}, {env, Env}]),
+        {ok, New} = rocksdb:open(Tmp, feed_opts([{env, Env}])),
         try copy_rows(Old, New)
         after rocksdb:close(New)
         end
@@ -363,6 +364,15 @@ write_rows(New, Ops) ->
 
 feed_enc_marker(Path) ->
     filename:join(Path, "feed.enc").
+
+%% the attachment count (barrel_att_feed) is a merged counter
+feed_opts(Extra) ->
+    [{create_if_missing, true}, {merge_operator, counter_merge_operator} | Extra].
+
+%% @doc The attachment count kept by the feed (barrel_att_feed).
+att_count(#{feed_ref := Ref}, DbName) -> barrel_att_feed:att_count(Ref, DbName).
+
+count_atts(#{feed_ref := Ref}, DbName) -> barrel_att_feed:count_atts(Ref, DbName).
 
 is_feed(Dir) ->
     filelib:is_regular(filename:join(Dir, "CURRENT")).
@@ -767,7 +777,8 @@ commit_feed(FeedRef, DbName, DocId, AttName, FeedOps) ->
     try
         lists:foreach(
             fun({put, K, V}) -> ok = rocksdb:batch_put(Batch, K, V);
-               ({delete, K}) -> ok = rocksdb:batch_delete(Batch, K)
+               ({delete, K}) -> ok = rocksdb:batch_delete(Batch, K);
+               ({merge, K, D}) -> ok = rocksdb:batch_merge(Batch, K, integer_to_binary(D))
             end,
             FeedOps),
         case rocksdb:write_batch(FeedRef, Batch, []) of
