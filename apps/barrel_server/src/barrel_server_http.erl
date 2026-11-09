@@ -19,7 +19,7 @@
 %% Route handlers (invoked by the livery router as Module:Function/1)
 -export([
     root/1,
-    health/1,
+    health/1, ready/1,
     create_db/1,
     db_info/1,
     drop_db/1,
@@ -113,6 +113,17 @@ root(_Req) ->
 
 health(_Req) ->
     json_resp(200, #{status => <<"ok">>}).
+
+%% Readiness: the processes that serve databases and replication run.
+%% /health only says the listener answers.
+ready(_Req) ->
+    Checks = [{databases, barrel_dbs},
+              {stores, barrel_db_sup},
+              {replication, barrel_rep_tasks}],
+    case [Name || {Name, Proc} <- Checks, whereis(Proc) =:= undefined] of
+        [] -> json_resp(200, #{status => <<"ready">>});
+        Down -> json_resp(503, #{status => <<"not_ready">>, failed => Down})
+    end.
 
 %%====================================================================
 %% Database lifecycle

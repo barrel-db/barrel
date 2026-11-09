@@ -10,7 +10,7 @@
 -module(barrel_server_SUITE).
 
 -export([all/0, init_per_suite/1, end_per_suite/1]).
--export([t_db_names/1, t_missing_db/1, t_find_pages/1, 
+-export([t_db_names/1, t_missing_db/1, t_find_pages/1, t_ready/1, 
     t_db_lifecycle/1,
     t_doc_crud/1,
     t_bulk/1,
@@ -64,7 +64,7 @@ all() ->
      t_create_db_att_opts_redacts_secrets, t_create_db_att_opts_blob_explicit,
      t_attachment_conditional_headers_unenforced_on_blob,
      t_attachment_bad_if_none_match,
-     t_attachment_disabled_internal_db, t_db_names, t_missing_db, t_find_pages].
+     t_attachment_disabled_internal_db, t_db_names, t_missing_db, t_find_pages, t_ready].
 
 init_per_suite(Config) ->
     %% Load first, then override env (application:load resets to .app defaults).
@@ -165,6 +165,21 @@ find_all(Url, Query, Acc) ->
         _ ->
             Acc1
     end.
+
+%% /ready answers 503 while a serving process is down, 200 otherwise.
+t_ready(Config) ->
+    B = base(Config),
+    {200, #{<<"status">> := <<"ready">>}} = req(get, B ++ "/ready", <<>>),
+    ok = supervisor:terminate_child(barrel_docdb_sup, barrel_rep_tasks),
+    try
+        ?assertEqual({503, #{<<"status">> => <<"not_ready">>,
+                             <<"failed">> => [<<"replication">>]}},
+                     req(get, B ++ "/ready", <<>>))
+    after
+        {ok, _} = supervisor:restart_child(barrel_docdb_sup, barrel_rep_tasks)
+    end,
+    {200, _} = req(get, B ++ "/ready", <<>>),
+    ok.
 
 t_doc_crud(Config) ->
     B = base(Config),
