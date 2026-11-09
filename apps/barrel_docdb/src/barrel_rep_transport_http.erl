@@ -52,6 +52,10 @@
 
 -export_type([endpoint/0]).
 
+-ifdef(TEST).
+-export([error_of/1]).
+-endif.
+
 -type endpoint() :: #{
     url := binary(),
     auth => #{token := binary()},
@@ -326,7 +330,7 @@ sync_hlc(Endpoint, Hlc) ->
         {ok, 200, #{<<"hlc">> := TheirsB64}} ->
             Theirs = barrel_hlc:decode(base64:decode(TheirsB64)),
             barrel_hlc:sync_hlc(Theirs);
-        {ok, 409, _} ->
+        {ok, 409, #{<<"error">> := <<"clock_skew">>}} ->
             logger:warning("sync_hlc rejected by ~s: clock skew",
                            [maps:get(url, Endpoint)]),
             {error, clock_skew};
@@ -945,11 +949,12 @@ change_from_wire(Change) ->
         false -> Base
     end.
 
-%% 404 -> not_found; anything else keeps the status and body for the
-%% caller's logs.
+%% 404 -> not_found; a 409 is clock skew only when the server says so
+%% (other routes and proxies answer 409 for other reasons); anything else
+%% keeps the status and body for the caller's logs.
 error_of({ok, 404, _}) -> {error, not_found};
 error_of({ok, 401, _}) -> {error, unauthorized};
-error_of({ok, 409, _}) -> {error, clock_skew};
+error_of({ok, 409, #{<<"error">> := <<"clock_skew">>}}) -> {error, clock_skew};
 error_of({ok, 413, _}) -> {error, too_large};
 error_of({ok, Status, Body}) -> {error, {http, Status, Body}};
 error_of({error, _} = Error) -> Error.
