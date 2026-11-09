@@ -248,9 +248,9 @@ open_stored(DbBin, Opts) ->
 open_plain(DbBin, Opts) ->
     EncSpec = maps:get(encryption, Opts, disabled),
     DocOpts = put_encryption(maps:get(docdb, Opts, #{}), EncSpec),
-    VecConfig0 = maps:get(vectordb, Opts, #{}),
     case ensure_docdb(DbBin, DocOpts) of
         {ok, _DbPid} ->
+            VecConfig0 = with_vec_path(DbBin, maps:get(vectordb, Opts, #{})),
             case vec_crypto_config(DbBin, EncSpec, VecConfig0) of
                 {ok, VecConfig} ->
                     case start_vstore(VecConfig#{name => DbBin},
@@ -294,11 +294,11 @@ do_open_record(DbBin, Opts, Policy) ->
     DocOpts0 = maps:get(docdb, Opts, #{}),
     DocOpts = put_encryption(DocOpts0#{outbox_tags_on_replication => [?EMBED_TAG]},
                              EncSpec),
-    VecConfig0 = maps:get(vectordb, Opts, #{}),
-    case resolve_dimension(Policy, VecConfig0) of
+    case resolve_dimension(Policy, maps:get(vectordb, Opts, #{})) of
         {ok, Dim} ->
             case ensure_docdb(DbBin, DocOpts) of
                 {ok, _DbPid} ->
+                    VecConfig0 = with_vec_path(DbBin, maps:get(vectordb, Opts, #{})),
                     ok = maybe_persist_policy(Opts, DbBin, Policy),
                     case vec_crypto_config(DbBin, EncSpec, VecConfig0) of
                         {ok, VecConfig1} ->
@@ -1132,6 +1132,26 @@ with_encryption(Map, Spec) -> Map#{encryption => Spec}.
 %% its docdb: one logical database, one key. The key resolves on the
 %% docdb KEYSPACE, so a branch's fresh vector store gets its parent's
 %% key. Vectordb never calls the provider itself.
+%% @private Where the vector store lives when the caller names no path:
+%% next to the document store, under the same data directory, so the
+%% data directory holds the whole database. A store already in the old
+%% default (priv/barrel_vectordb_<name> under the working directory) is
+%% kept where it is, with a notice.
+with_vec_path(_DbBin, #{path := _} = VecConfig) -> VecConfig;
+with_vec_path(_DbBin, #{db_path := _} = VecConfig) -> VecConfig;
+with_vec_path(DbBin, VecConfig) ->
+    Legacy = "priv/barrel_vectordb_" ++ binary_to_list(DbBin),
+    case filelib:is_dir(Legacy) of
+        true ->
+            logger:notice("barrel: vector store of ~s stays in ~s; set "
+                          "vectordb => #{db_path => ...} to move it under "
+                          "the data directory", [DbBin, Legacy]),
+            VecConfig#{db_path => Legacy};
+        false ->
+            {ok, #{db_path := DocPath}} = barrel_docdb:db_info(DbBin),
+            VecConfig#{db_path => unicode:characters_to_list(DocPath) ++ ".vectordb"}
+    end.
+
 vec_crypto_config(_DbBin, disabled, VecConfig) ->
     {ok, VecConfig};
 vec_crypto_config(DbBin, Spec, VecConfig) ->

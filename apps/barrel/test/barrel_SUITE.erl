@@ -12,6 +12,7 @@
 -export([all/0, init_per_suite/1, end_per_suite/1,
          init_per_testcase/2, end_per_testcase/2]).
 -export([
+    t_default_vec_path/1,
     t_doc_crud/1,
     t_batch_docs/1,
     t_attachments/1,
@@ -32,7 +33,8 @@
 all() ->
     [t_doc_crud, t_batch_docs, t_attachments, t_attachment_stream,
      t_vectors, t_vector_batch, t_changes, t_delete_db,
-     t_binary_names, t_supervised_store_survives_opener].
+     t_binary_names, t_supervised_store_survives_opener,
+     t_default_vec_path].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(barrel_docdb),
@@ -209,6 +211,30 @@ vec(Base) ->
 %%====================================================================
 %% Lifecycle
 %%====================================================================
+
+%% Without a db_path the vector store sits next to the document store,
+%% under the data directory. A store already in the old default
+%% (priv/ under the working directory) is kept there.
+t_default_vec_path(Config) ->
+    Priv = ?config(priv_dir, Config),
+    {ok, Db} = barrel:open(<<"defvec">>, #{vectordb => #{dimension => ?DIM}}),
+    #{vstore := Store} = Db,
+    {ok, VPath} = barrel_vectordb_server:get_db_path(Store),
+    ?assertEqual(filename:join(Priv, "defvec") ++ ".vectordb", VPath),
+    ?assert(filelib:is_dir(VPath)),
+    ok = barrel:delete(Db),
+    ?assertNot(filelib:is_dir(VPath)),
+    Legacy = "priv/barrel_vectordb_oldvec",
+    ok = filelib:ensure_dir(filename:join(Legacy, "x")),
+    try
+        {ok, Old} = barrel:open(<<"oldvec">>, #{vectordb => #{dimension => ?DIM}}),
+        #{vstore := OldStore} = Old,
+        ?assertEqual({ok, Legacy}, barrel_vectordb_server:get_db_path(OldStore)),
+        ok = barrel:delete(Old)
+    after
+        _ = file:del_dir_r("priv/barrel_vectordb_oldvec")
+    end,
+    ok.
 
 t_delete_db(Config) ->
     #{docdb := DbBin, vstore := Store} = Db = ?config(db, Config),
