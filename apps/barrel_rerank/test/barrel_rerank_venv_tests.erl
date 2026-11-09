@@ -26,6 +26,17 @@ venv_path_configured_test() ->
         application:unset_env(barrel_rerank, venv_path)
     end.
 
+%% The app env ships venv_path = undefined; that means "use the default",
+%% not a directory named undefined.
+venv_path_undefined_test() ->
+    Default = barrel_rerank_venv:venv_path(),
+    application:set_env(barrel_rerank, venv_path, undefined),
+    try
+        ?assertEqual(Default, barrel_rerank_venv:venv_path())
+    after
+        application:unset_env(barrel_rerank, venv_path)
+    end.
+
 is_valid_nonexistent_test() ->
     %% A non-existent venv should not be valid
     application:set_env(barrel_rerank, venv_path, "/nonexistent/venv/path"),
