@@ -1323,6 +1323,7 @@ json_resp(Status, Term) ->
 error_resp({error, Reason}) -> error_resp(Reason);
 error_resp(not_found) -> json_resp(404, #{error => <<"not_found">>});
 error_resp(invalid_name) -> json_resp(400, #{error => <<"invalid_name">>});
+error_resp(invalid_db_name) -> json_resp(400, #{error => <<"invalid_name">>});
 error_resp(bad_json) -> json_resp(400, #{error => <<"bad_json">>});
 error_resp({invalid_provenance, _}) ->
     json_resp(400, #{error => <<"invalid_provenance">>});
