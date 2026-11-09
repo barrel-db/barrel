@@ -71,7 +71,7 @@ subscribe(DbName, Bql, Params, Owner) ->
     %% Open the database in the caller's process, not the bridge loop: a
     %% cold or large open must not block every other subscribe/snapshot/
     %% unsubscribe call queued on the singleton bridge.
-    case barrel_server_dbs:ensure(DbName) of
+    case barrel_server_dbs:open_existing(DbName) of
         {ok, Db} ->
             gen_server:call(?MODULE,
                             {subscribe, DbName, Db, Bql, Params, Owner},

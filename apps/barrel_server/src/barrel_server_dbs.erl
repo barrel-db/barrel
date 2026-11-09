@@ -8,7 +8,7 @@
 %%%-------------------------------------------------------------------
 -module(barrel_server_dbs).
 
--export([ensure/1, ensure/2, close/1, branch/3, destroy/1, list/0,
+-export([ensure/1, ensure/2, open_existing/1, close/1, branch/3, destroy/1, list/0,
          ensure_opts/0]).
 
 
@@ -20,6 +20,16 @@
 -spec ensure(binary()) -> {ok, barrel:db()} | {error, term()}.
 ensure(Name) when is_binary(Name) ->
     ensure(Name, #{}).
+
+%% @doc The handle for `Name' when the database exists; never creates it.
+%% Data routes use this, so a mistyped name is an error, not a new empty
+%% database. `PUT /db/:db' (ensure/2) is how a client creates one.
+-spec open_existing(binary()) -> {ok, barrel:db()} | {error, term()}.
+open_existing(Name) when is_binary(Name) ->
+    case ensure(Name, #{must_exist => true}) of
+        {error, not_found} -> {error, db_not_found};
+        Other -> Other
+    end.
 
 %% @doc Same as `ensure/1', with `Opts' (e.g. `#{docdb => #{att_opts =>
 %% ...}}') merged over the server-wide `open_opts()' baseline -- only

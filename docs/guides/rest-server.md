@@ -30,7 +30,13 @@ example in `sys.config`.
 
 ## Endpoints
 
-Databases open lazily on first use through Barrel's database lifecycle manager
+Create a database with `PUT /db/:db` before you use it: every other `/db/:db`
+route answers 404 `{"error":"db_not_found"}` when the database does not exist,
+so a mistyped name never leaves an empty database behind. Names are lowercase
+letters, digits, `_` and `-`, 1 to 63 bytes, not starting with `_`; others
+answer 400 `invalid_name`.
+
+Existing databases open lazily on first use through Barrel's database lifecycle manager
 (`barrel_dbs`): handles are cached by name, idle databases close after
 `dbs_idle_timeout` (barrel app env, default 5 minutes, 0 disables), and
 `dbs_max_open` evicts the least recently used past a cap.
