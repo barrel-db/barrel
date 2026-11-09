@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.3.1] - 2026-11-09
+
+### Fixed
+- An encrypted database now hands its key to an attachment backend that stores outside RocksDB, so barrel_att_s3 0.2.0 can encrypt attachments in the bucket. Plaintext databases pass no key.
+
 ## [2.3.0] - 2026-11-09
 
 ### Fixed

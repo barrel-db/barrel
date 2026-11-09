@@ -35,6 +35,17 @@ Everything else -- `get_attachment/4`, `delete_attachment/4`, streaming --
 works exactly as it does with the default backend; the backend choice is
 entirely in `att_opts`.
 
+## Encryption
+
+An encrypted database (`encryption` at open) encrypts its attachments in
+the bucket too: AES-256 per object under a key derived from the database
+key, with the digest in the metadata sealed. Sizes are unchanged, so
+streaming, multipart and range reads work as for a plaintext database.
+Object keys still show the document id and attachment name. Objects
+written in plaintext before 0.2.0 are rewritten encrypted in the
+background when the database opens. See the
+[encryption guide](../../docs/guides/encryption.md).
+
 ## Documentation
 
 - [Getting started](docs/getting-started.md) -- config shape, credentials, `part_size`.

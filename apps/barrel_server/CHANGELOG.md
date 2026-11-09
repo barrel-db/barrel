@@ -5,6 +5,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.14.1] - 2026-11-09
+
+### Fixed
+- The OpenAPI file said `GET /` is public. Like every route except `/health` and `/ready`, it needs a token when auth is configured.
+
 ## [1.14.0] - 2026-11-09
 
 ### Breaking
