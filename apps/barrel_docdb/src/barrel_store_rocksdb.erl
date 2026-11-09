@@ -98,11 +98,12 @@ open(Path, Options) ->
         _ -> [{env, Env} | DbOpts0]
     end,
     %% Column family descriptors with their options
+    Codec = compression_cf_options(Options),
     CFDescriptors = [
-        {"default", build_default_cf_options(Options)},
-        {?POSTING_CF_NAME, build_posting_cf_options()},
-        {?BODY_CF_NAME, build_body_cf_options(Options)},
-        {?LOCAL_CF_NAME, []}  %% Simple KV storage for local docs (no merge operator)
+        {"default", Codec ++ build_default_cf_options(Options)},
+        {?POSTING_CF_NAME, Codec ++ build_posting_cf_options()},
+        {?BODY_CF_NAME, Codec ++ build_body_cf_options(Options)},
+        {?LOCAL_CF_NAME, Codec}  %% Simple KV storage for local docs (no merge operator)
     ],
 
     case open_store(ReadOnly, Path, DbOpts, CFDescriptors) of
@@ -579,10 +580,6 @@ build_db_options(Options) ->
         {max_write_buffer_number, maps:get(max_write_buffer_number, Options, 3)},
         {min_write_buffer_number_to_merge, maps:get(min_write_buffer_number_to_merge, Options, 1)},
 
-        %% Compression - snappy for all levels (zstd optional if available)
-        {compression, maps:get(compression, Options, snappy)},
-        {bottommost_compression, maps:get(bottommost_compression, Options, snappy)},
-
         %% Concurrency
         {allow_concurrent_memtable_write, true},
         {enable_write_thread_adaptive_yield, true},
@@ -828,6 +825,14 @@ fold_posting_loop_reverse({ok, Key, Value}, Iter, Fun, Acc) ->
 %% Body Column Family Operations (BlobDB enabled)
 %%====================================================================
 
+%% Compression is a column family option: rocksdb ignores it in the db
+%% options when column families are named. zstd is the one codec rocksdb
+%% always builds (bundled when the system has none).
+-spec compression_cf_options(map()) -> list().
+compression_cf_options(Options) ->
+    [{compression, maps:get(compression, Options, zstd)},
+     {bottommost_compression, maps:get(bottommost_compression, Options, zstd)}].
+
 %% @doc Build column family options for default CF (document entities,
 %% changes feed, history, stubs). Retention, TTL and stub purge delete
 %% long runs of consecutive keys here; a flush or compaction turns a run of
@@ -849,7 +854,7 @@ build_body_cf_options(Options) ->
         {enable_blob_files, true},
         {min_blob_size, maps:get(min_blob_size, Options, 4096)},        % 4KB threshold
         {blob_file_size, maps:get(blob_file_size, Options, 268435456)}, % 256MB
-        {blob_compression_type, maps:get(blob_compression, Options, snappy)},
+        {blob_compression_type, maps:get(blob_compression, Options, zstd)},
         {enable_blob_garbage_collection, true},
         {blob_garbage_collection_age_cutoff,
             maps:get(blob_gc_age_cutoff, Options, 0.25)},
