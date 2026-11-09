@@ -15,7 +15,8 @@
          init_per_group/2, end_per_group/2,
          init_per_testcase/2, end_per_testcase/2]).
 -export([rocksdb_deleted_run_reads/1, legacy_bitmap_cf_dropped/1,
-         legacy_bitmap_cf_read_only/1, default_compression_zstd/1]).
+         legacy_bitmap_cf_read_only/1, default_compression_zstd/1,
+         cf_options_applied/1]).
 
 %% Test cases
 -export([
@@ -77,7 +78,8 @@ groups() ->
             rocksdb_deleted_run_reads,
             legacy_bitmap_cf_dropped,
             legacy_bitmap_cf_read_only,
-            default_compression_zstd
+            default_compression_zstd,
+            cf_options_applied
         ]}
     ].
 
@@ -618,11 +620,7 @@ default_compression_zstd(Config) ->
     assert_zstd_only(Att).
 
 assert_zstd_only(Dir) ->
-    [Opts | _] = lists:reverse(lists:sort(filelib:wildcard(Dir ++ "/OPTIONS-*"))),
-    {ok, Bin} = file:read_file(Opts),
-    Pairs = [{string:trim(K), string:trim(V)}
-             || L <- binary:split(Bin, <<"\n">>, [global]),
-                [K, V] <- [binary:split(L, <<"=">>)]],
+    Pairs = options_pairs(Dir),
     Codecs = [V || {K, V} <- Pairs,
                    K =:= <<"compression">> orelse K =:= <<"bottommost_compression">>],
     ?assertNotEqual([], Codecs),
@@ -631,6 +629,38 @@ assert_zstd_only(Dir) ->
     Blobs = lists:usort([V || {<<"blob_compression_type">>, V} <- Pairs]),
     ?assert(lists:member(<<"kZSTD">>, Blobs)),
     ?assertEqual([], Blobs -- [<<"kZSTD">>, <<"kNoCompression">>]).
+
+%% Column family options reach every column family, not just the db options.
+cf_options_applied(Config) ->
+    TestDir = proplists:get_value(test_dir, Config),
+    Store = TestDir ++ "/cf_opts",
+    {ok, DbRef} = barrel_store_rocksdb:open(Store, #{max_write_buffer_number => 5,
+                                                     bloom_bits => 12}),
+    ok = barrel_store_rocksdb:close(DbRef),
+    Pairs = options_pairs(Store),
+    Cfs = [V || {<<"[CFOptions">>, V} <- Pairs],
+    ?assertEqual(4, length(Cfs)),
+    ?assertEqual([<<"5">>],
+                 lists:usort([V || {<<"max_write_buffer_number">>, V} <- Pairs])),
+    Filters = [V || {<<"filter_policy">>, V} <- Pairs],
+    ?assertEqual(4, length(Filters)),
+    ?assertEqual([<<"bloomfilter:12:false">>], lists:usort(Filters)).
+
+options_pairs(Dir) ->
+    [Opts | _] = lists:reverse(lists:sort(filelib:wildcard(Dir ++ "/OPTIONS-*"))),
+    {ok, Bin} = file:read_file(Opts),
+    lists:flatmap(
+      fun(L0) ->
+              L = string:trim(L0),
+              case binary:split(L, <<" ">>) of
+                  [<<"[CFOptions">>, Name] -> [{<<"[CFOptions">>, Name}];
+                  _ ->
+                      case binary:split(L, <<"=">>) of
+                          [K, V] -> [{string:trim(K), string:trim(V)}];
+                          _ -> []
+                      end
+              end
+      end, binary:split(Bin, <<"\n">>, [global])).
 
 legacy_bitmap_cf_read_only(Config) ->
     TestDir = proplists:get_value(test_dir, Config),

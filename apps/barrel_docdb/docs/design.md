@@ -261,12 +261,15 @@ Both stores share a common LRU block cache managed by `barrel_cache`:
 ```
 
 **Document Store Optimizations:**
+
+The document store has four column families (`default`, `posting`, `bodies`, `local`); each one takes these options from `store_opts`. Memory per database grows with them: up to `write_buffer_size` × `max_write_buffer_number` per column family for memtables.
+
 | Setting | Default | Purpose |
 |---------|---------|---------|
-| `block_cache` | 512MB shared | LRU cache for data/index blocks |
-| `bloom_filter` | 10 bits/key | Reduce disk reads for point lookups |
+| `block_cache` | 512MB shared | One cache for the data, index and filter blocks of every database on the node (`block_cache_size` app env) |
+| `bloom_bits` | 10 bits/key | Bloom filter on every column family: a read of a missing key skips the files that cannot hold it |
 | `write_buffer_size` | 64MB | Memtable size before flush |
-| `max_write_buffer_number` | 3 | Concurrent memtables |
+| `max_write_buffer_number` | 2 | Memtables per column family before writes wait for a flush |
 | `compression` | zstd | All levels. rocksdb always builds zstd (bundled when the system has none); `snappy` and `lz4` need the system library at build time |
 | `bottommost_compression` | zstd | Last level |
 | `level0_file_num_compaction_trigger` | 4 | Trigger L0→L1 compaction |
