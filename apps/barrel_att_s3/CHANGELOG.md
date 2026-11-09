@@ -5,6 +5,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-09
+
+### Changed
+- Attachments of an encrypted database are now encrypted in the bucket. They used to go to S3 in plaintext, with their SHA-256 readable in the object metadata, so anyone with access to the bucket could read them. Each object is now encrypted with AES-256 under a key derived from the database key; sizes are unchanged, and streaming, multipart uploads, resumed and range reads work as before. A full read is checked against the attachment's digest, so a changed object fails instead of returning altered bytes. Needs barrel_docdb 2.3.1 or later.
+- The local attachment feed of an encrypted database, which holds doc ids, attachment names and digests, is now encrypted with the database.
+- An encrypted database that already stored attachments in S3 keeps working: its plaintext objects stay readable and are rewritten encrypted in the background when it opens. Once every object is encrypted, a plaintext object is refused. Plaintext databases are unchanged.
+- What stays visible in the bucket: object keys contain the document id and attachment name, and object sizes are the attachment sizes.
+
 ## [0.1.5] - 2026-11-08
 
 ### Fixed

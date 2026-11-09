@@ -101,6 +101,13 @@ runtime config.
   the sector cipher) is not authenticated, so an active attacker with
   write access to the files is out of scope. In-memory keys are regular
   BEAM binaries and are not zeroized.
+- Attachments in S3 (barrel_att_s3 0.2.0) are covered: each object is
+  encrypted under a key derived from the database key, its digest in the
+  object metadata is sealed, and the local attachment feed opens under the
+  same env. A full read is checked against the digest. The bucket still
+  shows object keys (document id and attachment name) and sizes. An
+  encrypted database that stored S3 attachments before 0.2.0 rewrites its
+  plaintext objects encrypted in the background at open.
 - Vector search indexes are covered: HNSW and FAISS state persists in the
   encrypted RocksDB; the disk BM25 and DiskANN flat files use the sector
   cipher, and their id-mapping RocksDBs open under the same env. An
