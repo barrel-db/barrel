@@ -40,6 +40,7 @@
 
 -export([
     encrypted_feed_hides_names/1, plaintext_feed_encrypted_on_open/1,
+    encrypted_object_roundtrip/1, encrypted_multipart_roundtrip/1, encrypted_object_tamper_detected/1, encrypted_object_needs_key/1, encrypted_branch_reads_parent/1,
     open_missing_bucket/1,
     put_get_roundtrip/1,
     get_returns_not_found_for_missing/1,
@@ -175,7 +176,12 @@
     multipart_gc_periodic_timer_fires,
     multipart_gc_ignores_list_uploads_prefix,
     encrypted_feed_hides_names,
-    plaintext_feed_encrypted_on_open
+    plaintext_feed_encrypted_on_open,
+    encrypted_object_roundtrip,
+    encrypted_multipart_roundtrip,
+    encrypted_object_tamper_detected,
+    encrypted_object_needs_key,
+    encrypted_branch_reads_parent
 ]).
 
 %% Need a store enforcing If-Match/If-None-Match: RustFS, or Garage behind
@@ -1779,3 +1785,115 @@ plaintext_feed_encrypted_on_open(Config) ->
     ok = barrel_att_s3_store:close(Ref),
     ?assertNot(on_disk(filename:join(Path, "feed.db"), ?SENTINEL)),
     ?assertNot(filelib:is_dir(filename:join(Path, "feed.db.plain"))).
+
+raw_key(#{prefix := Prefix}, DocId, AttName) ->
+    <<Prefix/binary, "/", (binary:encode_hex(DocId, lowercase))/binary, "/",
+      AttName/binary>>.
+
+raw_get(#{client := Client, bucket := Bucket} = Ref, DocId, AttName) ->
+    {ok, Resp} = livery_s3:get_object(Client, Bucket, raw_key(Ref, DocId, AttName)),
+    Resp.
+
+plain_digest(Data) ->
+    <<"sha256-", (binary:encode_hex(crypto:hash(sha256, Data), lowercase))/binary>>.
+
+secret_payload(Size) ->
+    Unit = <<?SENTINEL/binary, "-">>,
+    binary:part(binary:copy(Unit, Size div byte_size(Unit) + 1), 0, Size).
+
+%% An encrypted database stores ciphertext with the salt in `enc' and a
+%% sealed digest; reads and info return the plaintext and its digest.
+encrypted_object_roundtrip(Config) ->
+    {Name, Path} = own_path(Config, <<"-encobj">>),
+    {ok, Ref} = barrel_att_s3_store:open(Path, enc_opts(Config, Name)),
+    Data = secret_payload(4096),
+    {ok, _} = barrel_att_s3_store:put(Ref, Name, <<"d">>, <<"s.txt">>, Data),
+    #{body := Stored, metadata := Meta} = raw_get(Ref, <<"d">>, <<"s.txt">>),
+    ?assertEqual(byte_size(Data), byte_size(Stored)),
+    ?assertEqual(nomatch, binary:match(Stored, ?SENTINEL)),
+    ?assertMatch(<<"v1.", _/binary>>, maps:get(<<"enc">>, Meta)),
+    ?assertNotEqual(plain_digest(Data), maps:get(<<"digest">>, Meta)),
+    ?assertEqual({ok, Data}, barrel_att_s3_store:get(Ref, Name, <<"d">>, <<"s.txt">>)),
+    ?assertMatch({ok, #{digest := _, length := 4096}},
+                 barrel_att_s3_store:get_info(Ref, Name, <<"d">>, <<"s.txt">>)),
+    {ok, #{digest := D}} = barrel_att_s3_store:get_info(Ref, Name, <<"d">>, <<"s.txt">>),
+    ?assertEqual(plain_digest(Data), D),
+    ok = barrel_att_s3_store:close(Ref).
+
+%% A multipart write is encrypted part by part; a streamed read that
+%% loses its connection resumes and still decrypts at the right offset.
+encrypted_multipart_roundtrip(Config) ->
+    {Name, Path} = own_path(Config, <<"-encmp">>),
+    {ok, Ref} = barrel_att_s3_store:open(Path, enc_opts(Config, Name)),
+    Data = secret_payload(2 * ?PART_SIZE + 12345),
+    {ok, W0} = barrel_att_s3_store:put_stream(Ref, Name, <<"d">>, <<"big.bin">>,
+                                              <<"application/octet-stream">>),
+    W = lists:foldl(fun(Off, Acc) ->
+                        Len = min(1000003, byte_size(Data) - Off),
+                        {ok, Acc1} = barrel_att_s3_store:write_chunk(
+                                         Acc, binary:part(Data, Off, Len)),
+                        Acc1
+                    end, W0, lists:seq(0, byte_size(Data) - 1, 1000003)),
+    {ok, #{chunked := true}} = barrel_att_s3_store:finish_stream(W),
+    #{body := Stored} = raw_get(Ref, <<"d">>, <<"big.bin">>),
+    ?assertEqual(nomatch, binary:match(Stored, ?SENTINEL)),
+    {ok, R} = barrel_att_s3_store:get_stream(Ref, Name, <<"d">>, <<"big.bin">>),
+    {ok, First, R1} = barrel_att_s3_store:read_chunk(R),
+    drop_next_read(),
+    try
+        Rest = drain(R1, []),
+        ?assertEqual(Data, <<First/binary, Rest/binary>>)
+    after
+        meck:unload([livery_client, livery_s3])
+    end,
+    ok = barrel_att_s3_store:close(Ref).
+
+%% CTR is not authenticated: a changed stored byte fails the read on the
+%% sealed digest instead of returning altered data.
+encrypted_object_tamper_detected(Config) ->
+    {Name, Path} = own_path(Config, <<"-enctamper">>),
+    {ok, Ref} = barrel_att_s3_store:open(Path, enc_opts(Config, Name)),
+    Data = secret_payload(2048),
+    {ok, _} = barrel_att_s3_store:put(Ref, Name, <<"d">>, <<"t.txt">>, Data),
+    #{body := <<B, Tail/binary>>, metadata := Meta} = raw_get(Ref, <<"d">>, <<"t.txt">>),
+    #{client := Client, bucket := Bucket} = Ref,
+    {ok, _} = livery_s3:put_object(Client, Bucket, raw_key(Ref, <<"d">>, <<"t.txt">>),
+                                   <<(B bxor 1), Tail/binary>>, #{metadata => Meta}),
+    ?assertMatch({error, {digest_mismatch, _}},
+                 barrel_att_s3_store:get(Ref, Name, <<"d">>, <<"t.txt">>)),
+    {ok, S} = barrel_att_s3_store:get_stream(Ref, Name, <<"d">>, <<"t.txt">>),
+    ?assertMatch({error, {digest_mismatch, _}}, drain_result(S)),
+    ok = barrel_att_s3_store:close(Ref).
+
+%% A store opened without the key does not hand out ciphertext.
+encrypted_object_needs_key(Config) ->
+    {Name, Path} = own_path(Config, <<"-encnokey">>),
+    Opts = enc_opts(Config, Name),
+    {ok, Ref} = barrel_att_s3_store:open(Path, Opts),
+    {ok, _} = barrel_att_s3_store:put(Ref, Name, <<"d">>, <<"k.txt">>, <<"secret">>),
+    ok = barrel_att_s3_store:close(Ref),
+    %% another plaintext store over the same prefix
+    {ok, Plain} = barrel_att_s3_store:open(Path ++ "-plain",
+                                           maps:without([env, crypto], Opts)),
+    ?assertEqual({error, db_is_encrypted},
+                 barrel_att_s3_store:get(Plain, Name, <<"d">>, <<"k.txt">>)),
+    ?assertEqual({error, db_is_encrypted},
+                 barrel_att_s3_store:get_stream(Plain, Name, <<"d">>, <<"k.txt">>)),
+    ok = barrel_att_s3_store:close(Plain).
+
+%% A branch copies its parent's objects as they are and reads them with
+%% the shared key.
+encrypted_branch_reads_parent(Config) ->
+    {Name, Path} = own_path(Config, <<"-encbranch">>),
+    Opts = enc_opts(Config, Name),
+    {ok, Ref} = barrel_att_s3_store:open(Path, Opts),
+    Data = secret_payload(3000),
+    {ok, _} = barrel_att_s3_store:put(Ref, Name, <<"d">>, <<"b.txt">>, Data),
+    BranchPath = Path ++ "-branch",
+    ok = barrel_att_s3_store:checkpoint(Ref, BranchPath),
+    {ok, Branch} = barrel_att_s3_store:open(BranchPath, Opts),
+    ok = wait_fork_synced(BranchPath),
+    ?assertEqual({ok, Data}, barrel_att_s3_store:get(Branch, Name, <<"d">>, <<"b.txt">>)),
+    ?assertMatch(#{metadata := #{<<"enc">> := _}}, raw_get(Branch, <<"d">>, <<"b.txt">>)),
+    ok = barrel_att_s3_store:close(Branch),
+    ok = barrel_att_s3_store:close(Ref).
