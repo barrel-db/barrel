@@ -9,8 +9,8 @@
 %%% - HTTP request latencies
 %%% - Peer connectivity
 %%%
-%%% Metrics are exposed via the '/metrics' HTTP endpoint in Prometheus
-%%% text format for scraping.
+%%% export_text/0 returns them in Prometheus text format; there is no
+%%% /metrics route, push them over OTLP or serve export_text/0 yourself.
 %%%
 %%% @end
 %%%-------------------------------------------------------------------
@@ -43,9 +43,7 @@
     set_rep_active/2,
 
     %% Storage
-    set_db_docs/2,
     set_db_size/2,
-    set_db_attachments/2,
     set_db_stubs/3,
     set_db_storage/2
 ]).
@@ -112,17 +110,9 @@
     {gauge, barrel_replication_active,
      <<"Whether replication is active (1) or not (0)">>},
 
-    %% Database document count gauge
-    {gauge, barrel_db_documents_total,
-     <<"Total number of documents in database">>},
-
     %% Database size gauge
     {gauge, barrel_db_size_bytes,
      <<"Database size in bytes">>},
-
-    %% Database attachment count gauge
-    {gauge, barrel_db_attachments_total,
-     <<"Total number of attachments in database">>},
 
     %% Deleted documents kept as stubs (measured by the retention sweep)
     {gauge, barrel_db_stubs_total,
@@ -286,16 +276,6 @@ set_rep_active(TaskId, Active) ->
 %% Storage
 %%====================================================================
 
-%% @doc Set database document count
--spec set_db_docs(binary(), non_neg_integer()) -> ok.
-set_db_docs(Db, Count) ->
-    Attrs = #{db => Db},
-    case instrument_meter:get_instrument(barrel_db_documents_total) of
-        undefined -> ok;
-        Instrument -> instrument_meter:set(Instrument, Count, Attrs)
-    end,
-    ok.
-
 %% @doc Set database size in bytes
 -spec set_db_size(binary(), non_neg_integer()) -> ok.
 set_db_size(Db, SizeBytes) ->
@@ -303,16 +283,6 @@ set_db_size(Db, SizeBytes) ->
     case instrument_meter:get_instrument(barrel_db_size_bytes) of
         undefined -> ok;
         Instrument -> instrument_meter:set(Instrument, SizeBytes, Attrs)
-    end,
-    ok.
-
-%% @doc Set database attachment count
--spec set_db_attachments(binary(), non_neg_integer()) -> ok.
-set_db_attachments(Db, Count) ->
-    Attrs = #{db => Db},
-    case instrument_meter:get_instrument(barrel_db_attachments_total) of
-        undefined -> ok;
-        Instrument -> instrument_meter:set(Instrument, Count, Attrs)
     end,
     ok.
 
