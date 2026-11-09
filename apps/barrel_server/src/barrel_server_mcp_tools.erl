@@ -193,10 +193,17 @@ specs() ->
 %% Databases
 %%====================================================================
 
+%% The one tool that creates: every other tool needs the database to exist.
 db_create(#{<<"db">> := Name}, Ctx) ->
-    with_db(Name, Ctx, write, fun(_Db) ->
-        reply(#{ok => true, db => Name})
-    end).
+    case barrel_server_mcp_auth:allow(Ctx, Name, write) of
+        ok ->
+            case barrel_server_dbs:ensure(Name) of
+                {ok, _Db} -> reply(#{ok => true, db => Name});
+                Err -> err(Err)
+            end;
+        {error, forbidden} ->
+            {tool_error, #{error => <<"forbidden">>, db => Name}}
+    end.
 
 db_list(_Args, Ctx) ->
     Dbs = [Db || Db <- barrel_server_dbs:list(),
@@ -547,7 +554,7 @@ merge(#{<<"db">> := Name}, Ctx) ->
 with_db(Name, Ctx, Right, Fun) ->
     case barrel_server_mcp_auth:allow(Ctx, Name, Right) of
         ok ->
-            case barrel_server_dbs:ensure(Name) of
+            case barrel_server_dbs:open_existing(Name) of
                 {ok, Db} -> Fun(Db);
                 Err -> err(Err)
             end;

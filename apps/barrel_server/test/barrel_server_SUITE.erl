@@ -10,7 +10,7 @@
 -module(barrel_server_SUITE).
 
 -export([all/0, init_per_suite/1, end_per_suite/1]).
--export([t_db_names/1, 
+-export([t_db_names/1, t_missing_db/1, 
     t_db_lifecycle/1,
     t_doc_crud/1,
     t_bulk/1,
@@ -64,7 +64,7 @@ all() ->
      t_create_db_att_opts_redacts_secrets, t_create_db_att_opts_blob_explicit,
      t_attachment_conditional_headers_unenforced_on_blob,
      t_attachment_bad_if_none_match,
-     t_attachment_disabled_internal_db, t_db_names].
+     t_attachment_disabled_internal_db, t_db_names, t_missing_db].
 
 init_per_suite(Config) ->
     %% Load first, then override env (application:load resets to .app defaults).
@@ -119,6 +119,28 @@ t_db_names(Config) ->
     {400, #{<<"error">> := <<"invalid_name">>}} =
         req(get, B ++ "/db/_barrel_system", <<>>),
     ok.
+
+%% Data routes need the database to exist: a typo answers 404 and does
+%% not leave an empty database behind. PUT /db/:db creates it.
+t_missing_db(Config) ->
+    B = base(Config),
+    Db = B ++ "/db/not_created",
+    NotFound = {404, #{<<"error">> => <<"db_not_found">>}},
+    ?assertEqual(NotFound, req_json(put, Db ++ "/doc/a", #{})),
+    ?assertEqual(NotFound, req(get, Db ++ "/doc/a", <<>>)),
+    ?assertEqual(NotFound, req(get, Db ++ "/changes", <<>>)),
+    ?assertEqual(NotFound, req_json(post, Db ++ "/find",
+                                    #{where => [[<<"path">>, [<<"a">>], 1]]})),
+    ?assertEqual(NotFound, req_raw_post_json(Db ++ "/query", <<"SELECT * FROM not_created">>)),
+    ?assertEqual(NotFound, req(get, Db, <<>>)),
+    ?assertNot(lists:member(<<"not_created">>, barrel_server_dbs:list())),
+    {201, _} = req(put, Db, <<>>),
+    {201, _} = req_json(put, Db ++ "/doc/a", #{}),
+    ok.
+
+req_raw_post_json(Url, Bql) ->
+    {S, Body} = req_raw_post(Url, [], Bql),
+    {S, json:decode(Body)}.
 
 t_doc_crud(Config) ->
     B = base(Config),

@@ -670,7 +670,7 @@ query_decision(Req) ->
 %% admission (the producers re-drive barrel with the raw text).
 prepare_query(Req) ->
     Name = livery_req:binding(<<"db">>, Req),
-    case barrel_server_dbs:ensure(Name) of
+    case barrel_server_dbs:open_existing(Name) of
         {ok, Db} ->
             case query_input(Req) of
                 {ok, Bql, QOpts} ->
@@ -692,6 +692,8 @@ prepare_query(Req) ->
             end;
         {error, invalid_name} ->
             {error, 400, json:encode(#{error => <<"invalid_name">>})};
+        {error, db_not_found} ->
+            {error, 404, json:encode(#{error => <<"db_not_found">>})};
         {error, Reason} ->
             {error, 500, json:encode(#{error => err_bin(Reason)})}
     end.
@@ -1170,7 +1172,7 @@ search_hybrid(Req) ->
 
 with_db(Req, Fun) ->
     Name = livery_req:binding(<<"db">>, Req),
-    case barrel_server_dbs:ensure(Name) of
+    case barrel_server_dbs:open_existing(Name) of
         {ok, Db} -> Fun(Db);
         Err -> error_resp(Err)
     end.
@@ -1322,6 +1324,7 @@ json_resp(Status, Term) ->
 
 error_resp({error, Reason}) -> error_resp(Reason);
 error_resp(not_found) -> json_resp(404, #{error => <<"not_found">>});
+error_resp(db_not_found) -> json_resp(404, #{error => <<"db_not_found">>});
 error_resp(invalid_name) -> json_resp(400, #{error => <<"invalid_name">>});
 error_resp(invalid_db_name) -> json_resp(400, #{error => <<"invalid_name">>});
 error_resp(bad_json) -> json_resp(400, #{error => <<"bad_json">>});

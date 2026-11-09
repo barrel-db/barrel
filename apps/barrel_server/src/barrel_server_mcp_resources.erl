@@ -87,7 +87,7 @@ db_resource(#{<<"db">> := Path}) ->
     end.
 
 db_info(Name) ->
-    case barrel_server_dbs:ensure(Name) of
+    case barrel_server_dbs:open_existing(Name) of
         {ok, Db} ->
             case barrel:info(Db) of
                 {ok, Info} ->
@@ -101,7 +101,7 @@ db_info(Name) ->
     end.
 
 doc_resource(#{<<"db">> := Name, <<"id">> := Id}) ->
-    case barrel_server_dbs:ensure(Name) of
+    case barrel_server_dbs:open_existing(Name) of
         {ok, Db} ->
             case barrel:get_doc(Db, Id) of
                 {ok, Doc} -> Doc;

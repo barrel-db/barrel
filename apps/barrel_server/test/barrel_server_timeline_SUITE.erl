@@ -176,11 +176,9 @@ t_purge(Config) ->
     put_doc(B, Branch, "a", #{}),
     {200, #{<<"purged">> := true}} =
         req(delete, B ++ "/db/" ++ Branch ++ "?purge=true", none),
-    %% recreated fresh: the branch data is gone (it opens as a NEW
-    %% plain db under the same name)
-    {200, Changes} = req(get, B ++ "/db/" ++ Branch ++ "/changes",
-                         none),
-    ?assertEqual([], maps:get(<<"changes">>, Changes)),
+    %% the branch is gone: reading it no longer recreates it
+    {404, #{<<"error">> := <<"db_not_found">>}} =
+        req(get, B ++ "/db/" ++ Branch ++ "/changes", none),
     ok.
 
 t_branch_errors(Config) ->

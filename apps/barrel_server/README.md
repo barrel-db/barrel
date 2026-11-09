@@ -68,7 +68,9 @@ All keys live in the `barrel_server` app env. Set them in `sys.config`, or with
 
 ## Endpoints
 
-Databases open lazily on first use and are cached by name.
+Create a database with `PUT /db/:db` first: the other `/db/:db` routes answer
+404 `db_not_found` when it does not exist. Existing databases open lazily on
+first use and are cached by name.
 
 ```
 GET    /                               liveness text
