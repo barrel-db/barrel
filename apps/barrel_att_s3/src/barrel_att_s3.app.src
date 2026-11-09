@@ -17,6 +17,7 @@
         %% true in practice; declared for anything that loads this app in
         %% isolation.
         barrel_docdb,
+        barrel_crypto,
         mimerl,
         livery,
         livery_s3

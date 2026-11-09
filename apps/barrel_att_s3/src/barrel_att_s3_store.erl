@@ -182,6 +182,7 @@
 -define(MAX_KEY_SIZE, 1024).
 -define(META_DIGEST, <<"digest">>).
 -define(META_ORIGIN, <<"origin-hlc">>).
+-define(META_ENC, <<"enc">>).
 -define(FORK_PENDING, "fork_pending").
 -define(DELETE_BATCH, 1000). %% S3 DeleteObjects cap per request
 %% Fork copy sweep: attempts before leaving it to the next open, and the
@@ -674,12 +675,13 @@ do_put(#{client := Client, bucket := Bucket, conditional_writes := CW,
                             Err;
                         {ok, CondHeaders} ->
                             ContentType = maps:get(content_type, Opts, mimerl:filename(AttName)),
+                            ObjCrypto = new_obj_crypto(AttRef),
                             PutOpts = maps:merge(#{
                                 content_type => ContentType,
-                                metadata => #{?META_DIGEST => Digest,
-                                              ?META_ORIGIN => encode_origin(OriginHlc)}
+                                metadata => write_meta(AttRef, ObjCrypto, Digest, OriginHlc)
                             }, CondHeaders),
-                            case livery_s3:put_object(Client, Bucket, Key, Data, PutOpts) of
+                            Body = obj_crypt(ObjCrypto, 0, Data),
+                            case livery_s3:put_object(Client, Bucket, Key, Body, PutOpts) of
                                 {ok, _} ->
                                     commit_feed_put(FeedRef, DbName, DocId, AttName,
                                                     OriginHlc, Digest, byte_size(Data),
@@ -810,7 +812,7 @@ conditional_headers(Opts, ConditionalWrites) ->
 %% @private A failed precondition reports what's actually at Key now, so
 %% the caller can decide: retry against the new baseline, surface it, or
 %% force an overwrite by retrying without the conditional options.
-conflict_error(#{client := Client, bucket := Bucket}, Key, AttName) ->
+conflict_error(#{client := Client, bucket := Bucket} = AttRef, Key, AttName) ->
     case livery_s3:head_object(Client, Bucket, Key) of
         {ok, Meta} ->
             Metadata = maps:get(metadata, Meta, #{}),
@@ -819,7 +821,7 @@ conflict_error(#{client := Client, bucket := Bucket}, Key, AttName) ->
                 content_type => maps:get(content_type, Meta,
                                          mimerl:filename(AttName)),
                 length => maps:get(content_length, Meta, 0),
-                digest => maps:get(?META_DIGEST, Metadata, undefined),
+                digest => meta_digest(AttRef, Metadata),
                 etag => maps:get(etag, Meta, undefined)
             }}};
         {error, not_found} ->
@@ -840,7 +842,13 @@ get(#{prefix := Prefix} = AttRef, DbName, DocId, AttName) ->
 
 do_get(#{client := Client, bucket := Bucket} = AttRef, DbName, DocId, AttName, Key) ->
     case livery_s3:get_object(Client, Bucket, Key) of
-        {ok, #{body := Body}} -> {ok, Body};
+        {ok, #{body := Body} = Resp} ->
+            Metadata = maps:get(metadata, Resp, #{}),
+            case read_crypto(AttRef, Metadata) of
+                {ok, none} -> {ok, Body};
+                {ok, ObjKey} -> check_plain(AttRef, Key, Metadata, obj_crypt(ObjKey, 0, Body));
+                {error, _} = Err -> Err
+            end;
         {error, {s3, _Code, _Msg, #{status := 404}}} ->
             not_found_or_sync_pending(AttRef, DbName, DocId, AttName);
         {error, _} = Err -> Err
@@ -947,14 +955,19 @@ do_get_info(#{client := Client, bucket := Bucket} = AttRef, DbName, DocId, AttNa
     case livery_s3:head_object(Client, Bucket, Key) of
         {ok, Meta} ->
             Metadata = maps:get(metadata, Meta, #{}),
-            {ok, #{
-                name => AttName,
-                content_type => maps:get(content_type, Meta,
-                                         mimerl:filename(AttName)),
-                length => maps:get(content_length, Meta, 0),
-                digest => maps:get(?META_DIGEST, Metadata, undefined),
-                chunked => false
-            }};
+            case read_crypto(AttRef, Metadata) of
+                {ok, _} ->
+                    {ok, #{
+                        name => AttName,
+                        content_type => maps:get(content_type, Meta,
+                                                 mimerl:filename(AttName)),
+                        length => maps:get(content_length, Meta, 0),
+                        digest => meta_digest(AttRef, Metadata),
+                        chunked => false
+                    }};
+                {error, _} = Err ->
+                    Err
+            end;
         {error, not_found} ->
             not_found_or_sync_pending(AttRef, DbName, DocId, AttName);
         {error, _} = Err ->
@@ -1046,7 +1059,10 @@ rebuild_one(AttRef, Client, Bucket, Prefix, FeedRef, DbName, Key) ->
             case livery_s3:head_object(Client, Bucket, Key) of
                 {ok, Meta} ->
                     Metadata = maps:get(metadata, Meta, #{}),
-                    Digest = maps:get(?META_DIGEST, Metadata, <<>>),
+                    Digest = case meta_digest(AttRef, Metadata) of
+                        undefined -> <<>>;
+                        D -> D
+                    end,
                     ContentType = maps:get(content_type, Meta,
                                            mimerl:filename(AttName)),
                     Length = maps:get(content_length, Meta, 0),
@@ -1125,6 +1141,89 @@ att_name_from_key(Prefix, Key) ->
     PrefixLen = byte_size(Prefix),
     binary:part(Key, PrefixLen, byte_size(Key) - PrefixLen).
 
+%%--------------------------------------------------------------------
+%% Object encryption (barrel_att_s3_crypto)
+%%--------------------------------------------------------------------
+
+%% A new object's salt and key; `none' for a plaintext database.
+new_obj_crypto(#{crypto := #{key := Key}}) ->
+    Salt = barrel_att_s3_crypto:new_salt(),
+    {Salt, barrel_att_s3_crypto:object_key(Key, Salt)};
+new_obj_crypto(_AttRef) ->
+    none.
+
+obj_crypt(none, _Offset, Data) -> Data;
+obj_crypt({_Salt, ObjKey}, Offset, Data) -> barrel_att_s3_crypto:crypt(ObjKey, Offset, Data);
+obj_crypt(ObjKey, Offset, Data) when is_binary(ObjKey) ->
+    barrel_att_s3_crypto:crypt(ObjKey, Offset, Data).
+
+write_meta(_AttRef, none, Digest, OriginHlc) ->
+    #{?META_DIGEST => Digest, ?META_ORIGIN => encode_origin(OriginHlc)};
+write_meta(#{crypto := #{key := Key}}, {Salt, _}, Digest, OriginHlc) ->
+    #{?META_DIGEST => barrel_att_s3_crypto:seal_digest(Key, Digest),
+      ?META_ORIGIN => encode_origin(OriginHlc),
+      ?META_ENC => barrel_att_s3_crypto:enc_meta(Salt)}.
+
+%% How to read an object: `none' (plaintext) or its key. An encrypted
+%% database reads a plaintext object (written before encryption) only
+%% until its objects have been re-encrypted.
+read_crypto(AttRef, Metadata) ->
+    case {barrel_att_s3_crypto:parse_enc(maps:get(?META_ENC, Metadata, undefined)),
+          AttRef} of
+        {none, #{crypto := _}} ->
+            case objects_encrypted(AttRef) of
+                true -> {error, unencrypted_object};
+                false -> {ok, none}
+            end;
+        {none, _} ->
+            {ok, none};
+        {{ok, Salt}, #{crypto := #{key := Key}}} ->
+            {ok, barrel_att_s3_crypto:object_key(Key, Salt)};
+        {{ok, _}, _} ->
+            {error, db_is_encrypted};
+        {{error, _} = Err, _} ->
+            Err
+    end.
+
+%% The plaintext digest from an object's metadata (sealed when encrypted).
+meta_digest(AttRef, Metadata) ->
+    Raw = maps:get(?META_DIGEST, Metadata, undefined),
+    case {maps:is_key(?META_ENC, Metadata), AttRef} of
+        {true, #{crypto := #{key := Key}}} -> barrel_att_s3_crypto:open_digest(Key, Raw);
+        {true, _} -> undefined;
+        {false, _} -> Raw
+    end.
+
+%% An encrypted object is unauthenticated CTR: check a full read against
+%% its sealed digest so a tampered object fails instead of reading garbage.
+check_plain(AttRef, Key, Metadata, Plain) ->
+    case meta_digest(AttRef, Metadata) of
+        undefined -> {ok, Plain};
+        Expected ->
+            case compute_digest(Plain) of
+                Expected -> {ok, Plain};
+                _ -> {error, {digest_mismatch, Key}}
+            end
+    end.
+
+stream_digest(_AttRef, none, _Metadata) -> undefined;
+stream_digest(AttRef, _ObjKey, Metadata) -> meta_digest(AttRef, Metadata).
+
+stream_end(#{expected_digest := Expected, digest_ctx := Ctx, key := Key})
+  when Expected =/= undefined ->
+    case finalize_digest(Ctx) of
+        Expected -> eof;
+        _ -> {error, {digest_mismatch, Key}}
+    end;
+stream_end(_Stream) ->
+    eof.
+
+%% Set once every object of the prefix carries the encryption marker.
+objects_encrypted(#{path := Path}) ->
+    filelib:is_regular(filename:join(Path, "enc_migrated"));
+objects_encrypted(_AttRef) ->
+    false.
+
 compute_digest(Data) ->
     Digest = crypto:hash(sha256, Data),
     <<"sha256-", (binary:encode_hex(Digest, lowercase))/binary>>.
@@ -1190,14 +1289,16 @@ put_stream(#{prefix := Prefix} = AttRef, DbName, DocId, AttName, ContentType, Op
             buffer => <<>>,
             digest_ctx => crypto:hash_init(sha256),
             length => 0,
-            multipart => undefined
+            multipart => undefined,
+            obj_crypto => new_obj_crypto(AttRef)
         }}
     end).
 
 -spec write_chunk(map(), binary()) -> {ok, map()} | {error, term()}.
 write_chunk(#{type := write, buffer := Buffer, digest_ctx := Ctx,
-              length := Length} = Stream, Data) ->
-    NewBuffer = <<Buffer/binary, Data/binary>>,
+              length := Length, obj_crypto := ObjCrypto} = Stream, Data) ->
+    %% the digest covers the plaintext; the buffer holds what S3 stores
+    NewBuffer = <<Buffer/binary, (obj_crypt(ObjCrypto, Length, Data))/binary>>,
     Stream1 = Stream#{
         buffer => NewBuffer,
         digest_ctx => crypto:hash_update(Ctx, Data),
@@ -1225,9 +1326,15 @@ part_size(#{att_ref := #{part_size := PartSize}}) -> PartSize.
 %% multipart uploads.
 flush_part(#{multipart := undefined} = Stream, WasUndefined) ->
     #{att_ref := #{client := Client, bucket := Bucket}, key := Key,
-      content_type := ContentType} = Stream,
-    case livery_s3:create_multipart_upload(Client, Bucket, Key,
-                                           #{content_type => ContentType}) of
+      content_type := ContentType, obj_crypto := ObjCrypto} = Stream,
+    %% the salt rides on the upload itself, so the object can be read
+    %% even if attaching the rest of its metadata fails after completion
+    CreateOpts = case ObjCrypto of
+        none -> #{content_type => ContentType};
+        {Salt, _} -> #{content_type => ContentType,
+                       metadata => #{?META_ENC => barrel_att_s3_crypto:enc_meta(Salt)}}
+    end,
+    case livery_s3:create_multipart_upload(Client, Bucket, Key, CreateOpts) of
         {ok, UploadId} ->
             Stream1 = Stream#{multipart => #{upload_id => UploadId,
                                              parts => [], part_number => 1}},
@@ -1267,7 +1374,7 @@ finish_stream(#{type := write, multipart := undefined} = Stream) ->
       key := Key, db_name := DbName, doc_id := DocId, att_name := AttName,
       content_type := ContentType,
       buffer := Buffer, digest_ctx := Ctx,
-      origin_hlc := OriginOpt,
+      origin_hlc := OriginOpt, obj_crypto := ObjCrypto,
       expected_digest := ExpectedDigest} = Stream,
     Digest = finalize_digest(Ctx),
     case digest_ok(Digest, ExpectedDigest) of
@@ -1284,8 +1391,8 @@ finish_stream(#{type := write, multipart := undefined} = Stream) ->
                             Err;
                         {ok, CondHeaders} ->
                             PutOpts = maps:merge(#{content_type => ContentType,
-                                                   metadata => #{?META_DIGEST => Digest,
-                                                                 ?META_ORIGIN => encode_origin(OriginHlc)}},
+                                                   metadata => write_meta(AttRef, ObjCrypto,
+                                                                          Digest, OriginHlc)},
                                                 CondHeaders),
                             case livery_s3:put_object(Client, Bucket, Key, Buffer, PutOpts) of
                                 {ok, _} ->
@@ -1310,7 +1417,7 @@ finish_stream(#{type := write, multipart := MP} = Stream) ->
       key := Key, db_name := DbName, doc_id := DocId, att_name := AttName,
       content_type := ContentType,
       buffer := Buffer, length := Length, digest_ctx := Ctx,
-      origin_hlc := OriginOpt,
+      origin_hlc := OriginOpt, obj_crypto := ObjCrypto,
       expected_digest := ExpectedDigest} = Stream,
     #{upload_id := UploadId, parts := Parts, part_number := PartNumber} = MP,
     FinalParts = case Buffer of
@@ -1347,7 +1454,7 @@ finish_stream(#{type := write, multipart := MP} = Stream) ->
                                 {ok, CondHeaders} ->
                                     complete(AttRef, Key, UploadId, AllParts, CondHeaders,
                                              DbName, DocId, AttName, ContentType, Length,
-                                             Digest, OriginHlc)
+                                             Digest, OriginHlc, ObjCrypto)
                             end
                     end
                     end)
@@ -1377,11 +1484,12 @@ finish_stream(#{type := write, multipart := MP} = Stream) ->
 %% whatever metadata still didn't make it) covers the gap either way.
 complete(#{client := Client, bucket := Bucket, feed_ref := FeedRef} = AttRef, Key,
          UploadId, AllParts, CondHeaders, DbName, DocId, AttName, ContentType,
-         Length, Digest, OriginHlc) ->
+         Length, Digest, OriginHlc, ObjCrypto) ->
     case livery_s3:complete_multipart_upload(Client, Bucket, Key, UploadId,
                                              AllParts, CondHeaders) of
         {ok, _} ->
-            attach_multipart_metadata(Client, Bucket, Key, ContentType, Digest, OriginHlc),
+            attach_multipart_metadata(Client, Bucket, Key, ContentType,
+                                      write_meta(AttRef, ObjCrypto, Digest, OriginHlc)),
             commit_feed_put(FeedRef, DbName, DocId, AttName, OriginHlc, Digest,
                             Length, ContentType),
             {ok, #{name => AttName, content_type => ContentType,
@@ -1396,10 +1504,8 @@ complete(#{client := Client, bucket := Bucket, feed_ref := FeedRef} = AttRef, Ke
             CompleteErr
     end.
 
-attach_multipart_metadata(Client, Bucket, Key, ContentType, Digest, OriginHlc) ->
-    Opts = #{content_type => ContentType,
-             metadata => #{?META_DIGEST => Digest,
-                           ?META_ORIGIN => encode_origin(OriginHlc)}},
+attach_multipart_metadata(Client, Bucket, Key, ContentType, Metadata) ->
+    Opts = #{content_type => ContentType, metadata => Metadata},
     case livery_s3:copy_object(Client, Bucket, Key, Bucket, Key, Opts) of
         {ok, _} ->
             ok;
@@ -1439,11 +1545,19 @@ get_stream(#{prefix := Prefix} = AttRef, DbName, DocId, AttName) ->
 do_get_stream(#{client := Client, bucket := Bucket} = AttRef, DbName, DocId, AttName, Key) ->
     case livery_s3:get_object(Client, Bucket, Key, #{stream => true}) of
         {ok, #{body := {stream, Reader}} = Resp} ->
-            {ok, #{type => read, att_ref => AttRef, key => Key,
-                   att_name => AttName, reader => Reader, offset => 0,
-                   etag => maps:get(etag, Resp, undefined),
-                   length => maps:get(content_length, Resp, undefined),
-                   resumes => 0}};
+            Metadata = maps:get(metadata, Resp, #{}),
+            case read_crypto(AttRef, Metadata) of
+                {ok, ObjKey} ->
+                    {ok, #{type => read, att_ref => AttRef, key => Key,
+                           att_name => AttName, reader => Reader, offset => 0,
+                           etag => maps:get(etag, Resp, undefined),
+                           length => maps:get(content_length, Resp, undefined),
+                           resumes => 0, obj_key => ObjKey,
+                           expected_digest => stream_digest(AttRef, ObjKey, Metadata),
+                           digest_ctx => crypto:hash_init(sha256)}};
+                {error, _} = Err ->
+                    Err
+            end;
         {error, {s3, _Code, _Msg, #{status := 404}}} ->
             not_found_or_sync_pending(AttRef, DbName, DocId, AttName);
         {error, _} = Err ->
@@ -1456,10 +1570,17 @@ do_get_stream(#{client := Client, bucket := Bucket} = AttRef, DbName, DocId, Att
 -spec read_chunk(map()) -> {ok, binary(), map()} | eof | {error, term()}.
 read_chunk(#{type := read, reader := Reader} = Stream) ->
     case livery_client:read(Reader, 30000) of
-        {ok, Data, NextReader} ->
-            Offset = maps:get(offset, Stream, 0) + byte_size(Data),
-            {ok, Data, Stream#{reader => NextReader, offset => Offset}};
-        {done, _NextReader} -> eof;
+        {ok, Data0, NextReader} ->
+            Offset0 = maps:get(offset, Stream, 0),
+            Data = obj_crypt(maps:get(obj_key, Stream, none), Offset0, Data0),
+            Ctx = maps:get(digest_ctx, Stream, undefined),
+            Stream1 = case Ctx of
+                undefined -> Stream;
+                _ -> Stream#{digest_ctx => crypto:hash_update(Ctx, Data)}
+            end,
+            {ok, Data, Stream1#{reader => NextReader,
+                                offset => Offset0 + byte_size(Data0)}};
+        {done, _NextReader} -> stream_end(Stream);
         {error, Reason} -> resume_read(Stream, Reason)
     end.
 

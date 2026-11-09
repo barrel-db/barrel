@@ -21,14 +21,16 @@
          s3_target_rejects_stale_replicated_write_rustfs/1,
          s3_target_rejects_stale_replicated_write_garage/1,
          bidirectional_lww_convergence_rocksdb_and_s3/1,
-         bidirectional_lww_convergence_s3_to_s3/1]).
+         bidirectional_lww_convergence_s3_to_s3/1,
+         encrypted_and_plain_s3_replicate/1]).
 
 all() ->
     [s3_target_receives_puts_and_deletes,
      s3_target_rejects_stale_replicated_write_rustfs,
      s3_target_rejects_stale_replicated_write_garage,
      bidirectional_lww_convergence_rocksdb_and_s3,
-     bidirectional_lww_convergence_s3_to_s3].
+     bidirectional_lww_convergence_s3_to_s3,
+     encrypted_and_plain_s3_replicate].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(barrel_docdb),
@@ -195,6 +197,35 @@ run_bidirectional_lww_convergence(Config, AOpts, BOpts, AName, BName) ->
 %%====================================================================
 %% S3 fixture helpers (see barrel_att_s3_test_support)
 %%====================================================================
+
+%% Replication reads attachments decrypted from the source and writes
+%% them through the target's own store: an encrypted and a plaintext
+%% database, both on S3, exchange the same bytes either way.
+encrypted_and_plain_s3_replicate(Config) ->
+    with_rustfs(fun(S3Opts) ->
+        Dir = ?config(dir, Config),
+        os:putenv("BARREL_ENCRYPTION_KEY", "att-s3-rep-suite-master-secret"),
+        Enc = <<"s3_enc_src">>,
+        Plain = <<"s3_plain_tgt">>,
+        S3 = #{backend => s3, s3 => S3Opts},
+        {ok, _} = barrel_docdb:create_db(Enc, #{data_dir => Dir, att_opts => S3,
+                                                encryption => default}),
+        {ok, _} = barrel_docdb:create_db(Plain, #{data_dir => Dir, att_opts => S3}),
+        try
+            Big = binary:copy(<<"secret-bytes-">>, 50000),
+            {ok, _} = barrel_docdb:put_attachment(Enc, <<"d1">>, <<"a.bin">>, Big),
+            {ok, _} = barrel_rep:replicate(Enc, Plain),
+            ?assertEqual({ok, Big}, barrel_docdb:get_attachment(Plain, <<"d1">>, <<"a.bin">>)),
+            {ok, _} = barrel_docdb:put_attachment(Plain, <<"d2">>, <<"b.txt">>, <<"from plain">>),
+            {ok, _} = barrel_rep:replicate(Plain, Enc),
+            ?assertEqual({ok, <<"from plain">>},
+                         barrel_docdb:get_attachment(Enc, <<"d2">>, <<"b.txt">>))
+        after
+            _ = barrel_docdb:delete_db(Enc),
+            _ = barrel_docdb:delete_db(Plain),
+            os:unsetenv("BARREL_ENCRYPTION_KEY")
+        end
+    end).
 
 with_rustfs(Fun) ->
     with_store(rustfs, Fun).
