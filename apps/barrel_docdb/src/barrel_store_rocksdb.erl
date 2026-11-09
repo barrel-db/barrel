@@ -98,12 +98,12 @@ open(Path, Options) ->
         _ -> [{env, Env} | DbOpts0]
     end,
     %% Column family descriptors with their options
-    Codec = compression_cf_options(Options),
+    Base = base_cf_options(Options),
     CFDescriptors = [
-        {"default", Codec ++ build_default_cf_options(Options)},
-        {?POSTING_CF_NAME, Codec ++ build_posting_cf_options()},
-        {?BODY_CF_NAME, Codec ++ build_body_cf_options(Options)},
-        {?LOCAL_CF_NAME, Codec}  %% Simple KV storage for local docs (no merge operator)
+        {"default", Base ++ build_default_cf_options(Options)},
+        {?POSTING_CF_NAME, Base ++ build_posting_cf_options()},
+        {?BODY_CF_NAME, Base ++ build_body_cf_options(Options)},
+        {?LOCAL_CF_NAME, Base}  %% Simple KV storage for local docs (no merge operator)
     ],
 
     case open_store(ReadOnly, Path, DbOpts, CFDescriptors) of
@@ -560,52 +560,26 @@ read_profile_opts(long_scan) ->
 
 %% Build RocksDB options from config
 build_db_options(Options) ->
-    WriteBufferSize = maps:get(write_buffer_size, Options, 64 * 1024 * 1024),
     Schedulers = erlang:system_info(schedulers),
-
-    %% Block-based table options with shared cache and bloom filters
-    BlockOpts = barrel_cache:get_block_opts(#{
-        bloom_bits => maps:get(bloom_bits, Options, 10),
-        block_size => maps:get(block_size, Options, 4096)
-    }),
-
     BaseOpts = [
         %% Auto-create missing column families on existing databases
         {create_missing_column_families, true},
         {create_if_missing, true},
         {max_open_files, maps:get(max_open_files, Options, 1000)},
 
-        %% Write buffer configuration
-        {write_buffer_size, WriteBufferSize},
-        {max_write_buffer_number, maps:get(max_write_buffer_number, Options, 3)},
-        {min_write_buffer_number_to_merge, maps:get(min_write_buffer_number_to_merge, Options, 1)},
-
         %% Concurrency
         {allow_concurrent_memtable_write, true},
         {enable_write_thread_adaptive_yield, true},
         {enable_pipelined_write, true},
 
-        %% Compaction tuning
-        {level0_file_num_compaction_trigger, maps:get(l0_compaction_trigger, Options, 4)},
-        {level0_slowdown_writes_trigger, maps:get(l0_slowdown_trigger, Options, 20)},
-        {level0_stop_writes_trigger, maps:get(l0_stop_trigger, Options, 36)},
+        %% Background work
         {max_background_jobs, maps:get(max_background_jobs, Options, Schedulers)},
         {max_subcompactions, maps:get(max_subcompactions, Options, 4)},
         %% Opt-in: compactions read their input with direct I/O so a large
         %% compaction does not push hot data out of the page cache
         {use_direct_io_for_compaction_reads,
             maps:get(use_direct_io_for_compaction_reads, Options, false)},
-
-        %% Prefix extractor for prefix bloom filters
-        %% Enables O(1) existence check for key prefixes (up to 64 bytes)
-        {prefix_extractor, {capped_prefix_transform, 64}},
-
-        %% Use counter merge operator for atomic counters
-        {merge_operator, counter_merge_operator},
-        {total_threads, erlang:max(4, Schedulers)},
-
-        %% Block-based table with bloom filters and shared cache
-        {block_based_table_options, BlockOpts}
+        {total_threads, erlang:max(4, Schedulers)}
     ],
 
     %% Optional rate limiter for production workloads
@@ -825,13 +799,27 @@ fold_posting_loop_reverse({ok, Key, Value}, Iter, Fun, Acc) ->
 %% Body Column Family Operations (BlobDB enabled)
 %%====================================================================
 
-%% Compression is a column family option: rocksdb ignores it in the db
-%% options when column families are named. zstd is the one codec rocksdb
-%% always builds (bundled when the system has none).
--spec compression_cf_options(map()) -> list().
-compression_cf_options(Options) ->
+%% Options every column family takes. rocksdb ignores column family
+%% options given with the db options once column families are named, so
+%% they go here. zstd is the one codec rocksdb always builds (bundled when
+%% the system has none). Tables share the node's block cache and carry a
+%% bloom filter.
+-spec base_cf_options(map()) -> list().
+base_cf_options(Options) ->
+    BlockOpts = barrel_cache:get_block_opts(#{
+        bloom_bits => maps:get(bloom_bits, Options, 10),
+        block_size => maps:get(block_size, Options, 4096)
+    }),
     [{compression, maps:get(compression, Options, zstd)},
-     {bottommost_compression, maps:get(bottommost_compression, Options, zstd)}].
+     {bottommost_compression, maps:get(bottommost_compression, Options, zstd)},
+     {write_buffer_size, maps:get(write_buffer_size, Options, 64 * 1024 * 1024)},
+     {max_write_buffer_number, maps:get(max_write_buffer_number, Options, 2)},
+     {min_write_buffer_number_to_merge,
+         maps:get(min_write_buffer_number_to_merge, Options, 1)},
+     {level0_file_num_compaction_trigger, maps:get(l0_compaction_trigger, Options, 4)},
+     {level0_slowdown_writes_trigger, maps:get(l0_slowdown_trigger, Options, 20)},
+     {level0_stop_writes_trigger, maps:get(l0_stop_trigger, Options, 36)},
+     {block_based_table_options, BlockOpts}].
 
 %% @doc Build column family options for default CF (document entities,
 %% changes feed, history, stubs). Retention, TTL and stub purge delete
@@ -872,12 +860,6 @@ build_posting_cf_options() ->
         %% Key format: 0x14 | db_name_len(16) | db_name | encoded_path
         %% 32 bytes captures db prefix + field name for most queries
         {prefix_extractor, {capped_prefix_transform, 32}},
-        %% Block-based table options with bloom filter
-        {block_based_table_options, [
-            {filter_policy, {bloom, 10}},
-            {cache_index_and_filter_blocks, true},
-            {pin_l0_filter_and_index_blocks_in_cache, true}
-        ]},
         %% Optimize for range scans (not just point lookups)
         {optimize_filters_for_hits, false}
     ].

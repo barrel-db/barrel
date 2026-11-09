@@ -156,8 +156,8 @@ block_opts_defaults(_Config) ->
     Opts = barrel_cache:get_block_opts(),
 
     %% Check default values
-    ?assertEqual({bloom_filter, 10}, proplists:get_value(filter_policy, Opts)),
-    ?assertEqual(false, proplists:get_value(whole_key_filtering, Opts)),
+    ?assertEqual(10, proplists:get_value(bloom_filter_policy, Opts)),
+    ?assertEqual(undefined, proplists:get_value(filter_policy, Opts)),
     ?assertEqual(4096, proplists:get_value(block_size, Opts)),
     ?assertEqual(true, proplists:get_value(cache_index_and_filter_blocks, Opts)),
 
@@ -167,7 +167,7 @@ block_opts_custom_bloom(_Config) ->
     %% Custom bloom filter bits
     Opts = barrel_cache:get_block_opts(#{bloom_bits => 15}),
 
-    ?assertEqual({bloom_filter, 15}, proplists:get_value(filter_policy, Opts)),
+    ?assertEqual(15, proplists:get_value(bloom_filter_policy, Opts)),
     %% Other defaults unchanged
     ?assertEqual(4096, proplists:get_value(block_size, Opts)),
 
@@ -179,7 +179,7 @@ block_opts_custom_block_size(_Config) ->
 
     ?assertEqual(8192, proplists:get_value(block_size, Opts)),
     %% Other defaults unchanged
-    ?assertEqual({bloom_filter, 10}, proplists:get_value(filter_policy, Opts)),
+    ?assertEqual(10, proplists:get_value(bloom_filter_policy, Opts)),
 
     ok.
 
@@ -235,7 +235,7 @@ fallback_when_not_running(_Config) ->
     ?assert(is_list(Opts)),
 
     %% Should have bloom filter
-    ?assertEqual({bloom_filter, 10}, proplists:get_value(filter_policy, Opts)),
+    ?assertEqual(10, proplists:get_value(bloom_filter_policy, Opts)),
 
     ok.
 
@@ -246,8 +246,8 @@ fallback_opts_structure(_Config) ->
     %% Fallback should return all expected options except block_cache
     Opts = barrel_cache:get_block_opts(#{bloom_bits => 12, block_size => 16384}),
 
-    ?assertEqual({bloom_filter, 12}, proplists:get_value(filter_policy, Opts)),
-    ?assertEqual(false, proplists:get_value(whole_key_filtering, Opts)),
+    ?assertEqual(12, proplists:get_value(bloom_filter_policy, Opts)),
+    ?assertEqual(undefined, proplists:get_value(filter_policy, Opts)),
     ?assertEqual(16384, proplists:get_value(block_size, Opts)),
     ?assertEqual(true, proplists:get_value(cache_index_and_filter_blocks, Opts)),
 

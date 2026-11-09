@@ -80,8 +80,7 @@ build_block_opts_no_cache(Options) ->
     BlockSize = maps:get(block_size, Options, 4096),
     CacheIndexAndFilter = maps:get(cache_index_and_filter, Options, true),
     [
-        {filter_policy, {bloom_filter, BloomBits}},
-        {whole_key_filtering, false},
+        {bloom_filter_policy, BloomBits},
         {block_size, BlockSize},
         {cache_index_and_filter_blocks, CacheIndexAndFilter}
     ].
@@ -110,8 +109,7 @@ handle_call({get_block_opts, Options}, _From, #state{cache = Cache} = State) ->
     CacheIndexAndFilter = maps:get(cache_index_and_filter, Options, true),
 
     BaseOpts = [
-        {filter_policy, {bloom_filter, BloomBits}},
-        {whole_key_filtering, false},
+        {bloom_filter_policy, BloomBits},
         {block_size, BlockSize},
         {cache_index_and_filter_blocks, CacheIndexAndFilter}
     ],
