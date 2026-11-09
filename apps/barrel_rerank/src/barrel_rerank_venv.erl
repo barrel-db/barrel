@@ -56,9 +56,11 @@
 %% @doc Get the venv path (configured or default).
 -spec venv_path() -> string().
 venv_path() ->
+    %% The app env declares venv_path as undefined; treat that as unset.
     case application:get_env(barrel_rerank, venv_path) of
-        {ok, Path} -> Path;
-        undefined -> default_venv_path()
+        {ok, Path} when is_list(Path), Path =/= "" -> Path;
+        {ok, Path} when is_binary(Path), Path =/= <<>> -> binary_to_list(Path);
+        _ -> default_venv_path()
     end.
 
 %% @doc Ensure venv exists with all dependencies.
