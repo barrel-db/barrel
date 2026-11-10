@@ -3,6 +3,11 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.13.1] - 2026-11-10
+
+### Fixed
+- The 1.13.0 package on Hex was published without its barrel_crypto, barrel_docdb, barrel_embed and barrel_vectordb requirements, so it did not build from Hex. Same code as 1.13.0.
+
 ## [1.13.0] - 2026-11-09
 
 ### Changed

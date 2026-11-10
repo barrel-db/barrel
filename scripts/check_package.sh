@@ -20,6 +20,14 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIR="$ROOT/apps/$APP"
 [ -f "$DIR/rebar.config" ] || { echo "no app $APP"; exit 2; }
 
+# rebar3 hex publish leaves out every dependency found in the app's own
+# _checkouts: a package published from such a directory lacks those
+# requirements and does not build from Hex.
+if [ -e "$DIR/_checkouts" ]; then
+    echo "error: $DIR/_checkouts exists; remove it before publishing $APP" >&2
+    exit 1
+fi
+
 # In-repo apps the app depends on, directly or through another in-repo app.
 siblings() {
     python3 -I - "$ROOT" "$APP" <<'EOF'
