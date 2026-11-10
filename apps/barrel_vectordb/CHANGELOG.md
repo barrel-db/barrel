@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.5.4] - 2026-11-10
+
+### Fixed
+- The 2.5.3 package on Hex was published without its barrel_crypto requirement, so it did not build from Hex. Same code as 2.5.3.
+
 ## [2.5.3] - 2026-11-09
 
 ### Fixed
