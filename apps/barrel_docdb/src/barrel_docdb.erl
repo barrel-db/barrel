@@ -190,6 +190,7 @@
     get_doc_state/2,
     stub_stats/1,
     put_doc_state/4,
+    put_doc_state/5,
     repair_doc_bodies/3,
     diff_states/2,
     diff_versions/2,
@@ -2100,8 +2101,9 @@ set_doc_embedding(Db, DocId, ExpectedRev, Vector) ->
 %%====================================================================
 
 %% @doc A document's full replication state: `#{id, state, digest,
-%% bodies}', where `state' is barrel_live:encode_state/1 and `bodies' maps
-%% each live version's token to its body.
+%% bodies, vectors}', where `state' is barrel_live:encode_state/1, `bodies'
+%% maps each live version's token to its body and `vectors' the winner's
+%% token to its client-supplied vector, when it has one.
 -spec get_doc_state(binary() | pid(), binary()) ->
     {ok, map()} | {error, term()}.
 get_doc_state(Db, DocId) ->
@@ -2133,8 +2135,17 @@ stub_stats(Db) ->
                     #{binary() => map()}) ->
     {ok | unchanged, binary(), binary()} | {error, term()}.
 put_doc_state(Db, DocId, StateBin, Bodies) ->
+    put_doc_state(Db, DocId, StateBin, Bodies, #{}).
+
+%% @doc put_doc_state/4 with the client vectors of the peer's versions
+%% (`vectors' in get_doc_state/2), by version token. The target stores
+%% the vector of its winner as the client's.
+-spec put_doc_state(binary() | pid(), binary(), binary(),
+                    #{binary() => map()}, #{binary() => [number()]}) ->
+    {ok | unchanged, binary(), binary()} | {error, term()}.
+put_doc_state(Db, DocId, StateBin, Bodies, Vectors) ->
     with_db(Db, fun(Pid) ->
-        barrel_db_server:put_doc_state(Pid, DocId, StateBin, Bodies)
+        barrel_db_server:put_doc_state(Pid, DocId, StateBin, Bodies, Vectors)
     end).
 
 %% @doc Repair stored bodies from a healthy copy: `Bodies' maps version

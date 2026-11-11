@@ -5,6 +5,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.14.2] - 2026-11-11
+
+### Fixed
+- Server to server replication carries a document's supplied vector, so the replica indexes the same vector instead of an embedding of the text.
+
 ## [1.14.1] - 2026-11-09
 
 ### Fixed

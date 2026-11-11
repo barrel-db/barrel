@@ -494,11 +494,12 @@ reconcile_docs(#{source := Source, st := ST, opts := ChangesOpts} = Ctx,
 
 reconcile_doc(#{source := Source, st := ST} = Ctx, DocId, Stats) ->
     case ST:get_doc_state(Source, DocId) of
-        {ok, #{state := State, bodies := Bodies}} ->
+        {ok, #{state := State, bodies := Bodies} = R} ->
             Stats1 = bump(docs_checked, 1, Stats),
             case repair_bodies(Ctx, DocId, Bodies) of
                 {ok, N} ->
                     merge_state(Ctx, DocId, State, Bodies,
+                                maps:get(vectors, R, #{}),
                                 bump(bodies_repaired, N, Stats1));
                 {error, Reason} ->
                     doc_failed(DocId, Reason, Stats1)
@@ -535,8 +536,9 @@ repair_bodies(#{target := Target, tt := TT}, DocId, Bodies) ->
             Error
     end.
 
-merge_state(#{target := Target, tt := TT}, DocId, State, Bodies, Stats) ->
-    case TT:put_doc_state(Target, DocId, State, Bodies) of
+merge_state(#{target := Target, tt := TT}, DocId, State, Bodies, Vectors,
+            Stats) ->
+    case barrel_rep_alg:put_state(TT, Target, DocId, State, Bodies, Vectors) of
         {ok, _, _} -> bump(docs_written, 1, Stats);
         {unchanged, _, _} -> Stats;
         {error, Reason} -> doc_failed(DocId, Reason, Stats)

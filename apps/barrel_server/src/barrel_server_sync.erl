@@ -188,11 +188,12 @@ get_state(Req) ->
         DocId = binding(<<"id">>, Req),
         Cbor = accepts_cbor(Req),
         case barrel_docdb:get_doc_state(DbBin, DocId) of
-            {ok, #{state := State, digest := Digest, bodies := Bodies}} ->
+            {ok, #{state := State, digest := Digest, bodies := Bodies} = R} ->
                 json_resp(Req, 200, #{id => DocId,
                                       state => vv_to_wire(Cbor, State),
                                       digest => vv_to_wire(Cbor, Digest),
-                                      bodies => Bodies});
+                                      bodies => Bodies,
+                                      vectors => maps:get(vectors, R, #{})});
             {error, Reason} ->
                 error_resp(Req, Reason)
         end
@@ -202,10 +203,15 @@ put_state(Req) ->
     with_sync_db(Req, fun(DbBin) ->
         DocId = binding(<<"id">>, Req),
         with_json(Req, fun
-            (#{<<"state">> := StateWire, <<"bodies">> := Bodies})
+            (#{<<"state">> := StateWire, <<"bodies">> := Bodies} = B)
                     when is_binary(StateWire), is_map(Bodies) ->
                 State = vv_from_wire(request_cbor(Req), StateWire),
-                case barrel_docdb:put_doc_state(DbBin, DocId, State, Bodies) of
+                Vectors = case maps:get(<<"vectors">>, B, #{}) of
+                    V when is_map(V) -> V;
+                    _ -> #{}
+                end,
+                case barrel_docdb:put_doc_state(DbBin, DocId, State, Bodies,
+                                                Vectors) of
                     {Written, Id, Winner} when Written =:= ok;
                                                Written =:= unchanged ->
                         json_resp(Req, 200, #{id => Id, winner => Winner,

@@ -153,7 +153,8 @@ get_replication_doc(StoreRef, DbName0, DocId) ->
                     {ok, CborBin} -> barrel_docdb_codec_cbor:decode_any(CborBin);
                     not_found -> #{}
                 end,
-                {ok, #{doc => Body#{<<"id">> => DocId},
+                {ok, #{doc => client_embedding(Body#{<<"id">> => DocId},
+                                               Deleted, Columns),
                        version => Token, vv => VVBin, deleted => Deleted}};
             not_found ->
                 {error, not_found}
@@ -296,6 +297,17 @@ do_get_docs(StoreRef, DbName, DocIds, Opts, Snapshot) ->
     ),
     %% Return results in original order
     [maps:get(DocId, DocBodyMap, {error, not_found}) || DocId <- DocIds].
+
+%% @private A client-supplied vector travels with its version; a
+%% computed one is recomputed by each replica.
+client_embedding(Doc, false, Columns) ->
+    case proplists:get_value(?COL_EMBEDDING_SRC, Columns, ?EMBEDDING_SRC_CLIENT) of
+        ?EMBEDDING_SRC_CLIENT -> maybe_add_embedding(Doc, Columns,
+                                                     #{include_embedding => true});
+        _ -> Doc
+    end;
+client_embedding(Doc, true, _Columns) ->
+    Doc.
 
 %% @private Attach the embedding column as the <<"_embedding">> object
 %% (vector + source) when include_embedding => true. Off by default, and

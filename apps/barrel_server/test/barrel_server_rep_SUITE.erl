@@ -15,6 +15,7 @@
          init_per_testcase/2, end_per_testcase/2]).
 -export([
     t_push_over_http/1,
+    t_client_vector_over_http/1,
     t_pull_over_http/1,
     t_bidirectional_convergence/1,
     t_filtered_pull/1,
@@ -46,7 +47,8 @@ all() ->
      t_json_only_client, t_unknown_db, t_att_filters_over_http,
      t_att_filter_errors_over_http, t_att_doc_enters_scope_over_http,
      t_att_empty_page_over_http, t_att_touch_over_http,
-     t_reconcile_push_over_http, t_reconcile_pull_over_http].
+     t_reconcile_push_over_http, t_reconcile_pull_over_http,
+     t_client_vector_over_http].
 
 init_per_suite(Config) ->
     application:load(barrel_server),
@@ -111,6 +113,31 @@ t_push_over_http(Config) ->
     {ok, #{deleted := true}} =
         barrel_docdb:get_doc_for_replication(Served, <<"b">>),
     ok.
+
+%% A client-supplied vector crosses _sync/state both ways; a computed
+%% one stays home.
+t_client_vector_over_http(Config) ->
+    Local = ?config(local, Config),
+    Served = ?config(served, Config),
+    Endpoint = ?config(endpoint, Config),
+    {ok, _} = barrel_docdb:put_doc(Local, #{<<"id">> => <<"up">>,
+                                            <<"_embedding">> => [0.5, 0.25]}),
+    {ok, _} = barrel_docdb:put_doc(Served, #{<<"id">> => <<"down">>,
+                                             <<"_embedding">> => [0.75, 1.0]}),
+    {ok, #{<<"rev">> := Rev}} = barrel_docdb:put_doc(Local, #{<<"id">> => <<"c">>}),
+    ok = barrel_docdb:set_doc_embedding(Local, <<"c">>, Rev, [1.0, 2.0]),
+    {ok, _} = barrel_rep:replicate(Local, Endpoint, push_opts()),
+    {ok, _} = barrel_rep:replicate(Endpoint, Local, pull_opts()),
+    ?assertEqual(#{<<"vector">> => [0.5, 0.25], <<"source">> => <<"client">>},
+                 embedding(Served, <<"up">>)),
+    ?assertEqual(#{<<"vector">> => [0.75, 1.0], <<"source">> => <<"client">>},
+                 embedding(Local, <<"down">>)),
+    ?assertEqual(undefined, embedding(Served, <<"c">>)),
+    ok.
+
+embedding(Db, Id) ->
+    {ok, Doc} = barrel_docdb:get_doc(Db, Id, #{include_embedding => true}),
+    maps:get(<<"_embedding">>, Doc, undefined).
 
 t_pull_over_http(Config) ->
     Local = ?config(local, Config),

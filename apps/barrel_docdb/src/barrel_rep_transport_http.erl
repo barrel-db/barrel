@@ -32,6 +32,7 @@
     full_state/1,
     get_doc_state/2,
     put_doc_state/4,
+    put_doc_state/5,
     repair_doc_bodies/3,
     diff_versions/2,
     get_changes/3,
@@ -210,8 +211,9 @@ full_state(Endpoint) ->
 get_doc_state(Endpoint, DocId) ->
     case req_typed(Endpoint, get, [<<"/state/">>, quote(DocId)], undefined,
                    [{<<"accept">>, <<"application/cbor">>}]) of
-        {ok, 200, _Encoding, #{<<"state">> := State, <<"bodies">> := Bodies}} ->
-            {ok, #{state => State, bodies => Bodies}};
+        {ok, 200, _Encoding, #{<<"state">> := State, <<"bodies">> := Bodies} = R} ->
+            {ok, #{state => State, bodies => Bodies,
+                   vectors => maps:get(<<"vectors">>, R, #{})}};
         {ok, Status, _Encoding, Body} ->
             error_of({ok, Status, Body});
         Other ->
@@ -219,9 +221,16 @@ get_doc_state(Endpoint, DocId) ->
     end.
 
 put_doc_state(Endpoint, DocId, State, Bodies) ->
+    put_doc_state(Endpoint, DocId, State, Bodies, #{}).
+
+%% An older server ignores `vectors': the target embeds the text.
+put_doc_state(Endpoint, DocId, State, Bodies, Vectors) ->
+    Fields = case map_size(Vectors) of
+        0 -> #{state => State, bodies => Bodies};
+        _ -> #{state => State, bodies => Bodies, vectors => Vectors}
+    end,
     Body = {encoded, <<"application/cbor">>,
-            barrel_docdb_codec_cbor:encode_wire(#{state => State,
-                                                  bodies => Bodies})},
+            barrel_docdb_codec_cbor:encode_wire(Fields)},
     case req(Endpoint, put, [<<"/state/">>, quote(DocId)], Body,
              [{<<"accept">>, <<"application/cbor">>}]) of
         {ok, 200, #{<<"id">> := Id, <<"winner">> := Winner,
