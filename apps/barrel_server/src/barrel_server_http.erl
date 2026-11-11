@@ -562,8 +562,8 @@ version_body(Req) ->
     with_db(Req, fun(Db) ->
         Id = livery_req:binding(<<"id">>, Req),
         Rev = livery_req:binding(<<"rev">>, Req),
-        case barrel:version_body(Db, Id, Rev) of
-            {ok, Body} -> json_resp(200, Body);
+        case barrel:version_body(Db, Id, Rev, embedding_opts_qs(Req)) of
+            {ok, Body} -> json_resp(200, encode_embedding_field(Body));
             Err -> error_resp(Err)
         end
     end).

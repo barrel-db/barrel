@@ -16,6 +16,7 @@
 -export([
     t_push_over_http/1,
     t_client_vector_over_http/1,
+    t_sibling_vectors_over_http/1,
     t_pull_over_http/1,
     t_bidirectional_convergence/1,
     t_filtered_pull/1,
@@ -48,7 +49,7 @@ all() ->
      t_att_filter_errors_over_http, t_att_doc_enters_scope_over_http,
      t_att_empty_page_over_http, t_att_touch_over_http,
      t_reconcile_push_over_http, t_reconcile_pull_over_http,
-     t_client_vector_over_http].
+     t_client_vector_over_http, t_sibling_vectors_over_http].
 
 init_per_suite(Config) ->
     application:load(barrel_server),
@@ -133,6 +134,35 @@ t_client_vector_over_http(Config) ->
     ?assertEqual(#{<<"vector">> => [0.75, 1.0], <<"source">> => <<"client">>},
                  embedding(Local, <<"down">>)),
     ?assertEqual(undefined, embedding(Served, <<"c">>)),
+    ok.
+
+%% A version that loses on the server keeps its vector there: resolving
+%% to it and pulling back gives the local side the same vector, and the
+%% past version reads with its vector over REST.
+t_sibling_vectors_over_http(Config) ->
+    Local = ?config(local, Config),
+    Served = ?config(served, Config),
+    Endpoint = ?config(endpoint, Config),
+    #{url := Base} = Endpoint,
+    {ok, #{<<"rev">> := RL}} = barrel_docdb:put_doc(
+        Local, #{<<"id">> => <<"s">>, <<"v">> => <<"local">>,
+                 <<"_embedding">> => [0.5, 0.25]}),
+    timer:sleep(2),
+    {ok, #{<<"rev">> := RS}} = barrel_docdb:put_doc(
+        Served, #{<<"id">> => <<"s">>, <<"v">> => <<"served">>,
+                  <<"_embedding">> => [0.75, 1.0]}),
+    {ok, _} = barrel_rep:replicate(Local, Endpoint, push_opts()),
+    {ok, #{vectors := V}} = barrel_docdb:get_doc_state(Served, <<"s">>),
+    ?assertEqual(#{RL => [0.5, 0.25], RS => [0.75, 1.0]}, V),
+    {ok, _} = barrel_docdb:resolve_conflict(Served, <<"s">>, RS, {choose, RL}),
+    {ok, _} = barrel_rep:replicate(Endpoint, Local, pull_opts()),
+    ?assertEqual(#{<<"vector">> => [0.5, 0.25], <<"source">> => <<"client">>},
+                 embedding(Local, <<"s">>)),
+    Url = <<Base/binary, "/doc/s/_versions/", RS/binary, "?include_embedding=true">>,
+    {ok, 200, _, Json} = hackney:request(get, Url, [], <<>>, [with_body]),
+    #{<<"v">> := <<"served">>, <<"_embedding">> := #{<<"vector">> := B64}} =
+        json:decode(Json),
+    ?assertEqual([0.75, 1.0], barrel_doc:decode_embedding(base64:decode(B64))),
     ok.
 
 embedding(Db, Id) ->
