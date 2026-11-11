@@ -21,6 +21,9 @@
     replicate_batch/5
 ]).
 
+%% Shared with barrel_rep:reconcile/3.
+-export([put_state/6]).
+
 %%====================================================================
 %% API
 %%====================================================================
@@ -161,9 +164,10 @@ exports(M, F, A) ->
 sync_state(Source, Target, SourceTransport, TargetTransport, DocId, Retry,
            Stats) ->
     case SourceTransport:get_doc_state(Source, DocId) of
-        {ok, #{state := State, bodies := Bodies}} ->
+        {ok, #{state := State, bodies := Bodies} = R} ->
             Stats2 = inc_stat(docs_read, Stats, 1),
-            case TargetTransport:put_doc_state(Target, DocId, State, Bodies) of
+            case put_state(TargetTransport, Target, DocId, State, Bodies,
+                           maps:get(vectors, R, #{})) of
                 {ok, _DocId, _Winner} ->
                     inc_stat(docs_written, Stats2, 1);
                 {unchanged, _DocId, _Winner} ->
@@ -181,6 +185,17 @@ sync_state(Source, Target, SourceTransport, TargetTransport, DocId, Retry,
             logger:warning("replicate read error for ~p: ~p", [DocId, Reason]),
             add_failed(DocId, inc_stat(doc_read_failures, Stats, 1))
     end.
+
+%% @doc Merge a state on the target with the client vectors that travel
+%% with it, through a transport that takes them.
+put_state(Transport, Target, DocId, State, Bodies, Vectors)
+        when map_size(Vectors) > 0 ->
+    case exports(Transport, put_doc_state, 5) of
+        true -> Transport:put_doc_state(Target, DocId, State, Bodies, Vectors);
+        false -> Transport:put_doc_state(Target, DocId, State, Bodies)
+    end;
+put_state(Transport, Target, DocId, State, Bodies, _Vectors) ->
+    Transport:put_doc_state(Target, DocId, State, Bodies).
 
 %% @doc Ship one missing document: read it with its version metadata
 %% from the source, apply it on the target.

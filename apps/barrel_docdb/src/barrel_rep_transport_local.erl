@@ -18,6 +18,7 @@
     full_state/1,
     get_doc_state/2,
     put_doc_state/4,
+    put_doc_state/5,
     repair_doc_bodies/3,
     diff_states/2,
     diff_versions/2,
@@ -62,6 +63,8 @@ full_state(_DbName) -> true.
 get_doc_state(DbName, DocId) -> barrel_docdb:get_doc_state(DbName, DocId).
 put_doc_state(DbName, DocId, StateBin, Bodies) ->
     barrel_docdb:put_doc_state(DbName, DocId, StateBin, Bodies).
+put_doc_state(DbName, DocId, StateBin, Bodies, Vectors) ->
+    barrel_docdb:put_doc_state(DbName, DocId, StateBin, Bodies, Vectors).
 diff_states(DbName, DigestMap) -> barrel_docdb:diff_states(DbName, DigestMap).
 repair_doc_bodies(DbName, DocId, Bodies) ->
     barrel_docdb:repair_doc_bodies(DbName, DocId, Bodies).

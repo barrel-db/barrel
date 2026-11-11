@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.5.0] - 2026-11-11
+
+### Fixed
+- A vector you supply with a document now replicates with it. Replicas used to receive the document without its vector and index an embedding of its text instead, so vector search on those replicas missed documents whose text differs from what the vector describes, such as encrypted text. Computed vectors are still recomputed on each replica.
+- Replicating a version that does not change a document's current body no longer drops its stored vector.
+- An automatic conflict resolution that keeps one version's body keeps that version's supplied vector. A resolution that produces a new body still has none.
+
 ## [2.4.1] - 2026-11-10
 
 ### Fixed
