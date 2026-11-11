@@ -9,3 +9,8 @@ clients/*/node_modules
 clients/*/dist
 *.beam
 erl_crash.dump
+**/.venv
+**/__pycache__
+data
+investigations
+rebar3.crashdump

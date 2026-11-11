@@ -1,0 +1,73 @@
+name: Docker image
+
+# Builds and smoke-tests the barrel_server image on changes to it. The
+# release workflow calls it with a Barrel bundle (b<N>) to publish it to
+# ghcr.io/barrel-db/barrel-server as :b<N> and :latest. Each architecture
+# builds on its own native runner (rocksdb under emulation takes hours).
+
+on:
+  workflow_call:
+    inputs:
+      bundle:
+        description: Barrel bundle to publish (b<N>)
+        required: true
+        type: string
+  pull_request:
+    paths:
+      - Dockerfile
+      - .dockerignore
+      - rel/docker/**
+      - .github/workflows/docker.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/barrel-db/barrel-server
+  BUNDLE: ${{ inputs.bundle || 'dev' }}
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build
+        run: docker build --build-arg "BARREL_BUNDLE=$BUNDLE" -t "$IMAGE:${{ matrix.arch }}" .
+      - name: Smoke test
+        run: |
+          docker run -d --name barrel -p 8080:8080 -e BARREL_AUTH_TOKENS=t "$IMAGE:${{ matrix.arch }}"
+          for i in $(seq 30); do curl -fsS 127.0.0.1:8080/ready && break; sleep 2; done
+          curl -fsS -XPUT 127.0.0.1:8080/db/smoke -H 'authorization: Bearer t'
+          test "$(curl -s -o /dev/null -w '%{http_code}' -XPUT 127.0.0.1:8080/db/nope)" = 401
+          docker exec barrel barrel ping
+      - name: Logs
+        if: failure()
+        run: docker logs barrel
+      - name: Push
+        if: inputs.bundle
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker tag "$IMAGE:${{ matrix.arch }}" "$IMAGE:$BUNDLE-${{ matrix.arch }}"
+          docker push "$IMAGE:$BUNDLE-${{ matrix.arch }}"
+
+  manifest:
+    if: inputs.bundle
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: docker/setup-buildx-action@v3
+      - name: Publish multi-arch tags
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker buildx imagetools create -t "$IMAGE:$BUNDLE" -t "$IMAGE:latest" \
+            "$IMAGE:$BUNDLE-amd64" "$IMAGE:$BUNDLE-arm64"

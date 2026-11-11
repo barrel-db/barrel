@@ -28,6 +28,8 @@ Configure with the `barrel_server` app env: `http_port` (default `8080`) and
 `data_dir` (where databases are stored). Set them before the app starts, for
 example in `sys.config`.
 
+To run the server without building it, use the Docker image (see the [Docker guide](docker.md)).
+
 ## Endpoints
 
 Create a database with `PUT /db/:db` before you use it: every other `/db/:db`

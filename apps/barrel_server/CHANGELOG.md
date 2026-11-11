@@ -5,6 +5,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- A Docker image runs the HTTP node with no Erlang install. You set the port, data directory, tokens and log level through environment variables, or mount your own configuration. It is published for amd64 and arm64 with each Barrel bundle.
+
 ## [1.15.1] - 2026-11-14
 
 ### Fixed
