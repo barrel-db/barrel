@@ -67,6 +67,24 @@ upgraded peers as new versions next to the ones they replaced, so they show
 as conflicts there and nothing is lost; a resolution made on an upgraded
 peer reaches the old peer and is not undone by it.
 
+## Client vectors
+
+`client-vectors.sh` checks that the vector you supply with a document stays
+with its version across three peers and a peer on the previous release
+(`OLD_REF`, default `barrel_server-v1.14.2`; `OLD_PORT`, default 8094, is its
+host port):
+
+```console
+$ test/e2e/client-vectors.sh
+```
+
+Two peers write the same document with their own vectors. Every peer keeps
+the winner's vector and the losing version's, a resolution back to the losing
+version reaches every peer with its vector, and a resolution sent with
+`_observed` and `_embedding` carries its own. A version relayed through the
+old peer loses its vector there and gets it back on the next direct sync from
+an upgraded peer.
+
 ## Crashes
 
 `crash.sh` kills peers with SIGKILL during replication:

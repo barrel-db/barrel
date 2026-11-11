@@ -26,7 +26,7 @@ url() {
     case "$1" in a) echo http://127.0.0.1:8091 ;;
                  b) echo http://127.0.0.1:8092 ;;
                  c) echo http://127.0.0.1:8093 ;;
-                 old) echo http://127.0.0.1:8094 ;; esac
+                 old) echo "http://127.0.0.1:${OLD_PORT:-8094}" ;; esac
 }
 
 wait_healthy() {  # wait_healthy <peer>
