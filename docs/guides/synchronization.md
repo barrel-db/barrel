@@ -333,6 +333,55 @@ Continuous behavior:
   `stop_task/1` stays paused.
 - Task docs store endpoints as URLs only; tokens come from `sync_auth`.
 
+## Vectors you supply
+
+A vector you write with a document (`_embedding`, source `client`) belongs to
+that version and replicates with it. Read this when the vector cannot be
+computed from the text on another node, for example when the text is
+encrypted.
+
+- Every live version keeps its own vector: the current one, conflict
+  siblings, and past versions until retention removes them. A version that
+  becomes current again, through a resolution or a point-in-time branch,
+  is indexed with its own vector.
+- Computed vectors (source `computed`) do not travel. Each node recomputes
+  them from the text.
+
+Resolve a conflict with a vector of your own when the merged body needs one:
+send the merged document with `_observed` (from `GET /db/:db/doc/:id?conflicts=true`)
+and `_embedding`.
+
+```console
+$ curl -XPUT localhost:8080/db/mydb/doc/m -H 'content-type: application/json' \
+    -d '{"text": "merged", "_observed": [...], "_embedding": [0.1, 0.2, 0.3]}'
+```
+
+From Erlang, `resolve_conflict` keeps the chosen version's vector, and takes
+`_embedding` in a merge:
+
+```erlang
+{ok, _} = barrel_docdb:resolve_conflict(Db, Id, Rev, {choose, Token}),
+{ok, _} = barrel_docdb:resolve_conflict(Db, Id, Rev,
+                                        {merge, Merged#{<<"_embedding">> => Vec}}).
+```
+
+Read a past version with its vector:
+
+```console
+$ curl 'localhost:8080/db/mydb/doc/m/_versions/<rev>?include_embedding=true'
+```
+
+Notes:
+
+- A past version's vector costs 4 bytes per dimension (6 KB at 1536
+  dimensions) and is removed with its archived body by retention
+  (`retention_period`, 30 days by default; `0` keeps both forever).
+- A peer before barrel_docdb 3.0 keeps only the current version's vector.
+  Vectors of other versions that pass through it are dropped, and come back
+  on the next direct sync from an upgraded peer.
+- A merge without `_embedding` produces a new body without a vector: a
+  record database embeds its text.
+
 ## Clocks
 
 Every wire exchange carries an `x-barrel-hlc` header and both sides fold it
@@ -355,10 +404,12 @@ stream that wakes the poller). Enable CORS and issue a capability token for it. 
 
 ## What is not covered yet
 
-- **Vectors.** Vector indexes are not shipped; with record mode the text and
-  metadata replicate as documents and the index rebuilds locally. A client
-  that needs the stored vectors pulls them with `include_embedding` on
-  `GET /db/:db/doc/:id` or `POST /db/:db/_bulk_get` (barrel-lite does).
+- **Vector indexes.** Indexes are not shipped; with record mode the
+  documents replicate, with the vectors you supplied (see
+  [Vectors you supply](#vectors-you-supply)), and each node rebuilds its
+  index. A client that needs the stored vectors pulls them with
+  `include_embedding` on `GET /db/:db/doc/:id` or `POST /db/:db/_bulk_get`
+  (barrel-lite does).
 - **Client certificates over HTTP/3.** H3 listeners serve TLS but do not
   check client certificates; use H1-TLS or H2 for an mTLS gate.
 - **Barrel API.** `barrel` (the full embeddable database) does not expose replication;
