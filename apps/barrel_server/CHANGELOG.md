@@ -5,11 +5,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.15.0] - 2026-11-14
+
+### Added
+- `GET /db/:db/doc/:id/_versions/:rev` takes `include_embedding=true`, like the document route, and returns the vector supplied with that version.
+- Replication between servers carries the vectors of every live version of a document, so a version that becomes current again keeps its own vector on every node.
+
 ### Fixed
 - A browser request that followed a CORS preflight on the same connection could fail with an invalid response. The preflight's empty `204` was sent with a stray end-of-body marker that the browser read as the start of the next answer. barrel-lite saw it as intermittent "Failed to fetch" errors.
 
 ### Changed
-- Requires livery 0.13 and barrel_mcp 4.5.1.
+- Requires barrel_docdb 3.0, barrel 1.14, livery 0.13 and barrel_mcp 4.5.1. barrel_docdb 3.0 renames the exported metrics; see its changelog.
 
 ## [1.14.2] - 2026-11-11
 

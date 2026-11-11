@@ -3,7 +3,10 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [1.14.0] - 2026-11-14
+
+### Added
+- Reading a past version of a document can return the vector supplied with that version. Requires barrel_docdb 3.0.
 
 ### Fixed
 - A context query whose remote member was cut off in the middle of a line reported the member as answering with an error (`bad_line`), as if the data were wrong. It now reports the answer as cut short (`missing_meta`), as when the cut falls between lines.

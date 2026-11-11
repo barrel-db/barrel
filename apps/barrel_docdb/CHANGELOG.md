@@ -7,8 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.0] - 2026-11-14
+
 ### Breaking
 - Metric names follow Prometheus conventions (instrument 2.0). Labels were folded into the metric name, so document operations exported as `barrel_doc_operations_db_operation_total{db,operation}`; they now export as `barrel_doc_operations_total{db,operation}`, and the same goes for every labeled metric. Counters end in `_total`. Update dashboards and alerts that use the old names; the metrics guide lists the current ones.
+
+### Added
+- Every version keeps the vector you supplied with it, not only the current one. A version that loses to a concurrent edit, or that you replace, keeps its vector until retention removes the version, and replication carries the vectors of every live version. When such a version becomes current again, through a conflict resolution or a point-in-time branch, it is indexed with its own vector instead of an embedding of its text. This closes the case where an encrypted memory, edited on two nodes at once, ended up indexed by its ciphertext.
+- Reading a past version can return its vector, as reading a document does.
+- A conflict resolution that merges bodies can carry a vector of its own.
+
+### Fixed
+- Resolving a conflict by choosing a version kept the text but dropped the vector of that version.
+- Resolving a conflict in a record database left the vector index on the version it replaced; the index now follows the resolution.
+- A point-in-time branch dropped the vector you supplied for the version it restored.
 
 ### Changed
 - Requires instrument 2.0 and hackney 4.11.
