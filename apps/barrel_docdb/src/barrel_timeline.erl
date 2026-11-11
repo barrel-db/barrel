@@ -546,7 +546,8 @@ sibling_ops(StoreRef, Ks, Id, Siblings) ->
                 false ->
                     Drop = [{delete,
                              barrel_store_keys:doc_version(Ks, Id,
-                                                           VEnc)}],
+                                                           VEnc)},
+                            barrel_doc_vectors:delete_op(Ks, Id, VEnc)],
                     {Drop ++ Ops, Kept}
             end
         end,
@@ -597,7 +598,8 @@ post_t_version_dels(Ks, Id, #{version := RestToken}, _Current) ->
     RestVEnc = barrel_version:encode(
         barrel_version:from_token(RestToken)),
     [{delete, barrel_store_keys:doc_version(Ks, Id, RestVEnc)},
-     {body_delete, barrel_store_keys:doc_body_rev(Ks, Id, RestVEnc)}].
+     {body_delete, barrel_store_keys:doc_body_rev(Ks, Id, RestVEnc)},
+     barrel_doc_vectors:delete_op(Ks, Id, RestVEnc)].
 
 chain_forget_ops(StoreRef, Ks, Id) ->
     Start = barrel_store_keys:doc_version_prefix(Ks, Id),
@@ -608,7 +610,8 @@ chain_forget_ops(StoreRef, Ks, Id) ->
             VEnc = barrel_store_keys:decode_doc_version_key(Ks, Id, Key),
             {ok, [{delete, Key},
                   {body_delete,
-                   barrel_store_keys:doc_body_rev(Ks, Id, VEnc)}
+                   barrel_store_keys:doc_body_rev(Ks, Id, VEnc)},
+                  barrel_doc_vectors:delete_op(Ks, Id, VEnc)
                   | Acc]}
         end,
         []).
@@ -623,8 +626,9 @@ restore_ops(StoreRef, Ks, Compiled, Id, Entry, NConflicts) ->
                             Current),
     %% Entity: identity columns from the restored entry; created_at /
     %% expires_at / tier carried from the current entity (created_at
-    %% is write-invariant, the others best effort); embedding columns
-    %% dropped (derived data).
+    %% is write-invariant, the others best effort); the restored
+    %% version's client vector comes back, a computed one is dropped
+    %% (derived data).
     Cols = [
         {?COL_VERSION, RestVEnc},
         {?COL_DELETED, case RestDeleted of
@@ -637,7 +641,7 @@ restore_ops(StoreRef, Ks, Compiled, Id, Entry, NConflicts) ->
         {?COL_CREATED_AT, maps:get(created_at, Current)},
         {?COL_EXPIRES_AT, maps:get(expires_at, Current)},
         {?COL_TIER, maps:get(tier, Current)}
-    ],
+    ] ++ restore_embedding(StoreRef, Ks, Id, RestVEnc, RestDeleted, Current),
     RestInfo0 = #{id => Id, rev => RestToken, deleted => RestDeleted,
                   num_conflicts => NConflicts, hlc => RestHlc},
     RestInfo = case RestDeleted of
@@ -674,6 +678,22 @@ restore_ops(StoreRef, Ks, Compiled, Id, Entry, NConflicts) ->
     ++ barrel_changes:write_path_index_ops(Ks, RestHlc, RestInfo)
     ++ ArsOps
     ++ ChannelOps.
+
+restore_embedding(_StoreRef, _Ks, _Id, _RestVEnc, true, _Current) ->
+    [];
+restore_embedding(StoreRef, Ks, Id, RestVEnc, false, Current) ->
+    case maps:get(version_enc, Current) of
+        RestVEnc ->
+            maps:get(client_embedding, Current);
+        _ ->
+            case barrel_doc_vectors:get(StoreRef, Ks, Id, RestVEnc) of
+                {ok, Vec} ->
+                    [{?COL_EMBEDDING, barrel_doc:encode_embedding(Vec)},
+                     {?COL_EMBEDDING_SRC, ?EMBEDDING_SRC_CLIENT}];
+                not_found ->
+                    []
+            end
+    end.
 
 %% The restored version's body: the current body when it is somehow
 %% still current, else the version-keyed archive. A missing archive
@@ -718,7 +738,17 @@ read_current_state(StoreRef, Ks, Id) ->
       created_at => proplists:get_value(?COL_CREATED_AT, Columns, <<>>),
       expires_at => proplists:get_value(?COL_EXPIRES_AT, Columns, 0),
       tier => proplists:get_value(?COL_TIER, Columns, 0),
+      client_embedding => client_embedding(Columns),
       body => Body}.
+
+client_embedding(Columns) ->
+    case {proplists:get_value(?COL_EMBEDDING, Columns, <<>>),
+          proplists:get_value(?COL_EMBEDDING_SRC, Columns, ?EMBEDDING_SRC_CLIENT)} of
+        {<<>>, _} -> [];
+        {Bin, ?EMBEDDING_SRC_CLIENT} ->
+            [{?COL_EMBEDDING, Bin}, {?COL_EMBEDDING_SRC, ?EMBEDDING_SRC_CLIENT}];
+        _ -> []
+    end.
 
 %% Pending outbox entries minted after T are work for post-T state:
 %% drop them (the tags themselves are config, not data).

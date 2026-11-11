@@ -826,9 +826,11 @@ handle_call_rw({get_conflicts, DocId}, _From,
     {reply, Result, State};
 
 handle_call_rw({resolve_conflict, DocId, BaseRev, Resolution}, _From,
-               #state{name = DbName, store_ref = StoreRef} = State) ->
+               #state{name = DbName, store_ref = StoreRef,
+                      config = Config} = State) ->
     Result = try
-        do_resolve_conflict(StoreRef, DbName, DocId, BaseRev, Resolution)
+        do_resolve_conflict(StoreRef, DbName, Config, DocId, BaseRev,
+                            Resolution)
     catch
         throw:{error, clock_skew} = Skew -> Skew;
         error:Reason -> {error, {invalid_resolution, Reason}}
@@ -1503,7 +1505,8 @@ sweep_old_version_ops(StoreRef, DbName, DocId, VersionEnc, HistDel, Stats) ->
             {[HistDel], inc_sweep(history_swept, Stats)};
         {ok, _Superseded} ->
             BodyKey = barrel_store_keys:doc_body_rev(Ks, DocId, VersionEnc),
-            {[HistDel, {delete, ChainKey}, {body_delete, BodyKey}],
+            {[HistDel, {delete, ChainKey}, {body_delete, BodyKey},
+              barrel_doc_vectors:delete_op(Ks, DocId, VersionEnc)],
              inc_sweep(superseded_removed, Stats)};
         not_found ->
             {[HistDel], inc_sweep(history_swept, Stats)}
@@ -1525,7 +1528,8 @@ chain_delete_ops(StoreRef, Ks, DocId) ->
         fun(Key, _Value, Acc) ->
             VEnc = barrel_store_keys:decode_doc_version_key(Ks, DocId, Key),
             {ok, [{delete, Key},
-                  {body_delete, barrel_store_keys:doc_body_rev(Ks, DocId, VEnc)}
+                  {body_delete, barrel_store_keys:doc_body_rev(Ks, DocId, VEnc)},
+                  barrel_doc_vectors:delete_op(Ks, DocId, VEnc)
                   | Acc]}
         end,
         []).
@@ -1626,7 +1630,8 @@ forget_doc_ops(StoreRef, DbName, DocId, Columns) ->
             VEnc = barrel_store_keys:decode_doc_version_key(Ks, DocId, Key),
             {ok, [{delete, Key},
                   {body_delete,
-                   barrel_store_keys:doc_body_rev(Ks, DocId, VEnc)}
+                   barrel_store_keys:doc_body_rev(Ks, DocId, VEnc)},
+                  barrel_doc_vectors:delete_op(Ks, DocId, VEnc)
                   | Acc]}
         end,
         []),
@@ -2617,7 +2622,8 @@ build_write_ops(StoreRef, DbName, DocRecord, Old, Opts, NextHlc0) ->
                 OldCbor ->
                     [{body_put,
                       barrel_store_keys:doc_body_rev(Ks, DocId, OldVersionEnc),
-                      OldCbor}]
+                      OldCbor}
+                     | barrel_doc_vectors:archive_ops(Ks, DocId, Old)]
             end,
             {Archive, LiveChainOps}
     end,
@@ -2807,7 +2813,8 @@ build_prepared_ops(StoreRef, DbName, #prep{rec = DocRecord} = P, Old, Opts,
                 OldCbor ->
                     [{body_put,
                       barrel_store_keys:doc_body_rev(Ks, DocId, OldVersionEnc),
-                      OldCbor}]
+                      OldCbor}
+                     | barrel_doc_vectors:archive_ops(Ks, DocId, Old)]
             end,
             {Archive, LiveChainOps}
     end,
@@ -2965,7 +2972,8 @@ build_delete_ops(StoreRef, DbName, DocId, Current, Opts) ->
                 OldCbor ->
                     [{body_put,
                       barrel_store_keys:doc_body_rev(Ks, DocId, OldVersionEnc),
-                      OldCbor}]
+                      OldCbor}
+                     | barrel_doc_vectors:archive_ops(Ks, DocId, Current)]
             end,
             ChainOps = LiveChainOps,
 
@@ -3004,11 +3012,12 @@ do_put_version(StoreRef, DbName, Config, Doc, Version, RemoteVV, Deleted) ->
     Old = read_current(StoreRef, DbName, DocId),
     Live0 = load_live(StoreRef, DbName, DocId, Old),
     Live1 = barrel_live:legacy_arrival(Live0, Version, Deleted, RemoteVV),
-    Vectors = maps:merge(carried_vector(Version, Deleted, Doc),
-                         local_vectors(Old)),
+    Local = live_vectors(StoreRef, DbName, DocId, Old, Live0),
+    Vectors = maps:merge(carried_vector(Version, Deleted, Doc), Local),
     case commit_state(StoreRef, DbName, Config, DocId, Old, Live0, Live1,
                       #{Version => DocBody},
-                      (replication_opts(Config))#{vectors => Vectors}) of
+                      (replication_opts(Config))#{vectors => Vectors,
+                                                  stored => maps:keys(Local)}) of
         {unchanged, DocId, Token} -> {ok, DocId, Token};
         Written -> Written
     end.
@@ -3032,10 +3041,11 @@ do_put_state(StoreRef, DbName, Config, DocId, StateBin, RemoteBodies,
           || {T, #{deleted := false}} <- maps:to_list(barrel_live:live(Live1)),
              not lists:member(T, Known), not maps:is_key(T, Bodies)] of
         [] ->
-            Vectors = maps:merge(remote_vectors(RemoteVectors),
-                                 local_vectors(Old)),
+            Local = live_vectors(StoreRef, DbName, DocId, Old, Live0),
+            Vectors = maps:merge(remote_vectors(RemoteVectors), Local),
             commit_state(StoreRef, DbName, Config, DocId, Old, Live0, Live1,
-                         Bodies, (replication_opts(Config))#{vectors => Vectors});
+                         Bodies, (replication_opts(Config))#{vectors => Vectors,
+                                                             stored => maps:keys(Local)});
         Missing ->
             {error, {missing_bodies, lists:sort(Missing)}}
     end.
@@ -3054,7 +3064,9 @@ do_get_state(StoreRef, DbName, DocId) ->
                         || T <- barrel_live:tokens(Live)]),
             Vectors = maps:from_list(
                         [{barrel_version:to_token(V), Vec}
-                         || {V, Vec} <- maps:to_list(local_vectors(Old))]),
+                         || {V, Vec} <- maps:to_list(
+                                          live_vectors(StoreRef, DbName, DocId,
+                                                       Old, Live))]),
             {ok, #{id => DocId, state => barrel_live:encode_state(Live),
                    digest => barrel_live:digest(Live), bodies => Bodies,
                    vectors => Vectors}}
@@ -3085,7 +3097,9 @@ do_repair_bodies(StoreRef, DbName, Config, DocId, RemoteBodies)
                     {ok, DocId, _} = do_write_state(
                         StoreRef, DbName, DocId, Old, Live, Live, BodyOf,
                         (replication_opts(Config))#{repair => Fix,
-                                                    vectors => local_vectors(Old)}),
+                                                    vectors => live_vectors(
+                                                                 StoreRef, DbName,
+                                                                 DocId, Old, Live)}),
                     {ok, DocId, lists:sort([barrel_version:to_token(T)
                                             || T <- maps:keys(Fix)])}
             end
@@ -3102,12 +3116,14 @@ replication_opts(Config) ->
       outbox => maps:get(outbox_tags_on_replication, Config, [])}.
 
 %% Client vectors travel with their version; computed ones are derived
-%% data each replica recomputes. Vectors are keyed by version.
-local_vectors(#{version := V, deleted := false,
-                embedding := {Bin, ?EMBEDDING_SRC_CLIENT}}) ->
-    #{V => barrel_doc:decode_embedding(Bin)};
-local_vectors(_) ->
-    #{}.
+%% data each replica recomputes. The client vectors of a document's live
+%% versions (the current one from the entity, the others from the
+%% archive), keyed by version.
+live_vectors(StoreRef, DbName, DocId, Old, Live) ->
+    Versions = [T || {T, #{deleted := false}}
+                         <- maps:to_list(barrel_live:live(Live))],
+    barrel_doc_vectors:versions(StoreRef, barrel_keyspace:resolve(DbName),
+                                DocId, Old, Versions).
 
 remote_vectors(Wire) when is_map(Wire) ->
     maps:from_list([{barrel_version:from_token(T), Vec}
@@ -3127,7 +3143,7 @@ carried_vector(_Version, _Deleted, _Doc) ->
     #{}.
 
 is_vector(Vec) ->
-    is_list(Vec) andalso Vec =/= [] andalso lists:all(fun is_number/1, Vec).
+    barrel_doc_vectors:is_vector(Vec).
 
 id_and_body(Doc) ->
     DocMap = barrel_doc:to_map(Doc),
@@ -3276,7 +3292,7 @@ write_state(StoreRef, DbName, DocId, Old, Live0, NewLive, BodyOf, Opts) ->
     Unchanged = Old =/= undefined
         andalso maps:get(ctx, Old) =/= undefined
         andalso barrel_live:digest(Live0) =:= barrel_live:digest(NewLive)
-        andalso not vector_arrived(Old, maps:get(vectors, Opts, #{})),
+        andalso not vectors_arrived(Old, NewLive, Opts),
     case Unchanged of
         true ->
             {unchanged, DocId, barrel_version:to_token(maps:get(version, Old))};
@@ -3285,7 +3301,16 @@ write_state(StoreRef, DbName, DocId, Old, Live0, NewLive, BodyOf, Opts) ->
                            BodyOf, Opts)
     end.
 
-%% A peer sent the client vector of a winner stored without one.
+%% A peer sent a client vector this database does not hold: the winner's
+%% or a live sibling's.
+vectors_arrived(Old, NewLive, Opts) ->
+    Vectors = maps:get(vectors, Opts, #{}),
+    Stored = maps:get(stored, Opts, maps:keys(Vectors)),
+    vector_arrived(Old, Vectors)
+        orelse lists:any(fun(T) -> maps:is_key(T, Vectors)
+                                       andalso not lists:member(T, Stored)
+                         end, maps:get(conflicts, barrel_live:view(NewLive))).
+
 vector_arrived(#{version := V, deleted := false, embedding := E}, Vectors) ->
     maps:is_key(V, Vectors) andalso not is_client(E);
 vector_arrived(_Old, _Vectors) ->
@@ -3455,15 +3480,28 @@ do_write_state(StoreRef, DbName, DocId, Old, Live0, NewLive, BodyOf, Opts) ->
                                                        barrel_version:encode(T)) end,
     BodyRevKey = fun(T) -> barrel_store_keys:doc_body_rev(Ks, DocId,
                                                           barrel_version:encode(T)) end,
-    %% live siblings: conflict rows; new ones bring their body
+    Vectors = maps:get(vectors, Opts, #{}),
+    Stored = maps:get(stored, Opts, maps:keys(Vectors)),
+    %% live siblings: conflict rows; new ones bring their body; a vector
+    %% this database did not hold is kept next to the body
     SibOps = lists:flatmap(
         fun(T) ->
             #{deleted := D, vv := VV} = maps:get(T, Info1),
             Row = {put, ChainKey(T), sibling_entry(conflict, D, VV)},
-            case maps:is_key(T, Info0) andalso not maps:is_key(T, Repair) of
-                true -> [Row];
+            Known = maps:is_key(T, Info0),
+            VecOps = case Vectors of
+                #{T := Vec} when not D ->
+                    case Known andalso lists:member(T, Stored) of
+                        true -> [];
+                        false -> [barrel_doc_vectors:put_op(Ks, DocId, T, Vec)]
+                    end;
+                _ -> []
+            end,
+            case Known andalso not maps:is_key(T, Repair) of
+                true -> [Row | VecOps];
                 false -> [Row, {body_put, BodyRevKey(T),
-                                barrel_docdb_codec_cbor:encode_cbor(BodyOf(T))}]
+                                barrel_docdb_codec_cbor:encode_cbor(BodyOf(T))}
+                          | VecOps]
             end
         end, Sibs),
     %% versions no longer live: superseded rows (their bodies stay archived
@@ -3471,9 +3509,11 @@ do_write_state(StoreRef, DbName, DocId, Old, Live0, NewLive, BodyOf, Opts) ->
     GoneOps = [{put, ChainKey(T), sibling_entry(superseded, D, VV)}
                || {T, #{deleted := D, vv := VV}} <- maps:to_list(Info0),
                   not maps:is_key(T, Info1)],
-    %% the winner lives in the entity, not in the chain
+    %% the winner lives in the entity, not in the chain; its archived
+    %% vector moves into the entity
     WinnerRowOps = case maps:is_key(W, Info0) andalso W =/= OldW of
-        true -> [{delete, ChainKey(W)}];
+        true -> [{delete, ChainKey(W)},
+                 barrel_doc_vectors:delete_op(Ks, DocId, barrel_version:encode(W))];
         false -> []
     end,
     %% the previous winner's body moves to the archive when it stops
@@ -3482,7 +3522,8 @@ do_write_state(StoreRef, DbName, DocId, Old, Live0, NewLive, BodyOf, Opts) ->
     ArchiveOps = case {WinnerChanged, OldW, OldCbor, OldDeleted} of
         {true, OldV, Cbor, false} when OldV =/= undefined, OldV =/= W,
                                        Cbor =/= undefined ->
-            [{body_put, BodyRevKey(OldV), Cbor}];
+            [{body_put, BodyRevKey(OldV), Cbor}
+             | outgoing_vector_ops(Ks, DocId, OldV, Old, Vectors)];
         _ -> []
     end,
     DocInfo = #{id => DocId, rev => Token, deleted => WDel,
@@ -3541,6 +3582,14 @@ do_write_state(StoreRef, DbName, DocId, Old, Live0, NewLive, BodyOf, Opts) ->
     ok = barrel_store_rocksdb:write_batch(StoreRef, AllOps, #{}),
     notify_subscribers(DbName, DocId, Token, ChangeHlc, WDel, WBody),
     {ok, DocId, Token}.
+
+%% The client vector of the version that stops being current: the one a
+%% peer sent for it, else the one its entity held.
+outgoing_vector_ops(Ks, DocId, OldV, Old, Vectors) ->
+    case Vectors of
+        #{OldV := Vec} -> [barrel_doc_vectors:put_op(Ks, DocId, OldV, Vec)];
+        _ -> barrel_doc_vectors:archive_ops(Ks, DocId, Old)
+    end.
 
 winner_index_ops(StoreRef, DbName, DocId, Old, NewDeleted, NewBody) ->
     {OldBody, OldDeleted} = case Old of
@@ -3771,7 +3820,8 @@ conflict_siblings(StoreRef, DbName, DocId) ->
 %% version, even one that arrived after the caller's read).
 %% Resolution: {choose, Token} (keeps that version's body and deleted
 %% flag), {merge, Body}, or delete.
-do_resolve_conflict(StoreRef, DbName, DocId, BaseRevOrObserved, Resolution) ->
+do_resolve_conflict(StoreRef, DbName, Config, DocId, BaseRevOrObserved,
+                    Resolution) ->
     case read_current(StoreRef, DbName, DocId) of
         undefined ->
             {error, not_found};
@@ -3795,23 +3845,27 @@ do_resolve_conflict(StoreRef, DbName, DocId, BaseRevOrObserved, Resolution) ->
                 [_] when is_binary(BaseRevOrObserved) ->
                     {error, no_conflicts};
                 _ ->
-                    resolve_with(StoreRef, DbName, DocId, Old, Live, Replaces,
+                    resolve_with(StoreRef, DbName, Config, DocId, Old, Live,
+                                 Replaces,
                                  Resolution)
             end
     end.
 
-resolve_with(StoreRef, DbName, DocId, Old, Live, Replaces, Resolution) ->
+resolve_with(StoreRef, DbName, Config, DocId, Old, Live, Replaces, Resolution) ->
     Info = barrel_live:live(Live),
+    Local = live_vectors(StoreRef, DbName, DocId, Old, Live),
     Picked = case Resolution of
         {merge, Doc} when is_map(Doc) ->
-            {ok, false, barrel_doc:doc_without_meta(Doc)};
+            {ok, false, barrel_doc:doc_without_meta(Doc),
+             barrel_doc_vectors:client_vector(Doc)};
         delete ->
-            {ok, true, #{}};
+            {ok, true, #{}, undefined};
         {choose, Tok} ->
             case [T || T <- Replaces, barrel_version:to_token(T) =:= Tok] of
                 [T] ->
                     #{deleted := D} = maps:get(T, Info),
-                    {ok, D, version_body(StoreRef, DbName, DocId, Old, T)};
+                    {ok, D, version_body(StoreRef, DbName, DocId, Old, T),
+                     maps:get(T, Local, undefined)};
                 [] ->
                     {error, {unknown_version, Tok}}
             end;
@@ -3819,20 +3873,33 @@ resolve_with(StoreRef, DbName, DocId, Old, Live, Replaces, Resolution) ->
             {error, {invalid_resolution, Resolution}}
     end,
     case Picked of
-        {ok, Deleted, Body} ->
+        {ok, Deleted, Body, Vec} ->
             Hlc = above_live(DbName, Live, alloc_hlc(DbName)),
             Token = barrel_version:new(Hlc, writer_id(DbName)),
             NewLive = barrel_live:author(Live, Token, Deleted, Replaces),
             BodyOf = fun(T) when T =:= Token -> Body;
                         (T) -> version_body(StoreRef, DbName, DocId, Old, T)
                      end,
+            Vectors = case Vec of
+                undefined -> Local;
+                _ -> Local#{Token => Vec}
+            end,
             {_, DocId, Rev} = write_state(StoreRef, DbName, DocId, Old, Live,
-                                          NewLive, BodyOf, #{cause => resolve}),
+                                          NewLive, BodyOf,
+                                          #{cause => resolve, vectors => Vectors,
+                                            stored => maps:keys(Local),
+                                            outbox => resolve_tags(Config)}),
             {ok, #{id => DocId, rev => Rev,
                    conflicts_resolved => length(Replaces) - 1}};
         {error, _} = Err ->
             Err
     end.
+
+%% A resolution is not issued through the layer that tags its own writes
+%% (barrel adds its index tag to put_doc): tag it like a replicated write,
+%% so a record database indexes the resolved version.
+resolve_tags(Config) ->
+    maps:get(outbox_tags_on_replication, Config, []).
 
 %% @private Read the archived body of a non-current version.
 read_version_body(StoreRef, DbName, DocId, Version) ->
