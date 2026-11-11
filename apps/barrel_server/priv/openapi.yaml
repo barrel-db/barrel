@@ -463,6 +463,13 @@ paths:
     get:
       tags: [Documents]
       summary: Read a past version body
+      parameters:
+        - name: include_embedding
+          in: query
+          required: false
+          schema:
+            type: boolean
+          description: When true, include the vector of that version (base64 float32 + dim), the one its writer supplied.
       responses:
         '200':
           description: The document body at that revision.

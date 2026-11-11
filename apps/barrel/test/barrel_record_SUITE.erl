@@ -47,7 +47,8 @@
          computed_embedding_stored/1,
          computed_roundtrip_reembeds/1,
          replicated_docs_embedded/1,
-         replicated_loser_not_reembedded/1]).
+         replicated_loser_not_reembedded/1,
+         conflict_keeps_client_vectors/1]).
 
 all() ->
     [adapter_get,
@@ -86,7 +87,8 @@ all() ->
      computed_embedding_stored,
      computed_roundtrip_reembeds,
      replicated_docs_embedded,
-     replicated_loser_not_reembedded].
+     replicated_loser_not_reembedded,
+     conflict_keeps_client_vectors].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(barrel),
@@ -146,7 +148,8 @@ meck_cases() ->
      computed_embedding_stored,
      computed_roundtrip_reembeds,
      replicated_docs_embedded,
-     replicated_loser_not_reembedded].
+     replicated_loser_not_reembedded,
+     conflict_keeps_client_vectors].
 
 %% Deterministic 3-dim embedder; texts containing "poison" fail.
 mock_embed() ->
@@ -815,6 +818,50 @@ replicated_loser_not_reembedded(Config) ->
     after
         _ = barrel:close(Db),
         _ = barrel_docdb:delete_db(<<"rep_loser_db">>)
+    end.
+
+%% Two record databases write the same document concurrently, each with
+%% its own vector. A's version loses, then becomes current again by a
+%% resolution on B. Every node indexes the supplied vectors, never the
+%% embedder's output for the text.
+conflict_keeps_client_vectors(Config) ->
+    {ok, A} = open_record(conf_vec_a, Config, #{fields => [<<"title">>]}),
+    {ok, B} = open_record(conf_vec_b, Config, #{fields => [<<"title">>]}),
+    VA = [0.5, 0.25, 0.125],
+    VB = [0.75, 1.0, 0.0625],
+    Indexed = fun(Db, Vec) ->
+        fun() -> case barrel:vector_get(Db, <<"m">>) of
+                     {ok, #{vector := Vec}} -> true;
+                     _ -> false
+                 end
+        end
+    end,
+    try
+        {ok, #{<<"rev">> := RA}} = barrel:put_doc(
+            A, #{<<"id">> => <<"m">>, <<"title">> => <<"a text">>,
+                 <<"_embedding">> => VA}),
+        timer:sleep(2),
+        {ok, #{<<"rev">> := RB}} = barrel:put_doc(
+            B, #{<<"id">> => <<"m">>, <<"title">> => <<"b text">>,
+                 <<"_embedding">> => VB}),
+        {ok, _} = barrel_rep:replicate(<<"conf_vec_a">>, <<"conf_vec_b">>),
+        {ok, _} = barrel_rep:replicate(<<"conf_vec_b">>, <<"conf_vec_a">>),
+        ok = wait_until(Indexed(A, VB)),
+        ok = wait_until(Indexed(B, VB)),
+        {ok, _} = barrel_docdb:resolve_conflict(<<"conf_vec_b">>, <<"m">>, RB,
+                                                {choose, RA}),
+        {ok, _} = barrel_rep:replicate(<<"conf_vec_b">>, <<"conf_vec_a">>),
+        ok = wait_until(Indexed(B, VA)),
+        ok = wait_until(Indexed(A, VA)),
+        ok = wait_until(fun() -> pending(<<"conf_vec_a">>) =:= [] end),
+        ok = wait_until(fun() -> pending(<<"conf_vec_b">>) =:= [] end),
+        ?assertEqual(0, meck:num_calls(barrel_embed, embed, '_')),
+        ?assertEqual(0, meck:num_calls(barrel_embed, embed_batch, '_'))
+    after
+        _ = barrel:close(A),
+        _ = barrel:close(B),
+        _ = barrel_docdb:delete_db(<<"conf_vec_a">>),
+        _ = barrel_docdb:delete_db(<<"conf_vec_b">>)
     end.
 
 %%====================================================================

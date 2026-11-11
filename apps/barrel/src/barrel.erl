@@ -85,6 +85,7 @@
     history/2,
     doc_versions/2,
     version_body/3,
+    version_body/4,
     history_floor/1,
     changes/3,
     subscribe/2,
@@ -873,6 +874,13 @@ doc_versions(#{docdb := DbBin}, DocId) ->
     {ok, map()} | {error, not_found}.
 version_body(#{docdb := DbBin}, DocId, VersionToken) ->
     barrel_docdb:get_version_body(DbBin, DocId, VersionToken).
+
+%% @doc version_body/3 with options: `include_embedding => true' adds the
+%% vector of that version as `_embedding'.
+-spec version_body(db(), binary(), binary(), map()) ->
+    {ok, map()} | {error, not_found}.
+version_body(#{docdb := DbBin}, DocId, VersionToken, Opts) ->
+    barrel_docdb:get_version_body(DbBin, DocId, VersionToken, Opts).
 
 %% @doc The oldest HLC the history is complete from (undefined until a
 %% retention sweep runs).
