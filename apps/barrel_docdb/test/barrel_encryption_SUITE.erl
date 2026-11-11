@@ -12,6 +12,7 @@
 -export([
     t_encrypted_roundtrip/1,
     t_sentinel_absent_on_disk/1,
+    t_archived_vector_absent_on_disk/1,
     t_attachments_encrypted/1,
     t_wrong_key/1,
     t_plaintext_open_of_encrypted/1,
@@ -35,6 +36,7 @@
 
 all() ->
     [t_encrypted_roundtrip, t_sentinel_absent_on_disk,
+     t_archived_vector_absent_on_disk,
      t_attachments_encrypted, t_wrong_key,
      t_plaintext_open_of_encrypted, t_encrypt_existing_plaintext,
      t_key_provider_error, t_gc_env_retained,
@@ -148,6 +150,38 @@ t_sentinel_absent_on_disk(Config) ->
                               binary_to_list(Plain)),
     try
         ?assert(found_on_disk(PlainPath, ?SENTINEL))
+    after
+        os:cmd("rm -rf " ++ PlainPath)
+    end,
+    ok.
+
+%% A version's client vector is kept next to its archived body when the
+%% version is replaced: encrypted at rest like the body.
+t_archived_vector_absent_on_disk(Config) ->
+    Db = ?config(db, Config),
+    Vec = [0.1234567, -3.7654321, 12.5e-3, 98.765, -0.0042, 7.77e2,
+           1.0e-5, -55.5, 0.314159, 2.71828, -1.41421, 6.02e-1],
+    Bytes = barrel_doc:encode_embedding(Vec),
+    Write = fun(D) ->
+        {ok, #{<<"rev">> := R1}} = barrel_docdb:put_doc(
+            D, #{<<"id">> => <<"a">>, <<"_embedding">> => Vec}),
+        {ok, _} = barrel_docdb:put_doc(D, #{<<"id">> => <<"a">>,
+                                            <<"_rev">> => R1}),
+        {ok, #{<<"_embedding">> := #{<<"vector">> := _}}} =
+            barrel_docdb:get_version_body(D, <<"a">>, R1,
+                                          #{include_embedding => true}),
+        ok = barrel_docdb:close_db(D)
+    end,
+    {ok, _} = barrel_docdb:create_db(Db, enc_opts(Config)),
+    Write(Db),
+    ?assertNot(found_on_disk(db_path(Config), Bytes)),
+    %% control: in a plaintext db the archived vector is on disk in clear
+    Plain = <<Db/binary, "_plain">>,
+    {ok, _} = barrel_docdb:create_db(Plain, plain_opts(Config)),
+    Write(Plain),
+    PlainPath = filename:join(?config(data_dir, Config), binary_to_list(Plain)),
+    try
+        ?assert(found_on_disk(PlainPath, Bytes))
     after
         os:cmd("rm -rf " ++ PlainPath)
     end,

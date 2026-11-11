@@ -27,7 +27,7 @@
 %% Caller-side reads
 -export([fold/4, fold/5]).
 -export([get_doc_versions/3]).
--export([get_version_body/4]).
+-export([get_version_body/4, get_version_body/5]).
 -export([history_floor/2]).
 
 %% Entry codec (exposed for tests)
@@ -160,38 +160,73 @@ get_doc_versions(StoreRef, DbName0, DocId) ->
 -spec get_version_body(barrel_store_rocksdb:db_ref(), db_name(), docid(),
                        binary()) -> {ok, map()} | {error, not_found}.
 get_version_body(StoreRef, DbName0, DocId, VersionToken) ->
+    get_version_body(StoreRef, DbName0, DocId, VersionToken, #{}).
+
+%% @doc get_version_body/4 with options: `include_embedding => true'
+%% adds the version's vector as `_embedding' (`vector', `source'): the
+%% entity's for the current version, the archived client vector for
+%% another one.
+-spec get_version_body(barrel_store_rocksdb:db_ref(), db_name(), docid(),
+                       binary(), map()) -> {ok, map()} | {error, not_found}.
+get_version_body(StoreRef, DbName0, DocId, VersionToken, Opts) ->
     try
-        do_get_version_body(StoreRef, DbName0, DocId, VersionToken)
+        do_get_version_body(StoreRef, DbName0, DocId, VersionToken, Opts)
     catch
         error:badarg -> {error, not_found}
     end.
 
-do_get_version_body(StoreRef, DbName0, DocId, VersionToken) ->
+do_get_version_body(StoreRef, DbName0, DocId, VersionToken, Opts) ->
     DbName = barrel_keyspace:resolve(DbName0),
     Version = barrel_version:from_token(VersionToken),
     EntityKey = barrel_store_keys:doc_entity(DbName, DocId),
-    BodyKey = case barrel_store_rocksdb:get_entity(StoreRef, EntityKey) of
+    {BodyKey, Embedding} = case barrel_store_rocksdb:get_entity(StoreRef, EntityKey) of
         {ok, Columns} ->
             case barrel_version:decode(
                      proplists:get_value(?COL_VERSION, Columns)) of
                 Version ->
-                    barrel_store_keys:doc_body(DbName, DocId);
+                    {barrel_store_keys:doc_body(DbName, DocId),
+                     fun() -> entity_embedding(Columns) end};
                 _Other ->
-                    barrel_store_keys:doc_body_rev(
-                        DbName, DocId, barrel_version:encode(Version))
+                    {barrel_store_keys:doc_body_rev(
+                        DbName, DocId, barrel_version:encode(Version)),
+                     fun() -> archived_embedding(StoreRef, DbName, DocId, Version) end}
             end;
         not_found ->
-            barrel_store_keys:doc_body_rev(
-                DbName, DocId, barrel_version:encode(Version))
+            {barrel_store_keys:doc_body_rev(
+                DbName, DocId, barrel_version:encode(Version)),
+             fun() -> archived_embedding(StoreRef, DbName, DocId, Version) end}
     end,
     case barrel_store_rocksdb:body_get(StoreRef, BodyKey) of
         {ok, CborBin} ->
-            {ok, barrel_docdb_codec_cbor:decode_any(CborBin)};
+            Body = barrel_docdb_codec_cbor:decode_any(CborBin),
+            case maps:get(include_embedding, Opts, false) of
+                true -> {ok, with_embedding(Body, Embedding())};
+                false -> {ok, Body}
+            end;
         not_found ->
             {error, not_found};
         {error, _} = Err ->
             Err
     end.
+
+entity_embedding(Columns) ->
+    case proplists:get_value(?COL_EMBEDDING, Columns, <<>>) of
+        <<>> -> undefined;
+        Bin -> {barrel_doc:decode_embedding(Bin),
+                proplists:get_value(?COL_EMBEDDING_SRC, Columns,
+                                    ?EMBEDDING_SRC_CLIENT)}
+    end.
+
+archived_embedding(StoreRef, Ks, DocId, Version) ->
+    case barrel_doc_vectors:get(StoreRef, Ks, DocId, Version) of
+        {ok, Vec} -> {Vec, ?EMBEDDING_SRC_CLIENT};
+        not_found -> undefined
+    end.
+
+with_embedding(Body, undefined) ->
+    Body;
+with_embedding(Body, {Vec, Src}) ->
+    Body#{<<"_embedding">> => #{<<"vector">> => Vec, <<"source">> => Src}}.
 
 %% @doc The oldest HLC the history is complete from, advanced by the
 %% retention sweeper. `undefined' until a sweep runs (history complete

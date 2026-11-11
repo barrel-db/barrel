@@ -22,7 +22,7 @@
 %% Column-wide document keys (CBOR codec)
 -export([doc_current/2, doc_current_prefix/1, doc_current_end/1]).
 -export([doc_tree/2]).
--export([doc_body/2, doc_body_rev/3]).
+-export([doc_body/2, doc_body_rev/3, doc_vector_rev/3]).
 
 %% Wide column document keys (entity storage)
 -export([doc_entity/2, doc_entity_prefix/1, doc_entity_end/1]).
@@ -139,6 +139,7 @@
 -define(PREFIX_DOC_VERSION, 16#1D).   %% Version chain: DbName + DocId + ':' + version → sibling entry
 -define(PREFIX_CHANNEL, 16#1E).       %% Per-channel change feed: DbName + channel (null-terminated) + HLC → row
 -define(PREFIX_DOC_EXPIRY, 16#1F).    %% Doc TTL index: DbName + ExpiresMs:64 + DocId → <<>>
+-define(PREFIX_DOC_VECTOR_REV, 16#20). %% Body CF: DbName + DocId + ':' + version → client vector of a non-current version
 
 %% Value prefix max length for value-first index (128 bytes)
 -define(VALUE_PREFIX_MAX_LEN, 128).
@@ -622,6 +623,13 @@ doc_body(DbName, DocId) ->
 -spec doc_body_rev(db_name(), docid(), revid()) -> binary().
 doc_body_rev(DbName, DocId, RevId) ->
     <<?PREFIX_DOC_BODY, (encode_name(DbName))/binary, DocId/binary, $:, RevId/binary>>.
+
+%% @doc Client-supplied vector of a non-current version, kept next to
+%% its archived body (body column family, same lifetime).
+-spec doc_vector_rev(db_name(), docid(), revid()) -> binary().
+doc_vector_rev(DbName, DocId, RevId) ->
+    <<?PREFIX_DOC_VECTOR_REV, (encode_name(DbName))/binary, DocId/binary, $:,
+      RevId/binary>>.
 
 %%====================================================================
 %% Wide Column Document Keys (Entity Storage)

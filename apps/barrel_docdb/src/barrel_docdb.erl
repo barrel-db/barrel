@@ -203,6 +203,7 @@
     fold_history/4,
     get_doc_versions/2,
     get_version_body/3,
+    get_version_body/4,
     history_floor/1,
     sweep_retention/1,
     sweep_ttl/1
@@ -2252,9 +2253,19 @@ get_doc_versions(Db, DocId) ->
 -spec get_version_body(binary(), binary(), binary()) ->
     {ok, map()} | {error, term()}.
 get_version_body(Db, DocId, VersionToken) ->
+    get_version_body(Db, DocId, VersionToken, #{}).
+
+%% @doc get_version_body/3 with options: `include_embedding => true'
+%% adds the version's vector as `_embedding', as get_doc/3 does for the
+%% current version. A past version keeps the vector its writer supplied
+%% until retention removes the version.
+-spec get_version_body(binary(), binary(), binary(), map()) ->
+    {ok, map()} | {error, term()}.
+get_version_body(Db, DocId, VersionToken, Opts) ->
     case reader_store(Db) of
         {ok, StoreRef} ->
-            barrel_history:get_version_body(StoreRef, Db, DocId, VersionToken);
+            barrel_history:get_version_body(StoreRef, Db, DocId, VersionToken,
+                                            Opts);
         undefined ->
             {error, not_found}
     end.
