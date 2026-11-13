@@ -246,6 +246,16 @@ lines([Line | Rest], St) ->
         _:_ -> {error, bad_line, St}
     end.
 
+%% A complete line still buffered at the end: kept when it parses (a
+%% source that omits the last newline), dropped when it does not.
+whole_line(<<>>) -> [];
+whole_line(Buf) ->
+    try json:decode(Buf) of
+        _ -> [Buf]
+    catch
+        _:_ -> []
+    end.
+
 %% hackney 4.8 reports a stream cut after its 200 as `closed': the meta
 %% line, not the transport, tells whether the answer is whole.
 transport_error(closed, #st{status = 200, mode = ndjson} = St) ->
@@ -256,7 +266,9 @@ transport_error(Reason, St) ->
 finish(#st{status = 200, mode = body, body = Body}) ->
     {ok, iolist_to_binary(Body)};
 finish(#st{status = 200, buf = Buf} = St0) ->
-    case lines([Buf], St0#st{buf = <<>>}) of
+    %% every line ends with a newline: text left without one is a line the
+    %% stream was cut in, not a line the source sent
+    case lines(whole_line(Buf), St0#st{buf = <<>>}) of
         {ok, #st{meta = undefined} = St} ->
             {error, failure(error, missing_meta, St)};
         {ok, #st{rows = Rows, meta = Meta, bytes = Bytes}} ->
