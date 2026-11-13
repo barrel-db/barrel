@@ -5,6 +5,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- A browser request that followed a CORS preflight on the same connection could fail with an invalid response. The preflight's empty `204` was sent with a stray end-of-body marker that the browser read as the start of the next answer. barrel-lite saw it as intermittent "Failed to fetch" errors.
+
+### Changed
+- Requires livery 0.13 and barrel_mcp 4.5.1.
+
 ## [1.14.2] - 2026-11-11
 
 ### Fixed
