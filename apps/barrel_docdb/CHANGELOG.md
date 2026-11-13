@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+- Metric names follow Prometheus conventions (instrument 2.0). Labels were folded into the metric name, so document operations exported as `barrel_doc_operations_db_operation_total{db,operation}`; they now export as `barrel_doc_operations_total{db,operation}`, and the same goes for every labeled metric. Counters end in `_total`. Update dashboards and alerts that use the old names; the metrics guide lists the current ones.
+
+### Changed
+- Requires instrument 2.0 and hackney 4.11.
+
 ## [2.5.0] - 2026-11-11
 
 ### Fixed

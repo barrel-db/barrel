@@ -411,7 +411,12 @@ export_format(_Config) ->
     ?assertNotEqual(nomatch, binary:match(Output, <<"_bucket">>)),
     ?assertNotEqual(nomatch, binary:match(Output, <<"_sum">>)),
     ?assertNotEqual(nomatch, binary:match(Output, <<"_count">>)),
-    ?assertNotEqual(nomatch, binary:match(Output, <<"{le=">>)),
+    ?assertNotEqual(nomatch, binary:match(Output, <<",le=\"">>)),
+    %% labels are labels, not part of the name (instrument 2.0)
+    ?assertNotEqual(nomatch, binary:match(Output,
+        <<"barrel_doc_operations_total{db=\"exportdb\",operation=\"put\"}">>)),
+    ?assertNotEqual(nomatch, binary:match(Output,
+        <<"barrel_doc_operation_duration_seconds_count{db=\"exportdb\",operation=\"put\"}">>)),
 
     ok.
 

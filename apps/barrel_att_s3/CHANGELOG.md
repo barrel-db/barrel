@@ -5,6 +5,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- Requires livery_s3 0.3.3 and livery 0.13.
+
 ## [0.2.1] - 2026-11-09
 
 ### Added

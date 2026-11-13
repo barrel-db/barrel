@@ -23,7 +23,7 @@ Neither barrel_docdb nor `barrel_server` serves a metrics route. To get them to 
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
-| `barrel_doc_operations` | Counter | db, operation | Total document operations |
+| `barrel_doc_operations_total` | Counter | db, operation | Total document operations |
 | `barrel_doc_operation_duration_seconds` | Histogram | db, operation | Operation latency |
 | `barrel_write_group_size` | Histogram | db | Write requests committed in one batch |
 
@@ -31,8 +31,8 @@ Neither barrel_docdb nor `barrel_server` serves a metrics route. To get them to 
 
 **Example:**
 ```
-barrel_doc_operations{db="mydb",operation="put"} 1234
-barrel_doc_operations{db="mydb",operation="get"} 5678
+barrel_doc_operations_total{db="mydb",operation="put"} 1234
+barrel_doc_operations_total{db="mydb",operation="get"} 5678
 barrel_doc_operation_duration_seconds_bucket{db="mydb",operation="get",le="0.001"} 5000
 ```
 
@@ -40,13 +40,13 @@ barrel_doc_operation_duration_seconds_bucket{db="mydb",operation="get",le="0.001
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
-| `barrel_query_operations` | Counter | db | Total query operations |
+| `barrel_query_operations_total` | Counter | db | Total query operations |
 | `barrel_query_duration_seconds` | Histogram | db | Query latency |
 | `barrel_query_results_count` | Histogram | db | Results per query |
 
 **Example:**
 ```
-barrel_query_operations{db="mydb"} 500
+barrel_query_operations_total{db="mydb"} 500
 barrel_query_duration_seconds_bucket{db="mydb",le="0.01"} 450
 ```
 
@@ -54,15 +54,15 @@ barrel_query_duration_seconds_bucket{db="mydb",le="0.01"} 450
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
-| `barrel_replication_docs` | Counter | direction | Documents replicated |
-| `barrel_replication_errors` | Counter | task_id | Replication errors |
+| `barrel_replication_docs_total` | Counter | direction | Documents replicated |
+| `barrel_replication_errors_total` | Counter | task_id | Replication errors |
 | `barrel_replication_lag_seconds` | Gauge | task_id | Seconds between the source write of the last copied change and its copy; 0 once caught up |
 | `barrel_replication_active` | Gauge | task_id | 1 while the task runs, 0 when paused, failed, completed or deleted |
 
 **Example:**
 ```
-barrel_replication_docs{direction="push"} 10000
-barrel_replication_errors{task_id="rep-123"} 2
+barrel_replication_docs_total{direction="push"} 10000
+barrel_replication_errors_total{task_id="rep-123"} 2
 ```
 
 ### Storage
@@ -99,7 +99,7 @@ Example queries for common dashboards:
 ### Document Operation Rate
 
 ```promql
-rate(barrel_doc_operations[5m])
+rate(barrel_doc_operations_total[5m])
 ```
 
 ### P99 Document Latency
@@ -111,19 +111,19 @@ histogram_quantile(0.99, rate(barrel_doc_operation_duration_seconds_bucket[5m]))
 ### Documents per Second
 
 ```promql
-rate(barrel_doc_operations{operation="put"}[5m])
+rate(barrel_doc_operations_total{operation="put"}[5m])
 ```
 
 ### Query Throughput
 
 ```promql
-rate(barrel_query_operations[5m])
+rate(barrel_query_operations_total[5m])
 ```
 
 ### Replication Throughput
 
 ```promql
-increase(barrel_replication_docs[1m])
+increase(barrel_replication_docs_total[1m])
 ```
 
 ## Alerting Examples
@@ -145,7 +145,7 @@ increase(barrel_replication_docs[1m])
 
 ```yaml
 - alert: BarrelReplicationErrors
-  expr: increase(barrel_replication_errors[5m]) > 0
+  expr: increase(barrel_replication_errors_total[5m]) > 0
   for: 1m
   labels:
     severity: warning
