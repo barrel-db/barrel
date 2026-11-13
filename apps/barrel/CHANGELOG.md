@@ -3,6 +3,11 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- A context query whose remote member was cut off in the middle of a line reported the member as answering with an error (`bad_line`), as if the data were wrong. It now reports the answer as cut short (`missing_meta`), as when the cut falls between lines.
+
 ## [1.13.1] - 2026-11-10
 
 ### Fixed
