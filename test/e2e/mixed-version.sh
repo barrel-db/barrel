@@ -13,6 +13,7 @@
 # last release before whole-state replication).
 #
 # Usage: test/e2e/mixed-version.sh
+# OLD_PORT (default 8094) is the host port of the old peer.
 # Requires: docker, docker compose, curl, jq, git. Exit 0 = pass.
 
 set -euo pipefail
@@ -40,7 +41,7 @@ docker build -q -t $OLD_IMAGE -f "$OLD_SRC/test/e2e/Dockerfile" "$OLD_SRC" >/dev
 echo "--- starting two upgraded peers and the old peer"
 $COMPOSE up -d --build peer-a peer-b
 docker run -d --name barrel-e2e-peer-old --network barrel-e2e_default \
-    --network-alias peer-old -p 8094:8080 $OLD_IMAGE >/dev/null
+    --network-alias peer-old -p "${OLD_PORT:-8094}:8080" $OLD_IMAGE >/dev/null
 for p in a b old; do wait_healthy $p; done
 
 DB=mx
