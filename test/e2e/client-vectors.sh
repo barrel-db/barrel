@@ -21,7 +21,7 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$DIR/../.." && pwd)"
 . "$DIR/lib.sh"
 
-OLD_REF="${OLD_REF:-barrel_server-v1.14.2}"
+OLD_REF="${OLD_REF:-b329}"   # the bundle of barrel_server 1.14.2
 OLD_IMAGE=barrel-server-e2e-vec-old
 OLD_SRC="$(mktemp -d)"
 
