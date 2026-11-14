@@ -8,25 +8,30 @@
 %%% deleted). 3.1 keys carry the doc id length (barrel_store_keys), and
 %%% a writable open moves the old rows once. A row belongs to the doc
 %%% id whose split of the key decodes to a version its own vector
-%%% names: a version's vector always holds its author at its own clock.
-%%% A read-only store opened before the move reads the old rows through
-%%% the same check.
+%%% names (its author at or above its own clock); a row no vector
+%%% settles, from a version converted from storage before 2.0, goes to
+%%% the longest doc id of the split that has a document. A read-only
+%%% store opened before the move reads the old rows through the vector
+%%% check. After the move the database repairs the versions 3.0 read
+%%% from other documents (barrel_db_server), then finish/2 records the
+%%% layout.
 %%% @end
 %%%-------------------------------------------------------------------
 -module(barrel_doc_chain).
 
--export([open/3, close/1, fold/5, fold_snapshot/6]).
+-export([open/3, finish/2, close/1, fold/5, fold_snapshot/6]).
 
 %% exported for tests
--export([owner/2]).
+-export([owner/2, owner/3]).
 
 -define(META, <<"doc_chain">>).
 -define(LAYOUT, <<"2">>).
 -define(BATCH, 1000).
 
-%% @doc Move the rows of the old layout (writable store), or mark the
-%% store as read through them (read-only store that still holds them).
--spec open(boolean(), barrel_store_rocksdb:db_ref(), binary()) -> ok.
+%% @doc Move the rows of the old layout (writable store: `moved', then
+%% repair and finish/2), or mark the store as read through them
+%% (read-only store that still holds them).
+-spec open(boolean(), barrel_store_rocksdb:db_ref(), binary()) -> ok | moved.
 open(ReadOnly, StoreRef, Ks) ->
     MetaKey = barrel_store_keys:db_meta(Ks, ?META),
     case barrel_store_rocksdb:get(StoreRef, MetaKey) of
@@ -41,9 +46,16 @@ open(ReadOnly, StoreRef, Ks) ->
             N = migrate(StoreRef, Ks),
             N > 0 andalso logger:notice("barrel_docdb ~ts: moved ~b version "
                                         "chain rows to the 3.1 layout", [Ks, N]),
-            ok = barrel_store_rocksdb:write_batch(
-                   StoreRef, [{put, MetaKey, ?LAYOUT}], #{sync => true})
+            moved
     end.
+
+%% @doc Record the 3.1 layout once the move and the repair are done: a
+%% crash before it runs both again.
+-spec finish(barrel_store_rocksdb:db_ref(), binary()) -> ok.
+finish(StoreRef, Ks) ->
+    barrel_store_rocksdb:write_batch(
+      StoreRef, [{put, barrel_store_keys:db_meta(Ks, ?META), ?LAYOUT}],
+      #{sync => true}).
 
 -spec close(barrel_store_rocksdb:db_ref()) -> ok.
 close(StoreRef) ->
@@ -71,13 +83,28 @@ fold_snapshot(StoreRef, Ks, DocId, Fun, Acc, Snapshot) ->
 %% named by the row's own vector, else `error'.
 -spec owner(binary(), binary()) -> {ok, binary(), binary()} | error.
 owner(Tail, Value) ->
+    owner(Tail, Value, fun(_DocId) -> false end).
+
+%% @doc owner/2, falling back, when no split's version is named by the
+%% vector, to the longest doc id `Exists' confirms. A version encoding
+%% starts with its clock, never with printable text and a `:', so a
+%% shorter doc id never owns the row of a longer one that exists.
+-spec owner(binary(), binary(), fun((binary()) -> boolean())) ->
+    {ok, binary(), binary()} | error.
+owner(Tail, Value, Exists) ->
     VV = row_vv(Value),
     Splits = [{binary:part(Tail, 0, P),
                binary:part(Tail, P + 1, byte_size(Tail) - P - 1)}
               || {P, 1} <- binary:matches(Tail, <<":">>)],
     case [S || {_DocId, VEnc} = S <- Splits, own_version(VEnc, VV)] of
-        [{DocId, VEnc} | _] -> {ok, DocId, VEnc};
-        [] -> error
+        [{DocId, VEnc} | _] ->
+            {ok, DocId, VEnc};
+        [] ->
+            case [S || {DocId, VEnc} = S <- lists:reverse(Splits),
+                       byte_size(VEnc) > 12, Exists(DocId)] of
+                [{DocId, VEnc} | _] -> {ok, DocId, VEnc};
+                [] -> error
+            end
     end.
 
 %%====================================================================
@@ -110,10 +137,8 @@ wrap({legacy, Prefix}, Fun) ->
         end
     end.
 
-%% A version's vector holds its author at the version's own clock.
 own_version(VEnc, VV) when byte_size(VEnc) > 12 ->
-    try barrel_version:decode(VEnc) of
-        {Hlc, Author} -> maps:get(Author, VV, undefined) =:= Hlc
+    try barrel_live:names_itself(barrel_version:decode(VEnc), VV)
     catch
         _:_ -> false
     end;
@@ -134,13 +159,17 @@ has_legacy(StoreRef, Ks) ->
 %% Move every old row of the keyspace, in batches. A row no split
 %% claims is kept where it is and reported.
 migrate(StoreRef, Ks) ->
+    Exists = fun(DocId) ->
+                     barrel_store_rocksdb:get_entity(
+                       StoreRef, barrel_store_keys:doc_entity(Ks, DocId)) =/= not_found
+             end,
     Prefix = barrel_store_keys:legacy_doc_version_db_prefix(Ks),
     Skip = byte_size(Prefix),
     {Ops, N} = barrel_store_rocksdb:fold_range(
         StoreRef, Prefix, successor(Prefix),
         fun(Key, Value, {Batch, Count}) ->
             <<_:Skip/binary, Tail/binary>> = Key,
-            case owner(Tail, Value) of
+            case owner(Tail, Value, Exists) of
                 {ok, DocId, VEnc} ->
                     New = barrel_store_keys:doc_version(Ks, DocId, VEnc),
                     Batch1 = [{delete, Key}, {put, New, Value} | Batch],

@@ -11,9 +11,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - A document whose id is another id followed by `:` (`session:42` and `session:42:data:k`, `a` and `a:b`) mixed its version history with the other one. The conflicts of `a` listed versions of `a:b`, replication carried them to the peers as versions of `a`, and the longer one's deletion could make `a` read as deleted on every node. Removing the history of `a` also removed the history of `a:b`. Each document now keeps its own history.
+- A peer still on 3.0 keeps sending versions it took from another document. A 3.1 database refuses them and logs it.
+- Versions 3.0 already stored this way are repaired when 3.1 converts the database: a document whose winner came from another document shows its own newest version again, and conflict counts are corrected.
+
+### Added
+- A `conflict_resolver` receives the id of the document in each version (`doc_id`), so one resolver can treat documents differently by id, a deleted version included.
 
 ### Changed
-- The version history is stored in a new layout. A database moves to it once, the first time this version opens it writable; a read-only database keeps reading the old layout correctly. A database opened by 3.1 cannot be opened by 3.0 again without losing its conflicts and past versions.
+- The version history is stored in a new layout. A database moves to it once, the first time this version opens it writable, and logs how many rows it moved and documents it repaired; a read-only database keeps reading the old layout correctly. A database opened by 3.1 cannot be opened by 3.0 again without losing its conflicts and past versions. You can upgrade the nodes of a mesh one at a time.
 
 ## [3.0.0] - 2026-11-14
 

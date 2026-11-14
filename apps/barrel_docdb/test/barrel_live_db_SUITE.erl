@@ -8,7 +8,7 @@
 
 -export([all/0, init_per_suite/1, end_per_suite/1,
          init_per_testcase/2, end_per_testcase/2]).
--export([conflict_reaches_both_sides/1,
+-export([conflict_reaches_both_sides/1, resolver_gets_doc_id/1,
          loser_survives_many_edits/1,
          edit_winner_keeps_conflict/1,
          observed_replaces_all/1,
@@ -34,7 +34,8 @@ all() ->
      resolver_one_version_everywhere, resolver_three_writers,
      different_resolvers_terminate, filtered_peer_gets_delete,
      filtered_peer_gets_delete_by_query, filter_matches_live_conflict,
-     bad_resolution_does_not_crash, delete_ships_no_body].
+     bad_resolution_does_not_crash, delete_ships_no_body,
+     resolver_gets_doc_id].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(barrel_docdb),
@@ -49,6 +50,7 @@ init_per_testcase(TC, Config) ->
     Opts = case TC of
         resolver_one_version_everywhere -> #{conflict_resolver => fun max_v/1};
         resolver_three_writers -> #{conflict_resolver => fun max_v/1};
+        resolver_gets_doc_id -> #{conflict_resolver => fun by_doc_id/1};
         _ -> #{}
     end,
     Dbs = [open(TC, N, Opts, Config) || N <- [a, b, c]],
@@ -71,6 +73,11 @@ max_v(Versions) ->
         [] -> delete;
         _ -> {merge, #{<<"v">> => lists:max([maps:get(<<"v">>, B, 0) || B <- Live])}}
     end.
+
+%% Every version a resolver gets names its document: keep the highest
+%% "v" for `d', leave any other document in conflict.
+by_doc_id([#{doc_id := <<"d">>} | _] = Versions) -> max_v(Versions);
+by_doc_id([#{doc_id := _} | _]) -> keep.
 
 min_v(Versions) ->
     {merge, #{<<"v">> => lists:min([maps:get(<<"v">>, B, 0)
@@ -216,6 +223,18 @@ resolver_one_version_everywhere(Config) ->
     ?assertEqual({ok, []}, barrel_docdb:get_conflicts(B, <<"d">>)),
     ?assertEqual(rev(A, <<"d">>), rev(B, <<"d">>)),
     {ok, #{<<"v">> := 7}} = barrel_docdb:get_doc(A, <<"d">>).
+
+resolver_gets_doc_id(Config) ->
+    [A, B | _] = ?config(dbs, Config),
+    put(A, <<"d">>, 0),
+    put(A, <<"e">>, 0),
+    sync(A, B),
+    edit(A, <<"d">>, 5), edit(B, <<"d">>, 7),
+    edit(A, <<"e">>, 5), edit(B, <<"e">>, 7),
+    sync(A, B),
+    ?assertEqual({ok, []}, barrel_docdb:get_conflicts(A, <<"d">>)),
+    {ok, [_]} = barrel_docdb:get_conflicts(A, <<"e">>),
+    ok.
 
 resolver_three_writers(Config) ->
     [A, B, C] = ?config(dbs, Config),
