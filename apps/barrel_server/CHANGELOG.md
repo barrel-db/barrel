@@ -8,10 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [1.15.1] - 2026-11-14
 
 ### Fixed
-- Spaces, tokens and handoffs replicated between servers no longer lose writes: a revoked token stays revoked, session data and pins written on two servers are both kept, and a completed handoff stays completed. Sessions now return their `counters`. Every server of a mesh must be upgraded before any of them writes; see the barrel_spaces 2.0 changelog.
+- Spaces, tokens and handoffs replicated between servers no longer lose writes: a revoked token stays revoked, session data and pins written on two servers are both kept, and a completed handoff stays completed. Every server of a mesh must be upgraded before any of them writes; the spaces guide gives the order.
 - A document whose id extends another id with `:` no longer mixes its history with the other one (barrel_docdb 3.1).
 
 ### Changed
+- A session read over REST or MCP no longer carries `_rev`, and carries `counters`.
 - Requires barrel_docdb 3.1 and barrel_spaces 2.0.
 
 ## [1.15.0] - 2026-11-14

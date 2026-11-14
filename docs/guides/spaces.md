@@ -224,8 +224,10 @@ agent, the completion. The status is the furthest step present.
 
 Replicate the registry and a space database between nodes like any barrel
 database. Every grant, session and handoff fact is a document written once
-or replaced as a whole, so the default rules already give the right answer
-and you need no conflict resolver:
+or replaced as a whole, so the version every node shows is already the
+answer. barrel_spaces opens the registry and its spaces with
+`barrel_spaces_resolver`, which closes each conflict on those documents by
+choosing that version, the same way on every node:
 
 - A revocation is a `revoke:` document of its own. A grant edited elsewhere
   cannot undo it, and two nodes revoking the same token agree.
@@ -248,14 +250,63 @@ ok = barrel_caps:revoke(TokenId, #{by => <<"ops">>}),
 {ok, [#{<<"revoked_by">> := <<"ops">>}]} = barrel_caps:list(SpaceId).
 ```
 
+### Your own conflict resolver
+
+A space database also holds your documents. Pass your resolver as
+`docdb => #{conflict_resolver => {M, F}}` to `create_space/1` or
+`open_space/2`: barrel_spaces wraps it, handles the `session:` documents and
+hands every other document to yours. If you open the registry or a space
+database yourself, set `{barrel_spaces_resolver, registry}` on the registry,
+and `barrel_spaces_resolver:with({M, F})` (or `{barrel_spaces_resolver,
+space}`) on a space. As with any resolver, every node must run the same one.
+
 ### Upgrading from 1.x
 
-Documents written by 1.x read the same and convert on their next write.
-`barrel_spaces:migrate/0` converts the registry and every space that opens
-without runtime options in one pass; for an encrypted space, open it with its
-key and run `barrel_session:migrate/1`. Run the new version on every node of a
-mesh before any of them writes: a 1.x node ignores `revoke:` documents and
-keeps accepting a revoked token.
+2.0 stores grants, sessions and handoffs differently, and needs barrel_docdb
+3.1. Nodes running both versions do not agree, so upgrade the whole mesh in
+this order:
+
+1. Upgrade barrel_docdb to 3.1 on every node. You can do it one node at a
+   time: the replication protocol is unchanged, and a 3.1 node refuses the
+   mixed-up versions a 3.0 node still sends. Each database converts its
+   version history the first time 3.1 opens it, in one pass, and logs how
+   many rows it moved and how many documents it repaired.
+2. Stop writing through barrel_spaces, or stop replicating the registry and
+   the space databases.
+3. Upgrade barrel_spaces to 2.0 (and barrel_server to 1.15.1) on every node.
+4. On one node, run `barrel_spaces:migrate/0`. It converts the registry and
+   every space that opens without runtime options, and lists the others in
+   `skipped`. Open each skipped space (an encrypted one with its key) and
+   run `barrel_session:migrate/1`.
+5. Resume replication. The other nodes receive the converted documents.
+6. Resume writes.
+
+```erlang
+{ok, #{grants := G, handoffs := H, sessions := S, skipped := Skipped}} =
+    barrel_spaces:migrate(),
+[begin
+     {ok, Space} = barrel_spaces:open_space(Id, #{encryption => Spec}),
+     {ok, _} = barrel_session:migrate(Space)
+ end || Id <- Skipped].
+```
+
+Documents you do not convert still read the same, and convert on their next
+write.
+
+What goes wrong if you skip step 2 and a 1.x node keeps writing:
+
+| On a 1.x node | Effect |
+|---|---|
+| Verifying a token | It ignores `revoke:` documents and accepts a token revoked on a 2.0 node. |
+| Reading a session | It finds no data, pins or summary written by 2.0. |
+| `set_data/4` on an existing key | 2.0 keeps showing its own value; only new keys appear. |
+| `unpin_context/3` | The pin comes back on 2.0 nodes. |
+| Accepting a handoff | A handoff accepted on 2.0 looks pending, so a second accept succeeds and the owner may change. |
+
+A 1.x revocation still holds on 2.0 nodes, which read both layouts.
+
+There is no way back: 1.x cannot read converted sessions, and a database
+opened by barrel_docdb 3.1 loses its conflicts and past versions under 3.0.
 
 ## Over REST and MCP
 

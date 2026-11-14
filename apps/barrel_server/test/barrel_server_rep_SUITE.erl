@@ -347,10 +347,12 @@ t_registry_grants_over_http(Config) ->
     ?assertEqual(crypto:hash(sha256, Legacy), LegacyHash),
     ok = barrel_caps:revoke(Token),
     {ok, _} = barrel_rep:replicate(Registry, Endpoint, push_opts()),
-    {ok, #{<<"revoked_at">> := Revoked}} = barrel_docdb:get_doc(Served, Key),
+    %% the revocation is its own document (barrel_spaces 2.0)
+    RevokeKey = <<"revoke:", Id/binary>>,
+    {ok, #{<<"revoked_at">> := Revoked}} = barrel_docdb:get_doc(Served, RevokeKey),
     ?assert(Revoked > 0),
     {ok, _} = barrel_rep:replicate(Endpoint, Local, pull_opts()),
-    {ok, #{<<"revoked_at">> := Revoked}} = barrel_docdb:get_doc(Local, Key),
+    {ok, #{<<"revoked_at">> := Revoked}} = barrel_docdb:get_doc(Local, RevokeKey),
     {ok, #{<<"token_hash">> := LegacyHash}} =
         barrel_docdb:get_doc(Local, LegacyKey),
     ok.

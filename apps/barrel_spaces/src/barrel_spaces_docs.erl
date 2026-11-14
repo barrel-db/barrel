@@ -1,24 +1,39 @@
 %%%-------------------------------------------------------------------
 %%% @doc Document writes for the agent layer: write once, replace every
-%%% version this node holds, or delete every version. A replace or a
-%%% delete hands back all the versions it read, so it leaves no
-%%% conflict behind on this node. `Db' is a barrel database (a space)
+%%% version this node holds, or delete every version. Each write hands
+%%% back every live version this node holds, tombstones and the
+%%% versions behind a tombstone included, so it leaves no conflict
+%%% behind on this node. `Db' is a barrel database (a space)
 %%% or a barrel_docdb name (the registry).
 %%% @end
 %%%-------------------------------------------------------------------
 -module(barrel_spaces_docs).
 
--export([create/3, replace/3, remove/2, get/2, fold_prefix/4, backoff/1]).
+-export([create/3, replace/3, remove/2, get/2, fold_prefix/4, backoff/1,
+         state/2]).
 
 -define(RETRIES, 32).
 
 %% @doc Write a document that must not exist yet: `{error, conflict}'
 %% when a live version of it does.
 -spec create(term(), map(), map()) -> {ok, map()} | {error, term()}.
-create(Db, Doc, Opts) ->
-    case put(Db, maps:without([<<"_rev">>, <<"_observed">>], Doc), Opts) of
-        {error, {conflict, _}} -> {error, conflict};
-        Other -> Other
+create(Db, #{<<"id">> := Id} = Doc0, Opts) ->
+    Doc = maps:without([<<"_rev">>, <<"_observed">>], Doc0),
+    case get_doc(Db, Id, #{}) of
+        {ok, _} ->
+            {error, conflict};
+        {error, _} ->
+            %% replace the versions behind a tombstone too, if any
+            Doc1 = case state(Db, Id) of
+                {ok, Live, _Deleted} when length(Live) > 1 ->
+                    Doc#{<<"_observed">> => Live};
+                _ ->
+                    Doc
+            end,
+            case put(Db, Doc1, Opts) of
+                {error, {conflict, _}} -> {error, conflict};
+                Other -> Other
+            end
     end.
 
 %% @doc Write a document over every version of it this node holds
@@ -64,9 +79,34 @@ remove(Db, Id, N) ->
                 {error, _} = Err -> Err
             end;
         {error, not_found} ->
-            ok;
+            %% shown deleted: delete the versions behind the tombstone
+            case state(Db, Id) of
+                {ok, Live, true} when length(Live) > 1 ->
+                    case delete(Db, Id, #{observed => Live}) of
+                        {ok, _} -> ok;
+                        {error, {conflict, _}} when N > 0 ->
+                            backoff(N), remove(Db, Id, N - 1);
+                        {error, _} = Err -> Err
+                    end;
+                _ ->
+                    ok
+            end;
         {error, _} = Err ->
             Err
+    end.
+
+%% @doc The live versions this node holds of a document, and whether
+%% the one it shows is a tombstone: `{ok, Tokens, Deleted}', or
+%% `not_found' when the node never held the document.
+-spec state(term(), binary()) -> {ok, [binary()], boolean()} | not_found.
+state(Db, Id) ->
+    case barrel_docdb:get_doc_state(docdb(Db), Id) of
+        {ok, #{state := Bin}} ->
+            State = barrel_live:decode_state(Bin),
+            #{observed := Observed, deleted := Deleted} = barrel_live:view(State),
+            {ok, [barrel_version:to_token(T) || T <- Observed], Deleted};
+        {error, _} ->
+            not_found
     end.
 
 %% @doc Read a document.

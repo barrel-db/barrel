@@ -6,16 +6,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [2.0.0] - 2026-11-14
 
 ### Breaking
-- Grants, sessions and handoffs are stored as one document per fact, so they replicate without losing writes. Every node of a mesh must run 2.0 before any of them writes: a 1.x node ignores the new revocation documents and keeps accepting a revoked token. Documents written by 1.x read the same and convert on their next write, or all at once with `barrel_spaces:migrate/0`.
+- Grants, sessions and handoffs are stored as one document per fact, so they replicate without losing writes. Nodes running 1.x and 2.0 do not agree: a 1.x node ignores the new revocation documents and keeps accepting a revoked token, and does not see session data written by 2.0. Upgrade every node, with writes or replication stopped, then run `barrel_spaces:migrate/0` on one node; the spaces guide gives the full procedure. Documents written by 1.x read the same and convert on their next write. There is no way back to 1.x once sessions are converted.
+- `barrel_session:get/2` no longer returns `_rev`, and returns `counters`.
 - Requires barrel_docdb 3.1.
 
 ### Fixed
 - A revocation could be undone. Revoking edited the grant, and a concurrent write to that grant on another node could win over the revocation. A revocation is now a document of its own that nothing edits.
 - Two nodes writing the same session kept only one side's data keys, pins or summary, and an unpinned item came back from a node that still had it. Each data key, pin and the summary are now documents of their own; removing one deletes its document.
 - A handoff could go back from completed to accepted, or from accepted to pending. Each step is now a document written once and the status is the furthest step present. Agents accepting on nodes that cannot see each other are all recorded, and every node names the same owner.
-- Concurrent edits of grants, sessions and handoffs left conflicts that nothing resolved. Applications replicating a space no longer need a conflict resolver for them.
+- Concurrent edits of grants, sessions and handoffs left conflicts that nothing resolved. The registry and spaces now open with `barrel_spaces_resolver`, which closes every conflict on these documents by keeping the version every node already shows, so applications replicating a space no longer need a resolver for them. A space opened with your own `conflict_resolver` still uses it for your documents.
+- The janitor could delete a session's documents that replication delivered before the session itself, and the deletion then replicated to every node. It now deletes them only once the session is deleted.
 
 ### Added
+- `barrel_spaces_resolver`: the conflict resolver of the registry and of spaces, for applications that open them themselves.
 - `barrel_session:delete_data/3` removes a data key.
 - `barrel_session:incr_counter/4` and `get_counters/2`: per-session counters that two nodes can update at once without losing an increment. `get/2` returns them under `counters`.
 - `barrel_caps:revoke/2` records who revoked a token; `list/1` returns it as `revoked_by`.

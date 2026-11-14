@@ -24,6 +24,7 @@
 
 -export([t_caller_pin_and_message_ids/1]).
 
+-export([t_janitor_keeps_early_parts/1]).
 -export([t_delete_data/1, t_counters_local_writers/1,
          t_janitor_collects_parts/1, t_one_document_per_fact/1]).
 
@@ -35,7 +36,7 @@ all() ->
      t_message_ranges, t_data_summary_pinned, t_delete_cascade,
      t_janitor_orphans, t_list_by_agent, t_no_ttl_durable, t_import_with_ids, t_list_match_indexed, t_caller_pin_and_message_ids,
      t_delete_data, t_counters_local_writers, t_janitor_collects_parts,
-     t_one_document_per_fact].
+     t_one_document_per_fact, t_janitor_keeps_early_parts].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(barrel_spaces),
@@ -366,6 +367,19 @@ t_janitor_collects_parts(Config) ->
         DbBin, fun(D, Acc) -> {ok, [D | Acc]} end, [],
         #{id_prefix => <<"session:", Sid/binary>>}),
     ?assertEqual([], Left),
+    ok.
+
+%% Replication can bring a session's documents before its header: the
+%% janitor leaves them until the header is a tombstone.
+t_janitor_keeps_early_parts(Config) ->
+    #{db := Db} = ?config(space, Config),
+    Sid = <<"early">>,
+    {ok, _} = barrel:put_doc(Db, #{<<"id">> => <<"session:early:data:k">>,
+                                   <<"type">> => <<"session_data">>,
+                                   <<"session">> => Sid, <<"key">> => <<"k">>,
+                                   <<"value">> => 1}),
+    {ok, _} = barrel_spaces_janitor:sweep(),
+    {ok, _} = barrel:get_doc(Db, <<"session:early:data:k">>),
     ok.
 
 %% Each fact is its own document and the header stays small.

@@ -9,6 +9,7 @@
 
 -export([all/0, init_per_suite/1, end_per_suite/1,
          init_per_testcase/2, end_per_testcase/2]).
+-export([app_resolver/1]).
 -export([t_revoke_during_split/1,
          t_revoke_survives_grant_rewrite/1,
          t_revoke_before_grant_arrives/1,
@@ -18,7 +19,9 @@
          t_delete_data_stays_removed/1,
          t_handoff_split_accept/1,
          t_handoff_never_goes_back/1,
-         t_counters_two_nodes/1]).
+         t_counters_two_nodes/1,
+         t_no_conflict_left/1,
+         t_app_resolver_kept/1]).
 
 -include_lib("common_test/include/ct.hrl").
 -include_lib("stdlib/include/assert.hrl").
@@ -31,7 +34,7 @@ all() ->
      t_session_two_sides, t_same_key_later_write_wins,
      t_unpin_stays_removed, t_delete_data_stays_removed,
      t_handoff_split_accept, t_handoff_never_goes_back,
-     t_counters_two_nodes].
+     t_counters_two_nodes, t_no_conflict_left, t_app_resolver_kept].
 
 init_per_suite(Config) ->
     application:set_env(barrel_docdb, data_dir, ?config(priv_dir, Config)),
@@ -41,6 +44,11 @@ init_per_suite(Config) ->
 end_per_suite(_Config) ->
     ok.
 
+init_per_testcase(t_app_resolver_kept = Case, Config) ->
+    Replicas = barrel_spaces_mesh:start(
+                 atom_to_binary(Case), 2,
+                 barrel_spaces_resolver:with({?MODULE, app_resolver})),
+    [{replicas, Replicas} | Config];
 init_per_testcase(Case, Config) ->
     Replicas = barrel_spaces_mesh:start(atom_to_binary(Case), 3),
     [{replicas, Replicas} | Config].
@@ -265,6 +273,77 @@ t_counters_two_nodes(Config) ->
     {ok, S} = barrel_session:get(space(A), Sid),
     ?assertEqual(21, maps:get(<<"messages">>, maps:get(<<"counters">>, S))),
     ok.
+
+%%====================================================================
+%% No conflict is left behind
+%%====================================================================
+
+%% Two nodes write every kind of document at once; after replication
+%% no document holds more than one live version on any node.
+t_no_conflict_left(Config) ->
+    [A, B, _C] = Rs = ?config(replicas, Config),
+    {ok, Sid} = barrel_session:create(space(A), #{}),
+    {ok, _} = barrel_session:set_data(space(A), Sid, <<"gone">>, 0),
+    {ok, Token, _} = on(A, fun() -> barrel_caps:grant(<<"sp_mesh">>, #{}) end),
+    {ok, #{token := Ho}} =
+        on(A, fun() -> barrel_handoff:create(<<"sp_mesh">>,
+                                             #{task_name => <<"t">>})
+              end),
+    {ok, #{token := Ho2}} =
+        on(A, fun() -> barrel_handoff:create(<<"sp_mesh">>,
+                                             #{task_name => <<"t2">>})
+              end),
+    ok = sync_all(Rs),
+    [begin
+         {ok, _} = barrel_session:set_data(space(R), Sid, <<"k">>, name(R)),
+         {ok, _} = barrel_session:set_summary(space(R), Sid, name(R)),
+         {ok, _} = barrel_session:delete_data(space(R), Sid, <<"gone">>),
+         {ok, <<"p">>} = barrel_session:pin_context(space(R), Sid,
+                                                    #{id => <<"p">>,
+                                                      content => name(R)}),
+         {ok, _} = barrel_session:incr_counter(space(R), Sid, <<"n">>, 1),
+         ok = on(R, fun() -> barrel_caps:revoke(Token, #{by => name(R)}) end),
+         {ok, _} = on(R, fun() -> accept(Ho, <<"same-agent">>) end),
+         {ok, _} = on(R, fun() ->
+                             barrel_handoff:complete(Ho2, #{revoke => false,
+                                                            result => name(R)})
+                         end)
+     end || R <- [A, B]],
+    ok = sync_all(Rs),
+    [?assertEqual([], barrel_spaces_mesh:conflicted(R)) || R <- Rs],
+    %% and every node still gives the same answers
+    Views = [barrel_session:get(space(R), Sid) || R <- Rs],
+    ?assertMatch([V, V, V], Views),
+    ok.
+
+%% A space opened with the application's resolver: the application's
+%% documents follow it, barrel_spaces' documents still close.
+t_app_resolver_kept(Config) ->
+    [A, B] = Rs = ?config(replicas, Config),
+    #{db := DbA} = space(A),
+    #{db := DbB} = space(B),
+    {ok, Sid} = barrel_session:create(space(A), #{}),
+    {ok, _} = barrel:put_doc(DbA, #{<<"id">> => <<"note">>, <<"v">> => 0}),
+    ok = sync_all(Rs),
+    {ok, _} = barrel_session:set_data(space(A), Sid, <<"k">>, 1),
+    {ok, _} = barrel_session:set_data(space(B), Sid, <<"k">>, 2),
+    [begin
+         {ok, D} = barrel:get_doc(Db, <<"note">>),
+         {ok, _} = barrel:put_doc(Db, D#{<<"v">> => V})
+     end || {Db, V} <- [{DbA, 3}, {DbB, 5}]],
+    ok = sync_all(Rs),
+    [?assertEqual([], barrel_spaces_mesh:conflicted(R)) || R <- Rs],
+    [?assertMatch({ok, #{<<"v">> := 8}}, barrel:get_doc(Db, <<"note">>))
+     || Db <- [DbA, DbB]],
+    ok.
+
+%% The application's resolver of the test: sum the values.
+app_resolver(Versions) ->
+    {merge, #{<<"v">> => lists:sum([maps:get(<<"v">>, B, 0)
+                                    || #{deleted := false, body := B} <- Versions])}}.
+
+name(#{name := Name}) ->
+    Name.
 
 %%====================================================================
 %% Helpers
