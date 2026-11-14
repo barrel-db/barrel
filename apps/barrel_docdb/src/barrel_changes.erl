@@ -804,17 +804,15 @@ in_channel(DbName, Channel, Body) ->
 
 %% @private Bodies of a document's live, non-deleted conflict versions.
 live_conflict_bodies(StoreRef, DbName, DocId) ->
-    barrel_store_rocksdb:fold_range(
-        StoreRef, barrel_store_keys:doc_version_prefix(DbName, DocId),
-        barrel_store_keys:doc_version_end(DbName, DocId),
-        fun(Key, <<1:8, 0:8, _/binary>>, Acc) ->
-               VEnc = barrel_store_keys:decode_doc_version_key(DbName, DocId, Key),
+    barrel_doc_chain:fold(
+        StoreRef, DbName, DocId,
+        fun(_Key, VEnc, <<1:8, 0:8, _/binary>>, Acc) ->
                case barrel_store_rocksdb:body_get(
                       StoreRef, barrel_store_keys:doc_body_rev(DbName, DocId, VEnc)) of
                    {ok, Cbor} -> {ok, [barrel_docdb_codec_cbor:decode_any(Cbor) | Acc]};
                    _ -> {ok, Acc}
                end;
-           (_Key, _Value, Acc) ->
+           (_Key, _VEnc, _Value, Acc) ->
                {ok, Acc}
         end,
         []).

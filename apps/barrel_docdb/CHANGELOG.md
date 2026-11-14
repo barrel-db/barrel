@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.1.0] - 2026-11-14
+
+### Fixed
+- A document whose id is another id followed by `:` (`session:42` and `session:42:data:k`, `a` and `a:b`) mixed its version history with the other one. The conflicts of `a` listed versions of `a:b`, replication carried them to the peers as versions of `a`, and the longer one's deletion could make `a` read as deleted on every node. Removing the history of `a` also removed the history of `a:b`. Each document now keeps its own history.
+
+### Changed
+- The version history is stored in a new layout. A database moves to it once, the first time this version opens it writable; a read-only database keeps reading the old layout correctly. A database opened by 3.1 cannot be opened by 3.0 again without losing its conflicts and past versions.
+
 ## [3.0.0] - 2026-11-14
 
 ### Breaking
