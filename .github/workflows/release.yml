@@ -80,6 +80,7 @@ jobs:
     needs: plan
     if: needs.plan.outputs.bundle != ''
     strategy:
+      fail-fast: false
       matrix:
         include:
           - target: linux-x64
@@ -115,12 +116,13 @@ jobs:
              "barrel_server-$BARREL_BUNDLE-${{ matrix.target }}.tar.gz"
       - name: Starts
         run: |
-          mkdir rel
-          tar xzf "barrel_server-$BARREL_BUNDLE-${{ matrix.target }}.tar.gz" -C rel
-          rel/bin/barrel_server daemon
+          dir="$RUNNER_TEMP/barrel_server"
+          mkdir -p "$dir"
+          tar xzf "barrel_server-$BARREL_BUNDLE-${{ matrix.target }}.tar.gz" -C "$dir"
+          "$dir/bin/barrel_server" daemon
           for i in $(seq 30); do curl -fsS 127.0.0.1:8080/ready && break; sleep 2; done
           curl -fsS 127.0.0.1:8080/ready
-          rel/bin/barrel_server stop
+          "$dir/bin/barrel_server" stop
       - uses: actions/upload-artifact@v4
         with:
           name: tarball-${{ matrix.target }}
