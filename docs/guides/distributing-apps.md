@@ -190,7 +190,7 @@ Git mirror, pinned to the Barrel bundle that carries the version you want:
 ```erlang
 {deps, [
     {barrel_embed, {git, "https://code.barrel-db.eu/barrel-db/barrel_embed.git",
-                    {tag, "b336"}}}
+                    {tag, "b00341"}}}
 ]}.
 ```
 

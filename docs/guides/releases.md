@@ -8,8 +8,9 @@ release, or pin a dependency to a known state.
 ## What a bundle is
 
 Every merge to `main` that passes CI is a bundle named `b<N>`, where N is the
-number of commits on `main` at that point (the scheme llama.cpp uses). Numbers
-only go up; the gaps between them are the commits of each merged change.
+number of commits on `main` at that point (the scheme llama.cpp uses), written
+with five digits: `b00341`. Numbers only go up, so bundles sort the same by name
+and by age; the gaps between them are the commits of each merged change.
 
 Each bundle has a git tag and a GitHub release holding:
 
@@ -24,13 +25,13 @@ version, which the bundle notes record.
 ## Find the app versions of a bundle
 
 ```sh
-gh release view b336 --repo barrel-db/barrel
+gh release view b00341 --repo barrel-db/barrel
 ```
 
 Or from a clone:
 
 ```sh
-git show b336:apps/barrel_docdb/src/barrel_docdb.app.src | grep vsn
+git show b00341:apps/barrel_docdb/src/barrel_docdb.app.src | grep vsn
 ```
 
 ## Run a bundle's barrel_server
@@ -38,15 +39,15 @@ git show b336:apps/barrel_docdb/src/barrel_docdb.app.src | grep vsn
 The tarball carries its own Erlang runtime:
 
 ```sh
-gh release download b336 --repo barrel-db/barrel -p 'barrel_server-b336-linux-x64.tar.gz'
-mkdir barrel && tar xzf barrel_server-b336-linux-x64.tar.gz -C barrel
+gh release download b00341 --repo barrel-db/barrel -p 'barrel_server-b00341-linux-x64.tar.gz'
+mkdir barrel && tar xzf barrel_server-b00341-linux-x64.tar.gz -C barrel
 barrel/bin/barrel_server foreground
 ```
 
 Or the image:
 
 ```sh
-docker run -p 8080:8080 -e BARREL_AUTH_TOKENS=secret ghcr.io/barrel-db/barrel-server:b336
+docker run -p 8080:8080 -e BARREL_AUTH_TOKENS=secret ghcr.io/barrel-db/barrel-server:b00341
 ```
 
 `barrel/bin/barrel_server versions` and the image's
@@ -59,7 +60,7 @@ repository, use the bundle tag:
 
 ```erlang
 {deps, [
-    {barrel, {git, "https://github.com/barrel-db/barrel.git", {tag, "b336"}}}
+    {barrel, {git, "https://github.com/barrel-db/barrel.git", {tag, "b00341"}}}
 ]}.
 ```
 
