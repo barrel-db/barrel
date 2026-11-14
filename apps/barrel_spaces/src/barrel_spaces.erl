@@ -50,7 +50,9 @@ ensure_registry() ->
         {ok, _} ->
             ok;
         {error, _} ->
-            case barrel_docdb:create_db(Name) of
+            case barrel_docdb:create_db(
+                   Name, #{conflict_resolver =>
+                               {barrel_spaces_resolver, registry}}) of
                 {ok, _} -> ok;
                 {error, already_exists} -> ok
             end
@@ -267,7 +269,8 @@ open_active(Id, Info, RuntimeOpts, Embedding) ->
 open_db(Id, Opts, TtlSweep, VecOpts, Embedding) ->
     DocOpts0 = maps:get(docdb, Opts, #{}),
     OpenOpts0 = with_embedding(Embedding, #{
-        docdb => DocOpts0#{ttl_sweep_interval => TtlSweep},
+        docdb => DocOpts0#{ttl_sweep_interval => TtlSweep,
+                           conflict_resolver => space_resolver(DocOpts0)},
         vectordb => VecOpts,
         owner => barrel_spaces
     }),
@@ -276,6 +279,13 @@ open_db(Id, Opts, TtlSweep, VecOpts, Embedding) ->
         Spec -> OpenOpts0#{encryption => Spec}
     end,
     barrel_dbs:ensure(Id, OpenOpts).
+
+%% barrel_spaces closes the conflicts of its own documents; the caller's
+%% resolver, if any, keeps the others.
+space_resolver(#{conflict_resolver := Theirs}) ->
+    barrel_spaces_resolver:with(Theirs);
+space_resolver(_DocOpts) ->
+    {barrel_spaces_resolver, space}.
 
 with_embedding(undefined, OpenOpts) -> OpenOpts;
 with_embedding(Policy, OpenOpts) -> OpenOpts#{embedding => Policy}.

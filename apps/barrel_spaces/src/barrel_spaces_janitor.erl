@@ -4,7 +4,9 @@
 %%% data, pins, summary, counters: none carries a TTL of its own)
 %%% become orphans. The janitor periodically walks
 %%% each OPEN space's `session:' prefix and deletes the documents
-%%% whose session header is gone. Bounded per pass; deletions are real
+%%% whose session header is a tombstone. A header this node never
+%%% received, or one expired and not yet swept, keeps its documents:
+%%% replication can deliver a session's documents before its header. Bounded per pass; deletions are real
 %%% tombstones.
 %%% @end
 %%%-------------------------------------------------------------------
@@ -106,14 +108,14 @@ classify(#{<<"session">> := Sid, <<"id">> := DocId}, SpaceDb, Live, Dead,
                 true ->
                     {ok, {Live, Dead, [DocId | Acc]}};
                 false ->
-                    case barrel_docdb:get_doc(
+                    case barrel_spaces_docs:state(
                              SpaceDb, <<"session:", Sid/binary>>) of
-                        {ok, _} ->
-                            {ok, {sets:add_element(Sid, Live), Dead,
-                                  Acc}};
-                        {error, _} ->
+                        {ok, _, true} ->
                             {ok, {Live, sets:add_element(Sid, Dead),
-                                  [DocId | Acc]}}
+                                  [DocId | Acc]}};
+                        _ ->
+                            {ok, {sets:add_element(Sid, Live), Dead,
+                                  Acc}}
                     end
             end
     end;

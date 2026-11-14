@@ -7,8 +7,9 @@
 %%% version it holds. After every step the replica that acted, or
 %%% received, must show what the oracle says; after the full sync every
 %%% replica must show the same thing, counters must be exact, a
-%%% revocation must hold everywhere and a handoff status must never
-%%% have gone back on any replica.
+%%% revocation must hold everywhere, a handoff status must never have
+%%% gone back on any replica, and no document may hold a second live
+%%% version.
 %%% @end
 %%%-------------------------------------------------------------------
 -module(barrel_spaces_prop_SUITE).
@@ -86,20 +87,16 @@ sessions(Rs, _Seed) ->
     Counts = maps:get(counts, O),
     [?assertEqual({ok, Counts}, barrel_session:get_counters(space(R), Sid))
      || R <- Rs],
-    %% a count document has one writer: never a conflict to lose
-    [[?assertNot(maps:is_key(<<"_conflicts">>, D)) || D <- count_docs(R, Sid)]
-     || R <- Rs],
-    ok.
+    no_conflict_left(Rs).
 
-count_docs(R, Sid) ->
-    #{db := #{docdb := Db}} = space(R),
-    Ids = barrel_spaces_docs:fold_prefix(
-            Db, <<"session:", Sid/binary, ":count:">>,
-            fun(#{<<"id">> := Id}, Acc) -> [Id | Acc] end, []),
-    [element(2, barrel_docdb:get_doc(Db, Id, #{conflicts => true})) || Id <- Ids].
+%% Once replicas agree, no document holds a second live version.
+no_conflict_left(Rs) ->
+    [?assertEqual([], barrel_spaces_mesh:conflicted(R)) || R <- Rs],
+    ok.
 
 session_step(Rs, Sid, O) ->
     R = pick(Rs),
+    ok = next_ms(),
     case uniform(6) of
         1 ->
             Key = pick([<<"k1">>, <<"k2">>, <<"k3">>]),
@@ -185,7 +182,7 @@ handoffs(Rs, _Seed) ->
     end,
     %% the final status is the furthest any replica ever showed
     ?assertEqual(lists:max(maps:values(Rank)), rank(Status)),
-    ok.
+    no_conflict_left(Rs).
 
 handoff_step(Rs, Hid, T, {Accepted, Completed, Rank}) ->
     R = pick(Rs),
@@ -252,7 +249,7 @@ grants(Rs, _Seed) ->
          [?assertEqual(Want, verified(R, Tok)) || R <- Rs]
      end || {Tok, _} <- Tokens],
     _ = Refused,
-    ok.
+    no_conflict_left(Rs).
 
 grant_step(Rs, Tokens, {Revoked, Refused}) ->
     R = pick(Rs),
@@ -344,6 +341,18 @@ name(#{name := Name}) ->
 
 pick(List) ->
     lists:nth(uniform(length(List)), List).
+
+%% Each step starts in a millisecond of its own, so the newest write is
+%% also the one with the highest token.
+next_ms() ->
+    T = erlang:system_time(millisecond),
+    wait_past(T).
+
+wait_past(T) ->
+    case erlang:system_time(millisecond) of
+        T -> timer:sleep(1), wait_past(T);
+        _ -> ok
+    end.
 
 %% The suite's own random state: code under test drawing from the
 %% process's state must not change the steps a seed runs.
