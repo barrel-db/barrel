@@ -15,7 +15,11 @@
          t_history_stays_apart/1,
          t_owner_split/1,
          t_moves_old_rows/1,
-         t_read_only_old_rows/1]).
+         t_read_only_old_rows/1,
+         t_owner_vector_ahead/1,
+         t_owner_without_vector/1,
+         t_refuses_leaked_versions/1,
+         t_repairs_leaked_winner/1]).
 
 -include_lib("common_test/include/ct.hrl").
 -include_lib("stdlib/include/assert.hrl").
@@ -24,7 +28,9 @@
 
 all() ->
     [t_conflicts_stay_apart, t_replication_keeps_docs, t_history_stays_apart,
-     t_owner_split, t_moves_old_rows, t_read_only_old_rows].
+     t_owner_split, t_moves_old_rows, t_read_only_old_rows,
+     t_owner_vector_ahead, t_owner_without_vector, t_refuses_leaked_versions,
+     t_repairs_leaked_winner].
 
 init_per_suite(Config) ->
     application:set_env(barrel_docdb, data_dir, ?config(priv_dir, Config)),
@@ -130,9 +136,88 @@ t_read_only_old_rows(Config) ->
     {ok, _} = barrel_docdb:create_db(A),
     ok.
 
+%% A version from an old peer whose vector names its author at a later
+%% clock still owns its row.
+t_owner_vector_ahead(_Config) ->
+    Hlc = barrel_hlc:new_hlc(),
+    Later = barrel_hlc:add_logical(Hlc, 5),
+    VEnc = barrel_version:encode({Hlc, <<"node-1">>}),
+    Row = <<0, 0, (barrel_vv:encode(#{<<"node-1">> => Later}))/binary>>,
+    ?assertEqual({ok, <<"a:b">>, VEnc},
+                 barrel_doc_chain:owner(<<"a:b:", VEnc/binary>>, Row)),
+    ok.
+
+%% A row whose vector names no version goes to the longest doc id that
+%% has a document.
+t_owner_without_vector(_Config) ->
+    VEnc = barrel_version:encode({barrel_hlc:new_hlc(), <<"node-1">>}),
+    Row = <<0, 0, (barrel_vv:encode(#{}))/binary>>,
+    Both = fun(Id) -> lists:member(Id, [<<"a">>, <<"a:b">>]) end,
+    ?assertEqual({ok, <<"a:b">>, VEnc},
+                 barrel_doc_chain:owner(<<"a:b:", VEnc/binary>>, Row, Both)),
+    ?assertEqual({ok, <<"a">>, VEnc},
+                 barrel_doc_chain:owner(<<"a:", VEnc/binary>>, Row, Both)),
+    ?assertEqual(error, barrel_doc_chain:owner(<<"a:", VEnc/binary>>, Row,
+                                               fun(_) -> false end)),
+    ok.
+
+%% A peer on docdb 3.0 sends, as a version of `a', a version it read
+%% from the row of `a:b': it is refused.
+t_refuses_leaked_versions(Config) ->
+    {A, B} = {?config(a, Config), ?config(b, Config)},
+    {ok, _} = barrel_docdb:put_doc(A, #{<<"id">> => <<"a">>, <<"who">> => <<"a">>}),
+    {ok, _} = barrel_docdb:put_doc(A, #{<<"id">> => <<"a:b">>, <<"who">> => <<"a:b">>}),
+    {Leaked, VV} = leaked_version(A),
+    {ok, #{state := StateBin, bodies := Bodies}} = barrel_docdb:get_doc_state(A, <<"a">>),
+    State = barrel_live:decode_state(StateBin),
+    Forged = State#{live => (barrel_live:live(State))#{Leaked => #{deleted => false,
+                                                                    vv => VV}}},
+    {ok, _, _} = barrel_docdb:put_doc_state(
+                   B, <<"a">>, barrel_live:encode_state(Forged),
+                   Bodies#{barrel_version:to_token(Leaked) => #{}}),
+    {ok, Doc} = barrel_docdb:get_doc(B, <<"a">>, #{conflicts => true}),
+    ?assertEqual(<<"a">>, maps:get(<<"who">>, Doc)),
+    ?assertNot(maps:is_key(<<"_conflicts">>, Doc)),
+    ok.
+
+%% A database from 3.0 whose `a' took a version of `a:b' as winner: the
+%% move promotes a version of `a' of its own.
+t_repairs_leaked_winner(Config) ->
+    {A, B} = {?config(a, Config), ?config(b, Config)},
+    _ = conflict_all(A, B),
+    {ok, #{<<"who">> := Shown}} = barrel_docdb:get_doc(A, <<"a">>),
+    Own = hd([A, B] -- [Shown]),
+    {Leaked, VV} = leaked_version(A),
+    Store = persistent_term:get({barrel_store, A}),
+    Key = barrel_store_keys:doc_entity(barrel_keyspace:resolve(A), <<"a">>),
+    {ok, Columns} = barrel_store_rocksdb:get_entity(Store, Key),
+    ok = barrel_store_rocksdb:put_entity(
+           Store, Key,
+           lists:keystore(<<"vv">>, 1,
+                          lists:keystore(<<"ver">>, 1, Columns,
+                                         {<<"ver">>, barrel_version:encode(Leaked)}),
+                          {<<"vv">>, barrel_vv:encode(VV)})),
+    _ = to_old_layout(A),
+    ok = barrel_docdb:close_db(A),
+    {ok, _} = barrel_docdb:create_db(A),
+    {ok, Doc} = barrel_docdb:get_doc(A, <<"a">>, #{conflicts => true}),
+    ?assertEqual(Own, maps:get(<<"who">>, Doc)),
+    ?assertNotEqual(barrel_version:to_token(Leaked), maps:get(<<"_rev">>, Doc)),
+    ok.
+
 %%====================================================================
 %% Helpers
 %%====================================================================
+
+%% The version docdb 3.0 read, for `a', from the row of `a:b': the
+%% tail `b:' + version of `a:b', with that version's vector.
+leaked_version(Db) ->
+    {ok, #{state := StateBin}} = barrel_docdb:get_doc_state(Db, <<"a:b">>),
+    Live = barrel_live:live(barrel_live:decode_state(StateBin)),
+    {V, #{vv := VV}} = lists:last(lists:sort(maps:to_list(Live))),
+    Leaked = barrel_version:decode(<<"b:", (barrel_version:encode(V))/binary>>),
+    true = barrel_live:leaked(Leaked, VV),
+    {Leaked, VV}.
 
 %% Each id written on A, copied to B, then edited on both sides.
 conflict_all(A, B) ->

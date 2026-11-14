@@ -17,6 +17,7 @@
 -export([view/1, evict/3]).
 -export([auto_inputs/1, auto_step/3, auto_token/2, base/2]).
 -export([live/1, tokens/1, digest/1]).
+-export([names_itself/2, leaked/2, drop_leaked/1]).
 -export([encode_ctx/1, decode_ctx/2, encode_state/1, decode_state/1]).
 
 -export_type([state/0, token/0, info/0]).
@@ -353,6 +354,40 @@ take_n(0, Rest, _Fun, Acc) -> {lists:reverse(Acc), Rest};
 take_n(N, Bin, Fun, Acc) ->
     {X, Rest} = Fun(Bin),
     take_n(N - 1, Rest, Fun, [X | Acc]).
+
+%%====================================================================
+%% Versions read from another document's key (docdb before 3.1)
+%%====================================================================
+
+%% @doc Whether a version's vector names it: its author at or above its
+%% own clock. Versions made by barrel_live, automatic resolutions and
+%% versions from old peers (legacy_arrival/4) all do.
+-spec names_itself(token(), #{binary() => barrel_hlc:timestamp()}) -> boolean().
+names_itself({Hlc, Author}, VV) ->
+    case maps:find(Author, VV) of
+        {ok, H} -> not barrel_hlc:less(H, Hlc);
+        error -> false
+    end.
+
+%% @doc Whether a version is one docdb before 3.1 read from the key of
+%% another document: `a' scanned the row `a:b' + ':' + V of `a:b' and
+%% took `b:' + V for a version of `a'. Its encoding then holds, after a
+%% ':', the version its vector names.
+-spec leaked(token(), #{binary() => barrel_hlc:timestamp()}) -> boolean().
+leaked(Token, VV) ->
+    Enc = barrel_version:encode(Token),
+    not names_itself(Token, VV) andalso
+        lists:any(fun({P, 1}) ->
+                          Tail = binary:part(Enc, P + 1, byte_size(Enc) - P - 1),
+                          byte_size(Tail) > 12 andalso
+                              names_itself(barrel_version:decode(Tail), VV)
+                  end, binary:matches(Enc, <<":">>)).
+
+%% @doc A state without its leaked versions, and their tokens.
+-spec drop_leaked(state()) -> {state(), [token()]}.
+drop_leaked(#{live := Live} = State) ->
+    Leaked = [T || {T, #{vv := VV}} <- maps:to_list(Live), leaked(T, VV)],
+    {State#{live => maps:without(Leaked, Live)}, Leaked}.
 
 %%====================================================================
 %% Internal

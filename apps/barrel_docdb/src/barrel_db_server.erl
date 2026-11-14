@@ -557,8 +557,9 @@ init(Name, Config, CompiledChannels, DbPath, Keyspace, Parent, ForkHlc, Crypto) 
                     persistent_term:put({barrel_source, Name},
                                         source_id(ReadOnly, StoreRef, Name,
                                                   DbPath)),
-                    ok = barrel_doc_chain:open(ReadOnly, StoreRef, Keyspace),
+                    Chain = barrel_doc_chain:open(ReadOnly, StoreRef, Keyspace),
                     ok = init_writer(ReadOnly, StoreRef, AttRef, Name, Keyspace),
+                    ok = after_chain_move(Chain, StoreRef, Name, Keyspace),
                     _ = gc_att_uploads(ReadOnly, AttRef, Name, Config),
                     ok = barrel_channel:install(Name, CompiledChannels),
 
@@ -2397,6 +2398,70 @@ load_live(StoreRef, DbName, DocId,
             barrel_live:decode_ctx(CtxBin, Live)
     end.
 
+%% Once the chain rows of a database from before 3.1 are moved, repair
+%% what docdb 3.0 stored from reading other documents' rows: a winner
+%% it took from another document, and conflict counts that counted the
+%% rows of another document. Then record the layout.
+after_chain_move(moved, StoreRef, DbName, Ks) ->
+    Fixed = barrel_store_rocksdb:fold_range(
+              StoreRef, barrel_store_keys:doc_entity_prefix(Ks),
+              barrel_store_keys:doc_entity_end(Ks),
+              fun(Key, _Value, N) ->
+                  Skip = byte_size(barrel_store_keys:doc_entity_prefix(Ks)),
+                  <<_:Skip/binary, DocId/binary>> = Key,
+                  {ok, N + repair_doc(StoreRef, DbName, Ks, DocId)}
+              end, 0),
+    Fixed > 0 andalso logger:notice("barrel_docdb ~ts: repaired ~b document(s) "
+                                    "that docdb 3.0 mixed with another", [DbName, Fixed]),
+    barrel_doc_chain:finish(StoreRef, Ks);
+after_chain_move(_Chain, _StoreRef, _DbName, _Ks) ->
+    ok.
+
+repair_doc(StoreRef, DbName, Ks, DocId) ->
+    case read_current(StoreRef, DbName, DocId) of
+        #{num_conflicts := N} = Old when N > 0 ->
+            repair_live(StoreRef, DbName, Ks, DocId, Old);
+        #{version := W, vv := VV} = Old ->
+            case barrel_live:leaked(W, VV) of
+                true -> repair_live(StoreRef, DbName, Ks, DocId, Old);
+                false -> 0
+            end;
+        undefined ->
+            0
+    end.
+
+repair_live(StoreRef, DbName, Ks, DocId, #{num_conflicts := N} = Old) ->
+    Live0 = load_live(StoreRef, DbName, DocId, Old),
+    case barrel_live:drop_leaked(Live0) of
+        {_Clean, []} ->
+            case map_size(barrel_live:live(Live0)) - 1 of
+                N ->
+                    0;
+                Own ->
+                    Key = barrel_store_keys:doc_entity(Ks, DocId),
+                    {ok, Columns} = barrel_store_rocksdb:get_entity(StoreRef, Key),
+                    ok = barrel_store_rocksdb:put_entity(
+                           StoreRef, Key,
+                           lists:keystore(?COL_NCONFLICTS, 1, Columns,
+                                          {?COL_NCONFLICTS, Own})),
+                    1
+            end;
+        {Clean, _Leaked} ->
+            case map_size(barrel_live:live(Clean)) of
+                0 ->
+                    logger:warning("barrel_docdb ~ts: ~p holds only versions of "
+                                   "another document (docdb 3.0); left as is",
+                                   [DbName, DocId]),
+                    0;
+                _ ->
+                    BodyOf = fun(T) -> version_body(StoreRef, DbName, DocId, Old, T) end,
+                    Vectors = live_vectors(StoreRef, DbName, DocId, Old, Clean),
+                    _ = write_state(StoreRef, DbName, DocId, Old, Live0, Clean, BodyOf,
+                                    #{vectors => Vectors, stored => maps:keys(Vectors)}),
+                    1
+            end
+    end.
+
 %% Every version in the document's chain, superseded or conflict.
 chain_versions(StoreRef, DbName, DocId) ->
     Ks = barrel_keyspace:resolve(DbName),
@@ -3020,7 +3085,8 @@ do_put_version(StoreRef, DbName, Config, Doc, Version, RemoteVV, Deleted) ->
 %% the two states, then eviction and automatic resolution.
 do_put_state(StoreRef, DbName, Config, DocId, StateBin, RemoteBodies,
              RemoteVectors) ->
-    Remote = barrel_live:decode_state(StateBin),
+    Remote = refuse_leaked(DbName, DocId,
+                           barrel_live:drop_leaked(barrel_live:decode_state(StateBin))),
     lists:foreach(fun({H, _}) -> sync_or_throw(H) end,
                   barrel_live:tokens(Remote)),
     Old = read_current(StoreRef, DbName, DocId),
@@ -3043,6 +3109,16 @@ do_put_state(StoreRef, DbName, Config, DocId, StateBin, RemoteBodies,
         Missing ->
             {error, {missing_bodies, lists:sort(Missing)}}
     end.
+
+%% A peer on docdb before 3.1 can send versions it read from another
+%% document's key (`a' holding rows of `a:b'): they are dropped.
+refuse_leaked(_DbName, _DocId, {Remote, []}) ->
+    Remote;
+refuse_leaked(DbName, DocId, {Remote, Leaked}) ->
+    logger:warning("barrel_docdb ~ts: refused ~b version(s) of ~p that a peer "
+                   "read from another document (docdb before 3.1)",
+                   [DbName, length(Leaked), DocId]),
+    Remote.
 
 %% @doc A document's full state for replication: its barrel_live state
 %% and the body of every live version, under one read in the writer.
@@ -3196,6 +3272,7 @@ auto_resolve(Config, DocId, Live, BodyOf, Vectors) ->
         {Fun, Inputs} ->
             LiveInfo = barrel_live:live(Live),
             Versions = [#{token => barrel_version:to_token(T),
+                          doc_id => DocId,
                           deleted => maps:get(deleted, maps:get(T, LiveInfo)),
                           body => BodyOf(T)} || T <- Inputs],
             case resolver_result(Fun, DocId, Versions, LiveInfo) of
