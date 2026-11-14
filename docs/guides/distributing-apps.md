@@ -18,8 +18,8 @@ Before publishing an app:
 - Ensure the app has a `README.md`, a `LICENSE`, a `CHANGELOG.md`, an `ex_doc`
   block, and `{rebar3_hex, "7.2.0"}` in its `project_plugins` (see the plugin
   note below).
-- Do not tag the app. Merging to main releases the Barrel bundle (`b<N>`),
-  which records every app's version; see [releases](releases.md).
+- Do not tag the app. Merging the bump to main releases the Barrel bundle
+  (`YYYY.MM.N`), which records every app's version; see [releases](releases.md).
 
 ## Publish order
 
@@ -170,7 +170,7 @@ Notes:
   `.app.src` point at the umbrella repo; per-app mirrors are optional (the
   umbrella is the source of truth).
 - Drive the mirrors from the bundle release workflow, so each Barrel bundle
-  (`b<N>`) fans out to the standalone repos.
+  (`YYYY.MM.N`) fans out to the standalone repos.
 
 ## Consume an app elsewhere
 
@@ -190,7 +190,7 @@ Git mirror, pinned to the Barrel bundle that carries the version you want:
 ```erlang
 {deps, [
     {barrel_embed, {git, "https://code.barrel-db.eu/barrel-db/barrel_embed.git",
-                    {tag, "b00341"}}}
+                    {tag, "v2026.11.8"}}}
 ]}.
 ```
 

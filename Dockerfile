@@ -22,7 +22,7 @@ RUN git init -q -b main \
     && git add -A \
     && git -c user.email=build@barrel -c user.name=build commit -qm build
 
-# The Barrel bundle this image is built for (b<N>); "dev" for a local build.
+# The Barrel bundle this image is built for (YYYY.MM.N); "dev" for a local build.
 ARG BARREL_BUNDLE=dev
 RUN BARREL_BUNDLE=$BARREL_BUNDLE rebar3 as s3_server,prod release -n barrel_server
 

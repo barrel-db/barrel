@@ -6,10 +6,11 @@ keyword search, encryption at rest, branching/PITR, replication, and an agent
 layer. This umbrella groups the applications so they develop and release
 together, while each stays a standalone OTP application with its own public API.
 
-Every merge to `main` is released as a Barrel bundle, `b<N>` (N commits on
-`main`, five digits: `b00341`), with every app's version, `barrel_server` tarballs and the
-`ghcr.io/barrel-db/barrel-server` image; each app is also on Hex under its own
-version. See [releases](docs/guides/releases.md).
+Each time apps are bumped and released, `main` is released as a Barrel bundle,
+`YYYY.MM.N` (the N-th bundle of that month), with every app's version,
+`barrel_server` tarballs and the `ghcr.io/barrel-db/barrel-server` image; each
+app is also on Hex under its own version. See
+[releases](docs/guides/releases.md).
 
 ## Applications
 

@@ -98,4 +98,4 @@ $ docker build -t barrel-server .
 
 - The container runs as user `barrel` (uid 1000). A bind-mounted data directory must be writable by that uid.
 - The health check calls `/ready` on `BARREL_HTTP_PORT`, so `docker ps` shows the node as healthy once the database and replication processes run. If your own config serves HTTP on another port, set `BARREL_HTTP_PORT` to it.
-- Images are published for `linux/amd64` and `linux/arm64` with each Barrel bundle, tagged with the bundle (`b<N>`) and `latest`. Pin a bundle tag in production.
+- Images are published for `linux/amd64` and `linux/arm64` with each Barrel bundle, tagged with the bundle (`YYYY.MM.N`) and `latest`. Pin a bundle tag in production.
