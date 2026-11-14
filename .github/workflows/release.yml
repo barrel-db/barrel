@@ -94,7 +94,7 @@ jobs:
           - target: linux-arm64
             runner: ubuntu-24.04-arm
           - target: macos-arm64
-            runner: macos-14
+            runner: macos-15
     runs-on: ${{ matrix.runner }}
     env:
       BARREL_BUNDLE: ${{ needs.plan.outputs.bundle }}
