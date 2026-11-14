@@ -21,6 +21,7 @@ Start here.
 - [MCP endpoint](guides/mcp.md): tools, resources, and live queries for MCP clients.
 - [barrel-lite (browser client)](guides/barrel-lite.md): an offline-first TypeScript client that syncs over the wire.
 - [Distribute the umbrella apps](guides/distributing-apps.md): Hex packages, git mirrors, and consuming an app elsewhere.
+- [Releases](guides/releases.md): the Barrel bundle `b<N>`, its app versions, tarballs and image.
 
 ## Architecture
 

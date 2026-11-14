@@ -19,8 +19,6 @@ name: CI
 on:
   push:
     branches: [main]
-    # 'barrel-v*' has no underscore, so 'barrel_*-v*' does not match it.
-    tags: ['barrel-v*', 'barrel_*-v*', 'v*']
   pull_request:
   # The e2e jobs build a Docker image and run containers: replication is
   # opt-in (manual dispatch); the S3 one also runs on every push to main.

@@ -1,0 +1,157 @@
+name: Release
+
+# The Barrel bundle, llama.cpp style: each push to main that passes CI is
+# released as b<N>, N the number of commits on main. The release notes list
+# every app's version and the CHANGELOG sections of the apps whose version
+# changed since the previous bundle; the release carries barrel_server
+# tarballs, and the image goes to ghcr.io/barrel-db/barrel-server as :b<N>
+# and :latest. Apps are not tagged: each is published to Hex on its own.
+#
+# A pull request touching the release runs it dry: notes and tarballs are
+# built, nothing is tagged, pushed or released.
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - scripts/bundle_notes.sh
+      - rebar.config
+
+permissions:
+  contents: write
+  packages: write
+
+# bundles from main run one after the other; a pull request's dry run has its own
+concurrency:
+  group: release-${{ github.event.pull_request.number || 'main' }}
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    if: >-
+      github.event_name == 'pull_request' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push')
+    runs-on: ubuntu-latest
+    outputs:
+      bundle: ${{ steps.n.outputs.bundle }}
+      sha: ${{ steps.n.outputs.sha }}
+      publish: ${{ steps.n.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.event.pull_request.head.sha }}
+          fetch-depth: 0
+      - id: n
+        name: Bundle number
+        run: |
+          sha="$(git rev-parse HEAD)"
+          bundle="b$(git rev-list --count "$sha")"
+          publish=false
+          if [ "${{ github.event_name }}" = workflow_run ]; then
+            if git ls-remote --exit-code --tags origin "refs/tags/$bundle" >/dev/null; then
+              echo "$bundle already released"
+              bundle=""
+            else
+              publish=true
+            fi
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "bundle=$bundle" >> "$GITHUB_OUTPUT"
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+      - name: Notes
+        if: steps.n.outputs.bundle != ''
+        run: |
+          prev="$(git describe --tags --match 'b[0-9]*' --abbrev=0 HEAD^ 2>/dev/null || echo -)"
+          scripts/bundle_notes.sh "$prev" HEAD > notes.md
+          cat notes.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: steps.n.outputs.bundle != ''
+        with:
+          name: notes
+          path: notes.md
+
+  tarball:
+    needs: plan
+    if: needs.plan.outputs.bundle != ''
+    strategy:
+      matrix:
+        include:
+          - target: linux-x64
+            runner: ubuntu-24.04
+          - target: linux-arm64
+            runner: ubuntu-24.04-arm
+          - target: macos-arm64
+            runner: macos-14
+    runs-on: ${{ matrix.runner }}
+    env:
+      BARREL_BUNDLE: ${{ needs.plan.outputs.bundle }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+      - name: Linux toolchain
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential libssl-dev zlib1g-dev \
+            libsnappy-dev liblz4-dev libzstd-dev
+      - name: macOS toolchain
+        if: runner.os == 'macOS'
+        run: brew install cmake snappy lz4 zstd
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: '28'
+          rebar3-version: '3.25.0'
+      - name: Build
+        run: |
+          rebar3 as s3_server,prod tar -n barrel_server
+          cp "_build/s3_server+prod/rel/barrel_server/barrel_server-$BARREL_BUNDLE.tar.gz" \
+             "barrel_server-$BARREL_BUNDLE-${{ matrix.target }}.tar.gz"
+      - name: Starts
+        run: |
+          mkdir rel
+          tar xzf "barrel_server-$BARREL_BUNDLE-${{ matrix.target }}.tar.gz" -C rel
+          rel/bin/barrel_server daemon
+          for i in $(seq 30); do curl -fsS 127.0.0.1:8080/ready && break; sleep 2; done
+          curl -fsS 127.0.0.1:8080/ready
+          rel/bin/barrel_server stop
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tarball-${{ matrix.target }}
+          path: barrel_server-${{ needs.plan.outputs.bundle }}-${{ matrix.target }}.tar.gz
+
+  image:
+    needs: plan
+    if: needs.plan.outputs.publish == 'true'
+    uses: ./.github/workflows/docker.yml
+    with:
+      bundle: ${{ needs.plan.outputs.bundle }}
+      ref: ${{ needs.plan.outputs.sha }}
+
+  release:
+    needs: [plan, tarball, image]
+    if: needs.plan.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    env:
+      BUNDLE: ${{ needs.plan.outputs.bundle }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+      - name: Tag and release
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$BUNDLE" -m "Barrel $BUNDLE" "${{ needs.plan.outputs.sha }}"
+          git push origin "$BUNDLE"
+          gh release create "$BUNDLE" --title "Barrel $BUNDLE" \
+            --notes-file out/notes/notes.md out/tarball-*/*.tar.gz

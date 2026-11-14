@@ -18,8 +18,8 @@ Before publishing an app:
 - Ensure the app has a `README.md`, a `LICENSE`, a `CHANGELOG.md`, an `ex_doc`
   block, and `{rebar3_hex, "7.2.0"}` in its `project_plugins` (see the plugin
   note below).
-- Tag the release: per app `<app>-v<version>` (e.g. `barrel_docdb-v1.0.0`), and
-  the umbrella `v<version>`. CI recognizes both tag globs.
+- Do not tag the app. Merging to main releases the Barrel bundle (`b<N>`),
+  which records every app's version; see [releases](releases.md).
 
 ## Publish order
 
@@ -169,8 +169,8 @@ Notes:
 - Replace the example remote with your forge. Package `links` in each
   `.app.src` point at the umbrella repo; per-app mirrors are optional (the
   umbrella is the source of truth).
-- Drive the mirrors from a release job keyed on the `barrel_*-v*` tags that CI
-  already recognizes, so a tagged release fans out to the standalone repos.
+- Drive the mirrors from the bundle release workflow, so each Barrel bundle
+  (`b<N>`) fans out to the standalone repos.
 
 ## Consume an app elsewhere
 
@@ -185,12 +185,12 @@ Hex package (after publishing):
 ]}.
 ```
 
-Git mirror:
+Git mirror, pinned to the Barrel bundle that carries the version you want:
 
 ```erlang
 {deps, [
     {barrel_embed, {git, "https://code.barrel-db.eu/barrel-db/barrel_embed.git",
-                    {tag, "v2.2.1"}}}
+                    {tag, "b336"}}}
 ]}.
 ```
 
