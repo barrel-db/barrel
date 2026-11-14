@@ -9,7 +9,7 @@
 # peer shows as a conflict on upgraded peers until someone resolves it.
 # The old peer receives each document's winner.
 #
-# The old image is built from OLD_REF (default: b00272, barrel_server 1.11.1, the
+# The old image is built from OLD_REF (default: v2026.10.6, barrel_server 1.11.1, the
 # last release before whole-state replication).
 #
 # Usage: test/e2e/mixed-version.sh
@@ -22,7 +22,7 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$DIR/../.." && pwd)"
 . "$DIR/lib.sh"
 
-OLD_REF="${OLD_REF:-b00272}"   # the bundle of barrel_server 1.11.1
+OLD_REF="${OLD_REF:-v2026.10.6}"   # the bundle of barrel_server 1.11.1
 OLD_IMAGE=barrel-server-e2e-old
 OLD_SRC="$(mktemp -d)"
 

@@ -1,12 +1,13 @@
 name: Release
 
-# The Barrel bundle, llama.cpp style: each push to main that passes CI is
-# released as b<N>, N the number of commits on main padded to five digits
-# (b00341), so bundles sort the same by name and by age. The release notes list
-# every app's version and the CHANGELOG sections of the apps whose version
-# changed since the previous bundle; the release carries barrel_server
-# tarballs, and the image goes to ghcr.io/barrel-db/barrel-server as :b<N>
-# and :latest. Apps are not tagged: each is published to Hex on its own.
+# The Barrel bundle: a push to main that passes CI and bumps at least one
+# app's version is released as YYYY.MM.N (tag vYYYY.MM.N), N counting the
+# bundles of that month from 0. The release notes list every app's version
+# and the CHANGELOG sections of the apps whose version changed since the
+# previous bundle; the release carries barrel_server tarballs, and the image
+# goes to ghcr.io/barrel-db/barrel-server as :YYYY.MM.N and :latest. Apps are
+# not tagged: each is published to Hex on its own. A push that bumps no app
+# releases nothing.
 #
 # A pull request touching the release runs it dry: notes and tarballs are
 # built, nothing is tagged, pushed or released.
@@ -48,27 +49,32 @@ jobs:
           ref: ${{ github.event.workflow_run.head_sha || github.event.pull_request.head.sha }}
           fetch-depth: 0
       - id: n
-        name: Bundle number
+        name: Bundle name
         run: |
           sha="$(git rev-parse HEAD)"
-          bundle="$(printf 'b%05d' "$(git rev-list --count "$sha")")"
+          match='v20[0-9][0-9].[0-9][0-9].*'
+          prev="$(git describe --tags --match "$match" --abbrev=0 "$sha^" 2>/dev/null || echo -)"
+          bundle=""
+          if [ -n "$(git tag --points-at "$sha" -l "$match")" ]; then
+            echo "already released: $(git tag --points-at "$sha" -l "$match")"
+          elif [ -z "$(scripts/bundle_notes.sh --changed "$prev" "$sha")" ]; then
+            echo "no app version changed since $prev: nothing to release"
+          else
+            ym="$(TZ=UTC git log -1 --date=format-local:%Y.%m --format=%cd "$sha")"
+            bundle="$ym.$(git tag -l "v$ym.*" | wc -l | tr -d ' ')"
+          fi
           publish=false
-          if [ "${{ github.event_name }}" = workflow_run ]; then
-            if git ls-remote --exit-code --tags origin "refs/tags/$bundle" >/dev/null; then
-              echo "$bundle already released"
-              bundle=""
-            else
-              publish=true
-            fi
+          if [ -n "$bundle" ] && [ "${{ github.event_name }}" = workflow_run ]; then
+            publish=true
           fi
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "prev=$prev" >> "$GITHUB_OUTPUT"
           echo "bundle=$bundle" >> "$GITHUB_OUTPUT"
           echo "publish=$publish" >> "$GITHUB_OUTPUT"
       - name: Notes
         if: steps.n.outputs.bundle != ''
         run: |
-          prev="$(git describe --tags --match 'b[0-9][0-9][0-9][0-9][0-9]' --abbrev=0 HEAD^ 2>/dev/null || echo -)"
-          scripts/bundle_notes.sh "$prev" HEAD > notes.md
+          scripts/bundle_notes.sh "${{ steps.n.outputs.prev }}" HEAD > notes.md
           cat notes.md >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         if: steps.n.outputs.bundle != ''
@@ -154,7 +160,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a "$BUNDLE" -m "Barrel $BUNDLE" "${{ needs.plan.outputs.sha }}"
-          git push origin "$BUNDLE"
-          gh release create "$BUNDLE" --title "Barrel $BUNDLE" \
+          git tag -a "v$BUNDLE" -m "Barrel $BUNDLE" "${{ needs.plan.outputs.sha }}"
+          git push origin "v$BUNDLE"
+          gh release create "v$BUNDLE" --title "Barrel $BUNDLE" \
             --notes-file out/notes/notes.md out/tarball-*/*.tar.gz

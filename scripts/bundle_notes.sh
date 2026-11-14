@@ -2,14 +2,18 @@
 # Release notes of a Barrel bundle: every app's version at TO, and the
 # CHANGELOG section of each app whose version changed since FROM.
 #
-# Usage: scripts/bundle_notes.sh FROM TO
-#   FROM  the previous bundle (a tag or a commit), or - for none: the
-#         apps whose version TO itself changed are listed as changed
-#   TO    the commit of the bundle
+# Usage: scripts/bundle_notes.sh [--changed] FROM TO
+#   FROM       the previous bundle (a tag or a commit), or - for none: the
+#              apps whose version TO itself changed are listed as changed
+#   TO         the commit of the bundle
+#   --changed  print only the apps whose version changed, one per line
+#              (nothing when no app was bumped: no bundle to release)
 #
 # Reads git objects only, so it works on any commit without a checkout.
 set -euo pipefail
 
+ONLY_CHANGED=false
+if [ "${1:-}" = "--changed" ]; then ONLY_CHANGED=true; shift; fi
 FROM="$1"
 TO="$2"
 [ "$FROM" = "-" ] && FROM="$(git rev-parse --verify --quiet "$TO^" || true)"
@@ -31,6 +35,17 @@ section() {
 
 apps="$(git ls-tree --name-only "$TO" apps/ | sed 's|apps/||' | sort)"
 sha="$(git rev-parse "$TO")"
+
+if $ONLY_CHANGED; then
+    for app in $apps; do
+        new="$(vsn "$TO" "$app")"
+        [ -z "$new" ] && continue
+        old=""
+        [ -n "$FROM" ] && old="$(vsn "$FROM" "$app")"
+        [ "$new" != "$old" ] && echo "$app"
+    done
+    exit 0
+fi
 
 echo "Commit \`${sha:0:12}\`, $(git log -1 --format=%cs "$TO")."
 echo

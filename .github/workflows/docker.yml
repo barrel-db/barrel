@@ -1,15 +1,15 @@
 name: Docker image
 
 # Builds and smoke-tests the barrel_server image on changes to it. The
-# release workflow calls it with a Barrel bundle (b<N>) to publish it to
-# ghcr.io/barrel-db/barrel-server as :b<N> and :latest. Each architecture
+# release workflow calls it with a Barrel bundle (YYYY.MM.N) to publish it to
+# ghcr.io/barrel-db/barrel-server as :YYYY.MM.N and :latest. Each architecture
 # builds on its own native runner (rocksdb under emulation takes hours).
 
 on:
   workflow_call:
     inputs:
       bundle:
-        description: Barrel bundle to publish (b<N>); empty builds only
+        description: Barrel bundle to publish (YYYY.MM.N); empty builds only
         required: false
         type: string
         default: ''
