@@ -557,6 +557,7 @@ init(Name, Config, CompiledChannels, DbPath, Keyspace, Parent, ForkHlc, Crypto) 
                     persistent_term:put({barrel_source, Name},
                                         source_id(ReadOnly, StoreRef, Name,
                                                   DbPath)),
+                    ok = barrel_doc_chain:open(ReadOnly, StoreRef, Keyspace),
                     ok = init_writer(ReadOnly, StoreRef, AttRef, Name, Keyspace),
                     _ = gc_att_uploads(ReadOnly, AttRef, Name, Config),
                     ok = barrel_channel:install(Name, CompiledChannels),
@@ -1034,6 +1035,7 @@ terminate(_Reason, #state{name = Name, store_ref = StoreRef, att_ref = AttRef,
     persistent_term:erase({barrel_att_ref, Name}),
     persistent_term:erase({barrel_source, Name}),
     persistent_term:erase({barrel_writer, Name}),
+    ok = barrel_doc_chain:close(StoreRef),
     ok = barrel_keyspace:uninstall(Name),
     ok = barrel_channel:uninstall(Name),
     %% Close attachment store
@@ -1522,11 +1524,9 @@ stub_ops(StoreRef, DbName, DocId) ->
      | chain_delete_ops(StoreRef, Ks, DocId)].
 
 chain_delete_ops(StoreRef, Ks, DocId) ->
-    barrel_store_rocksdb:fold_range(
-        StoreRef, barrel_store_keys:doc_version_prefix(Ks, DocId),
-        barrel_store_keys:doc_version_end(Ks, DocId),
-        fun(Key, _Value, Acc) ->
-            VEnc = barrel_store_keys:decode_doc_version_key(Ks, DocId, Key),
+    barrel_doc_chain:fold(
+        StoreRef, Ks, DocId,
+        fun(Key, VEnc, _Value, Acc) ->
             {ok, [{delete, Key},
                   {body_delete, barrel_store_keys:doc_body_rev(Ks, DocId, VEnc)},
                   barrel_doc_vectors:delete_op(Ks, DocId, VEnc)
@@ -1622,12 +1622,9 @@ purge_ops(StoreRef, DbName, Candidates, Stats) ->
 forget_doc_ops(StoreRef, DbName, DocId, Columns) ->
     Ks = barrel_keyspace:resolve(DbName),
     ChangeHlc = barrel_hlc:decode(proplists:get_value(?COL_HLC, Columns)),
-    Start = barrel_store_keys:doc_version_prefix(Ks, DocId),
-    End = barrel_store_keys:doc_version_end(Ks, DocId),
-    ChainOps = barrel_store_rocksdb:fold_range(
-        StoreRef, Start, End,
-        fun(Key, _Value, Acc) ->
-            VEnc = barrel_store_keys:decode_doc_version_key(Ks, DocId, Key),
+    ChainOps = barrel_doc_chain:fold(
+        StoreRef, Ks, DocId,
+        fun(Key, VEnc, _Value, Acc) ->
             {ok, [{delete, Key},
                   {body_delete,
                    barrel_store_keys:doc_body_rev(Ks, DocId, VEnc)},
@@ -2403,13 +2400,10 @@ load_live(StoreRef, DbName, DocId,
 %% Every version in the document's chain, superseded or conflict.
 chain_versions(StoreRef, DbName, DocId) ->
     Ks = barrel_keyspace:resolve(DbName),
-    barrel_store_rocksdb:fold_range(
-      StoreRef, barrel_store_keys:doc_version_prefix(Ks, DocId),
-      barrel_store_keys:doc_version_end(Ks, DocId),
-      fun(Key, _Value, Acc) ->
-          {ok, [barrel_version:decode(
-                  barrel_store_keys:decode_doc_version_key(Ks, DocId, Key))
-                | Acc]}
+    barrel_doc_chain:fold(
+      StoreRef, Ks, DocId,
+      fun(_Key, VEnc, _Value, Acc) ->
+          {ok, [barrel_version:decode(VEnc) | Acc]}
       end, []).
 
 %% @doc What a local write replaces, and the state it applies to.
@@ -3799,20 +3793,16 @@ do_get_conflicts(StoreRef, DbName, DocId) ->
 %% Returns [{version(), sibling_entry_map()}].
 conflict_siblings(StoreRef, DbName, DocId) ->
     Ks = barrel_keyspace:resolve(DbName),
-    Start = barrel_store_keys:doc_version_prefix(Ks, DocId),
-    End = barrel_store_keys:doc_version_end(Ks, DocId),
-    Fold = fun(Key, Value, Acc) ->
+    Fold = fun(_Key, VersionEnc, Value, Acc) ->
         Entry = decode_sibling_entry(Value),
         case maps:get(flag, Entry) of
             conflict ->
-                VersionEnc = barrel_store_keys:decode_doc_version_key(
-                                 Ks, DocId, Key),
                 {ok, [{barrel_version:decode(VersionEnc), Entry} | Acc]};
             superseded ->
                 {ok, Acc}
         end
     end,
-    lists:reverse(barrel_store_rocksdb:fold_range(StoreRef, Start, End, Fold, [])).
+    lists:reverse(barrel_doc_chain:fold(StoreRef, Ks, DocId, Fold, [])).
 
 %% @doc Resolve a conflict with a new version replacing the versions the
 %% caller observed. `Observed' is the list of tokens read (new form), or

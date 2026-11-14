@@ -602,12 +602,9 @@ post_t_version_dels(Ks, Id, #{version := RestToken}, _Current) ->
      barrel_doc_vectors:delete_op(Ks, Id, RestVEnc)].
 
 chain_forget_ops(StoreRef, Ks, Id) ->
-    Start = barrel_store_keys:doc_version_prefix(Ks, Id),
-    End = barrel_store_keys:doc_version_end(Ks, Id),
-    barrel_store_rocksdb:fold_range(
-        StoreRef, Start, End,
-        fun(Key, _Value, Acc) ->
-            VEnc = barrel_store_keys:decode_doc_version_key(Ks, Id, Key),
+    barrel_doc_chain:fold(
+        StoreRef, Ks, Id,
+        fun(Key, VEnc, _Value, Acc) ->
             {ok, [{delete, Key},
                   {body_delete,
                    barrel_store_keys:doc_body_rev(Ks, Id, VEnc)},

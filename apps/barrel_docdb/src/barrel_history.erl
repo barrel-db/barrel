@@ -318,11 +318,7 @@ byte_to_cause(2) -> resolve.
 %% barrel_db_server:sibling_entry/3), keyed by version encoding, so the
 %% scan is already version-ordered; reverse for newest first.
 chain_versions(StoreRef, DbName, DocId) ->
-    Start = barrel_store_keys:doc_version_prefix(DbName, DocId),
-    End = barrel_store_keys:doc_version_end(DbName, DocId),
-    Fold = fun(Key, <<FlagByte:8, DelByte:8, VVBin/binary>>, Acc) ->
-        VersionEnc = barrel_store_keys:decode_doc_version_key(
-                         DbName, DocId, Key),
+    Fold = fun(_Key, VersionEnc, <<FlagByte:8, DelByte:8, VVBin/binary>>, Acc) ->
         {ok, [#{
             version => barrel_version:to_token(
                            barrel_version:decode(VersionEnc)),
@@ -334,4 +330,4 @@ chain_versions(StoreRef, DbName, DocId) ->
             vv => barrel_vv:decode(VVBin)
         } | Acc]}
     end,
-    barrel_store_rocksdb:fold_range(StoreRef, Start, End, Fold, []).
+    barrel_doc_chain:fold(StoreRef, DbName, DocId, Fold, []).

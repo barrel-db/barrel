@@ -386,13 +386,9 @@ conflict_tokens(Columns, {StoreRef, DbName, DocId, Snapshot}) ->
         0 ->
             [];
         _ ->
-            Start = barrel_store_keys:doc_version_prefix(DbName, DocId),
-            End = barrel_store_keys:doc_version_end(DbName, DocId),
-            Fold = fun(Key, Value, Acc) ->
+            Fold = fun(_Key, VersionEnc, Value, Acc) ->
                 case Value of
                     <<1:8, _/binary>> -> %% conflict flag
-                        VersionEnc = barrel_store_keys:decode_doc_version_key(
-                                         DbName, DocId, Key),
                         {ok, [barrel_version:to_token(
                                   barrel_version:decode(VersionEnc)) | Acc]};
                     _ ->
@@ -400,6 +396,6 @@ conflict_tokens(Columns, {StoreRef, DbName, DocId, Snapshot}) ->
                 end
             end,
             lists:reverse(
-                barrel_store_rocksdb:fold_range_with_snapshot(
-                    StoreRef, Start, End, Fold, [], Snapshot))
+                barrel_doc_chain:fold_snapshot(
+                    StoreRef, DbName, DocId, Fold, [], Snapshot))
     end.

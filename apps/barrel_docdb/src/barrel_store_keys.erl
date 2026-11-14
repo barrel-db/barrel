@@ -90,7 +90,8 @@
 
 %% Per-doc version chains (superseded and conflict siblings)
 -export([doc_version/3, doc_version_prefix/2, doc_version_end/2,
-         decode_doc_version_key/3]).
+         decode_doc_version_key/3, legacy_doc_version_prefix/2,
+         legacy_doc_version_db_prefix/1, prefix_successor/1]).
 
 %% Retained history log (append-only, HLC-ordered, written with the batch)
 -export([history_key/2, history_prefix/1, history_end/1,
@@ -136,7 +137,8 @@
 -define(PREFIX_OUTBOX, 16#1A).        %% Tagged outbox: DbName + tag (null-terminated) + HLC → entry
 -define(PREFIX_CHANGES, 16#1B).       %% Prefix changes posting: prefix + bucket → [HLC:12, change, ...]
 -define(PREFIX_HISTORY, 16#1C).       %% Retained history log: DbName + change HLC → history entry
--define(PREFIX_DOC_VERSION, 16#1D).   %% Version chain: DbName + DocId + ':' + version → sibling entry
+-define(PREFIX_DOC_VERSION, 16#1D).   %% Version chain before 3.1: DbName + DocId + ':' + version (moved at open)
+-define(PREFIX_DOC_CHAIN, 16#21).     %% Version chain: DbName + DocId length:32 + DocId + version → sibling entry
 -define(PREFIX_CHANNEL, 16#1E).       %% Per-channel change feed: DbName + channel (null-terminated) + HLC → row
 -define(PREFIX_DOC_EXPIRY, 16#1F).    %% Doc TTL index: DbName + ExpiresMs:64 + DocId → <<>>
 -define(PREFIX_DOC_VECTOR_REV, 16#20). %% Body CF: DbName + DocId + ':' + version → client vector of a non-current version
@@ -372,31 +374,49 @@ decode_outbox_key(DbName, Key) ->
 %%====================================================================
 
 %% @doc Key for one non-current version of a document.
-%% Key format: prefix | db_name | doc_id | ':' | version (storage encoding,
-%% HLC-first, so the chain scans in causal order).
+%% Key format: prefix | db_name | doc_id length:32 | doc_id | version
+%% (storage encoding, HLC-first, so the chain scans in causal order).
+%% The length keeps the chain of `a' apart from the chain of `a:b'.
 -spec doc_version(db_name(), docid(), binary()) -> binary().
 doc_version(DbName, DocId, VersionEnc) ->
-    <<?PREFIX_DOC_VERSION, (encode_name(DbName))/binary,
-      DocId/binary, $:, VersionEnc/binary>>.
+    <<(doc_version_prefix(DbName, DocId))/binary, VersionEnc/binary>>.
 
 %% @doc Start key for scanning a document's version chain.
 -spec doc_version_prefix(db_name(), docid()) -> binary().
 doc_version_prefix(DbName, DocId) ->
-    <<?PREFIX_DOC_VERSION, (encode_name(DbName))/binary, DocId/binary, $:>>.
+    <<?PREFIX_DOC_CHAIN, (encode_name(DbName))/binary,
+      (byte_size(DocId)):32, DocId/binary>>.
 
-%% @doc End marker for a version chain scan.
+%% @doc End marker for a version chain scan: the first key after the
+%% document's chain.
 -spec doc_version_end(db_name(), docid()) -> binary().
 doc_version_end(DbName, DocId) ->
-    <<?PREFIX_DOC_VERSION, (encode_name(DbName))/binary, DocId/binary, $:,
-      16#FF, 16#FF, 16#FF, 16#FF, 16#FF, 16#FF, 16#FF, 16#FF,
-      16#FF, 16#FF, 16#FF, 16#FF, 16#FF>>.
+    prefix_successor(doc_version_prefix(DbName, DocId)).
 
 %% @doc Extract the encoded version from a version-chain key.
 -spec decode_doc_version_key(db_name(), docid(), binary()) -> binary().
 decode_doc_version_key(DbName, DocId, Key) ->
-    PrefixLen = 1 + 2 + byte_size(DbName) + byte_size(DocId) + 1,
+    PrefixLen = 1 + 2 + byte_size(DbName) + 4 + byte_size(DocId),
     <<_:PrefixLen/binary, VersionEnc/binary>> = Key,
     VersionEnc.
+
+%% @doc Chain rows of one document in the layout before 3.1 (`doc_id'
+%% then `:'), read and moved by barrel_doc_chain.
+-spec legacy_doc_version_prefix(db_name(), docid()) -> binary().
+legacy_doc_version_prefix(DbName, DocId) ->
+    <<?PREFIX_DOC_VERSION, (encode_name(DbName))/binary, DocId/binary, $:>>.
+
+%% @doc Every chain row of a database in the layout before 3.1.
+-spec legacy_doc_version_db_prefix(db_name()) -> binary().
+legacy_doc_version_db_prefix(DbName) ->
+    <<?PREFIX_DOC_VERSION, (encode_name(DbName))/binary>>.
+
+%% The first key after every key starting with Prefix.
+prefix_successor(Prefix) ->
+    successor_rev(lists:reverse(binary_to_list(Prefix))).
+
+successor_rev([255 | Rest]) -> successor_rev(Rest);
+successor_rev([B | Rest]) -> list_to_binary(lists:reverse([B + 1 | Rest])).
 
 %%====================================================================
 %% Retained History Log Keys (append-only, ordered by change HLC)
