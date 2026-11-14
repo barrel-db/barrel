@@ -1,9 +1,10 @@
 %%%-------------------------------------------------------------------
 %%% @doc Janitor for session leftovers: when the space's TTL sweeper
-%%% tombstones an idle session doc, its message docs (which carry no
-%%% TTL of their own) become orphans. The janitor periodically walks
-%%% each OPEN space's `session:' prefix and deletes message groups
-%%% whose session root is gone. Bounded per pass; deletions are real
+%%% tombstones an idle session header, its other documents (messages,
+%%% data, pins, summary, counters: none carries a TTL of its own)
+%%% become orphans. The janitor periodically walks
+%%% each OPEN space's `session:' prefix and deletes the documents
+%%% whose session header is gone. Bounded per pass; deletions are real
 %%% tombstones.
 %%% @end
 %%%-------------------------------------------------------------------
@@ -95,8 +96,8 @@ sweep_space(SpaceDb) ->
 classify(#{<<"type">> := <<"session">>, <<"session">> := Sid},
          _SpaceDb, Live, Dead, Acc) ->
     {ok, {sets:add_element(Sid, Live), Dead, Acc}};
-classify(#{<<"type">> := <<"message">>, <<"session">> := Sid,
-           <<"id">> := DocId}, SpaceDb, Live, Dead, Acc) ->
+classify(#{<<"session">> := Sid, <<"id">> := DocId}, SpaceDb, Live, Dead,
+         Acc) ->
     case sets:is_element(Sid, Live) of
         true ->
             {ok, {Live, Dead, Acc}};

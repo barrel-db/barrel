@@ -3,6 +3,24 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.0.0] - 2026-11-14
+
+### Breaking
+- Grants, sessions and handoffs are stored as one document per fact, so they replicate without losing writes. Every node of a mesh must run 2.0 before any of them writes: a 1.x node ignores the new revocation documents and keeps accepting a revoked token. Documents written by 1.x read the same and convert on their next write, or all at once with `barrel_spaces:migrate/0`.
+- Requires barrel_docdb 3.1.
+
+### Fixed
+- A revocation could be undone. Revoking edited the grant, and a concurrent write to that grant on another node could win over the revocation. A revocation is now a document of its own that nothing edits.
+- Two nodes writing the same session kept only one side's data keys, pins or summary, and an unpinned item came back from a node that still had it. Each data key, pin and the summary are now documents of their own; removing one deletes its document.
+- A handoff could go back from completed to accepted, or from accepted to pending. Each step is now a document written once and the status is the furthest step present. Agents accepting on nodes that cannot see each other are all recorded, and every node names the same owner.
+- Concurrent edits of grants, sessions and handoffs left conflicts that nothing resolved. Applications replicating a space no longer need a conflict resolver for them.
+
+### Added
+- `barrel_session:delete_data/3` removes a data key.
+- `barrel_session:incr_counter/4` and `get_counters/2`: per-session counters that two nodes can update at once without losing an increment. `get/2` returns them under `counters`.
+- `barrel_caps:revoke/2` records who revoked a token; `list/1` returns it as `revoked_by`.
+- `barrel_spaces:migrate/0`, `barrel_session:migrate/1`, `barrel_caps:migrate/0` and `barrel_handoff:migrate/0` move documents written by 1.x to the new layout.
+
 ## [1.3.2] - 2026-11-14
 
 ### Changed

@@ -24,13 +24,18 @@
 
 -export([t_caller_pin_and_message_ids/1]).
 
+-export([t_delete_data/1, t_counters_local_writers/1,
+         t_janitor_collects_parts/1, t_one_document_per_fact/1]).
+
 -include_lib("common_test/include/ct.hrl").
 -include_lib("stdlib/include/assert.hrl").
 
 all() ->
     [t_create_get_touch, t_sliding_ttl, t_messages_chronological,
      t_message_ranges, t_data_summary_pinned, t_delete_cascade,
-     t_janitor_orphans, t_list_by_agent, t_no_ttl_durable, t_import_with_ids, t_list_match_indexed, t_caller_pin_and_message_ids].
+     t_janitor_orphans, t_list_by_agent, t_no_ttl_durable, t_import_with_ids, t_list_match_indexed, t_caller_pin_and_message_ids,
+     t_delete_data, t_counters_local_writers, t_janitor_collects_parts,
+     t_one_document_per_fact].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(barrel_spaces),
@@ -310,6 +315,75 @@ t_caller_pin_and_message_ids(Config) ->
     {ok, [M1, M2]} = barrel_session:get_messages(Space, Sid),
     ?assertEqual(<<"hello">>, maps:get(<<"content">>, M1)),
     ?assertEqual(<<"later">>, maps:get(<<"content">>, M2)),
+    ok.
+
+t_delete_data(Config) ->
+    Space = ?config(space, Config),
+    {ok, Sid} = barrel_session:create(Space, #{data => #{<<"a">> => 1}}),
+    {ok, _} = barrel_session:set_data(Space, Sid, <<"b">>, 2),
+    {ok, _} = barrel_session:delete_data(Space, Sid, <<"a">>),
+    %% removing an absent key is fine
+    {ok, _} = barrel_session:delete_data(Space, Sid, <<"zz">>),
+    {ok, S} = barrel_session:get(Space, Sid),
+    ?assertEqual(#{<<"b">> => 2}, maps:get(<<"data">>, S)),
+    ?assertEqual({error, not_found},
+                 barrel_session:get_data(Space, Sid, <<"a">>)),
+    ?assertEqual({error, not_found},
+                 barrel_session:delete_data(Space, <<"nope">>, <<"a">>)),
+    ok.
+
+%% Writers in one VM share this replica's count document: no
+%% increment is lost to their races.
+t_counters_local_writers(Config) ->
+    Space = ?config(space, Config),
+    {ok, Sid} = barrel_session:create(Space, #{}),
+    Self = self(),
+    Pids = [spawn_link(fun() ->
+                [{ok, _} = barrel_session:incr_counter(Space, Sid,
+                                                       <<"n">>, 1)
+                 || _ <- lists:seq(1, 10)],
+                Self ! {done, self()}
+            end) || _ <- lists:seq(1, 8)],
+    [receive {done, P} -> ok end || P <- Pids],
+    ?assertEqual({ok, #{<<"n">> => 80}},
+                 barrel_session:get_counters(Space, Sid)),
+    ?assertEqual({ok, 79},
+                 barrel_session:incr_counter(Space, Sid, <<"n">>, -1)),
+    ok.
+
+t_janitor_collects_parts(Config) ->
+    #{id := SpaceId, db := #{docdb := DbBin}} = Space = ?config(space, Config),
+    {ok, Sid} = barrel_session:create(Space, #{ttl => 1}),
+    {ok, _} = barrel_session:set_data(Space, Sid, <<"k">>, 1),
+    {ok, _} = barrel_session:pin_context(Space, Sid, #{content => <<"p">>}),
+    {ok, _} = barrel_session:set_summary(Space, Sid, <<"s">>),
+    {ok, _} = barrel_session:incr_counter(Space, Sid, <<"n">>, 1),
+    timer:sleep(1100),
+    {ok, _} = barrel_docdb:sweep_ttl(SpaceId),
+    {ok, Deleted} = barrel_spaces_janitor:sweep(),
+    ?assert(Deleted >= 4),
+    {ok, Left} = barrel_docdb:fold_docs(
+        DbBin, fun(D, Acc) -> {ok, [D | Acc]} end, [],
+        #{id_prefix => <<"session:", Sid/binary>>}),
+    ?assertEqual([], Left),
+    ok.
+
+%% Each fact is its own document and the header stays small.
+t_one_document_per_fact(Config) ->
+    #{db := Db} = Space = ?config(space, Config),
+    {ok, Sid} = barrel_session:create(Space, #{data => #{<<"a">> => 1}}),
+    {ok, _} = barrel_session:pin_context(Space, Sid, #{id => <<"p">>,
+                                                       content => <<"x">>}),
+    {ok, _} = barrel_session:set_summary(Space, Sid, <<"s">>),
+    {ok, Header} = barrel:get_doc(Db, <<"session:", Sid/binary>>),
+    ?assertEqual([], [K || K <- [<<"data">>, <<"pinned">>, <<"summary">>],
+                           maps:is_key(K, Header)]),
+    {ok, #{<<"value">> := 1}} =
+        barrel:get_doc(Db, <<"session:", Sid/binary, ":data:a">>),
+    {ok, #{<<"pin">> := #{<<"content">> := <<"x">>}}} =
+        barrel:get_doc(Db, <<"session:", Sid/binary, ":pin:p">>),
+    {ok, #{<<"summary">> := <<"s">>}} =
+        barrel:get_doc(Db, <<"session:", Sid/binary, ":summary">>),
     ok.
 
 %% Sleep until the clock is past T (unix ms).

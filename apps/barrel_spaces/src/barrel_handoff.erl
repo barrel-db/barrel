@@ -22,7 +22,8 @@
          get/1,
          accept/2,
          complete/2,
-         chain/2]).
+         chain/2,
+         migrate/0]).
 
 %%====================================================================
 %% API
@@ -62,7 +63,6 @@ create(SpaceId, #{task_name := TaskName} = Opts)
                 <<"handoff">> => Hid,
                 <<"space">> => SpaceId,
                 <<"token_id">> => maps:get(<<"token_id">>, Grant),
-                <<"status">> => <<"pending">>,
                 <<"task_name">> => TaskName,
                 <<"from_agent">> => maps:get(from_agent, Opts, <<>>),
                 <<"to_agent">> => maps:get(to_agent, Opts, <<>>),
@@ -98,23 +98,29 @@ create(_SpaceId, _Opts) ->
 -spec list(map()) -> {ok, [map()]}.
 list(Filter) when is_map(Filter) ->
     Registry = barrel_spaces:registry_db(),
-    {ok, Docs} = barrel_docdb:fold_docs(
-        Registry,
-        fun(#{<<"type">> := <<"handoff">>} = Doc, Acc) ->
-                case matches(Doc, Filter) of
-                    true -> {ok, [Doc | Acc]};
-                    false -> {ok, Acc}
-                end;
+    {Bases, Steps} = barrel_spaces_docs:fold_prefix(
+        Registry, <<"handoff:">>,
+        fun(#{<<"type">> := <<"handoff">>} = Doc, {B, S}) ->
+                {[Doc | B], S};
+           (#{<<"handoff">> := Hid} = Doc, {B, S}) ->
+                {B, S#{Hid => [Doc | maps:get(Hid, S, [])]}};
            (_Doc, Acc) ->
-                {ok, Acc}
-        end, [], #{id_prefix => <<"handoff:">>}),
-    {ok, lists:reverse(Docs)}.
+                Acc
+        end, {[], #{}}),
+    Views = [view(B, maps:get(Hid, Steps, []))
+             || #{<<"handoff">> := Hid} = B <- lists:reverse(Bases)],
+    {ok, [V || V <- Views, matches(V, Filter)]}.
 
-%% @doc One handoff by id.
+%% @doc One handoff by id, with its status and steps.
 -spec get(binary()) -> {ok, map()} | {error, not_found}.
 get(Hid) when is_binary(Hid) ->
-    barrel_docdb:get_doc(barrel_spaces:registry_db(),
-                         <<"handoff:", Hid/binary>>).
+    Registry = barrel_spaces:registry_db(),
+    case barrel_docdb:get_doc(Registry, <<"handoff:", Hid/binary>>) of
+        {ok, Base} ->
+            {ok, view(Base, steps(Registry, Hid))};
+        {error, _} = Err ->
+            Err
+    end.
 
 %% @doc Accept a handoff by presenting its token. Opts: `agent' (the
 %% acceptor's name), `open_opts' (runtime open options for the space,
@@ -131,31 +137,20 @@ get(Hid) when is_binary(Hid) ->
 accept(Token, Opts) when is_binary(Token), is_map(Opts) ->
     case resolve(Token) of
         {ok, #{<<"status">> := <<"pending">>, <<"space">> := SpaceId,
-               <<"handoff">> := Hid} = Doc} ->
+               <<"handoff">> := Hid}} ->
             case barrel_caps:verify(Token, SpaceId, read) of
                 {ok, _Grant} ->
                     Agent = maps:get(agent, Opts, <<>>),
-                    Flipped = Doc#{
-                        <<"status">> => <<"accepted">>,
-                        <<"accepted_by">> => Agent,
-                        <<"accepted_at">> => barrel_spaces:now_ms()
-                    },
-                    case barrel_docdb:put_doc(
-                             barrel_spaces:registry_db(), Flipped) of
-                        {ok, _} ->
+                    case write_accept(Hid, Agent) of
+                        ok ->
                             case maps:get(session, Opts, #{}) of
                                 false ->
                                     {ok, Accepted} = get(Hid),
-                                    {ok, #{handoff =>
-                                               public(Accepted)}};
+                                    {ok, #{handoff => Accepted}};
                                 _ ->
                                     open_accepted(Hid, SpaceId, Agent,
                                                   Opts)
                             end;
-                        {error, conflict} ->
-                            {error, already_accepted};
-                        {error, {conflict, _}} ->
-                            {error, already_accepted};
                         {error, _} = Err ->
                             Err
                     end;
@@ -179,19 +174,16 @@ complete(Token, Opts) when is_binary(Token), is_map(Opts) ->
           when Status =:= <<"pending">>; Status =:= <<"accepted">> ->
             case barrel_caps:verify(Token, SpaceId, read) of
                 {ok, _} ->
-                    Done = Doc#{
-                        <<"status">> => <<"completed">>,
-                        <<"result">> => maps:get(result, Opts, <<>>),
-                        <<"notes">> => maps:get(notes, Opts, <<>>),
-                        <<"completed_at">> => barrel_spaces:now_ms()
-                    },
-                    {ok, _} = barrel_docdb:put_doc(
-                        barrel_spaces:registry_db(), Done),
-                    case maps:get(revoke, Opts, true) of
-                        true -> ok = barrel_caps:revoke(Token);
-                        false -> ok
-                    end,
-                    {ok, public(Done)};
+                    case write_complete(Doc, Opts) of
+                        ok ->
+                            case maps:get(revoke, Opts, true) of
+                                true -> ok = barrel_caps:revoke(Token);
+                                false -> ok
+                            end,
+                            get(maps:get(<<"handoff">>, Doc));
+                        {error, _} = Err ->
+                            Err
+                    end;
                 {error, _} = Err ->
                     Err
             end;
@@ -235,6 +227,19 @@ chain(Token, #{task_name := _} = CreateOpts) when is_binary(Token) ->
             Err
     end.
 
+%% @doc Give every handoff accepted or completed in place before 2.0
+%% its step documents. Returns how many were written. Safe to run
+%% again.
+-spec migrate() -> {ok, non_neg_integer()}.
+migrate() ->
+    Registry = barrel_spaces:registry_db(),
+    Bases = barrel_spaces_docs:fold_prefix(
+              Registry, <<"handoff:">>,
+              fun(#{<<"type">> := <<"handoff">>} = D, Acc) -> [D | Acc];
+                 (_Doc, Acc) -> Acc
+              end, []),
+    {ok, lists:sum([legacy_steps(Registry, B) || B <- Bases])}.
+
 %%====================================================================
 %% Internal
 %%====================================================================
@@ -266,6 +271,121 @@ resolve_scan(TokenId) ->
         [] -> {error, not_found}
     end.
 
+%% Accept documents are per agent: a second accept by the same agent
+%% conflicts, and an agent that is not the owner once its document is
+%% in (a local race) loses like the old rev check made it lose.
+write_accept(Hid, Agent) ->
+    Registry = barrel_spaces:registry_db(),
+    Doc = #{<<"id">> => <<"handoff:", Hid/binary, ":accept:", Agent/binary>>,
+            <<"type">> => <<"handoff_accept">>,
+            <<"handoff">> => Hid,
+            <<"agent">> => Agent,
+            <<"accepted_at">> => barrel_spaces:now_ms()},
+    case barrel_spaces_docs:create(Registry, Doc, #{}) of
+        {ok, _} ->
+            case get(Hid) of
+                {ok, #{<<"status">> := <<"accepted">>,
+                       <<"accepted_by">> := Agent}} -> ok;
+                {ok, #{<<"status">> := <<"completed">>}} ->
+                    {error, already_completed};
+                {ok, _} -> {error, already_accepted}
+            end;
+        {error, conflict} ->
+            {error, already_accepted};
+        {error, _} = Err ->
+            Err
+    end.
+
+write_complete(#{<<"handoff">> := Hid}, Opts) ->
+    Registry = barrel_spaces:registry_db(),
+    {ok, Base} = barrel_docdb:get_doc(Registry, <<"handoff:", Hid/binary>>),
+    _ = legacy_steps(Registry, Base),
+    Doc = #{<<"id">> => <<"handoff:", Hid/binary, ":complete">>,
+            <<"type">> => <<"handoff_complete">>,
+            <<"handoff">> => Hid,
+            <<"result">> => maps:get(result, Opts, <<>>),
+            <<"notes">> => maps:get(notes, Opts, <<>>),
+            <<"completed_at">> => barrel_spaces:now_ms()},
+    case barrel_spaces_docs:create(Registry, Doc, #{}) of
+        {ok, _} -> ok;
+        {error, conflict} -> {error, already_completed};
+        {error, _} = Err -> Err
+    end.
+
+%% The steps of one handoff.
+steps(Registry, Hid) ->
+    barrel_spaces_docs:fold_prefix(Registry, <<"handoff:", Hid/binary, ":">>,
+                                   fun(D, Acc) -> [D | Acc] end, []).
+
+%% The handoff as callers see it: the create document, its status (the
+%% furthest step present) and the owner and completion of its steps.
+%% A handoff edited in place before 2.0 carries its steps in its own
+%% fields; they count as steps too.
+view(Base0, Steps) ->
+    Base = maps:without([<<"_rev">>], Base0),
+    Accepts = [#{<<"agent">> => A, <<"accepted_at">> => At}
+               || #{<<"type">> := <<"handoff_accept">>, <<"agent">> := A,
+                    <<"accepted_at">> := At} <- Steps] ++ legacy_accept(Base),
+    Completes = [maps:with([<<"result">>, <<"notes">>, <<"completed_at">>], C)
+                 || #{<<"type">> := <<"handoff_complete">>} = C <- Steps],
+    Status = status(maps:get(<<"status">>, Base, <<"pending">>),
+                    Accepts, Completes),
+    V0 = maps:merge(Base, owner(Accepts)),
+    V1 = case Completes of
+        [C | _] -> maps:merge(V0, C);
+        [] -> V0
+    end,
+    V1#{<<"status">> => Status}.
+
+status(_Legacy, _Accepts, [_ | _]) -> <<"completed">>;
+status(<<"completed">>, _Accepts, []) -> <<"completed">>;
+status(_Legacy, [_ | _], []) -> <<"accepted">>;
+status(Legacy, [], []) -> Legacy.
+
+legacy_accept(#{<<"accepted_by">> := A, <<"accepted_at">> := At}) ->
+    [#{<<"agent">> => A, <<"accepted_at">> => At}];
+legacy_accept(_Base) ->
+    [].
+
+%% Earliest accepted_at, then agent name: every node names the same
+%% owner once it holds the same accept documents.
+owner([]) ->
+    #{};
+owner(Accepts) ->
+    [#{<<"agent">> := A, <<"accepted_at">> := At} | _] =
+        lists:sort(fun(#{<<"agent">> := A1, <<"accepted_at">> := T1},
+                       #{<<"agent">> := A2, <<"accepted_at">> := T2}) ->
+                       {T1, A1} =< {T2, A2}
+                   end, Accepts),
+    #{<<"accepted_by">> => A, <<"accepted_at">> => At}.
+
+%% A handoff edited in place before 2.0 gains its step documents.
+legacy_steps(Registry, #{<<"handoff">> := Hid} = Base) ->
+    Accept = case Base of
+        #{<<"accepted_by">> := A, <<"accepted_at">> := At} ->
+            [#{<<"id">> => <<"handoff:", Hid/binary, ":accept:", A/binary>>,
+               <<"type">> => <<"handoff_accept">>, <<"handoff">> => Hid,
+               <<"agent">> => A, <<"accepted_at">> => At}];
+        _ ->
+            []
+    end,
+    Complete = case Base of
+        #{<<"status">> := <<"completed">>} ->
+            [#{<<"id">> => <<"handoff:", Hid/binary, ":complete">>,
+               <<"type">> => <<"handoff_complete">>, <<"handoff">> => Hid,
+               <<"result">> => maps:get(<<"result">>, Base, <<>>),
+               <<"notes">> => maps:get(<<"notes">>, Base, <<>>),
+               <<"completed_at">> => maps:get(<<"completed_at">>, Base, 0)}];
+        _ ->
+            []
+    end,
+    lists:foldl(fun(Doc, N) ->
+                    case barrel_spaces_docs:create(Registry, Doc, #{}) of
+                        {ok, _} -> N + 1;
+                        {error, conflict} -> N
+                    end
+                end, 0, Accept ++ Complete).
+
 open_accepted(Hid, SpaceId, Agent, Opts) ->
     OpenOpts = maps:get(open_opts, Opts, #{}),
     case barrel_spaces:open_space(SpaceId, OpenOpts) of
@@ -277,7 +397,7 @@ open_accepted(Hid, SpaceId, Agent, Opts) ->
                      data => Data#{<<"handoff_id">> => Hid}}) of
                 {ok, Sid} ->
                     {ok, Doc} = get(Hid),
-                    {ok, #{handoff => public(Doc), space => Space,
+                    {ok, #{handoff => Doc, space => Space,
                            session => Sid}};
                 {error, _} = Err ->
                     Err
@@ -296,6 +416,3 @@ matches(Doc, Filter) ->
                 {ok, Want} -> maps:get(DocKey, Doc, <<>>) =:= Want
             end
         end, Checks).
-
-public(Doc) ->
-    maps:without([<<"_rev">>], Doc).

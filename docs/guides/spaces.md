@@ -78,11 +78,12 @@ route to touch it does not decide its mode. Per-space encryption keys are the is
 
 ## Sessions
 
-A session is a document in the space database written with a TTL; every
-mutation slides it. Messages are separate documents whose ids sort
-chronologically. An expired session disappears from reads immediately and is
-tombstoned by the space's TTL sweeper; a janitor then collects its orphaned
-messages.
+A session is a header document in the space database written with a TTL;
+every mutation slides it. Each data key, pin, the summary and each replica's
+counters are documents of their own, and messages are documents whose ids
+sort chronologically. An expired session disappears from reads immediately
+and its header is tombstoned by the space's TTL sweeper; a janitor then
+collects its orphaned documents.
 
 ```erlang
 {ok, Space} = barrel_spaces:open_space(SpaceId),
@@ -96,12 +97,22 @@ messages.
 
 %% structured working state and pinned context
 {ok, _} = barrel_session:set_data(Space, Sid, <<"cursor">>, 42),
+{ok, _} = barrel_session:delete_data(Space, Sid, <<"cursor">>),
 {ok, PinId} = barrel_session:pin_context(Space, Sid,
                                          #{content => <<"key fact">>,
                                            priority => 0}),
 {ok, Pinned} = barrel_session:list_pinned(Space, Sid),
-ok = barrel_session:delete(Space, Sid).   %% cascades to messages
+{ok, _} = barrel_session:unpin_context(Space, Sid, PinId),
+
+%% counters: no increment is lost when two nodes count at once
+{ok, 21} = barrel_session:incr_counter(Space, Sid, <<"messages">>, 1),
+{ok, #{<<"messages">> := 21}} = barrel_session:get_counters(Space, Sid),
+ok = barrel_session:delete(Space, Sid).   %% cascades to every document
 ```
+
+A counter only grows or shrinks by the amounts you add. To count "messages
+since the last extraction", keep the message counter and store its total at
+the last extraction as a data key: the difference is the count since.
 
 ### Durable sessions
 
@@ -170,10 +181,10 @@ config; spaces set it to 60000 by default.
 ## Handoffs
 
 A handoff is a shared space plus a capability. Creating one issues a grant
-and returns the token once; whoever holds the token accepts. Accepting flips
-the handoff document pending to accepted with a CAS (double accepts lose),
-opens the space, and creates a session for the acceptor in it: context is
-read in place, nothing is copied.
+and returns the token once; whoever holds the token accepts. Accepting
+records the acceptor (a second accept is refused), opens the space, and
+creates a session for the acceptor in it: context is read in place, nothing
+is copied.
 
 ```erlang
 {ok, #{handoff_id := Hid, token := HandoffToken}} =
@@ -206,6 +217,45 @@ read in place, nothing is copied.
 Handoff documents live in the registry database, so pending handoffs are
 discoverable with `barrel_handoff:list/1` (filters: `space`, `status`,
 `to_agent`, `from_agent`) or by subscribing to the registry's changes feed.
+Each step is a document written once: the handoff at create, one accept per
+agent, the completion. The status is the furthest step present.
+
+## Replicating a space and its registry
+
+Replicate the registry and a space database between nodes like any barrel
+database. Every grant, session and handoff fact is a document written once
+or replaced as a whole, so the default rules already give the right answer
+and you need no conflict resolver:
+
+- A revocation is a `revoke:` document of its own. A grant edited elsewhere
+  cannot undo it, and two nodes revoking the same token agree.
+- Two nodes writing different keys, pins or the summary of one session keep
+  both writes. The same key written on two nodes keeps the later write.
+- Removing a data key or a pin replicates as a delete: a node that still
+  holds the old copy cannot bring it back.
+- A handoff never goes back from completed to accepted, or from accepted to
+  pending. When two agents accept it on nodes that cannot see each other,
+  both accepts are kept and every node names the same owner: the earliest
+  `accepted_at`, then the agent name.
+- Counters are per replica and summed, so no increment is lost.
+
+```erlang
+%% node A
+ok = barrel_caps:revoke(TokenId, #{by => <<"ops">>}),
+
+%% node B, after replication
+{error, revoked} = barrel_caps:verify(Token, SpaceId, read),
+{ok, [#{<<"revoked_by">> := <<"ops">>}]} = barrel_caps:list(SpaceId).
+```
+
+### Upgrading from 1.x
+
+Documents written by 1.x read the same and convert on their next write.
+`barrel_spaces:migrate/0` converts the registry and every space that opens
+without runtime options in one pass; for an encrypted space, open it with its
+key and run `barrel_session:migrate/1`. Run the new version on every node of a
+mesh before any of them writes: a 1.x node ignores `revoke:` documents and
+keeps accepting a revoked token.
 
 ## Over REST and MCP
 
@@ -239,12 +289,12 @@ capability tokens work as bearers there (and only there). See
 - `barrel_caps:grant/2` does not require the space to exist. Granting on a
   purely logical scope (a tenant id, a handoff id) is supported: revocable,
   hash-at-rest, rights-laddered tokens with no space database behind them.
-- The registry (`_barrel_spaces`) holds space, grant, and handoff documents
-  as regular docs: folds and the changes feed see them.
+- The registry (`_barrel_spaces`) holds space, grant, revocation and
+  handoff documents as regular docs: folds and the changes feed see them.
 - An encrypted space needs its encryption spec on every open, including
   inside `barrel_handoff:accept/2` (pass `open_opts`). Over REST and MCP,
   spaces open with default options, so encrypted spaces are Erlang-API-only
   in v1.
-- `barrel_spaces_janitor` sweeps orphaned session messages of open spaces
+- `barrel_spaces_janitor` sweeps orphaned session documents of open spaces
   periodically (`janitor_interval`, default 5 minutes);
   `barrel_spaces_janitor:sweep/0` runs one pass now.

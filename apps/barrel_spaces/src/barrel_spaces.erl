@@ -26,7 +26,8 @@
          close_space/1,
          drop_space/1, drop_space/2,
          list_spaces/0,
-         space_info/1]).
+         space_info/1,
+         migrate/0]).
 
 %% Shared helpers for the other agent-layer modules
 -export([registry_db/0, new_id/1, now_ms/0, base32/1]).
@@ -56,7 +57,7 @@ ensure_registry() ->
     end.
 
 %% @doc The registry database name (documents: `space:Id', `grant:Id',
-%% `handoff:Id', `handoff_token:TokenId'). Configurable through the
+%% `revoke:Id', `handoff:Id' and its steps, `handoff_token:TokenId'). Configurable through the
 %% `registry_db' application env of barrel_spaces (default
 %% `_barrel_spaces'); set it before first use. The registry is a
 %% regular barrel database: opening it through barrel_dbs alongside
@@ -207,6 +208,35 @@ list_spaces() ->
 -spec space_info(binary()) -> {ok, map()} | {error, term()}.
 space_info(Id) when is_binary(Id) ->
     barrel_docdb:get_doc(registry_db(), <<"space:", Id/binary>>).
+
+%% @doc Move documents written before 2.0 to the 2.0 layout: grants
+%% revoked in place gain their `revoke:' document, handoffs past
+%% pending their step documents, and sessions are split into a header
+%% and one document per fact. Encrypted spaces, and spaces that do not
+%% open without runtime options, are listed in `skipped': run
+%% barrel_session:migrate/1 once they are open, or let their sessions
+%% convert on their next write. Safe to run again.
+-spec migrate() ->
+    {ok, #{grants := non_neg_integer(), handoffs := non_neg_integer(),
+           sessions := non_neg_integer(), skipped := [binary()]}}.
+migrate() ->
+    {ok, Grants} = barrel_caps:migrate(),
+    {ok, Handoffs} = barrel_handoff:migrate(),
+    {ok, Spaces} = list_spaces(),
+    {Sessions, Skipped} = lists:foldl(fun migrate_space/2, {0, []}, Spaces),
+    {ok, #{grants => Grants, handoffs => Handoffs, sessions => Sessions,
+           skipped => lists:reverse(Skipped)}}.
+
+migrate_space(#{<<"space">> := Id, <<"encrypted">> := true}, {N, Skipped}) ->
+    {N, [Id | Skipped]};
+migrate_space(#{<<"space">> := Id}, {N, Skipped}) ->
+    case open_space(Id) of
+        {ok, Space} ->
+            {ok, M} = barrel_session:migrate(Space),
+            {N + M, Skipped};
+        {error, _} ->
+            {N, [Id | Skipped]}
+    end.
 
 %%====================================================================
 %% Shared helpers
