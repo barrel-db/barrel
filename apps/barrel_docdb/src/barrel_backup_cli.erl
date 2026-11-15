@@ -4,7 +4,7 @@
 %%% flags (TCP, TLS or QUIC), and main/1 drives the node over erpc: every
 %%% backup, restore and prune runs on the node, against its own files.
 %%%
-%%%   create  Dir (Db... | --all)    Dir/Db/<UTC timestamp>/ per database
+%%%   create  Dir (Db... | --all)    Dir/Db/UTC-STAMP per database
 %%%   list    Dir [Db]               backups, newest first
 %%%   restore Backup Name [--retention Seconds]
 %%%   prune   Dir --keep N           keep the N newest per database
@@ -80,7 +80,7 @@ fail(Fmt, Args) ->
 %% On the node
 %%====================================================================
 
-%% @doc Back up the databases into Dir/Db/<UTC timestamp>, stopping at
+%% @doc Back up the databases into Dir/Db/UTC-STAMP, stopping at
 %% the first failure.
 -spec create(string(), all | [binary()]) ->
     {ok, [{binary(), binary()}]} | {error, binary(), term()}.
