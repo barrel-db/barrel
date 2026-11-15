@@ -87,6 +87,15 @@ case "${1:-start}" in
         mkdir -p "$BARREL_DATA_DIR/docdb" "$BARREL_DATA_DIR/ngram"
         exec "$REL/bin/barrel_server" foreground
         ;;
+    backup)
+        # barrel-backup reaches the node with its own vm.args and sys.config
+        # (and so its distribution carrier, TCP or QUIC)
+        shift
+        if [ -f "$CONF/vm.args" ]; then BARREL_VMARGS="$CONF/vm.args"; else BARREL_VMARGS="$RUN/vm.args"; fi
+        if [ -f "$CONF/sys.config" ]; then BARREL_SYS_CONFIG="$CONF/sys.config"; else BARREL_SYS_CONFIG="$RUN/sys.config"; fi
+        export BARREL_VMARGS BARREL_SYS_CONFIG
+        exec "$REL/bin/barrel-backup" "$@"
+        ;;
     *)
         # Release commands (remote_console, eval, ping) reuse the running
         # node's vm.args so they find it with the same name and cookie.

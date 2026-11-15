@@ -123,8 +123,11 @@ manifest(Name, Info, AttRef, Hlc, Tmp) ->
 %% @doc Restore the backup in `Dir' as database `Name', under the
 %% `data_dir' option (else the node's). Opts: `data_dir', `encryption'
 %% (required for an encrypted backup), `retention_period' (default the
-%% backup's), `read_only', and any other create_db/2 option.
--spec restore(file:filename_all(), binary(), map()) -> {ok, pid()} | {error, term()}.
+%% backup's), `read_only', and any other create_db/2 option. With
+%% `open => false' the files are put in place and nothing is opened:
+%% `{ok, DbPath}', for an application that opens its databases itself.
+-spec restore(file:filename_all(), binary(), map()) ->
+    {ok, pid()} | {ok, string()} | {error, term()}.
 restore(Dir0, Name, Opts) when is_binary(Name) ->
     Dir = to_list(Dir0),
     maybe
@@ -136,7 +139,11 @@ restore(Dir0, Name, Opts) when is_binary(Name) ->
                                                        "/tmp/barrel_data"))),
         DbPath = filename:join(DataDir, binary_to_list(Name)),
         ok ?= place(Dir, Manifest, DbPath, Name),
-        barrel_docdb:create_db(Name, open_opts(Opts, Manifest, DataDir))
+        case maps:get(open, Opts, true) of
+            false -> {ok, DbPath};
+            true -> barrel_docdb:create_db(Name, open_opts(maps:remove(open, Opts),
+                                                           Manifest, DataDir))
+        end
     end.
 
 %% @doc Read and check the manifest of a backup directory.
