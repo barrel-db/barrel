@@ -29,6 +29,26 @@ It builds the image, starts `peer-a` and `peer-b`, then:
 
 Exit 0 means every assertion passed. The script tears the stack down on exit.
 
+## Backup
+
+`backup.sh` runs `barrel backup` (the release's `bin/barrel-backup`) against a
+running `barrel_server` container, once per distribution carrier:
+
+```console
+$ DIST=tcp  test/e2e/backup.sh
+$ DIST=quic test/e2e/backup.sh
+```
+
+- `tcp` uses the image's default `vm.args`.
+- `quic` mounts a `vm.args` and `sys.config` that start the node on QUIC
+  distribution with test certificates, and runs twice: with `verify_none`,
+  then `verify_peer`. It also checks that the release's own `eval` cannot
+  reach that node, which is why the script brings its own client.
+
+Each run creates backups of every database, lists them, restores one under a
+new name and reads it over REST, refuses a name already taken, ignores an
+interrupted backup, and prunes. It needs `openssl` for the QUIC run.
+
 Replication is triggered inside a peer with `barrel_server eval`, which evaluates
 against the running node, so it runs the real `barrel_rep` algorithm (or, for the
 continuous-task scenario, `barrel_rep_tasks:start_task/1`) against the other

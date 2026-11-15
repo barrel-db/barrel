@@ -1,0 +1,80 @@
+#!/bin/sh
+# Back up and restore the databases of a running barrel node.
+#
+#   barrel-backup create  <dir> <db>... | --all
+#   barrel-backup list    <dir> [<db>]
+#   barrel-backup restore <backup> <name> [--retention SECONDS]
+#   barrel-backup prune   <dir> --keep N
+#
+# Paths are on the node: it writes and reads the backups itself.
+#
+# It reaches the node over distributed Erlang with the node's own
+# settings, so it works whether the node runs TCP, TLS or QUIC
+# distribution: it reads the node name, the cookie and every
+# distribution flag from the node's vm.args, and loads its sys.config
+# (QUIC distribution takes its certificates and discovery from there).
+#
+#   BARREL_VMARGS, BARREL_SYS_CONFIG   files to read instead of the defaults
+#   BARREL_BACKUP_CERT, BARREL_BACKUP_KEY
+#                                      certificate the script presents to a
+#                                      QUIC node with verify_peer (default:
+#                                      the node's own, from vm.args)
+set -eu
+
+REL=$(cd "$(dirname "$0")/.." && pwd)
+VSN=$(cut -d' ' -f2 "$REL/releases/start_erl.data" 2>/dev/null || ls "$REL/releases" | grep -v '\.' | head -1)
+
+first_file() {
+    for f in "$@"; do
+        if [ -n "$f" ] && [ -f "$f" ]; then printf '%s' "$f"; return 0; fi
+    done
+    return 1
+}
+
+VMARGS=$(first_file "${BARREL_VMARGS:-}" "${VMARGS_PATH:-}" /etc/barrel/vm.args \
+         /tmp/barrel/vm.args "$REL/releases/$VSN/vm.args") || {
+    echo "barrel-backup: no vm.args found (set BARREL_VMARGS)" >&2; exit 2; }
+SYSCONFIG=$(first_file "${BARREL_SYS_CONFIG:-}" "${RELX_CONFIG_PATH:-}" \
+            /etc/barrel/sys.config /tmp/barrel/sys.config \
+            "$REL/releases/$VSN/sys.config") || SYSCONFIG=""
+
+# value of a single-argument flag in vm.args
+arg() { sed -n "s/^[[:space:]]*$1[[:space:]]\{1,\}\([^[:space:]]*\).*/\1/p" "$VMARGS" | head -1; }
+
+NAMEFLAG=-name
+NODE=$(arg -name)
+if [ -z "$NODE" ]; then NAMEFLAG=-sname; NODE=$(arg -sname); fi
+[ -n "$NODE" ] || { echo "barrel-backup: no -name or -sname in $VMARGS" >&2; exit 2; }
+COOKIE=$(arg -setcookie)
+HOST=${NODE#*@}
+
+# Distribution flags as the node has them; a QUIC client listens on a
+# port of its own (0: any free one).
+DIST=$(grep -E '^[[:space:]]*-(proto_dist|epmd_module|start_epmd|quic_dist_[a-z_]+|ssl_dist_optfile|ssl_dist_opt|kernel[[:space:]]+inet_dist_[a-z_]+)[[:space:]]' "$VMARGS" \
+       | grep -vE '^[[:space:]]*-quic_dist_(port|cert|key)[[:space:]]' || true)
+if grep -qE '^[[:space:]]*-proto_dist[[:space:]]+quic' "$VMARGS"; then
+    CERT=${BARREL_BACKUP_CERT:-$(arg -quic_dist_cert)}
+    KEY=${BARREL_BACKUP_KEY:-$(arg -quic_dist_key)}
+    DIST="$DIST -quic_dist_port 0"
+    [ -n "$CERT" ] && DIST="$DIST -quic_dist_cert $CERT"
+    [ -n "$KEY" ] && DIST="$DIST -quic_dist_key $KEY"
+fi
+
+ERL=$(ls "$REL"/erts-*/bin/erl 2>/dev/null | head -1)
+[ -n "$ERL" ] || ERL=erl
+# the release's own boot file (its erts ships none)
+BOOT=""
+[ -f "$REL/releases/$VSN/start_clean.boot" ] && BOOT="-boot $REL/releases/$VSN/start_clean"
+
+PA=""
+for d in "$REL"/lib/*/ebin; do PA="$PA -pa $d"; done
+CONFIG=""
+[ -n "$SYSCONFIG" ] && CONFIG="-config ${SYSCONFIG%.config}"
+
+# Arguments go after -extra: erl would read --all or --keep as its own
+# flags. shellcheck disable=SC2086: PA, DIST and CONFIG hold several.
+exec "$ERL" -noshell -hidden $BOOT $PA \
+    $NAMEFLAG "barrel_backup_$$@$HOST" ${COOKIE:+-setcookie "$COOKIE"} \
+    $DIST $CONFIG -kernel logger_level error \
+    -eval 'barrel_backup_cli:main(init:get_plain_arguments())' \
+    -extra "$NODE" "$@"
