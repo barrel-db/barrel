@@ -237,6 +237,10 @@
 
 -export([db_instance_id/1, db_observed_version/1]).
 
+-ifdef(TEST).
+-export([writer_call/2]).
+-endif.
+
 %% Path Subscriptions (real-time document change notifications)
 -export([
     subscribe/2,
@@ -837,7 +841,7 @@ put_doc(Db, Doc, Opts) ->
     DbName = db_name(Db),
     Start = erlang:monotonic_time(millisecond),
     %% Write document locally first
-    Result = with_db(Db, fun(Pid) ->
+    Result = with_writer(Db, fun(Pid) ->
         barrel_db_server:put_doc(Pid, DbName, Doc, Opts)
     end),
     %% Record metrics
@@ -961,7 +965,7 @@ put_docs(Db, Docs, Opts) ->
     DbName = db_name(Db),
     ExtraAttrs = #{<<"db.batch_size">> => length(Docs)},
     barrel_trace:with_db_span(put_batch, DbName, ExtraAttrs, fun() ->
-        with_db(Db, fun(Pid) ->
+        with_writer(Db, fun(Pid) ->
             barrel_db_server:put_docs(Pid, DbName, Docs, Opts)
         end)
     end).
@@ -1106,7 +1110,7 @@ delete_doc(Db, DocId) ->
 delete_doc(Db, DocId, Opts) ->
     DbName = db_name(Db),
     Start = erlang:monotonic_time(millisecond),
-    Result = with_db(Db, fun(Pid) ->
+    Result = with_writer(Db, fun(Pid) ->
         barrel_db_server:delete_doc(Pid, DocId, Opts)
     end),
     Duration = erlang:monotonic_time(millisecond) - Start,
@@ -1223,7 +1227,7 @@ get_conflicts(Db, DocId) ->
                        {choose, binary()} | {merge, map()} | delete) ->
     {ok, map()} | {error, term()}.
 resolve_conflict(Db, DocId, BaseRev, Resolution) ->
-    with_db(Db, fun(Pid) ->
+    with_writer(Db, fun(Pid) ->
         barrel_db_server:resolve_conflict(Pid, DocId, BaseRev, Resolution)
     end).
 
@@ -2080,7 +2084,7 @@ outbox_fold(Db, Tag, Fun, Acc, Opts) ->
 -spec outbox_ack(binary() | pid(), binary(), [barrel_hlc:timestamp()]) ->
     ok | {error, term()}.
 outbox_ack(Db, Tag, Hlcs) ->
-    with_db(Db, fun(Pid) ->
+    with_writer(Db, fun(Pid) ->
         barrel_db_server:outbox_ack(Pid, Tag, Hlcs)
     end).
 
@@ -2093,7 +2097,7 @@ outbox_ack(Db, Tag, Hlcs) ->
 -spec set_doc_embedding(binary() | pid(), binary(), binary(), [number()]) ->
     ok | {error, conflict | not_found | term()}.
 set_doc_embedding(Db, DocId, ExpectedRev, Vector) ->
-    with_db(Db, fun(Pid) ->
+    with_writer(Db, fun(Pid) ->
         barrel_db_server:set_doc_embedding(Pid, DocId, ExpectedRev, Vector)
     end).
 
@@ -2145,7 +2149,7 @@ put_doc_state(Db, DocId, StateBin, Bodies) ->
                     #{binary() => map()}, #{binary() => [number()]}) ->
     {ok | unchanged, binary(), binary()} | {error, term()}.
 put_doc_state(Db, DocId, StateBin, Bodies, Vectors) ->
-    with_db(Db, fun(Pid) ->
+    with_writer(Db, fun(Pid) ->
         barrel_db_server:put_doc_state(Pid, DocId, StateBin, Bodies, Vectors)
     end).
 
@@ -2157,7 +2161,7 @@ put_doc_state(Db, DocId, StateBin, Bodies, Vectors) ->
 -spec repair_doc_bodies(binary() | pid(), binary(), #{binary() => map()}) ->
     {ok, binary(), [binary()]} | {error, term()}.
 repair_doc_bodies(Db, DocId, Bodies) ->
-    with_db(Db, fun(Pid) ->
+    with_writer(Db, fun(Pid) ->
         barrel_db_server:repair_doc_bodies(Pid, DocId, Bodies)
     end).
 
@@ -2183,7 +2187,7 @@ diff_states(Db, DigestMap) ->
 -spec put_version(binary() | pid(), map(), binary(), binary(), boolean()) ->
     {ok, binary(), binary()} | {error, term()}.
 put_version(Db, Doc, VersionToken, VVBin, Deleted) ->
-    with_db(Db, fun(Pid) ->
+    with_writer(Db, fun(Pid) ->
         barrel_db_server:put_version(Pid, Doc, VersionToken, VVBin, Deleted)
     end).
 
@@ -2286,7 +2290,7 @@ history_floor(Db) ->
 %% timer). Returns sweep statistics and the new floor.
 -spec sweep_retention(binary() | pid()) -> {ok, map()} | {error, term()}.
 sweep_retention(Db) ->
-    with_db(Db, fun(Pid) ->
+    with_writer(Db, fun(Pid) ->
         barrel_db_server:sweep_retention(Pid)
     end).
 
@@ -2294,7 +2298,7 @@ sweep_retention(Db) ->
 %% database option). Returns the number of docs tombstoned.
 -spec sweep_ttl(binary() | pid()) -> {ok, non_neg_integer()} | {error, term()}.
 sweep_ttl(Db) ->
-    with_db(Db, fun(Pid) ->
+    with_writer(Db, fun(Pid) ->
         barrel_db_server:sweep_ttl(Pid)
     end).
 
@@ -2321,7 +2325,7 @@ sweep_ttl(Db) ->
 %% @returns `ok'
 -spec put_local_doc(binary() | pid(), binary(), map()) -> ok | {error, term()}.
 put_local_doc(Db, DocId, Doc) ->
-    with_db(Db, fun(Pid) ->
+    with_writer(Db, fun(Pid) ->
         barrel_db_server:put_local_doc(Pid, DocId, Doc)
     end).
 
@@ -2330,7 +2334,7 @@ put_local_doc(Db, DocId, Doc) ->
 -spec put_local_doc(binary() | pid(), binary(), map(), map()) ->
     ok | {error, term()}.
 put_local_doc(Db, DocId, Doc, Opts) when is_map(Opts) ->
-    with_db(Db, fun(Pid) ->
+    with_writer(Db, fun(Pid) ->
         barrel_db_server:put_local_doc(Pid, DocId, Doc, Opts)
     end).
 
@@ -2352,7 +2356,7 @@ get_local_doc(Db, DocId) ->
 %% @returns `ok' or `{error, not_found}'
 -spec delete_local_doc(binary() | pid(), binary()) -> ok | {error, not_found}.
 delete_local_doc(Db, DocId) ->
-    with_db(Db, fun(Pid) ->
+    with_writer(Db, fun(Pid) ->
         barrel_db_server:delete_local_doc(Pid, DocId)
     end).
 
@@ -2810,6 +2814,28 @@ watched_db(Name) ->
     case barrel_db_watch:lookup(Name) of
         {ok, Pid} -> {ok, Pid};
         {failed, Reason} -> {error, {db_failed, Reason}};
+        restarting -> {error, not_found};
+        not_found -> {error, not_found}
+    end.
+
+%% @private get_db/1 for writes: a writer its supervisor is restarting
+%% is `unavailable', not missing.
+writer_db(Name) ->
+    case persistent_term:get({barrel_db, Name}, undefined) of
+        Pid when is_pid(Pid) ->
+            case is_process_alive(Pid) of
+                true -> {ok, Pid};
+                false -> restarting_db(Name)
+            end;
+        undefined ->
+            restarting_db(Name)
+    end.
+
+restarting_db(Name) ->
+    case barrel_db_watch:lookup(Name) of
+        {ok, Pid} -> {ok, Pid};
+        {failed, Reason} -> {error, {db_failed, Reason}};
+        restarting -> {error, unavailable};
         not_found -> {error, not_found}
     end.
 
@@ -2823,6 +2849,30 @@ with_db(Name, Fun) when is_binary(Name) ->
             Fun(Pid);
         {error, _} = Error ->
             Error
+    end.
+
+%% @private with_db/2 for writes. A write that meets a restarting writer
+%% returns an error instead of exiting the caller: `{error, unavailable}'
+%% when the writer died or is between two lives, `{error, timeout}' when
+%% it did not answer in time. Either way the write may have been
+%% applied (a group commit writes before it replies), so retry with the
+%% `_rev' or `_observed' you hold. Only exits from this database's
+%% writer are caught; any other exit propagates.
+-spec with_writer(binary() | pid(), fun((pid()) -> term())) -> term().
+with_writer(Pid, Fun) when is_pid(Pid) ->
+    writer_call(Pid, Fun);
+with_writer(Name, Fun) when is_binary(Name) ->
+    case writer_db(Name) of
+        {ok, Pid} -> writer_call(Pid, Fun);
+        {error, _} = Error -> Error
+    end.
+
+writer_call(Pid, Fun) ->
+    try
+        Fun(Pid)
+    catch
+        exit:{timeout, {gen_server, call, [Pid | _]}} -> {error, timeout};
+        exit:{_Reason, {gen_server, call, [Pid | _]}} -> {error, unavailable}
     end.
 
 %% @private Resolve the attachment store ref + db name for a handler.
@@ -2844,7 +2894,7 @@ att_ctx(AttRef, Pid, DbName) ->
 %% @private Like with_att/2 for attachment writes: a read-only database
 %% refuses them (the writer refuses their commits too).
 with_att_write(Db, Fun) ->
-    with_db(Db, fun(Pid) ->
+    with_writer(Db, fun(Pid) ->
         {ok, AttRef} = barrel_db_server:get_att_ref(Pid),
         case barrel_db_server:info(Pid) of
             {ok, #{read_only := true}} ->

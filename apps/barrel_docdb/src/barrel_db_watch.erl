@@ -27,8 +27,9 @@ writer_started(Name, Config, Sup) ->
     end.
 
 %% @doc Where a database stands when its registered writer is gone:
-%% the restarted writer, a recorded failure, or nothing.
--spec lookup(binary()) -> {ok, pid()} | {failed, term()} | not_found.
+%% the restarted writer, a recorded failure, a supervisor still
+%% restarting it (no writer yet), or nothing.
+-spec lookup(binary()) -> {ok, pid()} | {failed, term()} | restarting | not_found.
 lookup(Name) ->
     try ets:lookup(?TAB, {inst, Name}) of
         [{_, Sup}] ->
@@ -36,9 +37,13 @@ lookup(Name) ->
                 {ok, Pid} ->
                     {ok, Pid};
                 {error, not_found} ->
-                    %% the supervisor just died: let its DOWN be handled
+                    %% the supervisor just died, or is restarting the
+                    %% writer: let a DOWN be handled first
                     ok = gen_server:call(?MODULE, {settle, Name}, infinity),
-                    failure(Name)
+                    case failure(Name) of
+                        not_found -> restarting(Name);
+                        Failed -> Failed
+                    end
             end;
         [] ->
             failure(Name)
@@ -51,6 +56,13 @@ lookup(Name) ->
 clear_failure(Name) ->
     try gen_server:call(?MODULE, {clear_failure, Name}, infinity)
     catch exit:{noproc, _} -> not_found
+    end.
+
+%% The supervisor outlived the settle: its writer is between two lives.
+restarting(Name) ->
+    case ets:lookup(?TAB, {inst, Name}) of
+        [_] -> restarting;
+        [] -> not_found
     end.
 
 failure(Name) ->
