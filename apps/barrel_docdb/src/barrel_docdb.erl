@@ -235,6 +235,8 @@
     new_hlc/0
 ]).
 
+-export([backup_db/2, backup_db/3, restore_db/2, restore_db/3]).
+
 -export([db_instance_id/1, db_observed_version/1]).
 
 -ifdef(TEST).
@@ -433,6 +435,31 @@ db_exists(Name, Opts) when is_binary(Name), is_map(Opts) ->
             Dir = closed_db_data_dir(Name, Opts),
             filelib:is_dir(filename:join([Dir, binary_to_list(Name), "docs"]))
     end.
+
+%% @doc Back up a database into `Dir', which must not exist: a copy of
+%% its documents and attachments at one instant, taken while it stays
+%% open, with a `MANIFEST.json'. See barrel_db_backup.
+-spec backup_db(binary() | pid(), file:filename_all()) ->
+    {ok, map()} | {error, term()}.
+backup_db(Db, Dir) ->
+    backup_db(Db, Dir, #{}).
+
+-spec backup_db(binary() | pid(), file:filename_all(), map()) ->
+    {ok, map()} | {error, term()}.
+backup_db(Db, Dir, Opts) ->
+    barrel_db_backup:backup(Db, Dir, Opts).
+
+%% @doc Restore a backup as database `Name' and open it. The restored
+%% database is a new author (new source id and writer id); `Name' may be
+%% the original name. Opts are create_db/2 options; `retention_period'
+%% defaults to the backup's.
+-spec restore_db(file:filename_all(), binary()) -> {ok, pid()} | {error, term()}.
+restore_db(Dir, Name) ->
+    restore_db(Dir, Name, #{}).
+
+-spec restore_db(file:filename_all(), binary(), map()) -> {ok, pid()} | {error, term()}.
+restore_db(Dir, Name, Opts) ->
+    barrel_db_backup:restore(Dir, Name, Opts).
 
 %% @doc Fork a database into a new branch (timeline). `Parent' is the
 %% database name or the pid returned by create_db/2. See
