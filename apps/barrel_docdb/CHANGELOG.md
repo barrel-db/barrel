@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.2.0] - 2026-11-15
+
+### Fixed
+- A write that arrived while a database's writer was restarting exited the calling process. It now returns `{error, unavailable}`, or `{error, timeout}` when the writer does not answer. The write may or may not have been applied: retry it with the revision you read, and a write that already went through answers `conflict`.
+- A replication task whose endpoint was a map without a URL crashed when its process died, and could take the task manager down with it.
+
+### Added
+- Online backups. `backup_db` copies a database's documents and attachments at one instant while it keeps taking writes, with a manifest of checksums. `restore_db` brings a backup back under the same name or a new one, as a new author, so it never writes under the identity of the database it came from. Databases with S3 attachments are refused.
+- A `barrel-backup` command in the barrel_server release (`barrel backup` in the Docker image) creates, lists, restores and prunes the backups of a running node. It works when the node runs TCP, TLS or QUIC distribution.
+- Replication between the nodes of one Erlang cluster over distributed Erlang, with a `#{node, db}` endpoint: one-shot or continuous, attachments included, over TCP, TLS or QUIC distribution.
+
+### Changed
+- Code that caught exits around writes now gets error tuples instead.
+
 ## [3.1.0] - 2026-11-14
 
 ### Fixed

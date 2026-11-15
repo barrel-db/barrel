@@ -452,12 +452,14 @@ backup_db(Db, Dir, Opts) ->
 %% @doc Restore a backup as database `Name' and open it. The restored
 %% database is a new author (new source id and writer id); `Name' may be
 %% the original name. Opts are create_db/2 options; `retention_period'
-%% defaults to the backup's.
+%% defaults to the backup's. With `open => false' it only puts the files
+%% in place and returns `{ok, DbPath}'.
 -spec restore_db(file:filename_all(), binary()) -> {ok, pid()} | {error, term()}.
 restore_db(Dir, Name) ->
     restore_db(Dir, Name, #{}).
 
--spec restore_db(file:filename_all(), binary(), map()) -> {ok, pid()} | {error, term()}.
+-spec restore_db(file:filename_all(), binary(), map()) ->
+    {ok, pid()} | {ok, string()} | {error, term()}.
 restore_db(Dir, Name, Opts) ->
     barrel_db_backup:restore(Dir, Name, Opts).
 
