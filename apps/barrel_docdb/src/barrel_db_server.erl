@@ -725,6 +725,9 @@ handle_call_rw({checkpoint_to, DocsPath, AttPath}, _From,
                #state{store_ref = StoreRef, att_ref = AttRef} = State) ->
     ForkHlc = alloc_hlc(State#state.name),
     Result = case barrel_store_rocksdb:checkpoint(StoreRef, DocsPath) of
+        ok when AttPath =:= undefined ->
+            %% a backend with nothing local to copy (backups of `none')
+            {ok, ForkHlc};
         ok ->
             case barrel_att_store:checkpoint(AttRef, AttPath) of
                 ok -> {ok, ForkHlc};
@@ -2260,8 +2263,20 @@ source_id(DbName) ->
 %% @private Load or create the source id (persisted in db meta).
 %% A read-only store cannot mint: the stored id, else the one the import
 %% sidecar carries, else an in-memory one (it never authors a version).
-source_id(false, StoreRef, LogicalName, _DbPath) ->
-    ensure_source_id(StoreRef, LogicalName);
+source_id(false, StoreRef, LogicalName, DbPath) ->
+    Marker = filename:join(DbPath, "RESTORE"),
+    case filelib:is_regular(Marker) of
+        true ->
+            %% a restored backup is a new author, even under its old name
+            Key = barrel_store_keys:db_meta(LogicalName, <<"source_id">>),
+            SourceId = new_source_id(),
+            ok = barrel_store_rocksdb:write_batch(
+                   StoreRef, [{put, Key, SourceId}], #{sync => true}),
+            ok = file:delete(Marker),
+            SourceId;
+        false ->
+            ensure_source_id(StoreRef, LogicalName)
+    end;
 source_id(true, StoreRef, LogicalName, DbPath) ->
     Key = barrel_store_keys:db_meta(LogicalName, <<"source_id">>),
     case {barrel_store_rocksdb:get(StoreRef, Key),
