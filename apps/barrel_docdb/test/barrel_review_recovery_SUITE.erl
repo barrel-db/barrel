@@ -30,7 +30,12 @@
          http_download_stall_times_out/1,
          http_target_reject_closes_source/1,
          wait_for_stale_version_not_acknowledged/1,
-         wait_for_delete_acknowledged/1]).
+         wait_for_delete_acknowledged/1,
+         writes_during_writer_kill_return_unavailable/1,
+         stale_writer_pid_returns_unavailable/1,
+         restarting_writer_returns_unavailable/1,
+         failed_db_write_still_db_failed/1,
+         foreign_exit_still_raised/1]).
 
 all() ->
     [writer_crash_restarts,
@@ -53,7 +58,12 @@ all() ->
      http_download_stall_times_out,
      http_target_reject_closes_source,
      wait_for_stale_version_not_acknowledged,
-     wait_for_delete_acknowledged].
+     wait_for_delete_acknowledged,
+     writes_during_writer_kill_return_unavailable,
+     stale_writer_pid_returns_unavailable,
+     restarting_writer_returns_unavailable,
+     failed_db_write_still_db_failed,
+     foreign_exit_still_raised].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(barrel_docdb),
@@ -537,6 +547,102 @@ log(#{level := Level, msg := Msg}, #{config := #{pid := Pid}}) ->
     end,
     Pid ! {log, Level, lists:flatten(Text)},
     ok.
+
+%%====================================================================
+%% Writes while the writer restarts
+%%====================================================================
+
+%% Writes queued on a writer that is then killed come back as
+%% {error, unavailable}: the caller does not exit, and can retry.
+writes_during_writer_kill_return_unavailable(Config) ->
+    Db = ?config(db, Config),
+    {ok, Pid} = create(Db),
+    {ok, #{<<"rev">> := Rev}} = barrel_docdb:put_doc(Db, #{<<"id">> => <<"gone">>}),
+    Writes = [fun() -> barrel_docdb:put_doc(Db, #{<<"id">> => <<"a">>}) end,
+              fun() -> barrel_docdb:put_docs(Db, [#{<<"id">> => <<"b">>}]) end,
+              fun() -> barrel_docdb:delete_doc(Db, <<"gone">>, #{rev => Rev}) end,
+              fun() -> barrel_docdb:put_local_doc(Db, <<"l">>, #{<<"v">> => 1}) end,
+              fun() -> barrel_docdb:put_attachment(Db, <<"gone">>, <<"f">>, <<"data">>) end],
+    ok = sys:suspend(Pid),
+    Parent = self(),
+    Callers = [begin
+                   C = spawn(fun() -> Parent ! {self(), try W() catch C1:R1 -> {C1, R1} end} end),
+                   wait_queue(Pid, I),
+                   C
+               end || {I, W} <- lists:zip(lists:seq(1, length(Writes)), Writes)],
+    kill(Pid),
+    Results = [receive {C, R} -> R after 10000 -> ct:fail(no_answer) end
+               || C <- Callers],
+    [?assertEqual({error, unavailable}, R) || R <- Results],
+    %% the restarted writer takes the retried writes; reads are unchanged
+    New = await_restart(Db, Pid),
+    ?assertNotEqual(Pid, New),
+    {ok, _} = barrel_docdb:put_doc(Db, #{<<"id">> => <<"a">>}),
+    {ok, #{<<"id">> := <<"a">>}} = barrel_docdb:get_doc(Db, <<"a">>),
+    ok.
+
+%% A caller holding the writer pid from before a restart gets
+%% {error, unavailable} instead of a noproc exit.
+stale_writer_pid_returns_unavailable(Config) ->
+    Db = ?config(db, Config),
+    {ok, Old} = create(Db),
+    kill(Old),
+    _ = await_restart(Db, Old),
+    ?assertEqual({error, unavailable},
+                 barrel_docdb:put_doc(Old, #{<<"id">> => <<"x">>})),
+    ?assertEqual({error, unavailable},
+                 barrel_docdb:put_local_doc(Old, <<"l">>, #{})),
+    ok.
+
+%% While the supervisor is restarting the writer, writes are
+%% unavailable and reads report the database missing, as before.
+restarting_writer_returns_unavailable(Config) ->
+    Db = ?config(db, Config),
+    {ok, Pid} = create(Db),
+    ok = meck:new(barrel_db_watch, [passthrough]),
+    ok = meck:expect(barrel_db_watch, lookup, fun(_) -> restarting end),
+    persistent_term:put({barrel_db, Db}, spawn(fun() -> ok end)),
+    timer:sleep(10),
+    try
+        ?assertEqual({error, unavailable},
+                     barrel_docdb:put_doc(Db, #{<<"id">> => <<"x">>})),
+        ?assertEqual({error, not_found}, barrel_docdb:get_doc(Db, <<"x">>, #{}))
+    after
+        persistent_term:put({barrel_db, Db}, Pid),
+        meck:unload(barrel_db_watch)
+    end,
+    ok.
+
+%% A database out of restarts keeps answering {error, {db_failed, _}}.
+failed_db_write_still_db_failed(Config) ->
+    Db = ?config(db, Config),
+    {ok, _} = create(Db),
+    ok = fail_db(Db),
+    ?assertMatch({error, {db_failed, _}},
+                 barrel_docdb:put_doc(Db, #{<<"id">> => <<"x">>})),
+    ok.
+
+%% Only exits from the database's own writer are turned into errors.
+foreign_exit_still_raised(_Config) ->
+    Writer = spawn(fun() -> receive stop -> ok end end),
+    Other = spawn(fun() -> ok end),
+    Call = fun(P) -> {noproc, {gen_server, call, [P, x]}} end,
+    ?assertExit({noproc, {gen_server, call, [Other, x]}},
+                barrel_docdb:writer_call(Writer, fun(_) -> exit(Call(Other)) end)),
+    ?assertExit(bad, barrel_docdb:writer_call(Writer, fun(_) -> exit(bad) end)),
+    ?assertEqual({error, unavailable},
+                 barrel_docdb:writer_call(Writer, fun(W) -> exit(Call(W)) end)),
+    ?assertEqual({error, timeout},
+                 barrel_docdb:writer_call(
+                   Writer, fun(W) -> exit({timeout, {gen_server, call, [W, x, 5000]}}) end)),
+    Writer ! stop,
+    ok.
+
+wait_queue(Pid, N) ->
+    case erlang:process_info(Pid, message_queue_len) of
+        {message_queue_len, L} when L >= N -> ok;
+        _ -> timer:sleep(1), wait_queue(Pid, N)
+    end.
 
 %%====================================================================
 %% Helpers
