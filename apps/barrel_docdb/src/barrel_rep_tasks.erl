@@ -557,7 +557,7 @@ run_direction(#{task_id := TaskId, key := Key} = Ctx, From, To,
         to => To,
         from_transport => FromTransport,
         to_transport => ToTransport,
-        wake => init_wake(Ctx, From, Since),
+        wake => init_wake(Ctx, From, FromTransport, Since),
         poll => ?POLL_MIN,
         backoff => ?BACKOFF_MIN
     },
@@ -586,7 +586,7 @@ retry_pending(#{pending := Pending, from := From, to := To,
 %% The stream is unlinked: it ends with the task through its owner
 %% monitor, and a stream that ends leaves the task polling (see
 %% wait_for_wake/1) instead of taking it down.
-init_wake(#{mode := continuous}, From, Since) when is_binary(From) ->
+init_wake(#{mode := continuous}, From, _Transport, Since) when is_binary(From) ->
     case barrel_docdb:subscribe_changes(From, Since,
                                         #{mode => push,
                                           owner => self()}) of
@@ -596,7 +596,18 @@ init_wake(#{mode := continuous}, From, Since) when is_binary(From) ->
         {error, _} ->
             poll
     end;
-init_wake(_Ctx, _From, _Since) ->
+init_wake(#{mode := continuous}, From, Transport, Since) ->
+    %% a transport that can stream changes from another node (dist)
+    case erlang:function_exported(Transport, subscribe_changes, 3) of
+        true ->
+            case Transport:subscribe_changes(From, Since, self()) of
+                {ok, Stream} -> {stream, Stream};
+                {error, _} -> poll
+            end;
+        false ->
+            poll
+    end;
+init_wake(_Ctx, _From, _Transport, _Since) ->
     poll.
 
 run_task_loop(Ctx, Since0) ->
@@ -928,7 +939,11 @@ missing_at(Target, Versions) ->
             Versions
     end.
 
-%% @doc Get the appropriate transport for a (resolved) target
+%% @doc Get the appropriate transport for a (resolved) target: a node
+%% endpoint replicates over distributed Erlang, a URL over HTTP, a
+%% database name in this VM.
+get_transport_for_target(#{node := _}) ->
+    barrel_rep_transport_dist;
 get_transport_for_target(Target) ->
     case is_remote(Target) of
         true -> barrel_rep_transport_http;
@@ -1065,11 +1080,15 @@ open_local(M, F, Name) when is_binary(Name) ->
 open_local(_M, _F, _Endpoint) ->
     ok.
 
-local_open(Endpoint) ->
+%% Only a database name of this VM can be closed here; any other
+%% endpoint (a URL, a node, a custom transport's) counts as open.
+local_open(Endpoint) when is_binary(Endpoint) ->
     case is_remote(Endpoint) of
         true -> true;
         false -> local_running(barrel_docdb:db_pid(Endpoint))
-    end.
+    end;
+local_open(_Endpoint) ->
+    true.
 
 local_running({ok, _Pid}) -> true;
 local_running({error, _}) -> false.
@@ -1464,6 +1483,13 @@ userinfo_keys(Url) ->
     end.
 
 %% A custom transport owns its endpoint shape.
+check_endpoint(#{node := Node, db := Db} = Endpoint, Transport)
+  when Transport =:= undefined; Transport =:= barrel_rep_transport_dist ->
+    case is_atom(Node) andalso is_binary(Db)
+         andalso barrel_docdb:validate_db_name(Db) =:= ok of
+        true -> ok;
+        false -> throw({invalid, {invalid_endpoint, Endpoint}})
+    end;
 check_endpoint(Endpoint, Transport) when Transport =:= undefined;
                                          Transport =:= barrel_rep_transport_local;
                                          Transport =:= barrel_rep_transport_http ->
