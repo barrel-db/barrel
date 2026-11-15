@@ -5,8 +5,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.16.0] - 2026-11-15
+
 ### Added
 - A Docker image runs the HTTP node with no Erlang install. You set the port, data directory, tokens and log level through environment variables, or mount your own configuration. It is published for amd64 and arm64 with each Barrel bundle.
+- The release ships `barrel-backup` (`barrel backup` in the Docker image) to back up, list, restore and prune the databases of a running node, over TCP, TLS or QUIC distribution (barrel_docdb 3.2).
+
+### Changed
+- Moves to livery 0.14 and barrel_mcp 4.5.3, with h2 0.18, hackney 4.12.1 and quic 3.1. Over HTTP/3, a client certificate whose key usage does not allow TLS client authentication is now refused; check the certificates of HTTP/3 clients before upgrading. A graceful HTTP/2 shutdown now finishes the requests it already accepted.
 
 ## [1.15.1] - 2026-11-14
 
