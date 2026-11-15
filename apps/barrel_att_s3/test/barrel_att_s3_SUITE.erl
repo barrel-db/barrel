@@ -1134,18 +1134,27 @@ multipart_gc_periodic_timer_fires(Config) ->
     AttRef = ?config(att_ref, Config),
     DbName = ?config(db_name, Config),
     #{client := Client, bucket := Bucket, endpoint := Endpoint, prefix := Prefix} = AttRef,
-    ok = application:set_env(barrel_att_s3, multipart_gc_interval, 200),
-    ok = application:set_env(barrel_att_s3, multipart_gc_max_age, 0),
-    ok = supervisor:terminate_child(barrel_att_s3_sup, barrel_att_s3_multipart_gc),
-    {ok, _} = supervisor:restart_child(barrel_att_s3_sup, barrel_att_s3_multipart_gc),
-    %% the fresh gc process starts with an empty registry -- re-register
-    %% this test's own target, same as open/2 would on its next open
-    ok = barrel_att_s3_multipart_gc:register_target(Endpoint, Bucket, Prefix, Client),
+    %% the stale upload exists before the fast timer is armed: armed
+    %% first, it could sweep the upload before the assert sees it
     {Key, UploadId} = crash_upload(AttRef, DbName, <<"timer.bin">>),
     ?assert(upload_listed(Client, Bucket, Key, UploadId)),
-    ok = wait_until(fun() -> not upload_listed(Client, Bucket, Key, UploadId) end, 3000),
-    ok = application:unset_env(barrel_att_s3, multipart_gc_interval),
-    ok = application:unset_env(barrel_att_s3, multipart_gc_max_age).
+    ok = application:set_env(barrel_att_s3, multipart_gc_interval, 200),
+    ok = application:set_env(barrel_att_s3, multipart_gc_max_age, 0),
+    try
+        ok = supervisor:terminate_child(barrel_att_s3_sup, barrel_att_s3_multipart_gc),
+        {ok, _} = supervisor:restart_child(barrel_att_s3_sup, barrel_att_s3_multipart_gc),
+        %% the fresh gc process starts with an empty registry -- re-register
+        %% this test's own target, same as open/2 would on its next open
+        ok = barrel_att_s3_multipart_gc:register_target(Endpoint, Bucket, Prefix, Client),
+        ok = wait_until(fun() -> not upload_listed(Client, Bucket, Key, UploadId) end, 3000)
+    after
+        %% a fast gc left armed aborts the next cases' uploads in flight
+        ok = application:unset_env(barrel_att_s3, multipart_gc_interval),
+        ok = application:unset_env(barrel_att_s3, multipart_gc_max_age),
+        ok = supervisor:terminate_child(barrel_att_s3_sup, barrel_att_s3_multipart_gc),
+        {ok, _} = supervisor:restart_child(barrel_att_s3_sup, barrel_att_s3_multipart_gc),
+        ok = barrel_att_s3_multipart_gc:register_target(Endpoint, Bucket, Prefix, Client)
+    end.
 
 crash_upload(AttRef, DbName, AttName) ->
     {ok, S1} = barrel_att_s3_store:put_stream(AttRef, DbName, <<"doc1">>,
