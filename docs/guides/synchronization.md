@@ -22,10 +22,12 @@ Both sides converge to the same winner, body, and deletion state for every
 document, whatever the interleaving of writes. Conflicts are recorded where
 the concurrency was observed and resolve by writing a superseding version.
 
-Transports implement the `barrel_rep_transport` behaviour. Two ship today:
-`barrel_rep_transport_local` (same VM, database names) and
+Transports implement the `barrel_rep_transport` behaviour. Three ship today:
+`barrel_rep_transport_local` (same VM, database names),
 `barrel_rep_transport_http` (hackney client speaking the
-`/db/:db/_sync/*` wire served by `barrel_server`).
+`/db/:db/_sync/*` wire served by `barrel_server`) and
+`barrel_rep_transport_dist` (another node of the same Erlang cluster, see
+[Replicate inside an Erlang cluster](cluster-replication.md)).
 
 ## When to use it
 
@@ -302,7 +304,8 @@ Notes:
 ## Continuous replication (tasks)
 
 The task manager (`barrel_rep_tasks`) persists replications across restarts.
-Remote ends are URLs; the HTTP transport is picked automatically:
+Remote ends are URLs, or `#{node, db}` maps for a node of the same cluster;
+the transport is picked automatically:
 
 ```erlang
 {ok, TaskId} = barrel_rep_tasks:start_task(#{
@@ -331,7 +334,8 @@ Continuous behavior:
   <<"db_closed">>`. Within 5 s of its local databases being open again, the
   task resumes from its checkpoint. A task you paused with `pause_task/1` or
   `stop_task/1` stays paused.
-- Task docs store endpoints as URLs only; tokens come from `sync_auth`.
+- Task docs store URL endpoints without credentials; tokens come from
+  `sync_auth`.
 
 ## Vectors you supply
 

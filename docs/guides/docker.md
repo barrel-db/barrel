@@ -86,6 +86,16 @@ The [synchronization guide](synchronization.md) describes the listener and TLS k
 $ docker exec -it barrel barrel remote_console
 ```
 
+## Back up the databases
+
+```console
+$ docker exec barrel barrel backup create /data/backups --all
+$ docker exec barrel barrel backup list /data/backups
+```
+
+It uses the node's own config, so it works with your mounted `vm.args`,
+QUIC distribution included. See [Back up and restore](backup.md).
+
 ## Build the image yourself
 
 From a checkout of the repository:

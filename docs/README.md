@@ -13,6 +13,9 @@ Start here.
 - [Run barrel in Docker](guides/docker.md): the `barrel-server` image, its settings and your own config.
 - [Embed the barrel server in a livery app](guides/embedding-barrel-server.md): mount barrel's routes into a host livery service, under a sub-path.
 - [Synchronization](guides/synchronization.md): replication between databases.
+- [Replicate inside an Erlang cluster](guides/cluster-replication.md): replication over distributed Erlang, TCP or QUIC.
+- [Back up and restore](guides/backup.md): online backups, restores, and the `barrel-backup` command.
+- [Writes while a database restarts](guides/write-availability.md): the errors a write returns and how to retry it.
 - [Timeline](guides/timeline.md): branch a database, work in isolation, merge back (incl. PITR).
 - [Encryption at rest](guides/encryption.md): per-database keys over every store and index file.
 - [Audit and provenance](guides/audit-provenance.md): who wrote what, when, and past versions.
