@@ -5,6 +5,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.16.1] - 2026-11-16
+
+### Fixed
+- `barrel-backup` copied only the documents of the server's databases: a database with vectors came back from a restore without them. Backups now carry the vector store, and a record-mode database rebuilds its index from its stored embeddings when restored.
+
+### Changed
+- Requires barrel 1.15 and barrel_docdb 3.3.
+
 ## [1.16.0] - 2026-11-15
 
 ### Added
