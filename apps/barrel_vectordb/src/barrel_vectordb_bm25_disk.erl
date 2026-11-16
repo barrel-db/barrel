@@ -30,6 +30,7 @@
     open/1,
     open/2,
     close/1,
+    backup/2,
     sync/1,
     %% Rebuild of a store that predates the durable format
     rebuild_required/1,
@@ -244,6 +245,13 @@ close(#bm25_disk_index{file_handle = FileHandle, id_db = IdDb,
     end,
     catch ets:delete(DocStats),
     ok.
+
+%% @doc Copy the index into Dir (absent), with no writer running: the
+%% flat files after a sync, the bm25.ids RocksDB as a checkpoint.
+-spec backup(bm25_disk_index(), string()) -> ok | {error, term()}.
+backup(#bm25_disk_index{base_path = Base, id_db = IdDb} = Index, Dir) ->
+    ok = sync(Index),
+    barrel_vectordb_backup:copy_index_dir(Base, Dir, "bm25.ids", IdDb).
 
 %% @doc Sync to disk
 -spec sync(bm25_disk_index()) -> ok.

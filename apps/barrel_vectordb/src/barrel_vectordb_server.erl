@@ -58,6 +58,7 @@
     embedder_info/1,
     checkpoint/1,
     persist_index/1,
+    backup/2,
     bm25_info/1,
     bm25_compact/1
 ]).
@@ -270,6 +271,13 @@ embedder_info(Store) ->
 -spec checkpoint(store_ref()) -> ok.
 checkpoint(Store) ->
     gen_server:call(ref(Store), checkpoint).
+
+%% @doc Snapshot the store into Dir, which must not exist, while it keeps
+%% serving: writes wait for the copy. See barrel_vectordb_backup.
+-spec backup(store_ref(), file:filename_all()) -> ok | {error, term()}.
+backup(Store, Dir) ->
+    gen_server:call(ref(Store), {backup, unicode:characters_to_list(Dir)},
+                    ?LONG_TIMEOUT).
 
 %% @doc Persist the index graph to RocksDB now (also done at close and
 %% checkpoint); the next open loads it instead of rebuilding.
@@ -558,6 +566,21 @@ handle_read(checkpoint, #state{db = Db, cf_hnsw = CfHnsw,
 
 handle_read(persist_index, State) ->
     {persist_index_graph(State), State};
+
+%% The graph goes into the RocksDB first, so the copy opens without a
+%% rebuild; a read-only store has nothing newer to write.
+handle_read({backup, Dir}, #state{db = Db, cf_hnsw = CfHnsw, index = Index,
+                                   index_module = Mod, config = Config} = State) ->
+    _ = case read_only(Config) of
+        true -> ok;
+        false ->
+            _ = persist_index_meta(Db, CfHnsw, Index, Mod),
+            persist_index_graph(State)
+    end,
+    DbPath = maps:get(db_path, Config, "priv/barrel_vectordb_data"),
+    {barrel_vectordb_backup:run(Dir, Db, #{db_path => DbPath,
+                                           indexes => backup_indexes(State)}),
+     State};
 
 %% BM25 search
 handle_read({search_bm25, Query, Opts}, State) ->
@@ -1643,6 +1666,14 @@ init_bm25(DbPath, disk, Config, Crypto) ->
         {false, false} ->
             barrel_vectordb_bm25_disk:new(FinalConfig)
     end.
+
+%% The disk indexes a backup copies, under their default subdirectory.
+backup_indexes(#state{bm25_backend = Bm25, bm25_index = Bm25Index,
+                      index_module = Mod, index = Index}) ->
+    [{"bm25", fun(D) -> barrel_vectordb_bm25_disk:backup(Bm25Index, D) end}
+     || Bm25 =:= disk, Bm25Index =/= undefined]
+    ++ [{"diskann", fun(D) -> barrel_vectordb_diskann:backup(Index, D) end}
+        || Mod =:= barrel_vectordb_diskann].
 
 %% A read-only disk index that needs a rebuild cannot be served.
 open_bm25(#state{bm25_backend = disk, bm25_index = Index,

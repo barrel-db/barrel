@@ -39,6 +39,7 @@
     open/1,
     open/2,
     close/1,
+    backup/2,
     sync/1,
     %% Serialization (for barrel_vectordb_index behaviour)
     serialize/1,
@@ -2200,6 +2201,18 @@ close(#diskann_index{storage_mode = memory, cache_table = CacheTable,
         _ -> ets:delete(GraphCacheTable)
     end,
     ok.
+
+%% @doc Copy the index into Dir (absent), with no writer running: the
+%% files after a sync, a standalone diskann_ids RocksDB as a checkpoint
+%% (a shared one is in the store's own checkpoint).
+-spec backup(diskann_index(), string()) -> ok | {error, term()}.
+backup(#diskann_index{base_path = undefined}, _Dir) ->
+    ok;
+backup(#diskann_index{base_path = Base, id_db = IdDb,
+                      id_db_standalone = Standalone} = Index, Dir) ->
+    ok = sync(Index),
+    Own = case Standalone of true -> IdDb; false -> undefined end,
+    barrel_vectordb_backup:copy_index_dir(Base, Dir, "diskann_ids", Own).
 
 %% @doc Force sync to disk
 -spec sync(diskann_index()) -> ok.
