@@ -213,7 +213,7 @@ local_dbs() ->
 verify(Dir, #{<<"files">> := Files}) ->
     Bad = [P || #{<<"path">> := P, <<"size">> := Size, <<"sha256">> := Sum} <- Files,
                 not barrel_ctx_manifest:verify_file(filename:join(Dir, binary_to_list(P)),
-                                                    #{sha256 => Sum, bytes => Size})],
+                                                    #{path => P, sha256 => Sum, bytes => Size})],
     case Bad of
         [] -> ok;
         _ -> {error, {corrupt_backup, Bad}}
