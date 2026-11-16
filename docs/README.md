@@ -32,3 +32,9 @@ Start here.
 - [Contexts](architecture/contexts.md): the design of contexts (identity, cards, manifests, working sets, query contract, merge rules, budgets, permissions) and the measured decisions behind it.
 - [Overview](architecture/overview.md): how the umbrella is split and why.
 - [Responsibilities](migration/responsibilities.md): per-app responsibilities.
+
+## Proofs
+
+- [Replication proofs](architecture/replication-proofs.md): the properties document replication relies on, and why each holds.
+- [Machine-checked proofs](architecture/proofs/README.md): the TLA+ model (`proofs/tla/DocState.tla`), Ivy and Lean checks of those properties, with negative controls, and how to run them.
+- [Spaces layout model](../apps/barrel_spaces/spec/SpacesLayout.tla): a TLA+ model of barrel_spaces documents replicated on several nodes; run it with `apps/barrel_spaces/scripts/check-tla.sh`.
