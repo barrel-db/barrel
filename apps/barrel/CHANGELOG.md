@@ -3,6 +3,14 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.15.0] - 2026-11-16
+
+### Added
+- `backup/3` and `restore/3` back up and restore a whole database while it stays open. A plain database's backup carries its vector store. A record-mode backup carries no vectors: the restore rebuilds the index from the embeddings stored in the documents, without calling the embedder, and documents not yet indexed at the backup are indexed after it. A restored database is a new author, under the same name or a new one.
+
+### Changed
+- Requires barrel_docdb 3.2 and barrel_vectordb 2.6.
+
 ## [1.14.0] - 2026-11-14
 
 ### Added

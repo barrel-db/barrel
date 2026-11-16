@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.3.0] - 2026-11-16
+
+### Added
+- `barrel-backup` can back up and restore through another module, set in the `backup_module` option. barrel_server uses it so its backups carry the vector stores of its databases.
+
 ## [3.2.0] - 2026-11-15
 
 ### Fixed

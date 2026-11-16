@@ -176,3 +176,43 @@ Last2   = barrel:hlc_decode(Cursor),
 {ok, More, _} = barrel:changes(Db, Last2),  %% changes since the cursor
 {ok, Pid} = barrel:subscribe(Db, Last).
 ```
+
+## Back up and restore
+
+`barrel:backup/2` copies a database while it stays open. `barrel:restore/3`
+brings it back under any name, as a new author (it never writes under the
+identity of the database it came from).
+
+```erlang
+{ok, #{mode := plain}} = barrel:backup(Db, "/backups/notes-20261116"),
+
+{ok, Copy} = barrel:restore("/backups/notes-20261116", notes_copy,
+                            #{vectordb => #{dimension => 768}}).
+```
+
+Pass `restore/3` the options you open the database with: the `vectordb`
+config, and `encryption` for an encrypted database. The vector store goes
+next to the documents, or to `vectordb => #{db_path => P}`.
+
+What the backup holds depends on the mode:
+
+| Mode | Backup | Restore |
+|---|---|---|
+| plain | documents and the vector store | both copied back |
+| record | documents only | the index is rebuilt from the embeddings stored in the documents, with no embedder calls; documents not yet indexed are indexed after |
+| `vectordb => none` | documents | documents |
+
+The documents follow the rules of a barrel_docdb backup: see
+[Back up and restore](backup.md) for retention, branches, encryption and
+the `barrel-backup` command.
+
+## Errors and replication
+
+- A write while the database's writer restarts returns `{error, unavailable}`
+  or `{error, timeout}`; see [Writes while a database restarts](write-availability.md).
+- barrel does not wrap replication: call `barrel_rep` and `barrel_rep_tasks`
+  on the docdb name, `<<"notes">>` for a database opened as `notes`. Between
+  the nodes of one cluster, use a `#{node, db}` endpoint; see
+  [Replicate inside an Erlang cluster](cluster-replication.md). Vector
+  indexes are not replicated: in record mode each node indexes the
+  documents it receives, and plain-mode vectors stay on their node.

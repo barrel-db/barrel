@@ -80,6 +80,11 @@ prints the database and the reason, and exits 1, so you can run it from cron:
 0 2 * * *  /opt/barrel/bin/barrel-backup create /backups --all && /opt/barrel/bin/barrel-backup prune /backups --keep 7
 ```
 
+On a barrel_server node the databases are barrel databases, and
+`barrel-backup` backs them up with their vector store (see
+[barrel's backups](embedding.md#back-up-and-restore)). A record-mode
+database rebuilds its index from its stored embeddings when restored.
+
 In Docker, the same command is `barrel backup`:
 
 ```console

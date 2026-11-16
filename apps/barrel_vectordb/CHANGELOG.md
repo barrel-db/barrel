@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.6.0] - 2026-11-16
+
+### Added
+- `backup/2` copies a running store into a new directory: its vectors, the persisted index, the disk BM25 and DiskANN indexes, and the encryption marker. Writes wait while it copies. The copy opens as a store of its own, with the same config.
+
 ## [2.5.4] - 2026-11-10
 
 ### Fixed

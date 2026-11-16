@@ -1,6 +1,6 @@
 {application, barrel, [
     {description, "Barrel: the embeddable edge-AI database composing the document and vector layers"},
-    {vsn, "1.14.0"},
+    {vsn, "1.15.0"},
     {registered, [barrel_sup]},
     {mod, {barrel_app, []}},
     {applications, [
