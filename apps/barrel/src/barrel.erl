@@ -25,7 +25,11 @@
     branch/3,
     merge/1,
     merge/2,
-    info/1
+    info/1,
+    backup/2,
+    backup/3,
+    restore/2,
+    restore/3
 ]).
 
 %% Documents (barrel_docdb)
@@ -447,6 +451,30 @@ open_branch(Db, BranchBin, Opts) ->
 %% A branch of a database without a vector store has none either.
 branch_vec(#{vstore := _}) -> #{};
 branch_vec(_DocsOnly) -> none.
+
+%% @doc Back up a database into `Dir', which must not exist, while it
+%% stays open: its documents, and in plain mode its vector store. A
+%% record-mode backup carries no vectors; the restore rebuilds them from
+%% the stored embeddings. See barrel_backup.
+-spec backup(db(), file:filename_all()) -> {ok, map()} | {error, term()}.
+backup(Db, Dir) ->
+    backup(Db, Dir, #{}).
+
+-spec backup(db() | db_name(), file:filename_all(), map()) ->
+    {ok, map()} | {error, term()}.
+backup(Db, Dir, Opts) ->
+    barrel_backup:backup(Db, Dir, Opts).
+
+%% @doc Restore a backup as database `Name' and open it. Pass the open
+%% options the database needs (`vectordb' config, `encryption'). The
+%% restored database is a new author. See barrel_backup:restore/3.
+-spec restore(file:filename_all(), db_name()) -> {ok, db()} | {error, term()}.
+restore(Dir, Name) ->
+    restore(Dir, Name, #{}).
+
+-spec restore(file:filename_all(), db_name(), map()) -> {ok, db()} | {error, term()}.
+restore(Dir, Name, Opts) ->
+    barrel_backup:restore(Dir, Name, Opts).
 
 %% @doc Merge a branch's edits back into its parent (see
 %% barrel_docdb:merge_branch/2). When the parent is a record-mode
