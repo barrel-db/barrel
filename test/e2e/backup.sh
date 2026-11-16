@@ -108,14 +108,32 @@ run_cases() {  # run_cases <label>
         ok "$label: restore over an existing name refused"
     fi
 
-    # an interrupted backup: a directory without its manifest
-    docker exec "$NAME" sh -c "cp -r /data/backups/notes/$latest /data/backups/notes/$latest.partial-dead && rm /data/backups/notes/$latest.partial-dead/MANIFEST.json"
+    # an interrupted backup: a directory without its top manifest
+    docker exec "$NAME" sh -c "cp -r /data/backups/notes/$latest /data/backups/notes/$latest.partial-dead && rm -f /data/backups/notes/$latest.partial-dead/MANIFEST.json /data/backups/notes/$latest.partial-dead/BARREL.json"
     n=$(backup list /data/backups notes | wc -l | tr -d ' ')
     [ "$n" = 2 ] && ok "$label: an interrupted backup is not listed" || ko "$label: interrupted backup listed ($n)"
     if backup restore "/data/backups/notes/$latest.partial-dead" notes_bad >/dev/null 2>&1; then
         ko "$label: an interrupted backup cannot be restored"
     else
         ok "$label: an interrupted backup cannot be restored"
+    fi
+
+    # vectors: the server's databases are barrel databases, their
+    # backups carry the vector store (768 dimensions by default)
+    local va vb
+    va="[1$(printf ',0%.0s' $(seq 767))]"
+    vb="[0,1$(printf ',0%.0s' $(seq 766))]"
+    api PUT /db/vecs >/dev/null
+    api POST /db/vecs/vector "{\"id\":\"a\",\"text\":\"alpha\",\"vector\":$va}" >/dev/null
+    api POST /db/vecs/vector "{\"id\":\"b\",\"text\":\"beta\",\"vector\":$vb}" >/dev/null
+    backup create /data/vbackups vecs >/dev/null
+    local vlatest
+    vlatest=$(backup list /data/vbackups vecs | head -1 | awk '{print $2}')
+    if backup restore "/data/vbackups/vecs/$vlatest" vecs_copy >/dev/null \
+       && api POST /db/vecs_copy/search/vector "{\"vector\":$vb,\"k\":1}" | grep -q '"key":"b"'; then
+        ok "$label: a restored database keeps its vectors"
+    else
+        ko "$label: a restored database keeps its vectors"
     fi
 
     backup prune /data/backups --keep 1 >/dev/null

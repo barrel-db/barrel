@@ -22,6 +22,8 @@ start(_Type, _Args) ->
     %% the way the server does
     application:set_env(barrel_docdb, task_db_opener,
                         {barrel_server_dbs, ensure}),
+    %% barrel-backup carries the vector stores of the server's databases
+    application:set_env(barrel_docdb, backup_module, barrel_server_backup),
     barrel_server_sup:start_link().
 
 prep_stop(State) ->
@@ -34,4 +36,5 @@ prep_stop(State) ->
 
 stop(_State) ->
     application:unset_env(barrel_docdb, task_db_opener),
+    application:unset_env(barrel_docdb, backup_module),
     ok.
