@@ -80,12 +80,19 @@ fail(Fmt, Args) ->
 %% On the node
 %%====================================================================
 
+%% The module that backs up and restores: the `backup_module' env (a
+%% barrel_server node sets barrel_server_backup, which carries the vector
+%% stores), else barrel_db_backup. It exports backup/3, restore/3,
+%% read_manifest/1 and local_dbs/0.
+backup_module() ->
+    application:get_env(barrel_docdb, backup_module, barrel_db_backup).
+
 %% @doc Back up the databases into Dir/Db/UTC-STAMP, stopping at
 %% the first failure.
 -spec create(string(), all | [binary()]) ->
     {ok, [{binary(), binary()}]} | {error, binary(), term()}.
 create(Dir, all) ->
-    create(Dir, barrel_db_backup:local_dbs());
+    create(Dir, (backup_module()):local_dbs());
 create(Dir, Dbs) ->
     Stamp = stamp(),
     create(Dir, Stamp, Dbs, []).
@@ -94,7 +101,7 @@ create(_Dir, _Stamp, [], Done) ->
     {ok, lists:reverse(Done)};
 create(Dir, Stamp, [Db | Rest], Done) ->
     Target = filename:join([Dir, binary_to_list(Db), Stamp]),
-    case barrel_docdb:backup_db(Db, Target) of
+    case (backup_module()):backup(Db, Target, #{}) of
         {ok, #{dir := D}} -> create(Dir, Stamp, Rest, [{Db, D} | Done]);
         {error, Reason} -> {error, Db, Reason}
     end.
@@ -106,13 +113,16 @@ list(Dir, Only) ->
     Rows = [{Db, Ts, maps:get(<<"backup_hlc">>, M),
              lists:sum([S || #{<<"size">> := S} <- maps:get(<<"files">>, M)])}
             || Db <- dbs(Dir, Only), Ts <- stamps(Dir, Db),
-               {ok, M} <- [barrel_db_backup:read_manifest(filename:join([Dir, Db, Ts]))]],
+               {ok, M} <- [(backup_module()):read_manifest(filename:join([Dir, Db, Ts]))]],
     {ok, lists:sort(fun({D1, T1, _, _}, {D2, T2, _, _}) -> {D1, T2} =< {D2, T1} end, Rows)}.
 
 %% @doc Restore a backup, then open it the way the node opens its
 %% databases (barrel_server's opener applies its runtime config).
--spec restore(string(), binary(), map()) -> {ok, string()} | {error, term()}.
+-spec restore(string(), binary(), map()) -> {ok, string() | binary()} | {error, term()}.
 restore(Backup, Name, Opts) ->
+    restore(backup_module(), Backup, Name, Opts).
+
+restore(barrel_db_backup, Backup, Name, Opts) ->
     case barrel_docdb:restore_db(Backup, Name, Opts#{open => false}) of
         {ok, Path} ->
             case application:get_env(barrel_docdb, task_db_opener) of
@@ -122,7 +132,9 @@ restore(Backup, Name, Opts) ->
             {ok, Path};
         {error, _} = Err ->
             Err
-    end.
+    end;
+restore(Mod, Backup, Name, Opts) ->
+    Mod:restore(Backup, Name, Opts).
 
 %% @doc Keep the N newest complete backups of each database.
 -spec prune(string(), pos_integer()) -> {ok, [string()]}.
@@ -152,9 +164,16 @@ stamps(Dir, Db) ->
         {ok, L} ->
             lists:reverse(lists:sort(
                 [T || T <- L, string:find(T, ".partial-") =:= nomatch,
-                      filelib:is_regular(filename:join([Dir, Db, T, "MANIFEST.json"]))]));
+                      complete(filename:join([Dir, Db, T]))]));
         {error, _} ->
             []
+    end.
+
+%% A backup is complete once its manifest is written.
+complete(Path) ->
+    case (backup_module()):read_manifest(Path) of
+        {ok, _} -> true;
+        {error, _} -> false
     end.
 
 stamp() ->
