@@ -124,6 +124,7 @@
 -export([
     checkpoint/1,
     persist_index/1,
+    backup/2,
     destroy/1
 ]).
 
@@ -749,6 +750,15 @@ checkpoint(Store) ->
 -spec persist_index(store()) -> ok | {error, term()}.
 persist_index(Store) ->
     barrel_vectordb_server:persist_index(Store).
+
+%% @doc Snapshot a running store into `Dir', which must not exist. Writes
+%% wait while it copies; reads too, as for every call to the store. The
+%% copy opens as a store of its own: start one with `db_path => Dir' and
+%% the same config (with `bm25_disk' and `diskann' base paths left to
+%% their defaults, which the copy uses).
+-spec backup(store(), file:filename_all()) -> ok | {error, term()}.
+backup(Store, Dir) ->
+    barrel_vectordb_server:backup(Store, Dir).
 
 %%====================================================================
 %% Internal Functions
