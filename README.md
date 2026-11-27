@@ -26,6 +26,7 @@ app is also on Hex under its own version. See
 | `barrel_spaces` | `apps/barrel_spaces` | The agent layer: spaces (shared context databases), capability tokens, sessions with TTL, and handoffs. |
 | `barrel_server` | `apps/barrel_server` | The network server. Exposes `barrel` over HTTP (REST/JSON) and MCP using `livery`, contexts and working sets included. Opt-in behind the `server` profile. |
 | `barrel_att_s3` | `apps/barrel_att_s3` | S3-compatible attachment backend for `barrel_docdb`. Opt-in behind the `s3` profile. |
+| `barrel_design` | `apps/barrel_design` | Versioned designs with views kept current over a `barrel_docdb` database: native projections or sandboxed Wasm maps, category totals, a BQL `view` source. Opt-in behind the `design` profile; needs OTP 29. |
 | `barrel_faiss` | `apps/barrel_faiss` | Erlang NIF bindings for FAISS. Optional; needs the FAISS C++ library, so it is excluded from the default build. |
 
 Dependency direction (no cycles): `barrel_server` -> {`barrel`, `barrel_spaces`,
@@ -33,6 +34,7 @@ Dependency direction (no cycles): `barrel_server` -> {`barrel`, `barrel_spaces`,
 `barrel` -> {`barrel_docdb`, `barrel_vectordb`, `barrel_crypto`}; `barrel_vectordb`
 -> {`barrel_embed`, `barrel_crypto`} (optionally `barrel_faiss`, `barrel_rerank`);
 `barrel_ngram` -> `barrel_docdb`; `barrel_att_s3` -> `barrel_docdb`;
+`barrel_design` -> `barrel_docdb`;
 `barrel_docdb` -> `barrel_crypto`. Leaves:
 `barrel_crypto`, `barrel_embed`, `barrel_rerank`, `barrel_faiss`.
 
@@ -47,13 +49,14 @@ rebar3 compile
 
 This builds the default app set (`barrel_crypto`, `barrel_docdb`,
 `barrel_ngram`, `barrel_vectordb`, `barrel_embed`, `barrel_rerank`, `barrel`,
-`barrel_spaces`). `barrel_faiss`, `barrel_server` and `barrel_att_s3` are
-opt-in:
+`barrel_spaces`). `barrel_faiss`, `barrel_server`, `barrel_att_s3` and
+`barrel_design` are opt-in:
 
 ```
 rebar3 as faiss compile      # add the FAISS NIF app
 rebar3 as server compile     # add the HTTP/MCP server
 rebar3 as s3 compile         # add the S3 attachment backend
+rebar3 as design compile     # add maintained views (OTP 29)
 ```
 
 ## Test

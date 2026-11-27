@@ -36,6 +36,7 @@ them; each underlying app stays usable on its own.
 | Reranking | Opt-in | `barrel_rerank` (cross-encoder). |
 | FAISS index backend | Opt-in | `barrel_faiss`; needs the FAISS C++ library, excluded from the default build (`rebar3 as faiss`). |
 | Changes feed | Ready | `changes/2`, `subscribe/2`; HLC cursor via `hlc_encode/1`. |
+| Maintained views | Opt-in | `barrel_design` (`rebar3 as design`, OTP 29): versioned designs whose views follow every write, with category drill-down, `_sum`/`_count` totals, freshness waits, refresh, and Wasm maps under fuel, deadline and memory limits. Also a BQL `view(...)` source. See [design-views](guides/design-views.md). |
 | BQL queries | Ready | PartiQL dialect over docs, vectors, and BM25; live SUBSCRIBE queries. Results carry the observed version (`instance_id`, `last_seq`); the REST query route takes `max_rows` and `deadline_ms` and reports `bound`. See [query-bql](guides/query-bql.md). |
 | Contexts | Ready | Named datasets on this node or other `barrel_server` nodes, queried together with one BQL statement; per-source status, version and coverage; working sets with saved slices and imported snapshots that answer offline. Erlang (`barrel_ctx`), REST (`/contexts`, `/worksets`) and MCP (`context_*` tools). See [contexts](guides/contexts.md). |
 | Export and read-only import | Ready | `barrel_ctx_export`: a checksummed copy of a database, imported and verified elsewhere and served read only. See [contexts](guides/contexts.md#import-a-snapshot). |

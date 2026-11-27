@@ -1,0 +1,10 @@
+trial,mode,first_load_us,backfill_us,write_p50_us,write_p95_us,write_p99_us,catchup_us,query_p50_us,query_p95_us,query_p99_us,refresh_p95_us,loads,map_calls
+1,off,NA,NA,132,201,302,NA,NA,NA,NA,NA,0,0
+1,native,NA,180166,155,331,1000,39822,96,157,167,8,0,0
+1,wasm,8752,251227,148,255,386,157815,118,239,255,12,1,1600
+2,native,NA,142524,166,336,669,53879,279,426,494,19,0,0
+2,wasm,5955,274596,149,228,275,170379,296,401,428,22,1,1600
+2,off,NA,NA,119,159,179,NA,NA,NA,NA,NA,0,0
+3,wasm,6271,241856,135,197,229,129619,282,475,660,25,1,1600
+3,off,NA,NA,127,224,412,NA,NA,NA,NA,NA,0,0
+3,native,NA,152640,139,204,335,46358,126,166,183,13,0,0

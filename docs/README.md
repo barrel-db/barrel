@@ -9,6 +9,7 @@ Start here.
 - [Embed barrel in an Erlang app](guides/embedding.md): the `barrel` API.
 - [Record mode](guides/record-mode.md): policy-driven vector indexing over documents.
 - [Query with BQL](guides/query-bql.md): one query language over documents, vectors, and keyword search.
+- [Maintained views](guides/design-views.md): versioned designs whose views stay current, read by key, category and total, from Erlang or BQL.
 - [Run the REST server](guides/rest-server.md): `barrel_server` over HTTP.
 - [Run barrel in Docker](guides/docker.md): the `barrel-server` image, its settings and your own config.
 - [Embed the barrel server in a livery app](guides/embedding-barrel-server.md): mount barrel's routes into a host livery service, under a sub-path.

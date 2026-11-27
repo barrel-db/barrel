@@ -22,4 +22,17 @@ View = #{select => <<"SELECT * FROM db WHERE type = 'sale'">>,
        <<"customer">> => <<"Ada">>, <<"cents">> => 1250}]).
 ```
 
+Install a design and read a category total:
+
+```erlang
+{ok, _} = barrel_design:install(Db, Design, #{Digest => WasmBytes}),
+{ok, [#{key := [<<"Ada">>], value := 2550}], _} =
+    barrel_design:query(Db, {<<"receivables">>, <<"open_by_customer">>},
+                        #{key_prefix => [<<"Ada">>], group_level => 1}).
+```
+
+- Guide: [Maintained views](../../docs/guides/design-views.md).
+- Design, measurements and limits: [Barrel design templates and WebAssembly views](../../docs/architecture/wasm-views.md).
+- Runnable example and benchmark: [receivables](../../docs/architecture/examples/receivables/README.md).
+
 The test guests in `test/guests` rebuild with `make -C test/guests` (wasm-tools 1.256.0, Zig 0.17.1).
