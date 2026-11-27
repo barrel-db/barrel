@@ -160,6 +160,28 @@ WHERE h.lang = 'en'
   (3x `k`, capped at 1000) and returns UP TO `k` rows; heavy filtering
   can return fewer. Default order is search rank.
 
+## Registered sources
+
+An application can serve its own rows as a FROM source. It registers a
+module that implements the `barrel_bql_source` behaviour, and queries
+reach it by name. barrel_design registers its views this way.
+
+```erlang
+ok = barrel_bql:register_source(<<"rows">>, my_rows_source),
+{ok, Rows, _} = barrel_docdb:query(Db,
+    <<"SELECT v.id, v.n FROM rows(10) AS v WHERE v.n > 3 ORDER BY v.n">>).
+```
+
+- The alias is required. Arguments are literals or `$param`s; the
+  source validates them.
+- The source may use the WHERE conditions to read less, and BQL
+  applies them again to every row it returns.
+- An `ORDER BY` on the order the source already produces streams;
+  any other order buffers at most `max_rows` rows (100,000 by default)
+  before sorting. Without `ORDER BY`, `LIMIT` or `OFFSET`, a query
+  returns one chunk per call with a continuation.
+- `SUBSCRIBE` is not supported on a registered source.
+
 ## Live queries
 
 Append `SUBSCRIBE` and subscribe instead of running: you get the

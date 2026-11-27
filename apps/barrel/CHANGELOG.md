@@ -3,6 +3,11 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- `query/3`, `query_fold/5` and `explain_query/3` run BQL over sources registered by other applications, so the HTTP and MCP query routes reach them too. A federated context query refuses them.
+
 ## [1.15.0] - 2026-11-16
 
 ### Added

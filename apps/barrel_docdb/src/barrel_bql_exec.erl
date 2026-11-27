@@ -42,6 +42,8 @@ run(Db, Plan, Opts) ->
 
 do_run(_DbName, #{post := #{empty := true}}, _Opts) ->
     {ok, [], #{has_more => false, count => 0}};
+do_run(Db, #{source := {source, _, _, _}} = Plan, Opts) ->
+    run_source(Db, Plan, Opts);
 do_run(DbName, #{streamable := true} = Plan, Opts) ->
     #{spec := Spec, post := #{project := Project}} = Plan,
     case barrel_docdb:find(DbName, Spec, find_opts(Opts)) of
@@ -79,6 +81,8 @@ fold(Db, Plan, Opts, Fun, Acc) ->
 
 do_fold(_DbName, #{post := #{empty := true}}, _Opts, _Fun, Acc) ->
     {ok, Acc, #{has_more => false, count => 0}};
+do_fold(Db, #{source := {source, _, _, _}} = Plan, Opts, Fun, Acc) ->
+    fold_source(Db, Plan, Opts, Fun, Acc);
 do_fold(DbName, #{streamable := true} = Plan, Opts, Fun, Acc0) ->
     #{spec := Spec, post := #{project := Project}} = Plan,
     ChunkSize = maps:get(chunk_size, Opts, 100),
@@ -237,6 +241,176 @@ fold_rows([Row | Rest], Fun, Acc0) ->
         {ok, Acc} -> fold_rows(Rest, Fun, Acc);
         {stop, Acc} -> {stopped, Acc}
     end.
+
+%%====================================================================
+%% Registered sources (barrel_bql_source)
+%%====================================================================
+
+%% Pages pulled from a source while collecting, and the most rows a
+%% plan may buffer when it has to sort them.
+-define(SOURCE_PAGE, 1000).
+-define(SOURCE_MAX_ROWS, 100000).
+
+%% A plan whose order the source already produces streams: with no
+%% LIMIT/OFFSET/UNNEST, run returns one chunk per call like find/3.
+source_plan(#{source := {source, _Name, Module, Args}, unnest := Unnest,
+              post := Post}) ->
+    #{order := Order, offset := Offset, limit := Limit,
+      doc_where := DocWhere} = Post,
+    %% The source sees ORDER BY as a plain {FieldPath, Dir}.
+    SourceOrder = case Order of
+        {{b, Comps}, Dir} -> {Comps, Dir};
+        _ -> Order
+    end,
+    Served = case SourceOrder of
+        undefined -> true;
+        {Path, _} when is_list(Path) ->
+            _ = code:ensure_loaded(Module),
+            erlang:function_exported(Module, ordered, 2)
+                andalso Module:ordered(Args, SourceOrder);
+        _ -> false
+    end,
+    Streams = Served andalso Limit =:= undefined andalso Offset =:= 0
+              andalso Unnest =:= undefined,
+    Match = case DocWhere of
+        [] -> none;
+        _ ->
+            {ok, MatchPlan} = barrel_query:compile(#{where => DocWhere}),
+            MatchPlan
+    end,
+    #{module => Module, args => Args, served => Served, streams => Streams,
+      match => Match,
+      query => #{where => DocWhere, order => SourceOrder, limit => Limit,
+                 offset => Offset}}.
+
+source_page(Db, #{module := Module, args := Args, query := Query}, Cont,
+            ChunkSize, Opts) ->
+    Q0 = Query#{chunk_size => ChunkSize},
+    Q = case Cont of
+        undefined -> Q0;
+        _ -> Q0#{continuation => Cont}
+    end,
+    case Module:run(Db, Args, Q, maps:without([params], Opts)) of
+        {ok, Rows, Meta} when is_list(Rows), is_map(Meta) ->
+            {ok, Rows, maps:get(continuation, Meta, undefined),
+             maps:remove(continuation, Meta)};
+        {error, _} = Error ->
+            Error
+    end.
+
+source_frames(Rows, #{match := Match}, Unnest, Residual) ->
+    [Frame || Row <- Rows, is_map(Row),
+              Match =:= none orelse barrel_query:match(Match, Row),
+              Frame <- frames_for(Row, Unnest),
+              residual_match(Residual, Frame)].
+
+run_source(Db, Plan, Opts) ->
+    #{unnest := Unnest, post := Post} = Plan,
+    #{residual := Residual, project := Project} = Post,
+    Source = source_plan(Plan),
+    case Source of
+        #{streams := true} ->
+            ChunkSize = maps:get(chunk_size, Opts, ?SOURCE_PAGE),
+            Cont = maps:get(continuation, Opts, undefined),
+            case source_page(Db, Source, Cont, ChunkSize, Opts) of
+                {ok, Rows, Next, SourceMeta} ->
+                    Frames = source_frames(Rows, Source, Unnest, Residual),
+                    Out = [project_frame(Project, F, Unnest) || F <- Frames],
+                    {ok, Out, chunk_meta(Next, length(Out), SourceMeta)};
+                {error, _} = Error ->
+                    Error
+            end;
+        _ when is_map_key(continuation, Opts) ->
+            {error, {unsupported, continuation}};
+        #{served := Served} ->
+            #{offset := Offset, limit := Limit} = Post,
+            Need = case {Served, Limit} of
+                {true, undefined} -> infinity;
+                {true, _} -> Offset + Limit;
+                {false, _} -> infinity
+            end,
+            Cap = maps:get(max_rows, Opts, ?SOURCE_MAX_ROWS),
+            case collect_source(Db, Source, Unnest, Residual, Need, Cap, Served,
+                                undefined, [], 0, Opts) of
+                {ok, Frames, SourceMeta} ->
+                    Post1 = case Served of
+                        true -> Post#{order => undefined};
+                        false -> Post
+                    end,
+                    Rows = finalize(Frames, Post1, Unnest),
+                    {ok, Rows, #{has_more => false, count => length(Rows),
+                                 source => SourceMeta}};
+                {error, _} = Error ->
+                    Error
+            end
+    end.
+
+collect_source(Db, Source, Unnest, Residual, Need, Cap, Served, Cont, Acc, N,
+               Opts) ->
+    case source_page(Db, Source, Cont, ?SOURCE_PAGE, Opts) of
+        {ok, Rows, Next, SourceMeta} ->
+            Frames = source_frames(Rows, Source, Unnest, Residual),
+            N1 = N + length(Frames),
+            Acc1 = [Frames | Acc],
+            if
+                not Served andalso N1 > Cap ->
+                    {error, {too_many_rows, Cap}};
+                Need =/= infinity andalso N1 >= Need ->
+                    {ok, lists:append(lists:reverse(Acc1)), SourceMeta};
+                Next =:= undefined ->
+                    {ok, lists:append(lists:reverse(Acc1)), SourceMeta};
+                true ->
+                    collect_source(Db, Source, Unnest, Residual, Need, Cap,
+                                   Served, Next, Acc1, N1, Opts)
+            end;
+        {error, _} = Error ->
+            Error
+    end.
+
+fold_source(Db, Plan, Opts, Fun, Acc0) ->
+    #{unnest := Unnest, post := Post} = Plan,
+    #{residual := Residual, project := Project} = Post,
+    case source_plan(Plan) of
+        #{streams := true} = Source ->
+            ChunkSize = maps:get(chunk_size, Opts, 100),
+            fold_source_pages(Db, Source, Unnest, Residual, Project, ChunkSize,
+                              maps:get(continuation, Opts, undefined), Fun,
+                              Acc0, 0, Opts);
+        _ ->
+            case run_source(Db, Plan, Opts) of
+                {ok, Rows, Meta} ->
+                    {_, Acc} = fold_rows(Rows, Fun, Acc0),
+                    {ok, Acc, Meta};
+                {error, _} = Error ->
+                    Error
+            end
+    end.
+
+fold_source_pages(Db, Source, Unnest, Residual, Project, ChunkSize, Cont, Fun,
+                  Acc0, Count, Opts) ->
+    case source_page(Db, Source, Cont, ChunkSize, Opts) of
+        {ok, Rows, Next, SourceMeta} ->
+            Frames = source_frames(Rows, Source, Unnest, Residual),
+            Out = [project_frame(Project, F, Unnest) || F <- Frames],
+            Count1 = Count + length(Out),
+            case fold_rows(Out, Fun, Acc0) of
+                {stopped, Acc} ->
+                    {ok, Acc, chunk_meta(Next, Count1, SourceMeta)};
+                {ok, Acc} when Next =:= undefined ->
+                    {ok, Acc, chunk_meta(undefined, Count1, SourceMeta)};
+                {ok, Acc} ->
+                    fold_source_pages(Db, Source, Unnest, Residual, Project,
+                                      ChunkSize, Next, Fun, Acc, Count1, Opts)
+            end;
+        {error, _} = Error ->
+            Error
+    end.
+
+chunk_meta(undefined, Count, SourceMeta) ->
+    #{has_more => false, count => Count, source => SourceMeta};
+chunk_meta(Next, Count, SourceMeta) ->
+    #{has_more => true, continuation => Next, count => Count,
+      source => SourceMeta}.
 
 %%====================================================================
 %% Residual evaluation (tagged paths, engine leaf semantics)

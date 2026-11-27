@@ -31,6 +31,8 @@ run(_Db, #{subscribe := true}, _Opts) ->
     {error, {unsupported, subscribe}};
 run(#{docdb := DbBin}, #{source := {collection, _}} = Plan, Opts) ->
     barrel_bql_exec:run(DbBin, Plan, Opts);
+run(#{docdb := DbBin}, #{source := {source, _, _, _}} = Plan, Opts) ->
+    barrel_bql_exec:run(DbBin, Plan, Opts);
 run(#{docdb := DbBin} = Db, #{source := {table_fn, Fn, Args}} = Plan,
     Opts) ->
     barrel_bql_exec:observe(DbBin, run_table_fn(Db, Fn, Args, Plan, Opts)).
@@ -42,6 +44,9 @@ run(#{docdb := DbBin} = Db, #{source := {table_fn, Fn, Args}} = Plan,
 fold(_Db, #{subscribe := true}, _Opts, _Fun, _Acc) ->
     {error, {unsupported, subscribe}};
 fold(#{docdb := DbBin}, #{source := {collection, _}} = Plan, Opts, Fun,
+     Acc) ->
+    barrel_bql_exec:fold(DbBin, Plan, Opts, Fun, Acc);
+fold(#{docdb := DbBin}, #{source := {source, _, _, _}} = Plan, Opts, Fun,
      Acc) ->
     barrel_bql_exec:fold(DbBin, Plan, Opts, Fun, Acc);
 fold(Db, Plan, Opts, Fun, Acc0) ->
@@ -86,6 +91,18 @@ explain(Db, Plan) ->
             end;
         {table_fn, Fn, Args} ->
             {ok, Base#{source => Fn, args => Args,
+                       residual_conditions =>
+                           length(DocWhere) + length(Residual)}};
+        {source, Name, Module, Args} ->
+            #{post := #{order := Order, limit := Limit, offset := Offset}} = Plan,
+            _ = code:ensure_loaded(Module),
+            Detail = case erlang:function_exported(Module, explain, 2) of
+                true ->
+                    Module:explain(Args, #{where => DocWhere, order => Order,
+                                           limit => Limit, offset => Offset});
+                false -> #{}
+            end,
+            {ok, Base#{source => Name, args => Args, plan => Detail,
                        residual_conditions =>
                            length(DocWhere) + length(Residual)}}
     end.
