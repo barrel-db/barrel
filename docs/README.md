@@ -31,6 +31,7 @@ Start here.
 - [Vision](architecture/vision.md): what barrel is becoming (the database for agents) and the settled decisions.
 - [Contexts](architecture/contexts.md): the design of contexts (identity, cards, manifests, working sets, query contract, merge rules, budgets, permissions) and the measured decisions behind it.
 - [Overview](architecture/overview.md): how the umbrella is split and why.
+- [Barrel design templates and WebAssembly views](architecture/wasm-views.md) proposes `barrel_design` for Notes-style templates and automatically maintained views with on-demand refresh. [Implementation prompt](architecture/barrel-design-implementation-prompt.md) · [Measured indexing performance](architecture/wasm-views.md#measured-invoice-indexing-performance) · [Runnable receivables example](architecture/examples/receivables/README.md)
 - [Responsibilities](migration/responsibilities.md): per-app responsibilities.
 
 ## Proofs
