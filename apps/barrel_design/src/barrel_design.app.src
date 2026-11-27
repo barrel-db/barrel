@@ -1,0 +1,27 @@
+{application, barrel_design, [
+    {description, "Versioned designs with maintained views over barrel_docdb"},
+    {vsn, "0.1.0"},
+    {registered, [barrel_design_sup, barrel_design_modules, barrel_design_slots,
+                  barrel_design_db_sup]},
+    {mod, {barrel_design_app, []}},
+    {applications, [
+        kernel,
+        stdlib,
+        crypto,
+        rocksdb,
+        barrel_docdb,
+        wasm
+    ]},
+    {env, [
+        %% where derived view stores live, one directory per database
+        {data_dir, "data/barrel_design"},
+        %% concurrent guest jobs: node-wide (0 = scheduler count) and per database
+        {node_jobs, 0},
+        {db_jobs, 2},
+        %% node page budget for guest memory; undefined keeps the engine's own
+        {page_limit, undefined}
+    ]},
+    {modules, []},
+    {licenses, ["Apache-2.0"]},
+    {links, [{"GitHub", "https://github.com/barrel-db/barrel"}]}
+]}.
