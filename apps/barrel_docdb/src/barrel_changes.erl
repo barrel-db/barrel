@@ -20,7 +20,8 @@
     get_last_hlc/2,  %% Returns decoded HLC timestamp
     count_changes_since/3,
     has_changes_since/3,  %% Fast O(1) check using buckets
-    filter_doc_ids/4  %% Replication filter by id (attachment sync)
+    filter_doc_ids/4,  %% Replication filter by id (attachment sync)
+    read_feed/4  %% One feed page and its watermark under one snapshot
 ]).
 
 %% Internal - for use by barrel_db_writer
@@ -967,6 +968,122 @@ get_last_hlc_slow(StoreRef, DbName) ->
         end,
         barrel_hlc:min()
     ).
+
+%% @doc Read up to Limit feed rows after Since (exclusive) under one
+%% snapshot, with the snapshot's last-write HLC as the watermark. Each
+%% change pairs its HLC with the body stored in the same feed row, so a
+%% later rewrite can never mix two versions. When fewer than Limit rows
+%% remain, Next is the watermark: every write up to it has been read.
+-spec read_feed(barrel_store_rocksdb:db_ref(), db_name(), first | binary(),
+                pos_integer()) ->
+    {ok, [map()], Next :: binary(), Watermark :: binary()} | {error, term()}.
+read_feed(StoreRef, DbName0, Since, Limit) ->
+    Ks = barrel_keyspace:resolve(DbName0),
+    try barrel_store_rocksdb:snapshot(StoreRef) of
+        {ok, Snapshot} ->
+            try
+                read_feed_snapshot(StoreRef, Ks, Since, Limit, Snapshot)
+            after
+                barrel_store_rocksdb:safe_release_snapshot(Snapshot)
+            end;
+        {error, _} = Err ->
+            Err
+    catch
+        error:badarg -> {error, not_found}
+    end.
+
+read_feed_snapshot(StoreRef, Ks, Since, Limit, Snapshot) ->
+    SinceSeq = case Since of
+        first -> <<0:96>>;
+        <<_:96>> -> Since
+    end,
+    Prefix = barrel_store_keys:doc_hlc_prefix(Ks),
+    %% Without the last-write meta (a database written before it
+    %% existed), read to the end and report the last row read.
+    Watermark = case barrel_store_rocksdb:get_with_snapshot(
+                         StoreRef, barrel_store_keys:db_last_hlc(Ks), Snapshot) of
+        {ok, <<_:96>> = Last} -> Last;
+        not_found -> undefined
+    end,
+    EndKey = case Watermark of
+        undefined -> barrel_store_keys:doc_hlc_end(Ks);
+        _ -> <<Prefix/binary, Watermark/binary, 0>>
+    end,
+    StartKey = <<Prefix/binary, SinceSeq/binary>>,
+    PrefixLen = byte_size(Prefix),
+    Fold = fun(Key, Value, {N, Acc}) ->
+        <<_:PrefixLen/binary, Seq:12/binary>> = Key,
+        case Seq of
+            SinceSeq -> {ok, {N, Acc}};
+            _ ->
+                Change = decode_change(Value, barrel_hlc:decode(Seq)),
+                Acc1 = [{Seq, Change} | Acc],
+                case N + 1 of
+                    Limit -> {stop, {Limit, Acc1}};
+                    N1 -> {ok, {N1, Acc1}}
+                end
+        end
+    end,
+    {Count, Rows} = barrel_store_rocksdb:fold_range_with_snapshot(
+        StoreRef, StartKey, EndKey, Fold, {0, []}, Snapshot),
+    Ordered = lists:reverse(Rows),
+    Changes = feed_bodies(StoreRef, Ks, Ordered, Snapshot),
+    LastRead = case Ordered of
+        [] -> SinceSeq;
+        _ -> element(1, lists:last(Ordered))
+    end,
+    Next = case {Count, Watermark} of
+        {Limit, _} -> LastRead;
+        {_, undefined} -> LastRead;
+        {_, _} -> max(Watermark, SinceSeq)
+    end,
+    {ok, Changes, Next, case Watermark of undefined -> Next; _ -> Watermark end}.
+
+%% Feed rows written without an embedded body fall back to the body
+%% CF under the same snapshot; live rows also get their expiry.
+feed_bodies(_StoreRef, _Ks, [], _Snapshot) ->
+    [];
+feed_bodies(StoreRef, Ks, Rows, Snapshot) ->
+    Live = [Id || {_, #{id := Id} = C} <- Rows, not maps:get(deleted, C, false)],
+    Entities = barrel_store_rocksdb:multi_get_entity_with_snapshot(
+        StoreRef, [barrel_store_keys:doc_entity(Ks, Id) || Id <- Live], Snapshot),
+    Expiry = maps:from_list(
+        [{Id, E} || {Id, {ok, Columns}} <- lists:zip(Live, Entities),
+                    E <- [proplists:get_value(?COL_EXPIRES_AT, Columns, 0)],
+                    is_integer(E), E > 0]),
+    Missing = [Id || {_, #{id := Id} = C} <- Rows,
+                     not maps:get(deleted, C, false), not maps:is_key(doc, C)],
+    Bodies = case Missing of
+        [] -> #{};
+        _ ->
+            Found = barrel_store_rocksdb:body_multi_get_with_snapshot(
+                StoreRef, [barrel_store_keys:doc_body(Ks, Id) || Id <- Missing],
+                Snapshot),
+            maps:from_list([{Id, barrel_docdb_codec_cbor:decode_any(Cbor)}
+                            || {Id, {ok, Cbor}} <- lists:zip(Missing, Found)])
+    end,
+    [feed_change(Seq, C, Bodies, Expiry) || {Seq, C} <- Rows].
+
+feed_change(Seq, #{id := Id, rev := Rev} = C, Bodies, Expiry) ->
+    Base = #{id => Id, seq => Seq, rev => Rev,
+             num_conflicts => maps:get(num_conflicts, C, 0)},
+    case C of
+        #{deleted := true} ->
+            Base#{deleted => true};
+        _ ->
+            WithDoc = case maps:find(doc, C) of
+                {ok, Doc} -> Base#{doc => Doc#{<<"id">> => Id}};
+                error ->
+                    case maps:find(Id, Bodies) of
+                        {ok, Doc} -> Base#{doc => Doc#{<<"id">> => Id}};
+                        error -> Base
+                    end
+            end,
+            case maps:find(Id, Expiry) of
+                {ok, E} -> WithDoc#{expires_at => E};
+                error -> WithDoc
+            end
+    end.
 
 %% @doc Count changes since a given HLC timestamp (exclusive)
 -spec count_changes_since(barrel_store_rocksdb:db_ref(), db_name(),

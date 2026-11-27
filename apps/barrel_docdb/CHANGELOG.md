@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `read_feed/3` reads one page of the changes feed for an index that follows a database. The page and its end point come from one storage snapshot, and each change carries the body stored with it, so a document rewritten during the read can no longer pair one version's sequence with another version's body. A short page ends at the database's last write, so a follower can tell it has caught up even when that write's row was later replaced or purged. Changes also carry the document's expiry.
+- `store_env/1` returns the storage environment of an open database, so a store derived from it can be encrypted with the same key.
+
 ## [3.3.0] - 2026-11-16
 
 ### Added
