@@ -131,5 +131,4 @@ walk(L, F) when is_list(L) -> lists:foreach(fun(E) -> walk(E, F) end, L);
 walk(T, F) when is_tuple(T) -> walk(tuple_to_list(T), F);
 walk(_, _F) -> ok.
 
-kind(#{kind := K}) -> K;
-kind(Other) -> Other.
+kind(#{kind := K}) -> K.

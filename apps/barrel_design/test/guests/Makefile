@@ -3,7 +3,7 @@
 WASM_TOOLS ?= wasm-tools
 ZIG ?= zig
 EXAMPLE := ../../../../docs/architecture/examples/receivables
-WAT := by_customer counter loop fanout
+WAT := by_customer counter loop fanout dup
 
 all: $(addsuffix .wasm,$(WAT)) open_by_customer.wasm
 

@@ -149,8 +149,7 @@ instantiate_and_call(Module, Imports, Limits, Export) ->
     end.
 
 classify(#{kind := host_error, ctx := #{reason := Reason}}) -> Reason;
-classify(#{kind := Kind}) -> Kind;
-classify(Other) -> Other.
+classify(#{kind := Kind}) -> Kind.
 
 %%====================================================================
 %% Imports

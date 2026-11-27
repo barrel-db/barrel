@@ -22,17 +22,11 @@ groups() ->
      {holder, [], [one_load_per_digest, reload_after_cache_restart]}].
 
 init_per_suite(Config) ->
-    ok = application:load(barrel_docdb),
-    ok = application:set_env(barrel_docdb, data_dir,
-                             filename:join(?config(priv_dir, Config), "docdb")),
-    {ok, _} = application:ensure_all_started(barrel_design),
+    ok = barrel_design_test_util:start(Config),
     Config.
 
 end_per_suite(_Config) ->
-    _ = application:stop(barrel_design),
-    _ = application:stop(wasm),
-    _ = application:stop(barrel_docdb),
-    ok.
+    barrel_design_test_util:stop().
 
 %%====================================================================
 %% Admission
@@ -210,6 +204,9 @@ reload_after_cache_restart(_Config) ->
     exit(Cache, kill),
     receive {'DOWN', Ref, _, _, _} -> ok end,
     wait_registered(wasm_module_cache),
+    %% the new cache registers before its init has dropped the modules;
+    %% a call returns only after init
+    _ = wasm_module_cache:stats(),
     Doc = #{<<"customer">> => <<"Ada">>, <<"cents">> => 7},
     [{error, module_not_loaded}] = run(H, spec(by_customer), [Doc]),
     {ok, H} = barrel_design_modules:reload(D),

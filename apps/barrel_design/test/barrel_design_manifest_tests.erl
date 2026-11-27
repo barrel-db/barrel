@@ -35,7 +35,7 @@ normalize_wasm_test() ->
                    key := {array, [#{type := text, category := true},
                                    #{type := text, category := false}]},
                    value := #{type := i64}, reduce := '_sum',
-                   limits := #{fuel := 50000, timeout_ms := 100}}, V),
+                   limits := #{fuel := 50000, timeout_ms := 1000}}, V),
     ?assertEqual([?DIGEST], barrel_design_manifest:modules(
         element(2, barrel_design_manifest:normalize(receivables())))).
 

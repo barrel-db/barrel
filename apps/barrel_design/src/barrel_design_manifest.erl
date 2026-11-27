@@ -24,7 +24,8 @@
 -define(LIMITS, [
     %% key, default, min, max
     {fuel, 50000, 1, 10000000},
-    {timeout_ms, 100, 1, 5000},
+    %% a backstop: fuel bounds the work, this bounds a stalled call
+    {timeout_ms, 1000, 1, 5000},
     {max_memory_pages, 1, 1, 16},
     {max_depth, 64, 1, 1024},
     {max_heap_words, 262144, 16384, 8388608},

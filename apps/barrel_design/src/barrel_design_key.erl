@@ -11,7 +11,7 @@
 %% locale collation.
 -module(barrel_design_key).
 
--export([version/0, encode/1, decode/1, valid/1, prefix/1, after_prefix/1]).
+-export([version/0, encode/1, decode/1, valid/1, prefix/1, after_prefix/1, text_prefix/1]).
 
 -define(NULL, 16#01).
 -define(FALSE, 16#02).
@@ -57,6 +57,11 @@ encode(L) when is_list(L) ->
 -spec prefix([key()]) -> binary().
 prefix(Components) when is_list(Components) ->
     <<?ARRAY, << <<(encode(E))/binary>> || E <- Components >>/binary>>.
+
+%% @doc The bytes every encoded text starting with Stem starts with.
+-spec text_prefix(binary()) -> binary().
+text_prefix(Stem) when is_binary(Stem) ->
+    <<?TEXT, (escape(Stem))/binary>>.
 
 %% @doc The smallest binary greater than every binary starting with
 %% Prefix (an exclusive upper bound for a prefix scan).
