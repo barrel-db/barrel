@@ -1,0 +1,4 @@
+run,trial,module_bytes,first_load_us,warm_map_p50_us,warm_map_p95_us,warm_map_p99_us,batches,batch_docs
+2,1,1382,9669,47.250,58.156,81.672,200,64
+2,2,1382,6996,44.547,50.531,53.031,200,64
+2,3,1382,7207,45.766,51.125,52.484,200,64

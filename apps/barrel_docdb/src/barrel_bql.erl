@@ -3,7 +3,8 @@
 %% Pipeline: lex -> parse -> canonicalize -> validate -> lower. The
 %% resulting plan carries a barrel_query spec for the document scan, an
 %% optional table-function source (executed by the barrel module, never
-%% here), an optional unnest, and per-row post stages.
+%% here) or registered source (see barrel_bql_source), an optional
+%% unnest, and per-row post stages.
 %%
 %% ```
 %% {ok, Plan} = barrel_bql:compile(
@@ -18,7 +19,9 @@
     parse/1,
     compile/1,
     compile/2,
-    format_error/1
+    format_error/1,
+    register_source/2,
+    unregister_source/1
 ]).
 
 -export_type([plan/0, bql_error/0]).
@@ -28,6 +31,16 @@
 -type bql_error() ::
     {parse_error, loc(), binary()}
     | {invalid_query, loc() | undefined, tuple()}.
+
+%% @doc Register Module (a barrel_bql_source) as the FROM source Name,
+%% reached as `FROM name(args...) AS v'.
+-spec register_source(binary(), module()) -> ok | {error, builtin | invalid_name}.
+register_source(Name, Module) ->
+    barrel_bql_source:register(Name, Module).
+
+-spec unregister_source(binary()) -> ok.
+unregister_source(Name) ->
+    barrel_bql_source:unregister(Name).
 
 %% @doc Parse BQL source to its AST. Locations are {Line, Column}.
 -spec parse(binary() | string()) ->
@@ -107,8 +120,11 @@ reason_text({use_is_null, _}) ->
 reason_text({constant_predicate, _}) ->
     "predicates must reference a document field";
 reason_text({unknown_table_function, Name}) ->
-    ["unknown table function ", Name,
-     " (vector_top_k, bm25_top_k, hybrid_top_k)"];
+    Known = [<<"vector_top_k">>, <<"bm25_top_k">>, <<"hybrid_top_k">>
+             | barrel_bql_source:names()],
+    ["unknown table function ", Name, " (", lists:join(", ", Known), ")"];
+reason_text({invalid_source_arg, Name, Reason}) ->
+    io_lib:format("invalid arguments for ~s: ~p", [Name, Reason]);
 reason_text({invalid_table_fn_arg, Fn, query}) ->
     ["", atom_to_binary(Fn, utf8),
      " needs a string query as its first argument"];

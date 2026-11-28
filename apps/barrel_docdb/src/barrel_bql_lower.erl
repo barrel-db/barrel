@@ -74,7 +74,8 @@
     source := {collection, binary()}
             | {table_fn, vector_top_k | bm25_top_k | hybrid_top_k,
                #{query := binary(), k := pos_integer(),
-                 ef_search => pos_integer()}},
+                 ef_search => pos_integer()}}
+            | {source, binary(), module(), map()},
     unnest := undefined | #{path := comps(), alias := binary()},
     post := #{
         residual := [term()],
@@ -337,12 +338,46 @@ check_source({collection, _, _}) ->
     undefined;
 check_source({table_fn, Loc, Name, Args}) ->
     case lists:member(Name, ?TABLE_FNS) of
-        false -> fail(Loc, {unknown_table_function, Name});
-        true -> ok
-    end,
-    Fn = binary_to_atom(Name, utf8),
-    _ = normalize_fn_args(Fn, Loc, Args),
-    Fn.
+        true ->
+            Fn = binary_to_atom(Name, utf8),
+            _ = normalize_fn_args(Fn, Loc, Args),
+            Fn;
+        false ->
+            _ = registered_source(Loc, Name, Args),
+            {source, Name}
+    end.
+
+%% A registered FROM source: its module validates the literal args.
+registered_source(Loc, Name, Args) ->
+    case barrel_bql_source:lookup(Name) of
+        {ok, Module} ->
+            {Positional, Named} = split_source_args(Loc, Name, Args),
+            case Module:init_args(Positional, Named) of
+                {ok, Normalized} when is_map(Normalized) ->
+                    {Module, Normalized};
+                {error, Reason} ->
+                    fail(Loc, {invalid_source_arg, Name, Reason})
+            end;
+        error ->
+            fail(Loc, {unknown_table_function, Name})
+    end.
+
+split_source_args(Loc, Name, Args) ->
+    lists:foldl(
+        fun({pos, {lit, _, V}}, {Pos, Named}) when map_size(Named) =:= 0 ->
+                {Pos ++ [V], Named};
+           ({pos, {lit, ALoc, _}}, _Acc) ->
+                fail(ALoc, {invalid_source_arg, Name, positional_after_named});
+           ({named, Key, {lit, ALoc, V}}, {Pos, Named}) ->
+                case maps:is_key(Key, Named) of
+                    true -> fail(ALoc, {invalid_source_arg, Name, {duplicate, Key}});
+                    false -> {Pos, Named#{Key => V}}
+                end;
+           (_Other, _Acc) ->
+                fail(Loc, {invalid_source_arg, Name, literal_required})
+        end,
+        {[], #{}},
+        Args).
 
 %% Shared with the planner: normalizes table-fn args to a map.
 %% Positional query first; named options k (any function, default 10)
@@ -442,7 +477,7 @@ check_path({path, Loc, Var, Comps}, Fn) ->
     %% stored); the synthetic search columns are the only exceptions.
     %% Unnest-relative keys are not top-level, so they are exempt.
     case {Var, Comps} of
-        {base, [<<"_score">>]} when Fn =/= undefined -> ok;
+        {base, [<<"_score">>]} when is_atom(Fn), Fn =/= undefined -> ok;
         {base, [<<"_distance">>]} when Fn =:= vector_top_k -> ok;
         {base, [<<"_", _/binary>> = First | _]} ->
             fail(Loc, {reserved_field, First});
@@ -678,8 +713,14 @@ lower(Canon) ->
 lower_source({collection, _, Name}) ->
     {collection, Name};
 lower_source({table_fn, Loc, NameBin, Args}) ->
-    Fn = binary_to_atom(NameBin, utf8),
-    {table_fn, Fn, normalize_fn_args(Fn, Loc, Args)}.
+    case lists:member(NameBin, ?TABLE_FNS) of
+        true ->
+            Fn = binary_to_atom(NameBin, utf8),
+            {table_fn, Fn, normalize_fn_args(Fn, Loc, Args)};
+        false ->
+            {Module, Normalized} = registered_source(Loc, NameBin, Args),
+            {source, NameBin, Module, Normalized}
+    end.
 
 lower_unnest(undefined) ->
     undefined;
@@ -699,6 +740,8 @@ classify_conjuncts(Where, Source) ->
                 false ->
                     case Source of
                         {table_fn, _, _} ->
+                            {Id, Engine, [Conjunct | Doc], Residual};
+                        {source, _, _, _} ->
                             {Id, Engine, [Conjunct | Doc], Residual};
                         {collection, _} ->
                             case id_conjunct(Conjunct) of

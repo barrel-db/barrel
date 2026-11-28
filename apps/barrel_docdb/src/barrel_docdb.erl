@@ -168,6 +168,7 @@
 -export([
     get_changes/2,
     get_changes/3,
+    read_feed/3,
     subscribe_changes/2,
     subscribe_changes/3
 ]).
@@ -237,7 +238,7 @@
 
 -export([backup_db/2, backup_db/3, restore_db/2, restore_db/3]).
 
--export([db_instance_id/1, db_observed_version/1]).
+-export([db_instance_id/1, db_observed_version/1, store_env/1]).
 
 -ifdef(TEST).
 -export([writer_call/2]).
@@ -2029,6 +2030,60 @@ get_changes(Db, Since, Opts) ->
         end
     end).
 
+%% @doc Read one page of the changes feed for an index that follows it.
+%%
+%% The page and its watermark come from one storage snapshot, and each
+%% change carries the body stored with its feed row, so a document
+%% rewritten during the read can never pair one version's sequence with
+%% another version's body. `Since' is `first' or a sequence returned
+%% earlier (12-byte encoded HLC, exclusive). When fewer than `limit'
+%% rows remain, `Next' equals the watermark: every write up to it has
+%% been read, including rows a later write or a purge removed.
+%%
+%% Each change is `#{id, seq, rev, num_conflicts}' plus `deleted => true'
+%% for a tombstone, or `doc' (with `id') and, for a document with a TTL,
+%% `expires_at' in milliseconds. Options: `limit' (default 100, at most
+%% 10000).
+-spec read_feed(binary() | pid(), first | binary(), map()) ->
+    {ok, [map()], Next :: binary(),
+     #{instance_id := binary(), last_seq := binary()}} | {error, term()}.
+read_feed(Db, Since, Opts) when Since =:= first; is_binary(Since), byte_size(Since) =:= 12 ->
+    case maps:get(limit, Opts, 100) of
+        Limit when is_integer(Limit), Limit >= 1, Limit =< 10000 ->
+            case resolve_db_name(Db) of
+                {ok, DbName} -> read_feed_open(DbName, Since, Limit);
+                {error, _} = Err -> Err
+            end;
+        Limit ->
+            {error, {invalid_limit, Limit}}
+    end;
+read_feed(_Db, Since, _Opts) ->
+    {error, {invalid_since, Since}}.
+
+read_feed_open(DbName, Since, Limit) ->
+    case db_instance_id(DbName) of
+        {ok, InstanceId} ->
+            Read = fun(StoreRef) ->
+                case barrel_changes:read_feed(StoreRef, DbName, Since, Limit) of
+                    {ok, Changes, Next, Watermark} ->
+                        {ok, Changes, Next,
+                         #{instance_id => InstanceId, last_seq => Watermark}};
+                    {error, _} = Err ->
+                        Err
+                end
+            end,
+            case reader_store(DbName) of
+                {ok, StoreRef} -> Read(StoreRef);
+                undefined ->
+                    with_db(DbName, fun(Pid) ->
+                        {ok, StoreRef} = barrel_db_server:get_store_ref(Pid),
+                        Read(StoreRef)
+                    end)
+            end;
+        {error, _} = Err ->
+            Err
+    end.
+
 %% @doc Subscribe to a changes stream.
 %%
 %% Returns a stream pid that can be used to iterate over changes
@@ -2550,6 +2605,30 @@ db_instance_id(Db) ->
                 {ok, barrel_db_server:source_id(DbName)}
             catch
                 error:badarg -> {error, not_found}
+            end;
+        {error, _} = Err ->
+            Err
+    end.
+
+%% @doc The storage environment of an open database: `default' for a
+%% plaintext store, or the encrypted environment handle. A store derived
+%% from the database (an index over its documents) opens with the same
+%% handle so it is encrypted with the database key.
+-spec store_env(binary() | pid()) ->
+    {ok, default | rocksdb:env_handle()} | {error, term()}.
+store_env(Db) ->
+    case resolve_db_name(Db) of
+        {ok, DbName} ->
+            Env = fun(#{env := Handle}) -> {ok, Handle};
+                     (_) -> {ok, default}
+                  end,
+            case reader_store(DbName) of
+                {ok, StoreRef} -> Env(StoreRef);
+                undefined ->
+                    with_db(DbName, fun(Pid) ->
+                        {ok, StoreRef} = barrel_db_server:get_store_ref(Pid),
+                        Env(StoreRef)
+                    end)
             end;
         {error, _} = Err ->
             Err

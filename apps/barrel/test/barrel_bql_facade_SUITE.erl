@@ -29,7 +29,11 @@
          error_paths/1,
          plain_store_without_embedder/1,
          observed_version/1,
-         observed_version_after_write/1]).
+         observed_version_after_write/1,
+         registered_source/1]).
+
+%% barrel_bql_source callbacks, for registered_source/1
+-export([init_args/2, run/4]).
 
 all() ->
     [vector_rank_and_columns,
@@ -48,7 +52,8 @@ all() ->
      observed_version_after_write,
      query_fold_stops,
      error_paths,
-     plain_store_without_embedder].
+     plain_store_without_embedder,
+     registered_source].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(barrel),
@@ -376,3 +381,38 @@ observed_version_after_write(Config) ->
     {ok, done, #{last_seq := After}} =
         barrel:query_fold(Db, "SELECT * FROM db", #{}, Fun, pending),
     ?assert(After > Before).
+
+%% A registered FROM source runs through barrel:query, query_fold and
+%% explain_query the same way as through barrel_docdb:query.
+registered_source(Config) ->
+    Db = ?config(db, Config),
+    ok = barrel_bql:register_source(<<"facade_rows">>, ?MODULE),
+    try
+        {ok, Rows, _} = barrel:query(Db,
+            <<"SELECT v.n AS n FROM facade_rows(4) AS v WHERE v.n > 1 ORDER BY v.n DESC">>),
+        ?assertEqual([4, 3, 2], [N || #{<<"n">> := N} <- Rows]),
+        {ok, Seen, #{has_more := false}} = barrel:query_fold(Db,
+            <<"SELECT v.n AS n FROM facade_rows(5) AS v">>, #{chunk_size => 2},
+            fun(#{<<"n">> := N}, Acc) -> {ok, [N | Acc]} end, []),
+        ?assertEqual([1, 2, 3, 4, 5], lists:reverse(Seen)),
+        {ok, #{source := <<"facade_rows">>, args := #{n := 2}}} =
+            barrel:explain_query(Db, <<"SELECT * FROM facade_rows(2) AS v">>),
+        {ok, Plan} = barrel_bql:compile(<<"SELECT * FROM facade_rows(2) AS v LIMIT 2">>),
+        {error, {unsupported_federated_query, registered_source}} =
+            barrel_ctx_shape:classify(Plan, grouped, #{})
+    after
+        barrel_bql:unregister_source(<<"facade_rows">>)
+    end.
+
+init_args([N], _Named) when is_integer(N), N >= 0 -> {ok, #{n => N}};
+init_args(_Positional, _Named) -> {error, count_required}.
+
+run(_Db, #{n := N}, #{chunk_size := Chunk} = Query, _Opts) ->
+    Start = maps:get(continuation, Query, 0),
+    Page = [#{<<"id">> => integer_to_binary(I), <<"n">> => I}
+            || I <- lists:seq(Start + 1, min(N, Start + Chunk))],
+    Next = Start + length(Page),
+    {ok, Page, case Next < N of
+                   true -> #{continuation => Next};
+                   false -> #{}
+               end}.

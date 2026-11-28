@@ -23,7 +23,7 @@
 -type reason() :: subscribe | offset | unnest | continuation
                 | limit_required | limit_too_large | order_key_not_projected
                 | order_by_required | {merge_not_supported, atom()}
-                | {merge_not_allowed, atom()}.
+                | {merge_not_allowed, atom()} | registered_source.
 -export_type([merge/0, shape/0, reason/0]).
 
 %% @doc Accept a plan for the requested merge (`default' picks one).
@@ -68,6 +68,8 @@ classify(#{source := {collection, _},
         error ->
             reject(order_key_not_projected)
     end;
+classify(#{source := {source, _, _, _}}, _Merge, _Req) ->
+    reject(registered_source);
 classify(#{source := {table_fn, Fn, _Args}} = Plan, Merge, _Req) ->
     Bound = barrel_bql_query:row_bound(Plan),
     case Bound > ?MAX_ROWS of
