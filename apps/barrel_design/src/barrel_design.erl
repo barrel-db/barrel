@@ -6,7 +6,7 @@
 %% state, finite fuel, a deadline and memory limits.
 -module(barrel_design).
 
--export([install/3, uninstall/2, list/1]).
+-export([install/3, uninstall/2, list/1, module/1]).
 -export([query/3, refresh/2, refresh/3, rebuild/2, status/2]).
 -export([preview/3]).
 
@@ -21,22 +21,59 @@
 %%====================================================================
 
 %% @doc Install a named, versioned design in an open database. Modules
-%% maps each referenced module digest (SHA-256) to its `.wasm' bytes;
-%% bytes already stored need not be passed again. Everything is checked
-%% before anything is written: the manifest, the digests, and each
-%% module against the views that use it.
+%% maps each referenced module digest (SHA-256 of its `.wasm' bytes) to
+%% the module: its bytes, or `{wat, Text}', which is encoded to its
+%% canonical bytes first (see module/1). Modules already stored need not
+%% be passed again. Everything is checked before anything is written: the
+%% manifest, the digests, and each module against the views that use it.
 %%
 %% Returns once the design is stored and its views are scheduled to
 %% build. Installing the same version again changes nothing; a higher
 %% version keeps the rows of every view whose signature is unchanged and
 %% rebuilds the others in a new generation, the old one serving reads
 %% until the new one has caught up.
--spec install(binary(), map(), #{binary() => binary()}) -> {ok, map()} | {error, term()}.
-install(Db, Design, Modules) when is_binary(Db), is_map(Design), is_map(Modules) ->
-    case barrel_design_dbs:ensure(Db, install) of
-        {ok, Pid} -> barrel_design_db:install(Pid, Design, Modules);
-        {error, _} = Error -> Error
+-spec install(binary(), map(), #{binary() => binary() | {wat, binary()} | {wasm, binary()}}) ->
+    {ok, map()} | {error, term()}.
+install(Db, Design, Modules0) when is_binary(Db), is_map(Design), is_map(Modules0) ->
+    case module_bytes(Modules0) of
+        {ok, Modules} ->
+            case barrel_design_dbs:ensure(Db, install) of
+                {ok, Pid} -> barrel_design_db:install(Pid, Design, Modules);
+                {error, _} = Error -> Error
+            end;
+        {error, _} = Error ->
+            Error
     end.
+
+module_bytes(Modules) ->
+    maps:fold(fun(Digest, Source, {ok, Acc}) ->
+                      case module(Source) of
+                          {ok, _, Bytes} -> {ok, Acc#{Digest => Bytes}};
+                          {error, _} = Error -> Error
+                      end;
+                 (_, _, Error) -> Error
+              end, {ok, #{}}, Modules).
+
+%% @doc The bytes a design stores for a module and the digest it names
+%% the module by. `{wat, Text}' is encoded with erlang_wasm's canonical
+%% encoder, which writes no names: comments, layout and `$identifiers'
+%% leave the digest unchanged. `{wasm, Bytes}' or plain bytes are kept as
+%% they are, so a compiler's output keeps its own digest.
+-spec module({wat, binary() | string()} | {wasm, binary()} | binary()) ->
+    {ok, Digest :: binary(), Bytes :: binary()} | {error, term()}.
+module({wat, Text}) when is_list(Text) ->
+    module({wat, unicode:characters_to_binary(Text)});
+module({wat, Text}) when is_binary(Text) ->
+    case wasm:encode({wat, Text}) of
+        {ok, Bytes} -> {ok, crypto:hash(sha256, Bytes), Bytes};
+        {error, E} -> {error, {invalid_module, wat, E}}
+    end;
+module({wasm, Bytes}) when is_binary(Bytes) ->
+    module(Bytes);
+module(Bytes) when is_binary(Bytes) ->
+    {ok, crypto:hash(sha256, Bytes), Bytes};
+module(Other) ->
+    {error, {invalid_module, Other}}.
 
 %% @doc Remove a design, its views and their rows.
 -spec uninstall(binary(), binary()) -> ok | {error, term()}.
@@ -234,10 +271,10 @@ deadline(Opts) ->
 %%====================================================================
 
 %% @doc Run a view definition over sample documents without installing
-%% anything. Source is `{wat, Text}' (parsed in Erlang, never cached) or
-%% `{wasm, Bytes}'. The view is a manifest view whose `map' omits
-%% `module'. Returns, per document, its rows, its error or that the
-%% selector skipped it.
+%% anything. Source is `{wat, Text}' or `{wasm, Bytes}', checked as
+%% install/3 checks it but never loaded into the node's module cache. The
+%% view is a manifest view whose `map' omits `module'. Returns, per
+%% document, its rows, its error or that the selector skipped it.
 -spec preview({wat, binary() | string()} | {wasm, binary()}, map(), [map()]) ->
     {ok, [map()]} | {error, term()}.
 preview(Source, View, Docs) when is_map(View), is_list(Docs) ->
@@ -255,17 +292,16 @@ preview(Source, View, Docs) when is_map(View), is_list(Docs) ->
             Error
     end.
 
-preview_module({wat, Text}) when is_list(Text) ->
-    preview_module({wat, unicode:characters_to_binary(Text)});
-preview_module({wat, Text}) when is_binary(Text) ->
-    case wasm:compile({wat, Text}) of
-        {ok, Module} -> {ok, Module, <<0:256>>};
-        {error, E} -> {error, {invalid_module, wat, E}}
-    end;
-preview_module({wasm, Bytes}) when is_binary(Bytes) ->
-    case wasm:compile(Bytes) of
-        {ok, Module} -> {ok, Module, crypto:hash(sha256, Bytes)};
-        {error, E} -> {error, {invalid_module, wasm, E}}
+%% The same bytes install/3 would store, compiled without the cache.
+preview_module(Source) ->
+    case module(Source) of
+        {ok, Digest, Bytes} ->
+            case wasm:compile(Bytes) of
+                {ok, Module} -> {ok, Module, Digest};
+                {error, E} -> {error, {invalid_module, wasm, E}}
+            end;
+        {error, _} = Error ->
+            Error
     end.
 
 preview_run(Module, #{map := #{export := Export} = Map, limits := Limits} = View, Docs) ->

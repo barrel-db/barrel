@@ -6,7 +6,7 @@
          rows_from_fields/1, fresh_state/1, out_of_fuel/1, deadline_kills/1,
          memory_grow_refused/1, field_limits/1, row_limits/1, invalid_rows/1,
          partial_emits_discarded/1, host_call_limit/1, one_load_per_digest/1,
-         reload_after_cache_restart/1, preview_wat/1]).
+         reload_after_cache_restart/1, preview_wat/1, wat_module_identity/1]).
 
 -include_lib("common_test/include/ct.hrl").
 -include_lib("stdlib/include/assert.hrl").
@@ -15,7 +15,8 @@ all() ->
     [{group, admission}, {group, runner}, {group, holder}, preview_wat].
 
 groups() ->
-    [{admission, [], [accepts_abi_module, digest_mismatch, rejected_modules]},
+    [{admission, [], [accepts_abi_module, digest_mismatch, rejected_modules,
+                      wat_module_identity]},
      {runner, [], [rows_from_fields, fresh_state, out_of_fuel, deadline_kills,
                    memory_grow_refused, field_limits, row_limits, invalid_rows,
                    partial_emits_discarded, host_call_limit]},
@@ -40,6 +41,30 @@ accepts_abi_module(_Config) ->
     {ok, #{imports := Imports, pages := 1}} =
         barrel_design_module:check_bytes(Zig, crypto:hash(sha256, Zig), opts()),
     ?assertEqual([emit, field], lists:sort(Imports)).
+
+%% A module given as WAT is stored as its canonical encoding: layout,
+%% comments and identifiers do not change its digest, and it decodes to
+%% the same module as the wasm-tools binary of the same text.
+wat_module_identity(_Config) ->
+    Wat = guest("by_customer.wat"),
+    {ok, D, Bytes} = barrel_design:module({wat, Wat}),
+    ?assertEqual(D, crypto:hash(sha256, Bytes)),
+    {ok, _} = barrel_design_module:check_bytes(Bytes, D, opts()),
+    Renamed = binary:replace(binary:replace(Wat, <<"$field">>, <<"$get_field">>, [global]),
+                             <<"$key">>, <<"$k">>, [global]),
+    Reflowed = <<";; another layout\n", (binary:replace(Renamed, <<"\n">>, <<" \n  ">>, [global]))/binary>>,
+    {ok, D, Bytes} = barrel_design:module({wat, Reflowed}),
+    {ok, D, Bytes} = barrel_design:module({wat, binary_to_list(Wat)}),
+    Tool = guest("by_customer.wasm"),
+    %% wasm-tools also writes a name section, so its digest differs ...
+    {ok, ToolD, Tool} = barrel_design:module({wasm, Tool}),
+    ?assertNotEqual(D, ToolD),
+    %% ... while the code is the same
+    {ok, Mine} = wasm:compile(Bytes),
+    {ok, Theirs} = wasm:compile(Tool),
+    Strip = fun(M) -> setelement(tuple_size(M), setelement(2, M, x), []) end,
+    ?assertEqual(Strip(Mine), Strip(Theirs)),
+    {error, {invalid_module, wat, _}} = barrel_design:module({wat, <<"(module (func">>}).
 
 digest_mismatch(_Config) ->
     {error, {digest_mismatch, <<0:256>>}} =

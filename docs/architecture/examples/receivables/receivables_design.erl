@@ -140,12 +140,12 @@ native(Db) ->
     io:format("native projection: same ~B rows and totals ~s~n",
               [length(WRows), format_groups(Wasm)]).
 
-%% A minimal WAT map, tried on sample documents before anything is
-%% installed.
+%% A minimal WAT map: tried on sample documents, then installed as text.
 wat() ->
     {ok, Wat} = file:read_file("by_customer.wat"),
+    Fields = [{[<<"customer">>], text}, {[<<"cents">>], i64}],
     View = #{select => <<"SELECT * FROM db WHERE type = 'sale'">>,
-             map => #{fields => [{[<<"customer">>], text}, {[<<"cents">>], i64}]},
+             map => #{fields => Fields},
              key => #{type => text}, value => #{type => i64}, reduce => '_sum'},
     Docs = [#{<<"id">> => <<"a">>, <<"type">> => <<"sale">>, <<"customer">> => <<"Ada">>,
               <<"cents">> => 1250},
@@ -155,7 +155,20 @@ wat() ->
     {ok, Preview} = barrel_design:preview({wat, Wat}, View, Docs),
     io:format("WAT preview (by_customer.wat):~n"),
     [io:format("  ~s ~p~n", [Id, maps:get(rows, P)]) || #{id := Id} = P <- Preview],
-    ok.
+
+    %% install the text itself: it is stored as its canonical encoding
+    {ok, Digest, Bytes} = barrel_design:module({wat, Wat}),
+    Db = <<"sales">>,
+    {ok, _} = barrel_docdb:create_db(Db),
+    [{ok, _} = barrel_docdb:put_doc(Db, D) || D <- Docs],
+    Sales = #{name => <<"sales">>, version => 1, views => #{<<"by_customer">> =>
+                  View#{map => #{module => Digest, fields => Fields}}}},
+    {ok, _} = barrel_design:install(Db, Sales, #{Digest => {wat, Wat}}),
+    {ok, _} = barrel_design:refresh(Db, {<<"sales">>, <<"by_customer">>}),
+    {ok, Totals, _} = barrel_design:query(Db, {<<"sales">>, <<"by_customer">>}, #{group_level => exact}),
+    io:format("WAT installed as ~B bytes, sha256 ~s~n  totals: ~s~n",
+              [byte_size(Bytes), binary:encode_hex(Digest, lowercase),
+               lists:join(", ", [io_lib:format("~s ~B", [K, V]) || #{key := K, value := V} <- Totals])]).
 
 guest_calls(_Db) ->
     {ok, maps:get(guest_calls, barrel_design_stats:get())}.

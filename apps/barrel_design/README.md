@@ -2,7 +2,7 @@
 
 Versioned designs with automatically maintained views over barrel_docdb. A design packages named views for a database; each view selects documents with a BQL predicate and builds ordered key/value rows with a native projection or a Wasm map. Use it when an application needs categorized lists and totals (open invoices by customer, sales by month) that stay current as documents change.
 
-The app is optional and needs Erlang/OTP 29 (its runtime, erlang_wasm 0.11.2, requires it). Build and test it from the umbrella:
+The app is optional and needs Erlang/OTP 29 (its runtime, erlang_wasm 0.13.0, requires it). Build and test it from the umbrella:
 
 ```sh
 rebar3 as design compile

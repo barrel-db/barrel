@@ -10,7 +10,7 @@
          ttl_expiry/1, bulk_replicated_and_winner_changes/1, writes_during_backfill/1,
          native_and_wasm_agree/1, failed_map_removes_rows/1, caption_edit_reuses_index/1,
          selector_edit_rebuilds/1, upgrade_with_readers_in_flight/1, read_options/1,
-         grouped_scan_budget/1, install_rules/1, encrypted_rows/1]).
+         grouped_scan_budget/1, install_rules/1, encrypted_rows/1, install_from_wat/1]).
 
 -include_lib("common_test/include/ct.hrl").
 -include_lib("stdlib/include/assert.hrl").
@@ -26,7 +26,7 @@ all() ->
      bulk_replicated_and_winner_changes, writes_during_backfill, native_and_wasm_agree,
      failed_map_removes_rows, caption_edit_reuses_index, selector_edit_rebuilds,
      upgrade_with_readers_in_flight, read_options, grouped_scan_budget, install_rules,
-     encrypted_rows].
+     encrypted_rows, install_from_wat].
 
 init_per_suite(Config) ->
     ok = barrel_design_test_util:start(Config),
@@ -403,6 +403,37 @@ install_rules(Config) ->
     ok = barrel_design:uninstall(Db, <<"w">>),
     {error, not_found} = barrel_design:uninstall(Db, <<"w">>),
     {ok, []} = barrel_design_catalog:modules(Db).
+
+%% A view installed from WAT gives the rows of the same view installed
+%% from the wasm-tools binary; the key must be the digest of the
+%% canonical encoding.
+install_from_wat(Config) ->
+    Db = ?config(db, Config),
+    Wat = guest("by_customer.wat"),
+    {ok, WatD, _} = barrel_design:module({wat, Wat}),
+    Bin = guest("by_customer.wasm"),
+    BinD = crypto:hash(sha256, Bin),
+    View = fun(D) -> #{select => <<"SELECT * FROM db WHERE type = 'sale'">>,
+                       map => #{module => D, fields => [{[<<"customer">>], text}, {[<<"cents">>], i64}]},
+                       key => #{type => text}, value => #{type => i64}, reduce => '_sum'} end,
+    Design = barrel_design_test_util:design(<<"sales">>, 1,
+        #{<<"from_wat">> => View(WatD), <<"from_wasm">> => View(BinD)}),
+    {error, {digest_mismatch, _}} = barrel_design:install(Db, Design, #{BinD => {wat, Wat}, WatD => Bin}),
+    {error, {invalid_module, wat, _}} = barrel_design:install(Db, Design, #{WatD => {wat, <<"(module">>}}),
+    {ok, _} = barrel_design:install(Db, Design, #{WatD => {wat, Wat}, BinD => Bin}),
+    [{ok, _} = barrel_docdb:put_doc(Db, #{<<"id">> => integer_to_binary(I), <<"type">> => <<"sale">>,
+                                          <<"customer">> => lists:nth(1 + I rem 3, [<<"Ada">>, <<"Bea">>, <<"Cy">>]),
+                                          <<"cents">> => I * 7 - 20})
+     || I <- lists:seq(1, 25)],
+    [{ok, _} = barrel_design:refresh(Db, {<<"sales">>, V}, #{timeout_ms => 5000})
+     || V <- [<<"from_wat">>, <<"from_wasm">>]],
+    {ok, A} = all_rows(Db, {<<"sales">>, <<"from_wat">>}),
+    {ok, B} = all_rows(Db, {<<"sales">>, <<"from_wasm">>}),
+    ?assertEqual(25, length(A)),
+    ?assertEqual(A, B),
+    %% the stored bytes are the canonical encoding
+    {ok, Stored} = barrel_design_catalog:module_bytes(Db, WatD),
+    ?assertEqual(WatD, crypto:hash(sha256, Stored)).
 
 %% Rows of an encrypted database are encrypted in the derived store.
 encrypted_rows(Config) ->

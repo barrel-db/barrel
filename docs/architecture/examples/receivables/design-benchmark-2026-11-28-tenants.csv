@@ -1,0 +1,4 @@
+trial,b_write_p95_alone_us,b_write_p95_shared_us,b_write_p99_alone_us,b_write_p99_shared_us,b_read_p95_alone_us,b_read_p95_shared_us,b_read_p99_alone_us,b_read_p99_shared_us,b_samples,a_backfill_docs,a_backfill_us
+1,253,400,323,4241,375,310,473,1078,300,5000,456491
+2,217,322,316,1439,85,227,131,304,300,5000,423427
+3,273,291,699,1736,144,239,232,327,300,5000,429451

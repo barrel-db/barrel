@@ -27,19 +27,15 @@ _build/open_by_customer.wasm: open_by_customer.zig invoice.zig
 	  -fno-entry --export=map --stack 16384 --initial-memory=65536 --max-memory=65536 \
 	  --cache-dir _build/zig-cache -femit-bin=$@
 
-# The same design through barrel_design's public API (OTP 29).
-WASM_TOOLS ?= wasm-tools
+# The same design through barrel_design's public API (OTP 29). The WAT
+# map needs no tool: barrel_design encodes it.
 DESIGN_LIBS := $(REPO)/_build/design/lib
 BENCH := $(REPO)/apps/barrel_design/bench
 
 .PHONY: design-prepare design-run design-bench
-design-prepare: _build/open_by_customer.wasm _build/by_customer.wasm
+design-prepare: _build/open_by_customer.wasm
 	cd $(REPO) && rebar3 as design compile
 	erlc -Werror -o _build receivables_design.erl
-
-_build/by_customer.wasm: by_customer.wat
-	mkdir -p _build
-	$(WASM_TOOLS) parse by_customer.wat -o $@
 
 design-run: design-prepare
 	ERL_LIBS="$(DESIGN_LIBS)" erl -noshell -pa _build -s receivables_design run -s init stop

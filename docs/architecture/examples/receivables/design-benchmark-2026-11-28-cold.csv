@@ -1,0 +1,4 @@
+trial,module_bytes,first_load_us,warm_map_p50_us,warm_map_p95_us,warm_map_p99_us,batches,batch_docs,wat_bytes,wat_encode_first_us,wat_encode_p50_us
+1,1382,6805,48.313,56.125,58.906,200,64,152,8673,29
+2,1382,7051,48.281,54.859,57.016,200,64,152,8083,40
+3,1382,6858,46.063,50.266,53.078,200,64,152,6999,27

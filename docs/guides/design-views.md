@@ -4,7 +4,7 @@
 
 ## Build it
 
-The app is optional and needs Erlang/OTP 29 (its Wasm runtime, `erlang_wasm` 0.11.2, requires it).
+The app is optional and needs Erlang/OTP 29 (its Wasm runtime, `erlang_wasm` 0.13.0, requires it).
 
 ```sh
 rebar3 as design compile
@@ -84,10 +84,9 @@ Equalities on `v.key[0]`, `v.key[1]`, ... and one range on the next component na
 
 ## Map documents with Wasm
 
-When paths are not enough, write a map. It imports two functions from `barrel_v1`: `field(slot, dest, capacity)` copies a declared field, as CBOR, into guest memory and returns its length or `-1` when the document lacks it; `emit(key, key_len, value, value_len)` stages one row (CBOR integers, UTF-8 texts, booleans, null and arrays). Build the module with any toolchain that produces a freestanding `wasm32` module:
+When paths are not enough, write a map. It imports two functions from `barrel_v1`: `field(slot, dest, capacity)` copies a declared field, as CBOR, into guest memory and returns its length or `-1` when the document lacks it; `emit(key, key_len, value, value_len)` stages one row (CBOR integers, UTF-8 texts, booleans, null and arrays). Write it in WAT, which installs as it is, or build it with any toolchain that produces a freestanding `wasm32` module:
 
 ```sh
-wasm-tools parse by_customer.wat -o by_customer.wasm
 zig build-exe open_by_customer.zig -target wasm32-freestanding -O ReleaseSmall \
   -fno-entry --export=map --stack 16384 \
   --initial-memory=65536 --max-memory=65536 -femit-bin=open_by_customer.wasm
@@ -106,7 +105,18 @@ Sales = #{select => <<"SELECT * FROM db WHERE type = 'sale'">>,
            <<"customer">> => <<"Ada">>, <<"cents">> => 1250}]).
 ```
 
-Then install it with its bytes, named by their SHA-256:
+Then install it, named by the SHA-256 of its bytes. Text is installed through its canonical encoding, so comments, layout and `$identifiers` do not change the digest:
+
+```erlang
+{ok, Digest, _Bytes} = barrel_design:module({wat, Wat}),
+{ok, _} = barrel_design:install(Db,
+    #{name => <<"sales">>, version => 1,
+      views => #{<<"by_customer">> => Sales#{map => #{module => Digest,
+          fields => [{[<<"customer">>], text}, {[<<"cents">>], i64}]}}}},
+    #{Digest => {wat, Wat}}).
+```
+
+A compiler's binary keeps its own digest:
 
 ```erlang
 {ok, Wasm} = file:read_file("open_by_customer.wasm"),

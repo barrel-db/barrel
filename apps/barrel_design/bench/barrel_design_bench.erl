@@ -39,7 +39,7 @@
 -define(LIMIT_COLS, "trial,deadline_ms,terminate_ms,fuel,out_of_fuel_us,pages_before,"
         "pages_after,recovery_docs,docs_before_crash,recovery_ms,recovery_valid").
 -define(COLD_COLS, "trial,module_bytes,first_load_us,warm_map_p50_us,warm_map_p95_us,"
-        "warm_map_p99_us,batches,batch_docs").
+        "warm_map_p99_us,batches,batch_docs,wat_bytes,wat_encode_first_us,wat_encode_p50_us").
 
 header() ->
     Out = out_dir(),
@@ -437,7 +437,13 @@ cold(Trial) ->
         64 = length([ok || {ok, [_]} <- R]),
         Us / 64
     end || _ <- lists:seq(1, 200)],
-    [Trial, byte_size(Bytes), LoadUs, pct(50, PerDoc), pct(95, PerDoc), pct(99, PerDoc), 200, 64].
+    %% the WAT example encoded to its canonical bytes: first call, then 100
+    {ok, Wat} = file:read_file("by_customer.wat"),
+    {FirstEnc, {ok, _, WatBytes}} = timer:tc(fun() -> barrel_design:module({wat, Wat}) end),
+    Encodes = [timed(fun() -> {ok, _, _} = barrel_design:module({wat, Wat}) end)
+               || _ <- lists:seq(1, 100)],
+    [Trial, byte_size(Bytes), LoadUs, pct(50, PerDoc), pct(95, PerDoc), pct(99, PerDoc), 200, 64,
+     byte_size(WatBytes), FirstEnc, pct(50, Encodes)].
 
 pages() -> maps:get(pages_in_use, wasm_engine:stats()).
 

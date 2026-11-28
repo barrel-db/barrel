@@ -6,7 +6,7 @@ Two programs run this design. `make design-run` installs it through barrel_desig
 
 ## Run it through barrel_design
 
-From the Barrel repository root, with Erlang/OTP 29, Zig 0.17.1, wasm-tools 1.256.0, Make and the usual Barrel build tools. The target builds the two guests, compiles the umbrella with the `design` profile and starts fresh databases. [Barrel build requirements](../../../../README.md#build) · [Program](receivables_design.erl)
+From the Barrel repository root, with Erlang/OTP 29, Zig 0.17.1, Make and the usual Barrel build tools. The target builds the Zig guest, compiles the umbrella with the `design` profile and starts fresh databases. [Barrel build requirements](../../../../README.md#build) · [Program](receivables_design.erl)
 
 ```sh
 make -C docs/architecture/examples/receivables design-run
@@ -77,7 +77,7 @@ The same rows through BQL, and so through the HTTP and MCP query routes. [BQL re
     <<"SELECT v.key, v.value FROM view('receivables', 'open_by_customer', group_level => 1) AS v">>).
 ```
 
-The native projection reads the key from `customer` and `due_on` and sums `line_cents`, with no guest; it returns the same rows and totals. A minimal WAT map, [by_customer.wat](by_customer.wat), runs on sample documents with `preview/3` before anything is installed, and builds for installation with `wasm-tools parse by_customer.wat -o by_customer.wasm`. [Native design](receivables_design.erl#L21) · [WAT preview](receivables_design.erl#L145)
+The native projection reads the key from `customer` and `due_on` and sums `line_cents`, with no guest; it returns the same rows and totals. A minimal WAT map, [by_customer.wat](by_customer.wat), runs on sample documents with `preview/3`, then installs as text: `install/3` stores its canonical encoding, 152 bytes, with no toolchain. [Native design](receivables_design.erl#L21) · [WAT preview and install](receivables_design.erl#L143)
 
 ## Measure the public paths
 
