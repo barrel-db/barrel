@@ -222,9 +222,17 @@ jobs:
           path: ~/.cache/rebar3
           key: rebar3-design-${{ hashFiles('rebar.lock', 'apps/barrel_design/rebar.config') }}
       - run: rebar3 as design compile
-      - run: rebar3 as design xref
       - run: rebar3 as design eunit --app barrel_design
       - run: rebar3 as design ct --dir apps/barrel_design/test
+      # The umbrella's xref reports the optional barrel_faiss calls, so
+      # check barrel_design on its own, against its sibling sources.
+      - name: Xref (isolated)
+        working-directory: apps/barrel_design
+        run: |
+          mkdir -p _checkouts
+          ln -s ../../barrel_docdb _checkouts/barrel_docdb
+          ln -s ../../barrel_crypto _checkouts/barrel_crypto
+          rebar3 xref
 
   s3:
     name: S3 attachment backend
